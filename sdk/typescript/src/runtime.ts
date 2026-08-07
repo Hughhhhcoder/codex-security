@@ -577,23 +577,31 @@ export async function verifyStableWindowsCredentialDescendants(
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let descendants = 0;
     const pending = [path];
-    while (pending.length !== 0) {
-      const current = pending.pop()!;
-      const directory = await opendir(current);
-      for await (const entry of directory) {
-        const child = join(current, entry.name);
-        const metadata = await lstat(child);
-        if (metadata.isSymbolicLink()) {
-          throw new Error(
-            "Windows credential home contains a symbolic link or junction",
-          );
+    try {
+      while (pending.length !== 0) {
+        const current = pending.pop()!;
+        const directory = await opendir(current);
+        for await (const entry of directory) {
+          const child = join(current, entry.name);
+          const metadata = await lstat(child);
+          if (metadata.isSymbolicLink()) {
+            throw new Error(
+              "Windows credential home contains a symbolic link or junction",
+            );
+          }
+          if (!metadata.isDirectory() && !metadata.isFile()) {
+            throw new Error("Windows credential home contains an unsafe entry");
+          }
+          descendants += 1;
+          if (metadata.isDirectory()) pending.push(child);
         }
-        if (!metadata.isDirectory() && !metadata.isFile()) {
-          throw new Error("Windows credential home contains an unsafe entry");
-        }
-        descendants += 1;
-        if (metadata.isDirectory()) pending.push(child);
       }
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException;
+      if (failure.code === "ENOENT" && failure.path !== path) {
+        continue;
+      }
+      throw error;
     }
     if (descendants === 0) return;
 
