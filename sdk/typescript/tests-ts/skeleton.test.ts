@@ -70,6 +70,23 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
+  test("limits the longer CI test timeout to Windows", async () => {
+    const packageJson = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    const ciWorkflow = await readFile(
+      new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
+      "utf8",
+    );
+
+    expect(packageJson.scripts.test).toBe(
+      "bun test --timeout 30000 ./tests-ts",
+    );
+    expect(ciWorkflow).toContain(
+      "run: pnpm --dir sdk/typescript run test ${{ runner.os == 'Windows' && '--timeout 60000' || '' }}",
+    );
+  });
+
   test("builds packages without a preinstalled package manager and provides a production audit", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
