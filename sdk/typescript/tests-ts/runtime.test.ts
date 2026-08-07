@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -29,6 +29,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
@@ -2477,7 +2478,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "$unexpected = @($acl.Access | Where-Object { $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })",
         "[pscustomobject]@{ unexpected = $unexpected.Count } | ConvertTo-Json -Compress",
       ].join("; ");
-      const result = spawnSync(
+      const result = await promisify(execFile)(
         powershell,
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
         {
@@ -2488,7 +2489,6 @@ describe("runtime directories and plugin Python boundary", () => {
         },
       );
 
-      expect(result.status).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual({ unexpected: 0 });
     },
   );
