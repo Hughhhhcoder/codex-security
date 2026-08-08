@@ -79,9 +79,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--no-ignore-global",
         "--glob",
         "!.git/**",
-        "--",
-        scope,
     ]
+    for name in (".gitignore", ".ignore", ".rgignore"):
+        ignore = repository / name
+        if ignore.is_file() and not ignore.is_symlink():
+            command.extend(["--ignore-file", str(ignore)])
+    command.extend(["--", scope])
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
             result = subprocess.run(
