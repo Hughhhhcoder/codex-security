@@ -136,35 +136,52 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             raise InventoryError(f"could not inspect Git worktree: {error}") from error
         worktree = None
 
-    if worktree is not None and worktree.returncode not in (0, 128):
+    if worktree is not None and worktree.returncode:
         detail = worktree.stderr.decode("utf-8", errors="replace").strip()
-        message = f"git rev-parse exited with status {worktree.returncode}"
-        if detail:
-            message = f"{message}: {detail}"
-        raise InventoryError(message)
-
-    if worktree is not None and worktree.returncode == 0 and worktree.stdout.strip() == b"true":
-        try:
-            tracked = subprocess.run(
-                [*git, "ls-files", "--cached", "-z", "--", scope],
-                cwd=repository,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=environment,
-                check=False,
-            )
-        except OSError as error:
-            raise InventoryError(f"could not list tracked files: {error}") from error
-
-        if tracked.returncode:
-            detail = tracked.stderr.decode("utf-8", errors="replace").strip()
-            message = f"git ls-files exited with status {tracked.returncode}"
+        if worktree.returncode == 128 and "not a git repository" in detail.lower():
+            worktree = None
+        else:
+            message = f"git rev-parse exited with status {worktree.returncode}"
             if detail:
                 message = f"{message}: {detail}"
             raise InventoryError(message)
 
+    if worktree is not None and worktree.stdout.strip() == b"true":
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
-        for relative in tracked.stdout.split(b"\0"):
+        listed: list[bytes] = []
+        for arguments in (["--cached"], ["--others", "--exclude-standard"]):
+            try:
+                result = subprocess.run(
+                    [*git, "ls-files", *arguments, "-z", "--", scope],
+                    cwd=repository,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    check=False,
+                )
+            except OSError as error:
+                raise InventoryError(f"could not list repository files: {error}") from error
+            if result.returncode:
+                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                message = f"git ls-files exited with status {result.returncode}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise InventoryError(message)
+            listed.append(result.stdout)
+
+        def normalized(path: bytes) -> bytes:
+            return path.replace(b"\\", b"/") if os.name == "nt" else path
+
+        allowed = {
+            normalized(prefix + relative)
+            for collection in listed
+            for relative in collection.split(b"\0")
+            if relative
+        }
+        rows = {row for row in rows if normalized(row.rstrip(b"\r\n")) in allowed}
+        recorded = {normalized(row.rstrip(b"\r\n")) for row in rows}
+
+        for relative in listed[0].split(b"\0"):
             if not relative:
                 continue
             candidate = repository / os.fsdecode(relative)
@@ -174,7 +191,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 candidate.resolve(strict=True).relative_to(repository)
             except (OSError, ValueError):
                 continue
-            rows.add(prefix + relative + b"\n")
+            relative_path = prefix + relative
+            key = normalized(relative_path)
+            if key not in recorded:
+                rows.add(relative_path + b"\n")
+                recorded.add(key)
 
     rows = sorted(rows)
 

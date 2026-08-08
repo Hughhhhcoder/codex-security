@@ -63,7 +63,15 @@ describe("security scan file inventory", () => {
       writeFile(join(repository, "tracked.env"), "checked in intentionally\n"),
       writeFile(join(repository, ".ignore"), "hidden-by-rg.ts\n"),
       writeFile(join(repository, "hidden-by-rg.ts"), "tracked source\n"),
+      writeFile(
+        join(repository, "info-secret.ts"),
+        "local Git-excluded data\n",
+      ),
     ]);
+    await writeFile(
+      join(repository, ".git", "info", "exclude"),
+      "info-secret.ts\n",
+    );
     execFileSync(
       "git",
       ["add", "--force", "--", "tracked.env", "hidden-by-rg.ts"],
