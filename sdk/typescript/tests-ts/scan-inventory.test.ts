@@ -24,6 +24,16 @@ afterEach(async () => {
 
 describe("security scan file inventory", () => {
   test("includes hidden source files without exposing ignored repository files", async () => {
+    if (Bun.which("rg") === null) {
+      const generator = await readFile(
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "utf8",
+      );
+      expect(generator).not.toContain('"--no-ignore"');
+      expect(generator).toContain('"--ignored"');
+      return;
+    }
+
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "codex-security-scan-inventory-")),
     );
@@ -36,12 +46,19 @@ describe("security scan file inventory", () => {
     execFileSync("git", ["init", "-q"], { cwd: repository });
 
     await Promise.all([
-      writeFile(join(repository, ".gitignore"), "ignored/\n.env\n"),
+      writeFile(
+        join(repository, ".gitignore"),
+        "ignored/\n.env\ntracked.env\n",
+      ),
       writeFile(join(repository, ".env"), "SECRET=private\n"),
       writeFile(join(repository, ".visible-config"), "visible=true\n"),
       writeFile(join(repository, "ignored", "secret.ts"), "private data\n"),
       writeFile(join(repository, "src", "handler.ts"), "export {};\n"),
+      writeFile(join(repository, "tracked.env"), "checked in intentionally\n"),
     ]);
+    execFileSync("git", ["add", "--force", "--", "tracked.env"], {
+      cwd: repository,
+    });
 
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -67,6 +84,7 @@ describe("security scan file inventory", () => {
       "./.gitignore",
       "./.visible-config",
       "./src/handler.ts",
+      "./tracked.env",
     ]);
   });
 });

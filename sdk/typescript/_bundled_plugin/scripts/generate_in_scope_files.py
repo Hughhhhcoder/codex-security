@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -67,7 +68,7 @@ def resolve_output(value: str) -> Path:
 
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
-    """Atomically write the exact ripgrep inventory sorted as ``LC_ALL=C``."""
+    """Atomically inventory visible files and ignored files tracked by Git."""
     command = ["rg", "--files", "--hidden", "--glob", "!.git/**", "--", scope]
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
@@ -89,7 +90,43 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             raise InventoryError(message)
 
         inventory.seek(0)
-        rows = sorted(inventory)
+        rows = set(inventory)
+
+    if (repository / ".git").exists():
+        command = [
+            "git",
+            "ls-files",
+            "--cached",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            scope,
+        ]
+        try:
+            tracked = subprocess.run(
+                command,
+                cwd=repository,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except OSError as error:
+            raise InventoryError(f"could not list ignored tracked files: {error}") from error
+
+        if tracked.returncode:
+            detail = tracked.stderr.decode("utf-8", errors="replace").strip()
+            message = f"git ls-files exited with status {tracked.returncode}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise InventoryError(message)
+
+        prefix = b"./" if scope == "." or scope.startswith("./") else b""
+        for relative in tracked.stdout.split(b"\0"):
+            if relative and (repository / os.fsdecode(relative)).is_file():
+                rows.add(prefix + relative + b"\n")
+
+    rows = sorted(rows)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
