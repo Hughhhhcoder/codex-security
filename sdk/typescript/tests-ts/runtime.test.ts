@@ -230,7 +230,7 @@ describe("plugin runtime preparation", () => {
         "utf8",
       );
       expect(generator).not.toContain('"--no-ignore"');
-      expect(generator).toContain('"--ignored"');
+      expect(generator).toContain('"--cached"');
       return;
     }
 

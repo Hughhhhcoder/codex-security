@@ -71,9 +71,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically inventory visible files and ignored files tracked by Git."""
     command = [
         "rg",
+        "--no-config",
         "--files",
         "--hidden",
         "--no-require-git",
+        "--no-ignore-parent",
+        "--no-ignore-global",
         "--glob",
         "!.git/**",
         "--",
@@ -101,28 +104,54 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         inventory.seek(0)
         rows = set(inventory)
 
-    if (repository / ".git").exists():
-        command = [
-            "git",
-            "--literal-pathspecs",
-            "ls-files",
-            "--cached",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-            "--",
-            scope,
-        ]
+    environment = os.environ.copy()
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    ):
+        environment.pop(name, None)
+    environment["GIT_LITERAL_PATHSPECS"] = "1"
+    git = ["git", "-c", "core.fsmonitor=false", "--literal-pathspecs"]
+    try:
+        worktree = subprocess.run(
+            [*git, "rev-parse", "--is-inside-work-tree"],
+            cwd=repository,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            check=False,
+        )
+    except OSError as error:
+        if (repository / ".git").exists():
+            raise InventoryError(f"could not inspect Git worktree: {error}") from error
+        worktree = None
+
+    if worktree is not None and worktree.returncode not in (0, 128):
+        detail = worktree.stderr.decode("utf-8", errors="replace").strip()
+        message = f"git rev-parse exited with status {worktree.returncode}"
+        if detail:
+            message = f"{message}: {detail}"
+        raise InventoryError(message)
+
+    if worktree is not None and worktree.returncode == 0 and worktree.stdout.strip() == b"true":
         try:
             tracked = subprocess.run(
-                command,
+                [*git, "ls-files", "--cached", "-z", "--", scope],
                 cwd=repository,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=environment,
                 check=False,
             )
         except OSError as error:
-            raise InventoryError(f"could not list ignored tracked files: {error}") from error
+            raise InventoryError(f"could not list tracked files: {error}") from error
 
         if tracked.returncode:
             detail = tracked.stderr.decode("utf-8", errors="replace").strip()

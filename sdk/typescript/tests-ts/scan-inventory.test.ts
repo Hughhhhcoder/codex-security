@@ -31,9 +31,12 @@ describe("security scan file inventory", () => {
         "utf8",
       );
       expect(generator).not.toContain('"--no-ignore"');
-      expect(generator).toContain('"--ignored"');
+      expect(generator).toContain('"--cached"');
+      expect(generator).toContain('"--no-config"');
+      expect(generator).toContain('"--no-ignore-parent"');
       expect(generator).toContain('"--no-require-git"');
       expect(generator).toContain('"--literal-pathspecs"');
+      expect(generator).toContain('"core.fsmonitor=false"');
       return;
     }
 
@@ -58,10 +61,16 @@ describe("security scan file inventory", () => {
       writeFile(join(repository, "ignored", "secret.ts"), "private data\n"),
       writeFile(join(repository, "src", "handler.ts"), "export {};\n"),
       writeFile(join(repository, "tracked.env"), "checked in intentionally\n"),
+      writeFile(join(repository, ".ignore"), "hidden-by-rg.ts\n"),
+      writeFile(join(repository, "hidden-by-rg.ts"), "tracked source\n"),
     ]);
-    execFileSync("git", ["add", "--force", "--", "tracked.env"], {
-      cwd: repository,
-    });
+    execFileSync(
+      "git",
+      ["add", "--force", "--", "tracked.env", "hidden-by-rg.ts"],
+      {
+        cwd: repository,
+      },
+    );
     if (process.platform !== "win32") {
       const external = join(root, "external.txt");
       await writeFile(external, "private external file\n");
@@ -98,7 +107,9 @@ describe("security scan file inventory", () => {
         .map((path) => path.replaceAll("\\", "/")),
     ).toEqual([
       "./.gitignore",
+      "./.ignore",
       "./.visible-config",
+      "./hidden-by-rg.ts",
       "./src/handler.ts",
       "./tracked.env",
     ]);
@@ -114,6 +125,7 @@ describe("security scan file inventory", () => {
     const repository = join(root, "snapshot");
     const output = join(root, "in-scope-files.txt");
     await mkdir(repository);
+    await writeFile(join(root, ".gitignore"), "snapshot/source.ts\n");
     await Promise.all([
       writeFile(join(repository, ".gitignore"), ".env\n"),
       writeFile(join(repository, ".env"), "SECRET=private\n"),
