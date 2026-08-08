@@ -69,7 +69,16 @@ def resolve_output(value: str) -> Path:
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically inventory visible files and ignored files tracked by Git."""
-    command = ["rg", "--files", "--hidden", "--glob", "!.git/**", "--", scope]
+    command = [
+        "rg",
+        "--files",
+        "--hidden",
+        "--no-require-git",
+        "--glob",
+        "!.git/**",
+        "--",
+        scope,
+    ]
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
             result = subprocess.run(
@@ -95,6 +104,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     if (repository / ".git").exists():
         command = [
             "git",
+            "--literal-pathspecs",
             "ls-files",
             "--cached",
             "--ignored",
@@ -123,8 +133,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
         for relative in tracked.stdout.split(b"\0"):
-            if relative and (repository / os.fsdecode(relative)).is_file():
-                rows.add(prefix + relative + b"\n")
+            if not relative:
+                continue
+            candidate = repository / os.fsdecode(relative)
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            try:
+                candidate.resolve(strict=True).relative_to(repository)
+            except (OSError, ValueError):
+                continue
+            rows.add(prefix + relative + b"\n")
 
     rows = sorted(rows)
 
