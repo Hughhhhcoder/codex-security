@@ -121,7 +121,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     ):
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
-    git = ["git", "-c", "core.fsmonitor=false", "--literal-pathspecs"]
+    environment["LC_ALL"] = "C"
+    git = [
+        "git",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        f"core.excludesFile={os.devnull}",
+        "--literal-pathspecs",
+    ]
     try:
         worktree = subprocess.run(
             [*git, "rev-parse", "--is-inside-work-tree"],
@@ -178,7 +186,38 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for relative in collection.split(b"\0")
             if relative
         }
-        rows = {row for row in rows if normalized(row.rstrip(b"\r\n")) in allowed}
+        nested_worktrees = tuple(path for path in allowed if path.endswith(b"/"))
+        explicitly_ignored = False
+        if scope not in (".", "./"):
+            ignored_environment = environment.copy()
+            ignored_environment.pop("GIT_LITERAL_PATHSPECS", None)
+            explicit_path = scope if scope.startswith("./") else f"./{scope}"
+            try:
+                ignored = subprocess.run(
+                    [*git[:-1], "check-ignore", "--quiet", "--no-index", "--", explicit_path],
+                    cwd=repository,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=ignored_environment,
+                    check=False,
+                )
+            except OSError as error:
+                raise InventoryError(f"could not inspect scoped Git ignores: {error}") from error
+            if ignored.returncode not in (0, 1):
+                detail = ignored.stderr.decode("utf-8", errors="replace").strip()
+                message = f"git check-ignore exited with status {ignored.returncode}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise InventoryError(message)
+            explicitly_ignored = ignored.returncode == 0
+
+        if not explicitly_ignored:
+            rows = {
+                row
+                for row in rows
+                if (path := normalized(row.rstrip(b"\r\n"))) in allowed
+                or any(path.startswith(worktree) for worktree in nested_worktrees)
+            }
         recorded = {normalized(row.rstrip(b"\r\n")) for row in rows}
 
         for relative in listed[0].split(b"\0"):
