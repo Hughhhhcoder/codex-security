@@ -1412,11 +1412,25 @@ describe("live scan cost tracking", () => {
     expect((await tracker.stop()).cost?.inputTokens).toBe(250);
   });
 
-  test("reads session events larger than 1 MiB across polling cycles", async () => {
+  test("processes large delegated tool output across polling cycles", async () => {
     const home = await codexHome();
-    const path = await writeSession(home, "scan-thread", {
+    await writeSession(home, "scan-thread", {
       input_tokens: 100,
       output_tokens: 10,
+    });
+    const path = await writeSession(
+      home,
+      "worker-thread",
+      { input_tokens: 0, output_tokens: 0 },
+      "scan-thread",
+    );
+    await appendSessionItem(path, {
+      type: "function_call",
+      name: "exec_command",
+      call_id: "large-tool-output",
+      arguments: JSON.stringify({
+        cmd: 'rg "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
+      }),
     });
     const event = JSON.stringify({
       type: "response_item",
@@ -1428,9 +1442,12 @@ describe("live scan cost tracking", () => {
     });
     const split = 1 * 1_024 * 1_024 + 1;
     await appendFile(path, event.slice(0, split));
+    const activities: ScanActivity[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
+      repository: "/code/juice-shop",
+      onActivity: (activity) => activities.push(activity),
     });
     tracker.start("scan-thread");
     expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
@@ -1440,7 +1457,7 @@ describe("live scan cost tracking", () => {
       payload: {
         type: "token_count",
         info: {
-          total_token_usage: { input_tokens: 250, output_tokens: 20 },
+          total_token_usage: { input_tokens: 150, output_tokens: 10 },
         },
       },
     });
@@ -1450,11 +1467,26 @@ describe("live scan cost tracking", () => {
       inputTokens: 250,
       outputTokens: 20,
     });
+    expect(activities).toEqual([
+      expect.objectContaining({
+        id: "worker-thread:large-tool-output",
+        status: "running",
+      }),
+      expect.objectContaining({
+        id: "worker-thread:large-tool-output",
+        status: "completed",
+      }),
+    ]);
   });
 
-  test("discards oversized malformed events without losing later usage", async () => {
+  test("ignores oversized events from unrelated prior credential sessions", async () => {
     const home = await codexHome();
-    const path = await writeSession(home, "scan-thread", {
+    const unrelated = await writeSession(home, "unrelated-thread", {
+      input_tokens: 99,
+      output_tokens: 1,
+    });
+    await appendFile(unrelated, "x".repeat(1 * 1_024 * 1_024 + 1));
+    await writeSession(home, "scan-thread", {
       input_tokens: 100,
       output_tokens: 10,
     });
@@ -1464,25 +1496,38 @@ describe("live scan cost tracking", () => {
     });
     tracker.start("scan-thread");
 
-    await appendFile(path, "x".repeat(2 * 1_024 * 1_024));
-    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
-    await appendFile(path, "x".repeat(2 * 1_024 * 1_024));
-    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
-
-    const usage = JSON.stringify({
-      type: "event_msg",
-      payload: {
-        type: "token_count",
-        info: {
-          total_token_usage: { input_tokens: 250, output_tokens: 20 },
-        },
-      },
+    expect((await tracker.stop()).cost).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 10,
     });
-    await appendFile(path, `\n${usage}\n`);
+  });
+
+  test("ignores oversized delegated sessions belonging to an unrelated scan", async () => {
+    const home = await codexHome();
+    await writeSession(home, "unrelated-parent", {
+      input_tokens: 1,
+      output_tokens: 1,
+    });
+    const unrelated = await writeSession(
+      home,
+      "unrelated-child",
+      { input_tokens: 1, output_tokens: 1 },
+      "unrelated-parent",
+    );
+    await appendFile(unrelated, "x".repeat(1 * 1_024 * 1_024 + 1));
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
 
     expect((await tracker.stop()).cost).toMatchObject({
-      inputTokens: 250,
-      outputTokens: 20,
+      inputTokens: 100,
+      outputTokens: 10,
     });
   });
 

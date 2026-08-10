@@ -45,7 +45,6 @@ interface SessionUsage {
   offset: number;
   pendingLine: Buffer[];
   pendingLineBytes: number;
-  discardingLine: boolean;
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
@@ -89,7 +88,6 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
 
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
-const MAX_BUFFERED_SESSION_EVENT_BYTES = 1_024 * 1_024;
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
@@ -184,7 +182,6 @@ export class ScanCostTracker {
           offset: 0,
           pendingLine: [],
           pendingLineBytes: 0,
-          discardingLine: false,
           unreadable: false,
           threadId: null,
           parentThreadId: null,
@@ -378,27 +375,9 @@ function readSessionChunk(
   let lineStart = 0;
   while (lineStart < contents.length) {
     const newline = contents.indexOf(0x0a, lineStart);
-    if (session.discardingLine) {
-      if (newline === -1) return;
-      session.discardingLine = false;
-      lineStart = newline + 1;
-      continue;
-    }
-
     const lineEnd = newline === -1 ? contents.length : newline;
     const fragment = contents.subarray(lineStart, lineEnd);
     const lineBytes = session.pendingLineBytes + fragment.length;
-    if (lineBytes > MAX_BUFFERED_SESSION_EVENT_BYTES) {
-      session.pendingLine = [];
-      session.pendingLineBytes = 0;
-      if (newline === -1) {
-        session.discardingLine = true;
-        return;
-      }
-      lineStart = newline + 1;
-      continue;
-    }
-
     if (newline === -1) {
       if (fragment.length > 0) {
         session.pendingLine.push(Buffer.from(fragment));
