@@ -407,6 +407,44 @@ describe("diff rank input", () => {
     const [finding] = await runDiffRankInput(fixture, "local-patch");
     expect(finding?.preview).toContain("Git merge stage 2 (mode 100755):");
     expect(finding?.preview).toContain("(binary content)");
+
+    await writeRepositoryFile(
+      fixture.repository,
+      action,
+      Buffer.from([0, 0x45, 0x4c, 0x46]),
+    );
+    if (process.platform !== "win32") {
+      await chmod(join(fixture.repository, action), 0o755);
+    }
+    const [resolution] = await runDiffRankInput(fixture, "local-patch");
+    const heading =
+      process.platform === "win32" ? "Worktree:" : "Worktree (mode 100755):";
+    expect(resolution?.preview).toContain(`${heading}\n(binary content)`);
+  });
+
+  test("keeps executable mode changes for binary local actions", async () => {
+    const fixture = await createRepository();
+    const action = ".github/actions/local/tool";
+    await writeRepositoryFile(
+      fixture.repository,
+      action,
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0]),
+    );
+    git(fixture.repository, "add", action);
+    git(
+      fixture.repository,
+      "commit",
+      "-qm",
+      "add non-executable binary action",
+    );
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "update-index", "--chmod=+x", action);
+    git(fixture.repository, "commit", "-qm", "make binary action executable");
+
+    const [finding] = await runDiffRankInput(fixture, "revisions");
+    expect(finding?.path).toBe(action);
+    expect(finding?.preview).toContain("Git file mode: 100644 → 100755");
+    expect(finding?.preview).toContain("(binary content)");
   });
 
   test.skipIf(process.platform === "win32")(
@@ -705,6 +743,9 @@ describe("diff rank input", () => {
 
     const submodule = join(fixture.repository, action);
     await mkdir(submodule, { recursive: true });
+    await expect(runDiffRankInput(fixture, "local-patch")).rejects.toThrow(
+      /must be initialized/,
+    );
     git(submodule, "init", "-q", "-b", "main");
     git(submodule, "config", "user.name", "Codex Security Test");
     git(submodule, "config", "user.email", "codex-security@example.invalid");
@@ -745,6 +786,33 @@ describe("diff rank input", () => {
     expect(mixed?.preview).toContain("Git merge stage 3 (mode 100755):");
     expect(mixed?.preview).toContain("runs: conflicting file");
     expect(mixed?.preview).toContain(`Git submodule commit ${worktree}`);
+  });
+
+  test("rejects unreadable objects in unresolved executable stages", async () => {
+    const fixture = await createRepository();
+    const action = ".github/actions/local/run.sh";
+    await writeRepositoryFile(fixture.repository, action, "run safe\n");
+    git(fixture.repository, "add", action);
+    git(fixture.repository, "commit", "-qm", "add local action");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    const valid = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      cwd: fixture.repository,
+      encoding: "utf8",
+      input: "run valid\n",
+    }).trim();
+    const stages = [
+      `100644 ${valid} 1\t${action}\n`,
+      `100755 ${"f".repeat(40)} 2\t${action}\n`,
+      `100644 ${valid} 3\t${action}\n`,
+    ];
+    execFileSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      input: `0 ${"0".repeat(40)}\t${action}\n${stages.join("")}`,
+    });
+
+    await expect(runDiffRankInput(fixture, "local-patch")).rejects.toThrow(
+      /Could not read changed Git object/,
+    );
   });
 
   test("records unstaged local-action submodule revisions from their worktree", async () => {

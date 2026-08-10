@@ -420,13 +420,13 @@ def git_blob_preview(
             stderr=subprocess.DEVNULL,
         ) as process:
             if process.stdout is None:
-                return "", False
+                raise OSError("Git did not provide object contents")
             data = process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES)
             process.stdout.close()
         if process.returncode and len(data) < DIRECT_SCOPE_PREVIEW_READ_BYTES:
-            return "", False
-    except (OSError, ValueError):
-        return "", False
+            raise OSError("Git could not read the requested object")
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"Could not read changed Git object: {object_name}") from error
     return diff_preview_data(path, data, preview_bytes)
 
 
@@ -486,7 +486,9 @@ def submodule_worktree_revision(repo: Path, path: Path) -> str | None:
     return lines[1] if len(lines) == 2 and Path(lines[0]).resolve() == path.resolve() else None
 
 
-def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
+def unmerged_diff_preview(
+    repo: Path, path: Path, preview_bytes: int, *, track_worktree_filemode: bool
+) -> str:
     relative = path.relative_to(repo).as_posix()
     result = subprocess.run(
         ["git", "--no-replace-objects", "--literal-pathspecs", "-C", str(repo), "ls-files", "--stage", "-z", "--", relative],
@@ -503,6 +505,7 @@ def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
             raise SystemExit("Git returned an unexpected changed path: " + recorded_path)
         entries.append(metadata.split())
     directory_conflict = path.is_dir() and any(mode == "160000" for mode, _, _ in entries)
+    directory_revision = None
     if directory_conflict:
         try:
             if path.is_symlink() or (path.exists() and not path.is_dir()):
@@ -511,6 +514,9 @@ def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
                 path.resolve(strict=True).relative_to(repo)
         except (OSError, ValueError):
             raise SystemExit("Changed diff paths must not contain symbolic links: " + relative)
+        directory_revision = submodule_worktree_revision(repo, path)
+        if directory_revision is None:
+            raise SystemExit("Conflicted Git submodules must be initialized: " + relative)
     else:
         require_reviewable_diff_path(repo, path, reject_hard_links=True)
 
@@ -526,13 +532,14 @@ def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
         lines.extend((stage_header, "(binary content)" if binary else preview))
 
     if directory_conflict:
-        worktree = submodule_worktree_revision(repo, path)
-        if worktree is not None and all(worktree != revision for _, revision, _ in entries):
-            lines.extend(("Worktree:", f"Git submodule commit {worktree}"))
+        if all(directory_revision != revision for _, revision, _ in entries):
+            lines.extend(("Worktree:", f"Git submodule commit {directory_revision}"))
     else:
         current, binary = confined_diff_preview(repo, path, preview_bytes)
-        if current and not binary:
-            lines.extend(("Worktree:", current))
+        if current or binary:
+            mode = "100755" if path.stat().st_mode & 0o111 else "100644"
+            heading = f"Worktree (mode {mode}):" if track_worktree_filemode else "Worktree:"
+            lines.extend((heading, "(binary content)" if binary else current))
         require_reviewable_diff_path(repo, path, reject_hard_links=True)
     return fit_preview_lines(lines, preview_bytes)
 
@@ -984,7 +991,12 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 if is_binary:
                     continue
         elif status == "U":
-            preview = unmerged_diff_preview(repo, path, args.preview_bytes)
+            preview = unmerged_diff_preview(
+                repo,
+                path,
+                args.preview_bytes,
+                track_worktree_filemode=track_worktree_filemode,
+            )
         else:
             entry = git_diff_entry(repo, path, args.mode, args.head)
             if entry is not None and entry[0] == "160000":
@@ -1005,9 +1017,8 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 require_reviewable_diff_path(
                     repo, path, reject_hard_links=args.mode == "local-patch"
                 )
-                if is_binary:
-                    continue
                 base_entry = git_diff_entry(repo, path, "revisions", args.base)
+                changes: list[str] = []
                 if (
                     base_entry is not None
                     and entry is not None
@@ -1024,11 +1035,15 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                         for index, mode in enumerate(modes)
                         if index == 0 or mode != modes[index - 1]
                     ]
-                    if len(changes) > 1:
-                        preview = fit_preview_lines(
-                            [f"Git file mode: {' → '.join(changes)}", preview],
-                            args.preview_bytes,
-                        )
+                if is_binary:
+                    if len(changes) <= 1 and (entry is None or entry[0] != "100755"):
+                        continue
+                    preview = "(binary content)"
+                if len(changes) > 1:
+                    preview = fit_preview_lines(
+                        [f"Git file mode: {' → '.join(changes)}", preview],
+                        args.preview_bytes,
+                    )
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
     rows.sort(key=lambda row: str(row["path"]))
