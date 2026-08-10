@@ -67,6 +67,20 @@ def _same_repository(
     )
 
 
+def _recorded_identity_matches(
+    scan: sqlite3.Row, repository: Path, metadata: os.stat_result
+) -> bool:
+    if not stored_filesystem_identity_matches(scan["target_inode"], metadata.st_ino):
+        return False
+    if stored_filesystem_identity_matches(scan["target_device"], metadata.st_dev):
+        return True
+    return (
+        scan["target_path"] == str(repository)
+        and scan["target_revision"] != "unversioned"
+        and git_output(repository, "rev-parse", "--verify", "HEAD") == scan["target_revision"]
+    )
+
+
 def _requested_repository(
     connection: sqlite3.Connection, repository: Path
 ) -> tuple[sqlite3.Row, str | None]:
@@ -79,10 +93,43 @@ def _requested_repository(
     ).fetchone()
     target_id = requested["target_id"]
     if not target_id:
-        return requested, None
+        try:
+            metadata = repository.stat()
+        except OSError:
+            return requested, None
+        candidates = connection.execute(
+            """
+            SELECT targets.id, targets.current_path
+            FROM security_targets AS targets
+            JOIN scans ON scans.target_id = targets.id
+            WHERE scans.target_device = ? AND scans.target_inode = ?
+            """,
+            (
+                serialize_filesystem_identity(metadata.st_dev),
+                serialize_filesystem_identity(metadata.st_ino),
+            ),
+        )
+        missing_owners = {
+            row["id"]: row["current_path"]
+            for row in candidates
+            if not Path(row["current_path"]).exists()
+        }
+        if len(missing_owners) != 1:
+            return requested, None
+        target_id, previous_path = missing_owners.popitem()
+        with connection:
+            connection.execute(
+                "UPDATE security_targets SET current_path = ?, display_name = ?, "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE id = ? AND current_path = ?",
+                (str(repository), repository.name, target_id, previous_path),
+            )
+        requested = connection.execute(
+            "SELECT ? AS target_id, ? AS target_path", (target_id, str(repository))
+        ).fetchone()
     recorded = connection.execute(
         """
-        SELECT target_path, target_device, target_inode
+        SELECT target_path, target_device, target_inode, target_revision
         FROM scans
         WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
         ORDER BY started_at DESC, id DESC
@@ -96,12 +143,7 @@ def _requested_repository(
         metadata = repository.stat()
     except OSError:
         metadata = None
-    if metadata is not None and stored_filesystem_identity_matches(
-        recorded["target_inode"], metadata.st_ino
-    ) and (
-        recorded["target_path"] == str(repository)
-        or stored_filesystem_identity_matches(recorded["target_device"], metadata.st_dev)
-    ):
+    if metadata is not None and _recorded_identity_matches(recorded, repository, metadata):
         return requested, None
     return (
         connection.execute(
@@ -123,20 +165,18 @@ def _verified_target_metadata(
         return None, False
     recorded = connection.execute(
         """
-        SELECT 1
+        SELECT target_path, target_device, target_inode, target_revision
         FROM scans
         WHERE target_id = ? AND target_inode = ?
-            AND (target_path = ? OR target_device = ?)
-        LIMIT 1
         """,
         (
             target_id,
             serialize_filesystem_identity(metadata.st_ino),
-            str(repository),
-            serialize_filesystem_identity(metadata.st_dev),
         ),
-    ).fetchone()
-    return metadata, recorded is not None
+    )
+    return metadata, any(
+        _recorded_identity_matches(scan, repository, metadata) for scan in recorded
+    )
 
 
 def list_scans(
@@ -296,16 +336,26 @@ def list_scans(
         for target_id, (metadata, recorded) in verified_targets.items():
             if metadata is None or not recorded:
                 continue
+            current_target = connection.execute(
+                "SELECT current_path FROM security_targets WHERE id = ?", (target_id,)
+            ).fetchone()
+            current_revision = (
+                git_output(Path(current_target["current_path"]), "rev-parse", "--verify", "HEAD")
+                if current_target is not None
+                else None
+            )
             clauses.append(
                 "(scans.target_id IS NOT ? "
                 "OR (scans.target_inode = ? "
-                "AND (scans.target_path = targets.current_path OR scans.target_device = ?)))"
+                "AND (scans.target_device = ? "
+                "OR (scans.target_path = targets.current_path AND scans.target_revision = ?))))"
             )
             values.extend(
                 (
                     target_id,
                     serialize_filesystem_identity(metadata.st_ino),
                     serialize_filesystem_identity(metadata.st_dev),
+                    current_revision,
                 )
             )
     if args is not None and args.scan_root:
@@ -482,11 +532,8 @@ def list_unmatched_scan_pairs(
             return False
         if not target_metadata[1]:
             return scan["target_device"] is None and scan["target_inode"] is None
-        return stored_filesystem_identity_matches(
-            scan["target_inode"], target_metadata[0].st_ino
-        ) and (
-            scan["target_path"] == scan["current_target_path"]
-            or stored_filesystem_identity_matches(scan["target_device"], target_metadata[0].st_dev)
+        return _recorded_identity_matches(
+            scan, Path(scan["current_target_path"]), target_metadata[0]
         )
 
     selected = [

@@ -258,7 +258,8 @@ const nestedDirectoryScanProbe = [
   "    relocated_worktree = related_clone.with_name('portable-relocated-worktree')",
   "    related_clone.rename(relocated_worktree)",
   "    subprocess.run(['git', '-C', str(original_clone), 'worktree', 'repair', str(relocated_worktree)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
-  "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(relocated_worktree), relocated_target))",
+  "    relocated_args = argparse.Namespace(repository=str(relocated_worktree), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "    output['relocatedWorktreeHistory'] = [scan['scanId'] for scan in list_scans(connection, relocated_args)['scans']]",
   "    relocated_reads = []",
   "    relocated_matching = list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(original_clone), force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda scan: relocated_reads.append(scan['id']) or {})",
   "    output['relocatedWorktreeMatching'] = {'scanCount': relocated_matching['scanCount'], 'coverageReads': relocated_reads}",
@@ -322,12 +323,16 @@ const relocatedFindingProbe = [
   "    remount_args = argparse.Namespace(repository=str(checkout), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "    remounted_scans = [row['scanId'] for row in list_scans(connection, remount_args)['scans']]",
   "    remounted_matching = list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(checkout), force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda *_: {})['scanCount']",
-  "    connection.execute('UPDATE scans SET target_device = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev), 'scan'))",
+  "    connection.execute('UPDATE scans SET target_revision = ? WHERE id = ?', ('different-checkout-revision', 'scan'))",
+  "    reused_scans = [row['scanId'] for row in list_scans(connection, remount_args)['scans']]",
+  "    reused_matching = list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(checkout), force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda *_: {})['scanCount']",
+  "    connection.execute('UPDATE scans SET target_device = ?, target_revision = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev), revision, 'scan'))",
   "    scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
   "    occurrence = connection.execute('SELECT * FROM finding_occurrences WHERE id = ?', ('occurrence',)).fetchone()",
   "    moved_checkout = checkout.with_name('moved-checkout')",
   "    checkout.rename(moved_checkout)",
-  "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(moved_checkout), target))",
+  "    moved_args = argparse.Namespace(repository=str(moved_checkout), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "    moved_scan_ids = [row['scanId'] for row in list_scans(connection, moved_args)['scans']]",
   "    moved = finding_result(connection, scan, occurrence, full_details=True)",
   "    connection.execute('UPDATE scans SET target_device = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev + 1), 'scan'))",
   "    mismatched_scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
@@ -336,7 +341,7 @@ const relocatedFindingProbe = [
   "    replacement.mkdir()",
   "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(replacement), target))",
   "    replaced = finding_result(connection, scan, occurrence, full_details=True)",
-  "    print(json.dumps({'searches': searches, 'remountedScans': remounted_scans, 'remountedMatching': remounted_matching, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'mismatchedDeviceAbsolutePath': mismatched_device['locations'][0].get('absolutePath'), 'mismatchedDeviceSourceExcerpt': mismatched_device.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
+  "    print(json.dumps({'searches': searches, 'remountedScans': remounted_scans, 'remountedMatching': remounted_matching, 'reusedScans': reused_scans, 'reusedMatching': reused_matching, 'movedScans': moved_scan_ids, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'mismatchedDeviceAbsolutePath': mismatched_device['locations'][0].get('absolutePath'), 'mismatchedDeviceSourceExcerpt': mismatched_device.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
 ].join("\n");
 
 const findingDetailProbe = [
@@ -649,6 +654,7 @@ describe("workbench findings index", () => {
       forgedTargetlessIdentity: false,
       forgedGitDirectoryIdentity: false,
       relatedTargetlessIdentity: true,
+      relocatedWorktreeHistory: ["relocated-worktree-scan"],
       relocatedWorktreeMatching: {
         scanCount: 2,
         coverageReads: ["portable-scan", "relocated-worktree-scan"],
@@ -685,6 +691,9 @@ describe("workbench findings index", () => {
       searches: Record<string, string[]>;
       remountedScans: string[];
       remountedMatching: number;
+      reusedScans: string[];
+      reusedMatching: number;
+      movedScans: string[];
       movedAbsolutePath: string;
       expectedMovedAbsolutePath: string;
       movedSourceExcerpt?: string;
@@ -700,6 +709,9 @@ describe("workbench findings index", () => {
     });
     expect(output.remountedScans).toEqual(["scan"]);
     expect(output.remountedMatching).toBe(1);
+    expect(output.reusedScans).toEqual([]);
+    expect(output.reusedMatching).toBe(0);
+    expect(output.movedScans).toEqual(["scan"]);
     expect(output.movedAbsolutePath).toBe(output.expectedMovedAbsolutePath);
     expect(output.movedSourceExcerpt).toContain("dangerous_sink(user_input)");
     expect(output.mismatchedDeviceAbsolutePath).toBeNull();
