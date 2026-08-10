@@ -1479,6 +1479,25 @@ describe("live scan cost tracking", () => {
     ]);
   });
 
+  test("quarantines session events that exceed the buffered event budget", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    await appendFile(path, "x".repeat(16 * 1_024 * 1_024 + 1));
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+
+    await expect(tracker.refresh()).rejects.toThrow(
+      "Codex session event exceeds the 16 MiB safety limit.",
+    );
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+  });
+
   test("ignores oversized events from unrelated prior credential sessions", async () => {
     const home = await codexHome();
     const unrelated = await writeSession(home, "unrelated-thread", {

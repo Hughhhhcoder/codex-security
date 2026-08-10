@@ -463,7 +463,8 @@ including cached input and cache writes; fees and surcharges are not included.
 
 Use `--max-cost USD` to stop a scan, including its delegated workers, when its
 running cost exceeds the limit. Partial results are preserved. Requests
-already in progress can finish above the limit.
+already in progress can finish above the limit. Session events larger than
+16 MiB stop the scan because its running cost cannot be verified safely.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.
@@ -488,7 +489,8 @@ service,https://github.com/acme/service.git,0123456789abcdef0123456789abcdef0123
 Use `--scan-prompt-file PATH` to add instructions to a scan or every bulk scan.
 Bulk scans append each repository's CSV `prompt` after the shared instructions.
 Use `--post-scan-prompt-file PATH` to run a follow-up in the same authenticated
-session after each completed scan has been validated.
+session after each scan, including incomplete or failed scans. Canceled scans
+and scans stopped at their configured cost limit do not start another turn.
 
 `--workers` limits concurrent scans and `--max-attempts` retries failures.
 Results remain under `--output-dir`; rerun the same command to resume.
