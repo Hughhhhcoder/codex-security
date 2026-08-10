@@ -10,7 +10,7 @@ export const VERSION = PACKAGE_VERSIONS.package;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
 /** App-server is shipped by the pinned @openai/codex executable package. */
 export const CODEX_APP_SERVER_VERSION = CODEX_EXECUTABLE_VERSION;
-export const BUNDLED_PLUGIN_VERSION = "0.1.15" as const;
+export const BUNDLED_PLUGIN_VERSION = "0.1.16" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
 const VERSION_PATTERN =
