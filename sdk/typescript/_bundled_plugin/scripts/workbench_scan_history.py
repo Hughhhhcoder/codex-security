@@ -506,18 +506,7 @@ def list_unmatched_scan_pairs(
     def belongs_to_current_owner(scan: sqlite3.Row) -> bool:
         target_id = scan["target_id"]
         if not target_id:
-            if scan["target_device"] is None and scan["target_inode"] is None:
-                return True
-            try:
-                target_metadata = Path(scan["target_path"]).stat()
-            except OSError:
-                return False
-            return (
-                stored_filesystem_identity_matches(scan["target_device"], target_metadata.st_dev)
-                and stored_filesystem_identity_matches(
-                    scan["target_inode"], target_metadata.st_ino
-                )
-            )
+            return False
         if target_id not in verified_targets:
             target = connection.execute(
                 "SELECT current_path FROM security_targets WHERE id = ?", (target_id,)
@@ -530,10 +519,8 @@ def list_unmatched_scan_pairs(
                 )
             )
         target_metadata = verified_targets[target_id]
-        if target_metadata is None or target_metadata[0] is None:
+        if target_metadata is None or target_metadata[0] is None or not target_metadata[1]:
             return False
-        if not target_metadata[1]:
-            return scan["target_device"] is None and scan["target_inode"] is None
         return stored_filesystem_identity_matches(
             scan["target_device"], target_metadata[0].st_dev
         ) and stored_filesystem_identity_matches(
