@@ -2,11 +2,11 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  Codex,
+  CodexAppServer,
   type ModelReasoningEffort,
   type ThreadOptions,
   type TurnOptions,
-} from "@openai/codex-sdk";
+} from "./app-server.js";
 import { z } from "incur";
 import { accountStatus } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
@@ -30,6 +30,7 @@ interface ComparisonCodex {
       options: TurnOptions,
     ): Promise<{ finalResponse: string }>;
   };
+  close?(): Promise<void>;
 }
 
 export interface ScanComparisonOptions {
@@ -76,9 +77,13 @@ export async function matchScanFindings(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
 ): Promise<ScanComparisonResult> {
+  const codexCommand =
+    options.codex === undefined ? resolveCodexCommand() : null;
   const codex =
     options.codex ??
-    new Codex({
+    new CodexAppServer({
+      codexPathOverride: codexCommand?.command,
+      codexArgsPrefix: codexCommand?.prefixArgs,
       env: await comparisonEnvironment(
         options.environment,
         accountStatus,
@@ -102,33 +107,37 @@ export async function matchScanFindings(
         },
       },
     });
-  const thread = codex.startThread({
-    ...(options.model === undefined ? {} : { model: options.model }),
-    modelReasoningEffort: options.reasoningEffort ?? "medium",
-    sandboxMode: "read-only",
-    approvalPolicy: "never",
-    networkAccessEnabled: false,
-    webSearchMode: "disabled",
-    workingDirectory: options.workingDirectory ?? process.cwd(),
-    skipGitRepoCheck: true,
-  });
-  const turn = await thread.run(comparisonPrompt(input), {
-    outputSchema: z.toJSONSchema(comparisonSchema, { target: "openapi-3.0" }),
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-  });
-  let response: unknown;
   try {
-    response = JSON.parse(turn.finalResponse);
-  } catch (error) {
-    throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
-      cause: error,
+    const thread = codex.startThread({
+      ...(options.model === undefined ? {} : { model: options.model }),
+      modelReasoningEffort: options.reasoningEffort ?? "medium",
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+      networkAccessEnabled: false,
+      webSearchMode: "disabled",
+      workingDirectory: options.workingDirectory ?? process.cwd(),
+      skipGitRepoCheck: true,
     });
+    const turn = await thread.run(comparisonPrompt(input), {
+      outputSchema: z.toJSONSchema(comparisonSchema, { target: "openapi-3.0" }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+    let response: unknown;
+    try {
+      response = JSON.parse(turn.finalResponse);
+    } catch (error) {
+      throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
+        cause: error,
+      });
+    }
+    return validateComparison(
+      input,
+      response,
+      options.allowHistoricalUncertainty ?? false,
+    );
+  } finally {
+    if (options.codex === undefined) await codex.close?.();
   }
-  return validateComparison(
-    input,
-    response,
-    options.allowHistoricalUncertainty ?? false,
-  );
 }
 
 function comparisonPrompt(input: ScanComparisonInput): string {

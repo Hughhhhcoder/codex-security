@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
@@ -20,6 +20,7 @@ import {
   sep,
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createInterface } from "node:readline";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 
 const PACKAGE_SMOKE_TIMEOUT_MS = packageSmokeTimeouts().commandTimeoutMs;
@@ -219,50 +220,87 @@ async function smokeNestedDeepScanWorker(installedRoot, consumer) {
   });
   assert.match(codexVersion, /^codex-cli\s+\d/u);
 
-  const workerSdkBridge = join(consumer, "nested-worker-sdk.mjs");
-  await writeFile(
-    workerSdkBridge,
-    'export { Codex } from "@openai/codex-sdk";\n',
+  await assertAppServerStarts(
+    workerEnvironment.CODEX_CLI_PATH,
+    workerHome,
+    workerEnvironment,
   );
-  const { Codex } = await import(pathToFileURL(workerSdkBridge).href);
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(new Error("The nested Codex worker did not start.")),
-    15_000,
-  );
-  let started = false;
-  try {
-    const codex = new Codex({
-      codexPathOverride: workerEnvironment.CODEX_CLI_PATH,
-      env: workerEnvironment,
-      baseUrl: "http://127.0.0.1:1/v1",
-      apiKey: "synthetic-codex-security-package-smoke",
-    });
-    const { events } = await codex
-      .startThread({
-        workingDirectory: workerHome,
-        skipGitRepoCheck: true,
-        sandboxMode: "read-only",
-      })
-      .runStreamed("Validate packaged nested worker startup.", {
-        signal: controller.signal,
-      });
-    for await (const event of events) {
-      if (event.type === "thread.started") {
-        started = true;
-        controller.abort();
-        break;
+}
+
+async function assertAppServerStarts(command, cwd, env) {
+  const child = spawn(command, ["app-server", "--stdio"], {
+    cwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  child.stderr.resume();
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  let finished = false;
+  const started = new Promise((resolveStarted, rejectStarted) => {
+    const timeout = setTimeout(() => {
+      rejectStarted(new Error("The nested Codex app-server did not start."));
+    }, 15_000);
+    const finish = (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      lines.close();
+      if (!child.killed) child.kill();
+      if (error === undefined) resolveStarted();
+      else rejectStarted(error);
+    };
+    lines.on("line", (line) => {
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        finish(new Error("The nested Codex app-server returned invalid JSON."));
+        return;
       }
-    }
-  } finally {
-    clearTimeout(timeout);
-    controller.abort();
-  }
-  assert.equal(
-    started,
-    true,
-    "The installed package must launch an actual nested Codex worker without codex on PATH.",
+      if (message.id === "initialize") {
+        child.stdin.write(
+          `${JSON.stringify({
+            id: "thread-start",
+            method: "thread/start",
+            params: { cwd, sandbox: "read-only", approvalPolicy: "never" },
+          })}\n`,
+        );
+      } else if (
+        message.id === "thread-start" &&
+        typeof message.result?.thread?.id === "string"
+      ) {
+        finish();
+      } else if (message.id === "thread-start" && message.error) {
+        finish(new Error("The nested Codex app-server rejected thread/start."));
+      }
+    });
+    child.once("error", finish);
+    child.once("exit", (code, signal) => {
+      if (!finished) {
+        finish(
+          new Error(
+            `The nested Codex app-server exited before thread/start (${signal ?? code ?? "unknown"}).`,
+          ),
+        );
+      }
+    });
+  });
+  child.stdin.write(
+    `${JSON.stringify({
+      id: "initialize",
+      method: "initialize",
+      params: {
+        clientInfo: {
+          name: "codex_security_package_smoke",
+          title: "Codex Security package smoke",
+          version: "1",
+        },
+        capabilities: { experimentalApi: true },
+      },
+    })}\n`,
   );
+  await started;
 }
 
 const archive = await resolveArchive();

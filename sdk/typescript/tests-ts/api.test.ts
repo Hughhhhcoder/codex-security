@@ -18,8 +18,12 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
+import { fileURLToPath } from "node:url";
+import {
+  CodexAppServer,
+  type CodexOptions,
+  type ThreadEvent,
+} from "../src/app-server.js";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -5017,10 +5021,18 @@ if (process.argv.slice(2).join(" ") !== "login status") {
     await writeFile(
       preload,
       [
-        'process.stdout.write(`${JSON.stringify({type:"thread.started",thread_id:"thread-1"})}\\n`);',
-        'process.stdout.write(`${JSON.stringify({type:"turn.failed",error:{message:"401 invalid API key"}})}\\n`);',
+        'import { createInterface } from "node:readline";',
+        "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+        'createInterface({ input: process.stdin, crlfDelay: Infinity }).on("line", (line) => {',
+        "  const message = JSON.parse(line);",
+        '  if (message.method === "initialize") send({ id: message.id, result: { userAgent: "fixture", codexHome: process.env.CODEX_HOME, platformFamily: "unix", platformOs: "linux" } });',
+        '  else if (message.method === "thread/start") send({ id: message.id, result: { thread: { id: "thread-1" } } });',
+        '  else if (message.method === "turn/start") {',
+        '    send({ id: message.id, result: { turn: { id: "turn-1" } } });',
+        '    send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "failed", error: { message: "401 invalid API key" } } } });',
+        "  }",
+        "});",
         "setInterval(() => {}, 1_000);",
-        "await new Promise(() => {});",
       ].join("\n"),
     );
     const nodeExecutable = execFileSync("node", ["-p", "process.execPath"], {
@@ -5038,13 +5050,10 @@ if (process.argv.slice(2).join(" ") !== "login status") {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         createCodex: (options: CodexOptions) =>
-          new Codex({
+          new CodexAppServer({
             ...options,
             codexPathOverride: nodeExecutable,
-            env: {
-              ...options.env,
-              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
-            },
+            codexArgsPrefix: [preload],
           }),
       },
     );

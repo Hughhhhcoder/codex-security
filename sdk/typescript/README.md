@@ -4,6 +4,12 @@ Open-source TypeScript SDK and CLI for running Codex Security scans. The
 ESM-only package includes TypeScript declarations, the `codex-security`
 executable, and the matching Codex runtime.
 
+Scan turns run through the pinned Codex app-server JSON-RPC transport. The
+SDK still creates an isolated `CODEX_HOME`, installs the bundled Security
+plugin there, and points standard and deep-scan workers at the same durable
+workbench state; app-server replaces the previous `codex exec` transport, not
+the scan contract or result layout.
+
 > [!NOTE]
 > This package follows semantic versioning. Its public API may change between
 > minor versions before `1.0.0`.

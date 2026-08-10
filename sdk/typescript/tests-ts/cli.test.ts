@@ -991,7 +991,7 @@ describe("CLI", () => {
       scanMcp: false,
       cliVersion: VERSION,
       codexVersion: "0.144.6",
-      codexSdkVersion: "0.144.6",
+      codexAppServerVersion: "0.144.6",
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",

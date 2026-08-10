@@ -12,7 +12,11 @@ import {
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
-import { Codex, type CodexOptions } from "@openai/codex-sdk";
+import {
+  CodexAppServer,
+  type CodexOptions,
+  type ThreadEvent,
+} from "./app-server.js";
 import {
   parse as parseToml,
   stringify as stringifyToml,
@@ -65,7 +69,10 @@ import {
   type ScanProgress,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
-import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
+import {
+  CODEX_APP_SERVER_VERSION,
+  CODEX_EXECUTABLE_VERSION,
+} from "./version.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
   bootstrapPlugin,
@@ -114,10 +121,7 @@ interface CodexThreadLike {
   ): Promise<{ events: AsyncGenerator<ScanEvent> }>;
 }
 
-interface ScanEvent {
-  readonly type: string;
-  readonly [key: string]: unknown;
-}
+type ScanEvent = ThreadEvent;
 
 interface CodexClientLike {
   startThread(options: {
@@ -125,6 +129,7 @@ interface CodexClientLike {
     skipGitRepoCheck: boolean;
     approvalPolicy: "never";
   }): CodexThreadLike;
+  close?(): Promise<void>;
 }
 
 interface PreparedRuntime {
@@ -251,7 +256,7 @@ interface LocalScanInputs
 }
 
 export interface CodexSecurityMetadata {
-  sdk: "@openai/codex-sdk";
+  sdk: "codex-app-server";
   sdkVersion: string;
   executable: "@openai/codex";
   executableVersion: string;
@@ -272,7 +277,14 @@ interface ClientDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  createCodex: (options) => new Codex(options),
+  createCodex: (options) => {
+    const command = resolveCodexCommand();
+    return new CodexAppServer({
+      ...options,
+      codexPathOverride: command.command,
+      codexArgsPrefix: command.prefixArgs,
+    });
+  },
   environment: process.env,
 };
 
@@ -290,8 +302,8 @@ const DEEP_SCAN_SETTINGS = [
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
-    sdk: "@openai/codex-sdk",
-    sdkVersion: CODEX_SDK_VERSION,
+    sdk: "codex-app-server",
+    sdkVersion: CODEX_APP_SERVER_VERSION,
     executable: "@openai/codex",
     executableVersion: CODEX_EXECUTABLE_VERSION,
   };
@@ -393,6 +405,7 @@ export class CodexSecurity {
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
     let preparedTargetWarnings: string[] = [];
+    let codex: CodexClientLike | null = null;
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
     let activeScan: {
@@ -941,7 +954,7 @@ export class CodexSecurity {
         CODEX_HOME: runtime.codexHome,
         ...runtimePaths,
       };
-      const codex = this.#dependencies.createCodex({
+      codex = this.#dependencies.createCodex({
         ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
         env: definedEnvironment(
           selectedScanEnvironment(environment, "chatgpt"),
@@ -1140,6 +1153,7 @@ export class CodexSecurity {
       }
       throw failure;
     } finally {
+      await codex?.close?.();
       // Removing the temporary scan inputs is best effort. A throw here would replace the
       // outcome the try and catch blocks already produced, so these failures are reported
       // as warnings: a scan that failed has to say why it failed, not why its temporary

@@ -338,6 +338,19 @@ describe("plugin runtime preparation", () => {
     );
   });
 
+  test("launches bundled Deep Scan workers through app-server", async () => {
+    const parts = await Promise.all(
+      ["000", "001"].map((part) =>
+        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
+      ),
+    );
+    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+
+    expect(runtime).toContain("CodexAppServer");
+    expect(runtime).toContain('"app-server", "--stdio"');
+    expect(runtime).not.toContain('"exec", "--experimental-json"');
+  });
+
   test("keeps focused Standard scans on native direct-start tools", async () => {
     const skill = await readFile(
       join(PLUGIN_ROOT, "skills", "security-scan", "SKILL.md"),

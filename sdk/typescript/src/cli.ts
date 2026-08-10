@@ -26,7 +26,7 @@ import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { ModelReasoningEffort } from "@openai/codex-sdk";
+import type { ModelReasoningEffort } from "./app-server.js";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -105,7 +105,7 @@ import {
   BUNDLED_PLUGIN_VERSION,
   checkForUpdate,
   CODEX_EXECUTABLE_VERSION,
-  CODEX_SDK_VERSION,
+  CODEX_APP_SERVER_VERSION,
   formatUpdateNotice,
   updateNoticeEnabled,
   type UpdateNotice,
@@ -1787,7 +1787,7 @@ export async function main(
         cancellationNote: z.string(),
         cliVersion: z.string(),
         codexVersion: z.string(),
-        codexSdkVersion: z.string(),
+        codexAppServerVersion: z.string(),
         model: z.string(),
         reasoningEffort: z.string(),
         nextStep: z.string(),
@@ -1801,7 +1801,7 @@ export async function main(
             "Scans are CLI-only because the MCP transport cannot cancel active commands.",
           cliVersion: VERSION,
           codexVersion: CODEX_EXECUTABLE_VERSION,
-          codexSdkVersion: CODEX_SDK_VERSION,
+          codexAppServerVersion: CODEX_APP_SERVER_VERSION,
           ...scanModelConfiguration(DEFAULT_CODEX_CONFIG),
           nextStep: "codex-security scan . --dry-run",
         };
@@ -2093,7 +2093,7 @@ function validateCliArguments(
       "cancellationNote",
       "cliVersion",
       "codexVersion",
-      "codexSdkVersion",
+      "codexAppServerVersion",
       "model",
       "reasoningEffort",
       "nextStep",
@@ -2748,7 +2748,7 @@ async function runScan(
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
       codex_version: CODEX_EXECUTABLE_VERSION,
-      codex_sdk_version: CODEX_SDK_VERSION,
+      codex_app_server_version: CODEX_APP_SERVER_VERSION,
       mode: arguments_.mode,
       max_cost_usd: arguments_.maxCostUsd,
       target:

@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
+import type { ThreadOptions, TurnOptions } from "../src/app-server.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   comparisonEnvironment,

@@ -1,7 +1,7 @@
 import { mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { McpToolCallItem, ThreadEvent } from "@openai/codex-sdk";
+import type { McpToolCallItem, ThreadEvent } from "../src/app-server.js";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runScanEvents } from "../src/api.js";
 import {

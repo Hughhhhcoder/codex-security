@@ -141,6 +141,7 @@ const allowedRoot = new Set([
 const distFiles = new Set(
   [
     "api",
+    "app-server",
     "auth",
     "bulk-scan-discovery",
     "cli",

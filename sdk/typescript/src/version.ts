@@ -7,8 +7,9 @@ const PACKAGE_VERSIONS = packageVersions(
 
 /** npm-compatible successor to the Python package version 0.1.0b3. */
 export const VERSION = PACKAGE_VERSIONS.package;
-export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
+/** App-server is shipped by the pinned @openai/codex executable package. */
+export const CODEX_APP_SERVER_VERSION = CODEX_EXECUTABLE_VERSION;
 export const BUNDLED_PLUGIN_VERSION = "0.1.15" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
@@ -164,7 +165,6 @@ function isNewerVersion(latest: string, current: string): boolean {
 
 function packageVersions(url: URL): {
   package: string;
-  sdk: string;
   executable: string;
 } {
   try {
@@ -183,23 +183,14 @@ function packageVersions(url: URL): {
     if (typeof dependencies !== "object" || dependencies === null) {
       throw new Error("dependencies must be an object");
     }
-    const sdk =
-      "@openai/codex-sdk" in dependencies
-        ? dependencies["@openai/codex-sdk"]
-        : undefined;
     const executable =
       "@openai/codex" in dependencies
         ? dependencies["@openai/codex"]
         : undefined;
-    if (
-      typeof sdk !== "string" ||
-      sdk.length === 0 ||
-      typeof executable !== "string" ||
-      executable.length === 0
-    ) {
+    if (typeof executable !== "string" || executable.length === 0) {
       throw new Error("Codex dependencies must have non-empty versions");
     }
-    return { package: manifest.version, sdk, executable };
+    return { package: manifest.version, executable };
   } catch (error) {
     throw new Error("Unable to read Codex Security package versions.", {
       cause: error,

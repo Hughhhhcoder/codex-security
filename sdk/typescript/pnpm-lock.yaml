@@ -17,9 +17,6 @@ importers:
       '@openai/codex':
         specifier: 0.144.6
         version: 0.144.6
-      '@openai/codex-sdk':
-        specifier: 0.144.6
-        version: 0.144.6
       ajv:
         specifier: 8.20.0
         version: 8.20.0
@@ -322,10 +319,6 @@ packages:
 
   '@octokit/types@16.0.0':
     resolution: {integrity: sha512-sKq+9r1Mm4efXW1FCk7hFSeJo4QKreL/tTbR0rz/qx/r1Oa2VV83LTA/H/MuCOX7uCIJmQVRKBcbmWoySjAnSg==}
-
-  '@openai/codex-sdk@0.144.6':
-    resolution: {integrity: sha512-jFgXHjFq2//PTfJa8CySqhUilRBPVmCLuQoH5F+iJ2x4owZwPlnqmIbCkWIJJ6IxDuQdjf3ewg0LaDtc3i6h9Q==}
-    engines: {node: '>=18'}
 
   '@openai/codex@0.144.6':
     resolution: {integrity: sha512-wk+2CWiBNXiJLBoN2D08N9RceWkSBnlgk5g2K1a4CXrP/C0gdlHyRUG7RFzm9y41DCK/7tvCct233JVxyFmznw==}
@@ -816,10 +809,6 @@ snapshots:
   '@octokit/types@16.0.0':
     dependencies:
       '@octokit/openapi-types': 27.0.0
-
-  '@openai/codex-sdk@0.144.6':
-    dependencies:
-      '@openai/codex': 0.144.6
 
   '@openai/codex@0.144.6':
     optionalDependencies:
