@@ -2090,6 +2090,69 @@ describe("GitHub release workflow safeguards", () => {
     expect(failedLookup.stdout).not.toContain("No older npm release");
   });
 
+  test("publishes GitHub releases in version order without dropping pending tags", () => {
+    expect(githubReleaseWorkflow).toContain(
+      "run-name: GitHub release ${{ inputs.tag }}",
+    );
+    const ordering = workflowStepShell(
+      githubReleaseWorkflow,
+      "Wait for older GitHub releases",
+    );
+    expect(ordering).toContain(
+      "actions/workflows/node-github-release.yml/runs?per_page=100",
+    );
+    expect(ordering).toContain(
+      'require-increase "$RELEASE_VERSION" "$candidate"',
+    );
+
+    const root = mkdtempSync(join(tmpdir(), "codex-security-github-order-"));
+    const mocks = [
+      "gh() {",
+      '  if [[ ! -e "$RELEASE_RUN_CHECKED" ]]; then',
+      '    touch "$RELEASE_RUN_CHECKED"',
+      "    printf '7\\tGitHub release npm-v0.1.0\\t7\\n'",
+      "  fi",
+      "}",
+      'sleep() { printf "waited %s\\n" "$1"; }',
+    ].join("\n");
+    try {
+      const ordered = spawnSync("bash", ["-c", `${mocks}\n${ordering}`], {
+        encoding: "utf8",
+        cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: "test/codex-security",
+          GITHUB_RUN_ID: "8",
+          GITHUB_RUN_NUMBER: "8",
+          RELEASE_RUN_CHECKED: join(root, "checked"),
+          RELEASE_VERSION: "0.2.0",
+        },
+      });
+      expect(ordered.status).toBe(0);
+      expect(ordered.stdout).toContain("waited 15");
+      expect(ordered.stdout).toContain("No older GitHub release");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+
+    const failedLookup = spawnSync(
+      "bash",
+      ["-c", `gh() { return 17; }\n${ordering}`],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: "test/codex-security",
+          GITHUB_RUN_ID: "8",
+          GITHUB_RUN_NUMBER: "8",
+          RELEASE_VERSION: "0.2.0",
+        },
+      },
+    );
+    expect(failedLookup.status).toBe(17);
+    expect(failedLookup.stdout).not.toContain("No older GitHub release");
+  });
+
   test("dispatches GitHub releases after publishing with isolated permissions", () => {
     expect(protectedReleaseWorkflow).toContain(
       [

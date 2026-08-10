@@ -1,4 +1,5 @@
 name: node-github-release
+run-name: GitHub release ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
@@ -391,6 +392,47 @@ jobs:
             printf 'previous-tag=%s\n' "$previous_tag"
             printf 'make-latest=%s\n' "$make_latest"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for older GitHub releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..120}; do
+            waiting=
+            active_runs="$(
+              gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/node-github-release.yml/runs?per_page=100" \
+                --jq '.workflow_runs[] | select(.status != "completed") | [.id, (.display_title // ""), .run_number] | @tsv'
+            )"
+            while IFS=$'\t' read -r run_id run_name run_number; do
+              [[ -n "$run_id" && "$run_id" != "$GITHUB_RUN_ID" ]] || continue
+              if [[ "$run_name" == "GitHub release npm-v"* ]]; then
+                candidate="${run_name#GitHub release npm-v}"
+                node sdk/typescript/scripts/release-automation.mjs \
+                  require-increase "$RELEASE_VERSION" "$candidate" \
+                  >/dev/null 2>&1 || continue
+              elif [[ ! "$run_number" =~ ^[0-9]+$ ||
+                    "$run_number" -ge "$GITHUB_RUN_NUMBER" ]]; then
+                continue
+              fi
+              waiting="$run_id"
+              break
+            done <<< "$active_runs"
+
+            if [[ -z "$waiting" ]]; then
+              echo "No older GitHub release is still running."
+              break
+            fi
+            if [[ "$attempt" == 120 ]]; then
+              echo "Timed out waiting for older GitHub release run $waiting." >&2
+              exit 1
+            fi
+            sleep 15
+          done
 
       - name: Publish GitHub Release and generated notes
         shell: bash
