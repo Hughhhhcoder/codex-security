@@ -526,7 +526,7 @@ describe("security scan file inventory", () => {
     expect(rows).toContain("./vendor/source.py");
   });
 
-  test("retains an explicitly scoped Git-ignored file", async () => {
+  test("retains ignored explicit files without exposing ignored directory descendants", async () => {
     if (Bun.which("rg") === null) return;
 
     const root = await realpath(
@@ -546,22 +546,38 @@ describe("security scan file inventory", () => {
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     expect(python).not.toBeNull();
     if (python === null) throw new Error("A Python interpreter is required.");
-    execFileSync(
-      python,
-      [
-        "-B",
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "--repo",
-        repository,
-        "--scope",
-        "selected.skip",
-        "--out",
-        output,
-      ],
-      { cwd: repository, stdio: "pipe" },
-    );
+    const enumerate = (scope: string) =>
+      execFileSync(
+        python,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          scope,
+          "--out",
+          output,
+        ],
+        { cwd: repository, stdio: "pipe" },
+      );
 
+    enumerate("selected.skip");
     expect((await readFile(output, "utf8")).trim()).toBe("selected.skip");
+
+    const ignored = join(repository, "ignored");
+    await mkdir(ignored);
+    await Promise.all([
+      writeFile(join(repository, ".gitignore"), "*.skip\nignored/\n"),
+      writeFile(join(ignored, "public.py"), "tracked source\n"),
+      writeFile(join(ignored, "private.py"), "ignored source\n"),
+    ]);
+    execFileSync("git", ["add", "--force", "ignored/public.py"], {
+      cwd: repository,
+    });
+
+    enumerate("ignored");
+    expect((await readFile(output, "utf8")).trim()).toBe("ignored/public.py");
   });
 
   test("rejects symbolic scope and ignore-file paths", async () => {

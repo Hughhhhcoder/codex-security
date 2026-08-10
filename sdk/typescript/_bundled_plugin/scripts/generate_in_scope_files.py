@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 IGNORE_FILE_NAMES = (".gitignore", ".ignore", ".rgignore")
@@ -238,7 +239,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
     if worktree is not None or discovered_roots:
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
-        listed = [b"", b""]
+        listed: list[list[bytes]] = [[], []]
+
+        def listed_paths(index: int) -> Iterator[bytes]:
+            for chunk in listed[index]:
+                yield from (relative for relative in chunk.split(b"\0") if relative)
+
         if worktree is not None:
             for index, arguments in enumerate(
                 (["--cached"], ["--others", "--exclude-standard"])
@@ -250,7 +256,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     if detail:
                         message = f"{message}: {detail}"
                     raise InventoryError(message)
-                listed[index] = result.stdout
+                listed[index].append(result.stdout)
 
         nested_roots = discovered_roots.copy()
         current = selected if selected.is_dir() else selected.parent
@@ -258,10 +264,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if (current / ".git").exists():
                 nested_roots.add(current)
             current = current.parent
-        for collection in listed:
-            for relative in collection.split(b"\0"):
-                if not relative:
-                    continue
+        for index in range(len(listed)):
+            for relative in listed_paths(index):
                 candidate = repository / os.fsdecode(relative)
                 if candidate.is_symlink() or not candidate.is_dir():
                     continue
@@ -319,10 +323,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     raise InventoryError(
                         f"nested git ls-files exited with status {result.returncode}: {detail}"
                     )
-                listed[index] += b"".join(
-                    nested_prefix + relative + b"\0"
-                    for relative in result.stdout.split(b"\0")
-                    if relative
+                listed[index].append(
+                    b"".join(
+                        nested_prefix + relative + b"\0"
+                        for relative in result.stdout.split(b"\0")
+                        if relative
+                    )
                 )
                 for relative in result.stdout.split(b"\0"):
                     if not relative:
@@ -342,9 +348,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         allowed = {
             normalized(prefix + relative)
-            for collection in listed
-            for relative in collection.split(b"\0")
-            if relative
+            for index in range(len(listed))
+            for relative in listed_paths(index)
         }
         inspected_prefixes = tuple(
             normalized(prefix + os.fsencode(root.relative_to(repository).as_posix()) + b"/")
@@ -379,7 +384,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if detail:
                     message = f"{message}: {detail}"
                 raise InventoryError(message)
-            explicitly_ignored = ignored.returncode == 0
+            explicitly_ignored = ignored.returncode == 0 and selected.is_file()
 
         if not explicitly_ignored:
             rows = {
@@ -394,9 +399,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             }
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
 
-        for relative in listed[0].split(b"\0"):
-            if not relative:
-                continue
+        for relative in listed_paths(0):
             candidate = repository / os.fsdecode(relative)
             if candidate.is_symlink() or not candidate.is_file():
                 continue
