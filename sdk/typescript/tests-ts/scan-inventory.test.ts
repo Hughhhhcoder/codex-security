@@ -281,6 +281,22 @@ describe("security scan file inventory", () => {
     expect((await readFile(output, "utf8")).split("\n")).toContain(
       "./source.ts",
     );
+    expect(() =>
+      execFileSync(
+        python,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          process.platform === "win32" ? ".GIT" : ".git",
+          "--out",
+          output,
+        ],
+        { cwd: repository, stdio: "pipe" },
+      ),
+    ).toThrow("Git metadata paths are not supported");
   });
 
   test.each([false, true])(
@@ -541,10 +557,7 @@ describe("security scan file inventory", () => {
 
     const stale = join(repository, "vendor");
     await mkdir(stale);
-    await writeFile(
-      join(stale, ".git"),
-      `gitdir: ${join(root, "missing-git-metadata")}\n`,
-    );
+    await writeFile(join(stale, ".git"), "malformed nested Git marker\n");
     await writeFile(join(stale, "source.py"), "print('copied source')\n");
 
     const python =

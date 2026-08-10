@@ -20,6 +20,13 @@ class InventoryError(ValueError):
     """Raised when the repository, scope, or inventory cannot be used safely."""
 
 
+def symbolic_metadata(metadata: os.stat_result) -> bool:
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & reparse_point
+    )
+
+
 def resolve_repository(value: str) -> Path:
     """Resolve the repository once so every scope is bound to its real root."""
     try:
@@ -47,16 +54,15 @@ def resolve_scope(repository: Path, value: str) -> str:
         relative = resolved.relative_to(repository)
     except ValueError as error:
         raise InventoryError(f"--scope: path must remain inside --repo: {value}") from error
+    if any(component.casefold() == ".git" for component in relative.parts):
+        raise InventoryError("--scope: Git metadata paths are not supported")
 
     current = scope
     while current != repository:
         if current == current.parent:
             raise InventoryError("--scope: symbolic links are not supported")
         metadata = current.stat(follow_symlinks=False)
-        reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-        if stat.S_ISLNK(metadata.st_mode) or (
-            getattr(metadata, "st_file_attributes", 0) & reparse_point
-        ):
+        if symbolic_metadata(metadata):
             raise InventoryError("--scope: symbolic links are not supported")
         current = current.parent
 
@@ -97,8 +103,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     ancestors.reverse()
 
     def reject_symbolic_ignore(directory: Path) -> None:
-        if any((directory / name).is_symlink() for name in IGNORE_FILE_NAMES):
-            raise InventoryError("symbolic ignore files are not supported")
+        for name in IGNORE_FILE_NAMES:
+            try:
+                metadata = (directory / name).stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if symbolic_metadata(metadata):
+                raise InventoryError("symbolic ignore files are not supported")
+            if not stat.S_ISREG(metadata.st_mode):
+                raise InventoryError("non-regular ignore files are not supported")
 
     def directory_identity(path: Path) -> tuple[int, int]:
         metadata = path.stat()
@@ -112,7 +125,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             directory_path = Path(directory)
             if directory_path != repository and (directory_path / ".git").exists():
                 discovered_roots[directory_identity(directory_path)] = directory_path
-            children[:] = [name for name in children if name != ".git"]
+            children[:] = [
+                name
+                for name in children
+                if name.casefold() != ".git"
+                and not symbolic_metadata((directory_path / name).stat(follow_symlinks=False))
+            ]
             reject_symbolic_ignore(directory_path)
 
     command = [
@@ -333,6 +351,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     for reason in (
                         "not a git repository",
                         "gitfile does not point to a valid repository",
+                        "invalid gitfile format",
                     )
                 ):
                     continue
@@ -446,10 +465,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 current = candidate
                 while current != repository:
                     metadata = current.stat(follow_symlinks=False)
-                    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-                    if stat.S_ISLNK(metadata.st_mode) or (
-                        getattr(metadata, "st_file_attributes", 0) & reparse_point
-                    ):
+                    if symbolic_metadata(metadata):
                         break
                     current = current.parent
                 if current != repository:
