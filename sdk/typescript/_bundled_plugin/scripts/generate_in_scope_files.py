@@ -10,6 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+GIT_TIMEOUT_SECONDS = 10
+INVENTORY_TIMEOUT_SECONDS = 120
+IGNORE_FILE_NAMES = (".gitignore", ".ignore", ".rgignore")
+
 
 class InventoryError(ValueError):
     """Raised when the repository, scope, or inventory cannot be used safely."""
@@ -43,6 +47,14 @@ def resolve_scope(repository: Path, value: str) -> str:
     except ValueError as error:
         raise InventoryError(f"--scope: path must remain inside --repo: {value}") from error
 
+    current = scope
+    while current != repository:
+        if current == current.parent:
+            raise InventoryError("--scope: symbolic links are not supported")
+        if current.is_symlink():
+            raise InventoryError("--scope: symbolic links are not supported")
+        current = current.parent
+
     if not resolved.is_dir() and not resolved.is_file():
         raise InventoryError(f"--scope: expected a file or directory: {value}")
 
@@ -69,6 +81,11 @@ def resolve_output(value: str) -> Path:
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically inventory visible files and ignored files tracked by Git."""
+    for directory, children, names in os.walk(repository, followlinks=False):
+        children[:] = [name for name in children if name != ".git"]
+        if any((Path(directory) / name).is_symlink() for name in names if name in IGNORE_FILE_NAMES):
+            raise InventoryError("symbolic ignore files are not supported")
+
     command = [
         "rg",
         "--no-config",
@@ -80,7 +97,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--glob",
         "!.git/**",
     ]
-    for name in (".gitignore", ".ignore", ".rgignore"):
+    for name in IGNORE_FILE_NAMES:
         ignore = repository / name
         if ignore.is_file() and not ignore.is_symlink():
             command.extend(["--ignore-file", str(ignore)])
@@ -93,8 +110,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 stdout=inventory,
                 stderr=subprocess.PIPE,
                 check=False,
+                timeout=INVENTORY_TIMEOUT_SECONDS,
             )
-        except OSError as error:
+        except (OSError, subprocess.TimeoutExpired) as error:
             raise InventoryError(f"could not run ripgrep: {error}") from error
 
         if result.returncode not in (0, 1):
@@ -115,7 +133,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "GIT_DIR",
         "GIT_DISCOVERY_ACROSS_FILESYSTEM",
         "GIT_INDEX_FILE",
+        "GIT_ICASE_PATHSPECS",
+        "GIT_GLOB_PATHSPECS",
         "GIT_NAMESPACE",
+        "GIT_NOGLOB_PATHSPECS",
         "GIT_OBJECT_DIRECTORY",
         "GIT_WORK_TREE",
     ):
@@ -130,45 +151,52 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         f"core.excludesFile={os.devnull}",
         "--literal-pathspecs",
     ]
-    try:
-        worktree = subprocess.run(
-            [*git, "rev-parse", "--is-inside-work-tree"],
-            cwd=repository,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=environment,
-            check=False,
-        )
-    except OSError as error:
-        if (repository / ".git").exists():
-            raise InventoryError(f"could not inspect Git worktree: {error}") from error
-        worktree = None
 
+    def run_git(
+        arguments: list[str], *, directory: Path = repository, literal: bool = True
+    ) -> subprocess.CompletedProcess[bytes]:
+        command = git if literal else git[:-1]
+        git_environment = environment if literal else environment.copy()
+        if not literal:
+            git_environment.pop("GIT_LITERAL_PATHSPECS", None)
+        try:
+            return subprocess.run(
+                [*command, *arguments],
+                cwd=directory,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=git_environment,
+                check=False,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise InventoryError(f"could not run Git: {error}") from error
+
+    worktree = (
+        run_git(["rev-parse", "--show-toplevel"])
+        if (repository / ".git").exists()
+        else None
+    )
     if worktree is not None and worktree.returncode:
         detail = worktree.stderr.decode("utf-8", errors="replace").strip()
-        if worktree.returncode == 128 and "not a git repository" in detail.lower():
-            worktree = None
-        else:
-            message = f"git rev-parse exited with status {worktree.returncode}"
-            if detail:
-                message = f"{message}: {detail}"
-            raise InventoryError(message)
+        message = f"git rev-parse exited with status {worktree.returncode}"
+        if detail:
+            message = f"{message}: {detail}"
+        raise InventoryError(message)
 
-    if worktree is not None and worktree.stdout.strip() == b"true":
+    if worktree is not None:
+        try:
+            worktree_root = Path(os.fsdecode(worktree.stdout.strip())).resolve(strict=True)
+        except (OSError, ValueError) as error:
+            raise InventoryError(f"could not resolve Git worktree root: {error}") from error
+        if worktree_root != repository:
+            worktree = None
+
+    if worktree is not None:
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
         listed: list[bytes] = []
         for arguments in (["--cached"], ["--others", "--exclude-standard"]):
-            try:
-                result = subprocess.run(
-                    [*git, "ls-files", *arguments, "-z", "--", scope],
-                    cwd=repository,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=environment,
-                    check=False,
-                )
-            except OSError as error:
-                raise InventoryError(f"could not list repository files: {error}") from error
+            result = run_git(["ls-files", *arguments, "-z", "--", scope])
             if result.returncode:
                 detail = result.stderr.decode("utf-8", errors="replace").strip()
                 message = f"git ls-files exited with status {result.returncode}"
@@ -176,6 +204,45 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     message = f"{message}: {detail}"
                 raise InventoryError(message)
             listed.append(result.stdout)
+
+        selected = (repository / scope).resolve(strict=True)
+        nested_roots: set[Path] = set()
+        current = selected if selected.is_dir() else selected.parent
+        while current != repository:
+            if (current / ".git").exists():
+                nested_roots.add(current)
+            current = current.parent
+        for collection in listed:
+            for relative in collection.split(b"\0"):
+                if not relative:
+                    continue
+                candidate = repository / os.fsdecode(relative)
+                if candidate.is_dir() and (candidate / ".git").exists():
+                    nested_roots.add(candidate.resolve(strict=True))
+
+        for nested in sorted(nested_roots):
+            try:
+                nested_scope = selected.relative_to(nested).as_posix() or "."
+            except ValueError:
+                nested_scope = "."
+            nested_prefix = os.fsencode(nested.relative_to(repository).as_posix()) + b"/"
+            for index, arguments in enumerate(
+                (["--cached"], ["--others", "--exclude-standard"])
+            ):
+                result = run_git(
+                    ["ls-files", *arguments, "-z", "--", nested_scope],
+                    directory=nested,
+                )
+                if result.returncode:
+                    detail = result.stderr.decode("utf-8", errors="replace").strip()
+                    raise InventoryError(
+                        f"nested git ls-files exited with status {result.returncode}: {detail}"
+                    )
+                listed[index] += b"".join(
+                    nested_prefix + relative + b"\0"
+                    for relative in result.stdout.split(b"\0")
+                    if relative
+                )
 
         def normalized(path: bytes) -> bytes:
             return path.replace(b"\\", b"/") if os.name == "nt" else path
@@ -189,20 +256,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         nested_worktrees = tuple(path for path in allowed if path.endswith(b"/"))
         explicitly_ignored = False
         if scope not in (".", "./"):
-            ignored_environment = environment.copy()
-            ignored_environment.pop("GIT_LITERAL_PATHSPECS", None)
             explicit_path = scope if scope.startswith("./") else f"./{scope}"
-            try:
-                ignored = subprocess.run(
-                    [*git[:-1], "check-ignore", "--quiet", "--no-index", "--", explicit_path],
-                    cwd=repository,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=ignored_environment,
-                    check=False,
-                )
-            except OSError as error:
-                raise InventoryError(f"could not inspect scoped Git ignores: {error}") from error
+            ignored = run_git(
+                ["check-ignore", "--quiet", "--no-index", "--", explicit_path],
+                literal=False,
+            )
             if ignored.returncode not in (0, 1):
                 detail = ignored.stderr.decode("utf-8", errors="replace").strip()
                 message = f"git check-ignore exited with status {ignored.returncode}"
@@ -215,10 +273,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             rows = {
                 row
                 for row in rows
-                if (path := normalized(row.rstrip(b"\r\n"))) in allowed
+                if (path := normalized(row.removesuffix(b"\n"))) in allowed
                 or any(path.startswith(worktree) for worktree in nested_worktrees)
             }
-        recorded = {normalized(row.rstrip(b"\r\n")) for row in rows}
+        recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
 
         for relative in listed[0].split(b"\0"):
             if not relative:

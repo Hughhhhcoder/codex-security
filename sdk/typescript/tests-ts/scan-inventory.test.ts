@@ -61,6 +61,7 @@ describe("security scan file inventory", () => {
       writeFile(join(repository, ".visible-config"), "visible=true\n"),
       writeFile(join(repository, "ignored", "secret.ts"), "private data\n"),
       writeFile(join(repository, "src", "handler.ts"), "export {};\n"),
+      writeFile(join(repository, "src", "info-secret.ts"), "local secret\n"),
       writeFile(join(repository, "tracked.env"), "checked in intentionally\n"),
       writeFile(join(repository, ".ignore"), "hidden-by-rg.ts\n"),
       writeFile(join(repository, "hidden-by-rg.ts"), "tracked source\n"),
@@ -72,7 +73,7 @@ describe("security scan file inventory", () => {
     ]);
     await writeFile(
       join(repository, ".git", "info", "exclude"),
-      "info-secret.ts\n",
+      "info-secret.ts\nsrc/info-secret.ts\n",
     );
     execFileSync(
       "git",
@@ -115,6 +116,8 @@ describe("security scan file inventory", () => {
           GIT_CONFIG_COUNT: "1",
           GIT_CONFIG_KEY_0: "core.excludesFile",
           GIT_CONFIG_VALUE_0: globalIgnore,
+          GIT_GLOB_PATHSPECS: "1",
+          GIT_ICASE_PATHSPECS: "1",
         },
       },
     );
@@ -132,6 +135,22 @@ describe("security scan file inventory", () => {
       "./src/handler.ts",
       "./tracked.env",
     ]);
+
+    execFileSync(
+      python,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        "src",
+        "--out",
+        output,
+      ],
+      { cwd: repository, stdio: "pipe" },
+    );
+    expect((await readFile(output, "utf8")).trim()).toBe("src/handler.ts");
   });
 
   test("respects ignore files in non-Git directory snapshots", async () => {
@@ -144,6 +163,7 @@ describe("security scan file inventory", () => {
     const repository = join(root, "snapshot");
     const output = join(root, "in-scope-files.txt");
     await mkdir(repository);
+    execFileSync("git", ["init", "-q"], { cwd: root });
     await writeFile(join(root, ".gitignore"), "snapshot/source.ts\n");
     await Promise.all([
       writeFile(join(repository, ".gitignore"), ".env\n"),
@@ -224,6 +244,58 @@ describe("security scan file inventory", () => {
     expect(rows).toContain("./nested/tracked.py");
     expect(rows).toContain("./nested/local.py");
     expect(rows).not.toContain("./nested/.env");
+
+    execFileSync(
+      python,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        "nested/tracked.py",
+        "--out",
+        output,
+      ],
+      { cwd: repository, stdio: "pipe" },
+    );
+    expect((await readFile(output, "utf8")).trim()).toBe("nested/tracked.py");
+
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Inventory Test",
+        "-c",
+        "user.email=inventory@example.test",
+        "commit",
+        "-qm",
+        "Track nested source",
+      ],
+      { cwd: nested },
+    );
+    await writeFile(join(repository, ".gitignore"), "nested/\n");
+    execFileSync("git", ["add", "--force", "--", "nested"], {
+      cwd: repository,
+      stdio: "ignore",
+    });
+    execFileSync(
+      python,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        output,
+      ],
+      { cwd: repository, stdio: "pipe" },
+    );
+    expect((await readFile(output, "utf8")).split("\n")).toContain(
+      "./nested/tracked.py",
+    );
   });
 
   test("retains an explicitly scoped Git-ignored file", async () => {
@@ -262,5 +334,46 @@ describe("security scan file inventory", () => {
     );
 
     expect((await readFile(output, "utf8")).trim()).toBe("selected.skip");
+  });
+
+  test("rejects symbolic scope and ignore-file paths", async () => {
+    if (process.platform === "win32" || Bun.which("rg") === null) return;
+
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-symbolic-inventory-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const output = join(root, "in-scope-files.txt");
+    await mkdir(join(repository, "source"), { recursive: true });
+    await writeFile(join(repository, "source", "file.ts"), "export {};\n");
+    await writeFile(join(repository, ".gitignore"), "ignored.ts\n");
+    await symlink("source", join(repository, "alias"));
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) throw new Error("A Python interpreter is required.");
+    const command = [
+      "-B",
+      join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+      "--repo",
+      repository,
+      "--out",
+      output,
+    ];
+
+    expect(() =>
+      execFileSync(python, [...command, "--scope", "alias"], {
+        cwd: repository,
+        stdio: "pipe",
+      }),
+    ).toThrow("symbolic links are not supported");
+
+    await symlink(".gitignore", join(repository, ".ignore"));
+    expect(() =>
+      execFileSync(python, [...command, "--scope", "."], {
+        cwd: repository,
+        stdio: "pipe",
+      }),
+    ).toThrow("symbolic ignore files are not supported");
   });
 });
