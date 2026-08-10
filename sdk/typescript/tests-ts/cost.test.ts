@@ -1412,81 +1412,43 @@ describe("live scan cost tracking", () => {
     expect((await tracker.stop()).cost?.inputTokens).toBe(250);
   });
 
-  test("rejects and quarantines a session event larger than 1 MiB", async () => {
+  test("reads session events larger than 1 MiB across polling cycles", async () => {
     const home = await codexHome();
     const path = await writeSession(home, "scan-thread", {
       input_tokens: 100,
       output_tokens: 10,
     });
-    await appendFile(path, "x".repeat(1 * 1_024 * 1_024 + 1));
+    const event = JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "large-tool-output",
+        output: "x".repeat(2 * 1_024 * 1_024),
+      },
+    });
+    const split = 1 * 1_024 * 1_024 + 1;
+    await appendFile(path, event.slice(0, split));
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
     });
     tracker.start("scan-thread");
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
 
-    await expect(tracker.refresh()).rejects.toThrow(
-      "Codex session event exceeds the 1 MiB safety limit.",
-    );
-    expect((await tracker.refresh()).cost).toEqual({
-      model: "gpt-5.6-terra",
-      inputTokens: 100,
-      cachedInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      outputTokens: 10,
-      estimatedUsd: 0.00032,
+    const usage = JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: { input_tokens: 250, output_tokens: 20 },
+        },
+      },
     });
-  });
-
-  test("ignores oversized events from unrelated prior credential sessions", async () => {
-    const home = await codexHome();
-    const unrelated = await writeSession(home, "unrelated-thread", {
-      input_tokens: 99,
-      output_tokens: 1,
-    });
-    await appendFile(unrelated, "x".repeat(1 * 1_024 * 1_024 + 1));
-    await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
-    const tracker = new ScanCostTracker({
-      codexHome: home,
-      model: "gpt-5.6-terra",
-    });
-    tracker.start("scan-thread");
+    await appendFile(path, `${event.slice(split)}\n${usage}\n`);
 
     expect((await tracker.stop()).cost).toMatchObject({
-      inputTokens: 100,
-      outputTokens: 10,
-    });
-  });
-
-  test("ignores oversized delegated sessions belonging to an unrelated scan", async () => {
-    const home = await codexHome();
-    await writeSession(home, "unrelated-parent", {
-      input_tokens: 1,
-      output_tokens: 1,
-    });
-    const unrelated = await writeSession(
-      home,
-      "unrelated-child",
-      { input_tokens: 1, output_tokens: 1 },
-      "unrelated-parent",
-    );
-    await appendFile(unrelated, "x".repeat(1 * 1_024 * 1_024 + 1));
-    await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
-    const tracker = new ScanCostTracker({
-      codexHome: home,
-      model: "gpt-5.6-terra",
-    });
-    tracker.start("scan-thread");
-
-    expect((await tracker.stop()).cost).toMatchObject({
-      inputTokens: 100,
-      outputTokens: 10,
+      inputTokens: 250,
+      outputTokens: 20,
     });
   });
 
