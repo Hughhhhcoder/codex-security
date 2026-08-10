@@ -511,10 +511,9 @@ def require_scan_target_identity(
         raise SystemExit(
             "Remediation is unavailable because the selected checkout is no longer accessible."
         ) from exc
-    if not stored_filesystem_identity_matches(expected_inode, metadata.st_ino) or (
-        target_path is not None
-        and not stored_filesystem_identity_matches(scan["target_device"], metadata.st_dev)
-    ):
+    if not stored_filesystem_identity_matches(
+        expected_inode, metadata.st_ino
+    ) or not stored_filesystem_identity_matches(scan["target_device"], metadata.st_dev):
         raise SystemExit(
             "Remediation is unavailable because the selected checkout path was replaced. "
             "Start a new scan."

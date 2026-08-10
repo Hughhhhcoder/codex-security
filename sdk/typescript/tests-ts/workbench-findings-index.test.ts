@@ -71,7 +71,7 @@ const nestedDirectoryScanProbe = [
   "from functools import cache",
   "sys.path.insert(0, sys.argv[1])",
   "from workbench_db import apply_migrations, serialize_filesystem_identity",
-  "from workbench_scan_history import _same_repository, list_scans, list_unmatched_scan_pairs",
+  "from workbench_scan_history import _same_repository, compare_scans, list_scans, list_unmatched_scan_pairs",
   "import workbench_scan_history as history",
   "from workbench_target import git_output",
   "from workbench_target_state import ensure_security_target",
@@ -202,6 +202,13 @@ const nestedDirectoryScanProbe = [
   "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_device, target_inode, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('current-owned-scan', 'current-owned-workspace', stale_owned_target, str(stale_owned_checkout), serialize_filesystem_identity(current_metadata.st_dev), serialize_filesystem_identity(current_metadata.st_ino), 'unversioned', '.', 'standard', directory + '/results/current-owned', 'complete', 'reporting', current_timestamp, current_timestamp, current_timestamp, current_timestamp))",
   "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('current-owned-scan', current_timestamp))",
   "    output['reusedRegisteredCheckout'] = [scan['scanId'] for scan in list_scans(connection, stale_args)['scans']]",
+  "    reused_scan = lambda scan_id: connection.execute('SELECT * FROM scans WHERE id = ?', (scan_id,)).fetchone()",
+  "    output['reusedRegisteredScanIdentity'] = _same_repository(reused_scan('stale-owned-scan'), reused_scan('current-owned-scan'))",
+  "    try:",
+  "        compare_scans(connection, argparse.Namespace(before_scan_id='stale-owned-scan', after_scan_id='current-owned-scan'), require_scan=lambda _, scan_id: reused_scan(scan_id), read_coverage=lambda _: {})",
+  "        output['reusedRegisteredComparison'] = 'accepted'",
+  "    except SystemExit as error:",
+  "        output['reusedRegisteredComparison'] = str(error)",
   "    sibling_root = (pathlib.Path(directory) / 'sibling-checkout').resolve()",
   "    sibling_a = sibling_root / 'service-a'",
   "    sibling_b = sibling_root / 'service-b'",
@@ -250,6 +257,16 @@ const nestedDirectoryScanProbe = [
   "    for label, path in [('forgedTargetlessIdentity', forged_clone), ('forgedGitDirectoryIdentity', forged_git_directory), ('relatedTargetlessIdentity', related_clone)]:",
   "        targetless_checkout = connection.execute('SELECT NULL AS target_id, ? AS target_path', (str(path),)).fetchone()",
   "        output[label] = _same_repository(targetless_original, targetless_checkout)",
+  "    related_target = ensure_security_target(connection, str(related_clone))",
+  "    related_metadata = related_clone.stat()",
+  "    connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ('related-workspace', related_target, str(related_clone), timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_device, target_inode, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('related-worktree-scan', 'related-workspace', related_target, str(related_clone), serialize_filesystem_identity(related_metadata.st_dev), serialize_filesystem_identity(related_metadata.st_ino), 'unversioned', '.', 'standard', directory + '/results/related-worktree', 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('related-worktree-scan', timestamp))",
+  "    registered_args = argparse.Namespace(repository=str(original_clone), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "    output['registeredSiblingHistory'] = [scan['scanId'] for scan in list_scans(connection, registered_args)['scans']]",
+  "    registered_reads = []",
+  "    registered_matching = list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(original_clone), force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda scan: registered_reads.append(scan['id']) or {})",
+  "    output['registeredSiblingMatching'] = {'scanCount': registered_matching['scanCount'], 'coverageReads': registered_reads}",
   "    reused_services = (pathlib.Path(directory) / 'reused-services').resolve()",
   "    previous_services = (pathlib.Path(directory) / 'previous-services').resolve()",
   "    reused_services.mkdir()",
@@ -306,13 +323,15 @@ const relocatedFindingProbe = [
   "    connection.execute('INSERT INTO finding_occurrences(id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('occurrence', 'finding', 'scan', 'Äuthorization bypass', 'Über account access', 'high', 'high', 'Require authorization.', '{}', timestamp))",
   "    connection.execute('INSERT INTO finding_locations(occurrence_id, relative_path, start_line, end_line, role, sort_order) VALUES (?, ?, ?, ?, ?, ?)', ('occurrence', 'src/ÄUTH-Straße.py', 1, 1, 'root_control', 0))",
   "    searches = {query: [row['id'] for row in finding_occurrence_rows(connection, 'scan', offset=0, limit=20, query=query)] for query in ['äuthorization', 'über', 'äuth-strasse']}",
+  "    occurrence = connection.execute('SELECT * FROM finding_occurrences WHERE id = ?', ('occurrence',)).fetchone()",
   "    connection.execute('UPDATE scans SET target_device = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev + 1), 'scan'))",
   "    owner_args = argparse.Namespace(repository=str(checkout), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "    mismatched_owner_scans = [row['scanId'] for row in list_scans(connection, owner_args)['scans']]",
   "    mismatched_owner_matching = list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(checkout), force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda *_: {})['scanCount']",
+  "    mismatched_original_scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
+  "    mismatched_original = finding_result(connection, mismatched_original_scan, occurrence, full_details=True)",
   "    connection.execute('UPDATE scans SET target_device = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev), 'scan'))",
   "    scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
-  "    occurrence = connection.execute('SELECT * FROM finding_occurrences WHERE id = ?', ('occurrence',)).fetchone()",
   "    moved_checkout = checkout.with_name('moved-checkout')",
   "    checkout.rename(moved_checkout)",
   "    moved_args = argparse.Namespace(repository=str(moved_checkout), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
@@ -327,7 +346,7 @@ const relocatedFindingProbe = [
   "    replacement.mkdir()",
   "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(replacement), target))",
   "    replaced = finding_result(connection, scan, occurrence, full_details=True)",
-  "    print(json.dumps({'searches': searches, 'mismatchedOwnerScans': mismatched_owner_scans, 'mismatchedOwnerMatching': mismatched_owner_matching, 'unregisteredMovedScans': unregistered_moved_scan_ids, 'movedScans': moved_scan_ids, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'mismatchedDeviceAbsolutePath': mismatched_device['locations'][0].get('absolutePath'), 'mismatchedDeviceSourceExcerpt': mismatched_device.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
+  "    print(json.dumps({'searches': searches, 'mismatchedOwnerScans': mismatched_owner_scans, 'mismatchedOwnerMatching': mismatched_owner_matching, 'mismatchedOriginalAbsolutePath': mismatched_original['locations'][0].get('absolutePath'), 'mismatchedOriginalSourceExcerpt': mismatched_original.get('sourceExcerpt'), 'unregisteredMovedScans': unregistered_moved_scan_ids, 'movedScans': moved_scan_ids, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'mismatchedDeviceAbsolutePath': mismatched_device['locations'][0].get('absolutePath'), 'mismatchedDeviceSourceExcerpt': mismatched_device.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
 ].join("\n");
 
 const findingDetailProbe = [
@@ -612,6 +631,9 @@ describe("workbench findings index", () => {
       staleRegisteredCheckout: [],
       staleRegisteredMatching: { scanCount: 0, coverageReads: [] },
       reusedRegisteredCheckout: ["current-owned-scan"],
+      reusedRegisteredScanIdentity: false,
+      reusedRegisteredComparison:
+        "Semantic scan comparisons require the same repository target.",
       unscannedSiblingService: [],
       relatedCheckoutHistory: ["portable-scan"],
       relatedCheckoutVerified: true,
@@ -640,6 +662,11 @@ describe("workbench findings index", () => {
       forgedTargetlessIdentity: false,
       forgedGitDirectoryIdentity: false,
       relatedTargetlessIdentity: true,
+      registeredSiblingHistory: ["portable-scan", "related-worktree-scan"],
+      registeredSiblingMatching: {
+        scanCount: 2,
+        coverageReads: ["portable-scan", "related-worktree-scan"],
+      },
       reusedRootDescendantScans: ["current-service-a", "current-service-b"],
       directTargetScanIds: ["scan"],
       directTargetLookupBounded: true,
@@ -672,6 +699,8 @@ describe("workbench findings index", () => {
       searches: Record<string, string[]>;
       mismatchedOwnerScans: string[];
       mismatchedOwnerMatching: number;
+      mismatchedOriginalAbsolutePath: string | null;
+      mismatchedOriginalSourceExcerpt: string | null;
       unregisteredMovedScans: string[];
       movedScans: string[];
       movedAbsolutePath: string;
@@ -689,6 +718,8 @@ describe("workbench findings index", () => {
     });
     expect(output.mismatchedOwnerScans).toEqual([]);
     expect(output.mismatchedOwnerMatching).toBe(0);
+    expect(output.mismatchedOriginalAbsolutePath).toBeNull();
+    expect(output.mismatchedOriginalSourceExcerpt).toBeNull();
     expect(output.unregisteredMovedScans).toEqual([]);
     expect(output.movedScans).toEqual(["scan"]);
     expect(output.movedAbsolutePath).toBe(output.expectedMovedAbsolutePath);
