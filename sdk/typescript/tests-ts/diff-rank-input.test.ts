@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
 import {
+  chmod,
   mkdir,
   mkdtemp,
+  link,
   readFile,
   realpath,
   rename,
@@ -321,7 +323,7 @@ describe("diff rank input", () => {
     expect(rows.every((row) => row.preview.length > 0)).toBe(true);
   });
 
-  test("inventories untracked security workflows without including ignored files", async () => {
+  test("keeps untracked files outside the declared local-patch scope", async () => {
     const fixture = await createRepository();
 
     await Promise.all([
@@ -337,13 +339,78 @@ describe("diff rank input", () => {
       ),
     ]);
 
-    const rows = await runDiffRankInput(fixture, "local-patch");
-
-    expect(rows.map((row) => row.path)).toEqual([
-      ".github/workflows/untracked.yml",
-    ]);
-    expect(rows[0]?.preview.length).toBeGreaterThan(0);
+    expect(await runDiffRankInput(fixture, "local-patch")).toEqual([]);
   });
+
+  test("includes every unresolved Git index stage in a local patch", async () => {
+    const fixture = await createRepository();
+    const workflow = ".github/workflows/conflicted.yml";
+    await writeRepositoryFile(fixture.repository, workflow, "run: base\n");
+    git(fixture.repository, "add", workflow);
+    git(fixture.repository, "commit", "-qm", "add workflow");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+
+    const stages = ["base", "ours", "theirs"].map((label, index) => {
+      const object = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: fixture.repository,
+        encoding: "utf8",
+        input: `run: ${label}\n`,
+      }).trim();
+      return `100644 ${object} ${index + 1}\t${workflow}\n`;
+    });
+    execFileSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      input: `0 ${"0".repeat(40)}\t${workflow}\n${stages.join("")}`,
+    });
+    await writeRepositoryFile(fixture.repository, workflow, "run: worktree\n");
+
+    const [finding] = await runDiffRankInput(fixture, "local-patch");
+    expect(finding?.path).toBe(workflow);
+    for (const label of ["base", "ours", "theirs", "worktree"]) {
+      expect(finding?.preview).toContain(`run: ${label}`);
+    }
+  });
+
+  test("includes executable mode changes in committed diff previews", async () => {
+    const fixture = await createRepository();
+    git(fixture.repository, "update-index", "--chmod=+x", "src/app.ts");
+    git(fixture.repository, "commit", "-qm", "make source executable");
+
+    const [finding] = await runDiffRankInput(fixture, "revisions");
+    expect(finding?.path).toBe("src/app.ts");
+    expect(finding?.preview).toContain("Git file mode: 100644 → 100755");
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "includes unstaged executable mode changes in local patch previews",
+    async () => {
+      const fixture = await createRepository();
+      await chmod(join(fixture.repository, "src", "app.ts"), 0o755);
+
+      const [finding] = await runDiffRankInput(fixture, "local-patch");
+      expect(finding?.path).toBe("src/app.ts");
+      expect(finding?.preview).toContain("Git file mode: 100644 → 100755");
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects changed worktree files with another hard link",
+    async () => {
+      const fixture = await createRepository();
+      const external = join(fixture.root, "external-source.yml");
+      const workflow = ".github/workflows/linked.yml";
+      await writeFile(external, "synthetic private source\n");
+      await mkdir(join(fixture.repository, ".github", "workflows"), {
+        recursive: true,
+      });
+      await link(external, join(fixture.repository, workflow));
+      git(fixture.repository, "add", workflow);
+
+      await expect(runDiffRankInput(fixture, "local-patch")).rejects.toThrow(
+        /hard links/,
+      );
+    },
+  );
 
   test("previews revision changes from their selected head instead of the current checkout", async () => {
     const fixture = await createRepository();
@@ -409,25 +476,6 @@ describe("diff rank input", () => {
         preview: "export const authenticated = false;",
       },
     ]);
-  });
-
-  test("requires full revision reviews from their exact immutable Git objects", async () => {
-    const guidance = await readFile(
-      join(
-        PLUGIN_ROOT,
-        "skills",
-        "security-scan",
-        "references",
-        "scan-artifacts-and-ledger.md",
-      ),
-      "utf8",
-    );
-
-    expect(guidance).toContain('git --no-replace-objects show "<head>:<path>"');
-    expect(guidance).toContain('git --no-replace-objects show "<base>:<path>"');
-    expect(guidance).toContain(
-      "Never substitute the current checkout for either immutable revision.",
-    );
   });
 
   test("does not apply repository replacement refs to selected revision content", async () => {

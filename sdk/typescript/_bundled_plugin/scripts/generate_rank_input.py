@@ -363,7 +363,7 @@ def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[s
             return "", False
 
         expected = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(expected.st_mode):
+        if not stat.S_ISREG(expected.st_mode) or expected.st_nlink != 1:
             return "", False
 
         resolved = path.resolve(strict=True)
@@ -471,6 +471,30 @@ def local_patch_preview(
     return preview, False
 
 
+def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
+    relative = path.relative_to(repo).as_posix()
+    result = subprocess.run(
+        ["git", "--no-replace-objects", "-C", str(repo), "ls-files", "--stage", "-z", "--", relative],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    lines: list[str] = []
+    for entry in result.stdout.split("\0"):
+        if not entry:
+            continue
+        mode, object_name, stage = entry.split("\t", 1)[0].split()
+        if mode == "120000":
+            raise SystemExit("Changed diff paths must not contain symbolic links: " + relative)
+        preview, binary = git_blob_preview(repo, path, object_name, preview_bytes)
+        if not binary:
+            lines.extend((f"Git merge stage {stage}:", preview))
+    current, binary = confined_diff_preview(repo, path, preview_bytes)
+    if current and not binary:
+        lines.extend(("Worktree:", current))
+    return fit_preview_lines(lines, preview_bytes)
+
+
 def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, str] | None:
     relative = path.relative_to(repo).as_posix()
     arguments = (
@@ -511,12 +535,12 @@ def require_reviewable_diff_path(repo: Path, path: Path) -> None:
     if not path.exists() and not path.is_symlink():
         return
     try:
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1:
             raise ValueError
         path.resolve(strict=True).relative_to(repo)
     except (OSError, ValueError):
         raise SystemExit(
-            "Changed diff paths must not contain symbolic links or non-regular files: "
+            "Changed diff paths must not contain symbolic links, hard links, or non-regular files: "
             + path.relative_to(repo).as_posix()
         ) from None
 
@@ -859,16 +883,9 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
         unstaged = run_git_changed_paths(repo, [base])
         staged = run_git_changed_paths(repo, ["--cached", base])
         combined = dict(staged)
-        combined.update(unstaged)
-        untracked = subprocess.run(
-            ["git", "--no-replace-objects", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        for path in untracked.stdout.split("\0"):
-            if path:
-                combined.setdefault(repo / path, "A")
+        for path, status in unstaged:
+            if combined.get(path) != "U":
+                combined[path] = status
         return sorted(combined.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
 
@@ -895,7 +912,9 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 if is_binary:
                     continue
         elif status == "U":
-            preview = ""
+            require_reviewable_diff_path(repo, path)
+            preview = unmerged_diff_preview(repo, path, args.preview_bytes)
+            require_reviewable_diff_path(repo, path)
         else:
             entry = git_diff_entry(repo, path, args.mode, args.head)
             if entry is not None and entry[0] == "160000":
@@ -914,6 +933,28 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 require_reviewable_diff_path(repo, path)
                 if is_binary:
                     continue
+                base_entry = git_diff_entry(repo, path, "revisions", args.base)
+                if (
+                    base_entry is not None
+                    and entry is not None
+                    and base_entry[0].startswith("100")
+                    and entry[0].startswith("100")
+                ):
+                    modes = [base_entry[0], entry[0]]
+                    if args.mode == "local-patch" and os.name != "nt":
+                        worktree_mode = "100755" if path.stat().st_mode & 0o111 else "100644"
+                        if worktree_mode != modes[-1]:
+                            modes.append(worktree_mode)
+                    changes = [
+                        mode
+                        for index, mode in enumerate(modes)
+                        if index == 0 or mode != modes[index - 1]
+                    ]
+                    if len(changes) > 1:
+                        preview = fit_preview_lines(
+                            [f"Git file mode: {' → '.join(changes)}", preview],
+                            args.preview_bytes,
+                        )
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
     rows.sort(key=lambda row: str(row["path"]))
