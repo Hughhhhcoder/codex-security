@@ -378,6 +378,37 @@ describe("diff rank input", () => {
     ]);
   });
 
+  test("reviews selected head text when the checked-out source is binary", async () => {
+    const fixture = await createRepository();
+    await writeRepositoryFile(
+      fixture.repository,
+      "src/app.ts",
+      Buffer.from([0x00, 0x01, 0x02]),
+    );
+    git(fixture.repository, "add", "src/app.ts");
+    git(fixture.repository, "commit", "-qm", "store binary base");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    await writeRepositoryFile(
+      fixture.repository,
+      "src/app.ts",
+      "export const authenticated = false;\n",
+    );
+    git(fixture.repository, "add", "src/app.ts");
+    git(fixture.repository, "commit", "-qm", "replace binary with source");
+    const head = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "checkout", "--quiet", fixture.base);
+
+    expect(
+      await runDiffRankInput(fixture, "revisions", undefined, head),
+    ).toEqual([
+      {
+        path: "src/app.ts",
+        area: "diff",
+        preview: "export const authenticated = false;",
+      },
+    ]);
+  });
+
   test("keeps security-relevant rename sources when destinations are excluded", async () => {
     const fixture = await createRepository();
     await mkdir(join(fixture.repository, "docs"));
@@ -390,6 +421,21 @@ describe("diff rank input", () => {
 
     expect(await runDiffRankInput(fixture, "revisions")).toEqual([
       { path: "AGENTS.md", area: "diff", preview: "" },
+    ]);
+  });
+
+  test("keeps reviewable source renames into excluded directories", async () => {
+    const fixture = await createRepository();
+    await mkdir(join(fixture.repository, "docs"));
+    await rename(
+      join(fixture.repository, "src", "old.py"),
+      join(fixture.repository, "docs", "old.py"),
+    );
+    git(fixture.repository, "add", "-A");
+    git(fixture.repository, "commit", "-qm", "archive reviewable source");
+
+    expect(await runDiffRankInput(fixture, "revisions")).toEqual([
+      { path: "src/old.py", area: "diff", preview: "" },
     ]);
   });
 
@@ -428,6 +474,41 @@ describe("diff rank input", () => {
         path: ".github/actions/local",
         area: "diff",
         preview: `Git submodule commit ${fixture.base}`,
+      },
+    ]);
+  });
+
+  test("records unstaged local-action submodule revisions from their worktree", async () => {
+    const fixture = await createRepository();
+    const submodule = join(fixture.repository, ".github", "actions", "local");
+    await mkdir(submodule, { recursive: true });
+    git(submodule, "init", "-q", "-b", "main");
+    git(submodule, "config", "user.name", "Codex Security Test");
+    git(submodule, "config", "user.email", "codex-security@example.invalid");
+    git(submodule, "config", "commit.gpgsign", "false");
+    await writeRepositoryFile(submodule, "action.yml", "runs: old\n");
+    git(submodule, "add", "action.yml");
+    git(submodule, "commit", "-qm", "initial action");
+    const staged = git(submodule, "rev-parse", "HEAD");
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${staged},.github/actions/local`,
+    );
+    git(fixture.repository, "commit", "-qm", "pin local action");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    await writeRepositoryFile(submodule, "action.yml", "runs: updated\n");
+    git(submodule, "add", "action.yml");
+    git(submodule, "commit", "-qm", "update action");
+    const unstaged = git(submodule, "rev-parse", "HEAD");
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toEqual([
+      {
+        path: ".github/actions/local",
+        area: "diff",
+        preview: `Git submodule commit ${unstaged}`,
       },
     ]);
   });
