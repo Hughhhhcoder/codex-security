@@ -204,6 +204,7 @@ const nestedDirectoryScanProbe = [
   "    output['reusedRegisteredCheckout'] = [scan['scanId'] for scan in list_scans(connection, stale_args)['scans']]",
   "    reused_scan = lambda scan_id: connection.execute('SELECT * FROM scans WHERE id = ?', (scan_id,)).fetchone()",
   "    output['reusedRegisteredScanIdentity'] = _same_repository(reused_scan('stale-owned-scan'), reused_scan('current-owned-scan'))",
+  "    output['reusedStalePairIdentity'] = _same_repository(reused_scan('stale-owned-scan'), reused_scan('stale-owned-scan'))",
   "    try:",
   "        compare_scans(connection, argparse.Namespace(before_scan_id='stale-owned-scan', after_scan_id='current-owned-scan'), require_scan=lambda _, scan_id: reused_scan(scan_id), read_coverage=lambda _: {})",
   "        output['reusedRegisteredComparison'] = 'accepted'",
@@ -634,6 +635,7 @@ describe("workbench findings index", () => {
       staleRegisteredMatching: { scanCount: 0, coverageReads: [] },
       reusedRegisteredCheckout: ["current-owned-scan"],
       reusedRegisteredScanIdentity: false,
+      reusedStalePairIdentity: false,
       reusedRegisteredComparison:
         "Semantic scan comparisons require the same repository target.",
       unscannedSiblingService: [],

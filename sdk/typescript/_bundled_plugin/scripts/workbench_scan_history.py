@@ -30,14 +30,6 @@ def _same_repository(
 ) -> bool:
     before_target_id = before["target_id"]
     after_target_id = after["target_id"]
-    if before_target_id and before_target_id == after_target_id:
-        fields = ("target_device", "target_inode")
-        if all(field in row.keys() for row in (before, after) for field in fields):
-            before_identity = tuple(before[field] for field in fields)
-            after_identity = tuple(after[field] for field in fields)
-            if any(value is not None for value in (*before_identity, *after_identity)):
-                return before_identity == after_identity and None not in before_identity
-        return True
     for scan in (before, after):
         if not scan["target_id"] or not all(
             field in scan.keys() for field in ("target_device", "target_inode")
@@ -59,6 +51,14 @@ def _same_repository(
             device, metadata.st_dev
         ) or not stored_filesystem_identity_matches(inode, metadata.st_ino):
             return False
+    if before_target_id and before_target_id == after_target_id:
+        fields = ("target_device", "target_inode")
+        if all(field in row.keys() for row in (before, after) for field in fields):
+            before_identity = tuple(before[field] for field in fields)
+            after_identity = tuple(after[field] for field in fields)
+            if any(value is not None for value in (*before_identity, *after_identity)):
+                return before_identity == after_identity and None not in before_identity
+        return True
     before_target = Path(before["target_path"] if before_target_path is None else before_target_path)
     after_target = Path(after["target_path"])
     if before_target.resolve() == after_target.resolve():
