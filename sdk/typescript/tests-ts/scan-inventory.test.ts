@@ -197,6 +197,55 @@ describe("security scan file inventory", () => {
     expect(rows).toEqual(["./.gitignore", "./source.ts"]);
   });
 
+  test.each([false, true])(
+    "applies intermediate scope ignore files (Git repository: %s)",
+    async (useGit) => {
+      if (Bun.which("rg") === null) return;
+
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-ancestor-inventory-")),
+      );
+      temporaryDirectories.push(root);
+      const repository = join(root, "repository");
+      const scoped = join(repository, "parent", "nested");
+      const output = join(root, "in-scope-files.txt");
+      await mkdir(scoped, { recursive: true });
+      if (useGit) execFileSync("git", ["init", "-q"], { cwd: repository });
+      await Promise.all([
+        writeFile(join(repository, "parent", ".ignore"), "nested/secret.py\n"),
+        writeFile(
+          join(repository, "parent", ".gitignore"),
+          "nested/private.py\n",
+        ),
+        writeFile(join(scoped, "secret.py"), "secret\n"),
+        writeFile(join(scoped, "private.py"), "private\n"),
+        writeFile(join(scoped, "safe.py"), "safe\n"),
+      ]);
+
+      const python =
+        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+      if (python === null) throw new Error("A Python interpreter is required.");
+      execFileSync(
+        python,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          "parent/nested",
+          "--out",
+          output,
+        ],
+        { cwd: repository, stdio: "pipe" },
+      );
+
+      expect((await readFile(output, "utf8")).trim()).toBe(
+        "parent/nested/safe.py",
+      );
+    },
+  );
+
   test("retains visible files inside nested Git worktrees", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -215,6 +264,8 @@ describe("security scan file inventory", () => {
       writeFile(join(nested, ".env"), "SECRET=private\n"),
       writeFile(join(nested, "tracked.py"), "print('tracked')\n"),
       writeFile(join(nested, "local.py"), "print('local')\n"),
+      writeFile(join(nested, "chosen.skip"), "explicit nested source\n"),
+      writeFile(join(nested, ".git", "info", "exclude"), "chosen.skip\n"),
     ]);
     execFileSync("git", ["add", "--", "tracked.py"], { cwd: nested });
 
@@ -262,6 +313,22 @@ describe("security scan file inventory", () => {
     expect((await readFile(output, "utf8")).trim()).toBe("nested/tracked.py");
 
     execFileSync(
+      python,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        "nested/chosen.skip",
+        "--out",
+        output,
+      ],
+      { cwd: repository, stdio: "pipe" },
+    );
+    expect((await readFile(output, "utf8")).trim()).toBe("nested/chosen.skip");
+
+    execFileSync(
       "git",
       [
         "-c",
@@ -271,6 +338,41 @@ describe("security scan file inventory", () => {
         "commit",
         "-qm",
         "Track nested source",
+      ],
+      { cwd: nested },
+    );
+    const inner = join(nested, "inner");
+    await mkdir(inner);
+    execFileSync("git", ["init", "-q"], { cwd: inner });
+    await writeFile(join(inner, "security.py"), "print('nested security')\n");
+    execFileSync("git", ["add", "--", "security.py"], { cwd: inner });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Inventory Test",
+        "-c",
+        "user.email=inventory@example.test",
+        "commit",
+        "-qm",
+        "Track inner security source",
+      ],
+      { cwd: inner },
+    );
+    execFileSync("git", ["add", "--", "inner"], {
+      cwd: nested,
+      stdio: "ignore",
+    });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Inventory Test",
+        "-c",
+        "user.email=inventory@example.test",
+        "commit",
+        "-qm",
+        "Track inner worktree",
       ],
       { cwd: nested },
     );
@@ -295,6 +397,9 @@ describe("security scan file inventory", () => {
     );
     expect((await readFile(output, "utf8")).split("\n")).toContain(
       "./nested/tracked.py",
+    );
+    expect((await readFile(output, "utf8")).split("\n")).toContain(
+      "./nested/inner/security.py",
     );
   });
 
@@ -349,6 +454,9 @@ describe("security scan file inventory", () => {
     await writeFile(join(repository, "source", "file.ts"), "export {};\n");
     await writeFile(join(repository, ".gitignore"), "ignored.ts\n");
     await symlink("source", join(repository, "alias"));
+    const unrelated = join(repository, "unrelated");
+    await mkdir(unrelated);
+    await symlink(join(repository, ".gitignore"), join(unrelated, ".ignore"));
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     if (python === null) throw new Error("A Python interpreter is required.");
@@ -360,6 +468,12 @@ describe("security scan file inventory", () => {
       "--out",
       output,
     ];
+
+    execFileSync(python, [...command, "--scope", "source"], {
+      cwd: repository,
+      stdio: "pipe",
+    });
+    expect((await readFile(output, "utf8")).trim()).toBe("source/file.ts");
 
     expect(() =>
       execFileSync(python, [...command, "--scope", "alias"], {

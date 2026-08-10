@@ -81,10 +81,27 @@ def resolve_output(value: str) -> Path:
 
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically inventory visible files and ignored files tracked by Git."""
-    for directory, children, names in os.walk(repository, followlinks=False):
-        children[:] = [name for name in children if name != ".git"]
-        if any((Path(directory) / name).is_symlink() for name in names if name in IGNORE_FILE_NAMES):
+    selected = (repository / scope).resolve(strict=True)
+    selected_directory = selected if selected.is_dir() else selected.parent
+    ancestors: list[Path] = []
+    current = selected_directory
+    while True:
+        ancestors.append(current)
+        if current == repository:
+            break
+        current = current.parent
+    ancestors.reverse()
+
+    def reject_symbolic_ignore(directory: Path) -> None:
+        if any((directory / name).is_symlink() for name in IGNORE_FILE_NAMES):
             raise InventoryError("symbolic ignore files are not supported")
+
+    for ancestor in ancestors:
+        reject_symbolic_ignore(ancestor)
+    if selected.is_dir():
+        for directory, children, _ in os.walk(selected, followlinks=False):
+            children[:] = [name for name in children if name != ".git"]
+            reject_symbolic_ignore(Path(directory))
 
     command = [
         "rg",
@@ -97,33 +114,55 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--glob",
         "!.git/**",
     ]
-    for name in IGNORE_FILE_NAMES:
-        ignore = repository / name
-        if ignore.is_file() and not ignore.is_symlink():
-            command.extend(["--ignore-file", str(ignore)])
-    command.extend(["--", scope])
-    with tempfile.TemporaryFile(mode="w+b") as inventory:
-        try:
-            result = subprocess.run(
-                command,
-                cwd=repository,
-                stdout=inventory,
-                stderr=subprocess.PIPE,
-                check=False,
-                timeout=INVENTORY_TIMEOUT_SECONDS,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise InventoryError(f"could not run ripgrep: {error}") from error
 
-        if result.returncode not in (0, 1):
-            detail = result.stderr.decode("utf-8", errors="replace").strip()
-            message = f"ripgrep exited with status {result.returncode}"
-            if detail:
-                message = f"{message}: {detail}"
-            raise InventoryError(message)
+    def ripgrep_inventory(directory: Path, requested_scope: str) -> set[bytes]:
+        arguments = command.copy()
+        for name in IGNORE_FILE_NAMES:
+            ignore = directory / name
+            if ignore.is_file() and not ignore.is_symlink():
+                arguments.extend(["--ignore-file", str(ignore)])
+        arguments.extend(["--", requested_scope])
+        with tempfile.TemporaryFile(mode="w+b") as inventory:
+            try:
+                result = subprocess.run(
+                    arguments,
+                    cwd=directory,
+                    stdout=inventory,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=INVENTORY_TIMEOUT_SECONDS,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise InventoryError(f"could not run ripgrep: {error}") from error
 
-        inventory.seek(0)
-        rows = set(inventory)
+            if result.returncode not in (0, 1):
+                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                message = f"ripgrep exited with status {result.returncode}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise InventoryError(message)
+
+            inventory.seek(0)
+            return set(inventory)
+
+    def normalized(path: bytes) -> bytes:
+        return path.replace(b"\\", b"/") if os.name == "nt" else path
+
+    rows = ripgrep_inventory(repository, scope)
+    for ancestor in ancestors[1:]:
+        if not any((ancestor / name).is_file() for name in IGNORE_FILE_NAMES):
+            continue
+        ancestor_scope = selected.relative_to(ancestor).as_posix() or "."
+        ancestor_prefix = os.fsencode(ancestor.relative_to(repository).as_posix()) + b"/"
+        visible = {
+            normalized(ancestor_prefix + row.removesuffix(b"\n").removeprefix(b"./"))
+            for row in ripgrep_inventory(ancestor, ancestor_scope)
+        }
+        rows = {
+            row
+            for row in rows
+            if normalized(row.removesuffix(b"\n").removeprefix(b"./")) in visible
+        }
 
     environment = os.environ.copy()
     for name in (
@@ -205,7 +244,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError(message)
             listed.append(result.stdout)
 
-        selected = (repository / scope).resolve(strict=True)
         nested_roots: set[Path] = set()
         current = selected if selected.is_dir() else selected.parent
         while current != repository:
@@ -220,7 +258,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if candidate.is_dir() and (candidate / ".git").exists():
                     nested_roots.add(candidate.resolve(strict=True))
 
-        for nested in sorted(nested_roots):
+        pending_roots = sorted(nested_roots)
+        inspected_roots: set[Path] = set()
+        while pending_roots:
+            nested = pending_roots.pop(0)
+            if nested in inspected_roots:
+                continue
+            inspected_roots.add(nested)
             try:
                 nested_scope = selected.relative_to(nested).as_posix() or "."
             except ValueError:
@@ -243,9 +287,21 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     for relative in result.stdout.split(b"\0")
                     if relative
                 )
-
-        def normalized(path: bytes) -> bytes:
-            return path.replace(b"\\", b"/") if os.name == "nt" else path
+                for relative in result.stdout.split(b"\0"):
+                    if not relative:
+                        continue
+                    candidate = nested / os.fsdecode(relative)
+                    if candidate.is_symlink() or not candidate.is_dir():
+                        continue
+                    if not (candidate / ".git").exists():
+                        continue
+                    try:
+                        discovered = candidate.resolve(strict=True)
+                        discovered.relative_to(repository)
+                    except (OSError, ValueError):
+                        continue
+                    if discovered not in inspected_roots:
+                        pending_roots.append(discovered)
 
         allowed = {
             normalized(prefix + relative)
@@ -256,9 +312,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         nested_worktrees = tuple(path for path in allowed if path.endswith(b"/"))
         explicitly_ignored = False
         if scope not in (".", "./"):
-            explicit_path = scope if scope.startswith("./") else f"./{scope}"
+            enclosing = max(
+                (root for root in (repository, *inspected_roots) if selected.is_relative_to(root)),
+                key=lambda root: len(root.parts),
+            )
+            explicit_relative = selected.relative_to(enclosing).as_posix()
+            explicit_path = f"./{explicit_relative}"
             ignored = run_git(
                 ["check-ignore", "--quiet", "--no-index", "--", explicit_path],
+                directory=enclosing,
                 literal=False,
             )
             if ignored.returncode not in (0, 1):
