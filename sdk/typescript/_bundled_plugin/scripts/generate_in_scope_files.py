@@ -128,7 +128,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 arguments.extend(["--ignore-file", str(ignore)])
         if directory_guard:
             relative_scope = requested_scope.removeprefix("./")
-            arguments.extend(["--glob", f"/{re.escape(relative_scope)}/**", "--", "."])
+            arguments.extend(
+                ["--quiet", "--glob", f"/{re.escape(relative_scope)}/**", "--", "."]
+            )
         else:
             arguments.extend(["--", requested_scope])
         with tempfile.TemporaryFile(mode="w+b") as inventory:
@@ -150,6 +152,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     message = f"{message}: {detail}"
                 raise InventoryError(message)
 
+            if directory_guard:
+                return {b""} if result.returncode == 0 else set()
             inventory.seek(0)
             return set(inventory)
 
@@ -167,13 +171,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         ancestor_scope = selected.relative_to(ancestor).as_posix() or "."
         ancestor_prefix = os.fsencode(ancestor.relative_to(repository).as_posix()) + b"/"
         visible = {
-            normalized(ancestor_prefix + row.removesuffix(b"\n").removeprefix(b"./"))
+            normalized(
+                ancestor_prefix + normalized(row.removesuffix(b"\n")).removeprefix(b"./")
+            )
             for row in ripgrep_inventory(ancestor, ancestor_scope)
         }
         rows = {
             row
             for row in rows
-            if normalized(row.removesuffix(b"\n").removeprefix(b"./")) in visible
+            if normalized(row.removesuffix(b"\n")).removeprefix(b"./") in visible
         }
 
     environment = os.environ.copy()

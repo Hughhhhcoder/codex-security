@@ -285,7 +285,11 @@ describe("security scan file inventory", () => {
       const python =
         Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
       if (python === null) throw new Error("A Python interpreter is required.");
-      for (const scope of ["parent/nested", "parent/./nested"]) {
+      for (const scope of [
+        "parent/nested",
+        "parent/./nested",
+        "./parent/nested",
+      ]) {
         execFileSync(
           python,
           [
@@ -302,7 +306,7 @@ describe("security scan file inventory", () => {
         );
 
         expect((await readFile(output, "utf8")).trim()).toBe(
-          "parent/nested/safe.py",
+          `${scope.startsWith("./") ? "./" : ""}parent/nested/safe.py`,
         );
       }
     },

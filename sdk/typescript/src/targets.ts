@@ -243,14 +243,37 @@ export async function normalizeTarget(
     const candidate = isAbsolute(expandHome(value))
       ? resolve(expandHome(value))
       : resolve(root, expandHome(value));
+    const requestedPath = relative(root, candidate);
+    if (
+      requestedPath === ".." ||
+      requestedPath.startsWith(`..${sep}`) ||
+      isAbsolute(requestedPath)
+    ) {
+      throw new InvalidTargetError(
+        `Path target is outside the repository: ${value}`,
+      );
+    }
     if (!existsSync(candidate)) {
       throw new InvalidTargetError(`Path target does not exist: ${value}`);
     }
     let canonical: string;
     try {
+      for (
+        let current = candidate;
+        current !== root;
+        current = dirname(current)
+      ) {
+        const metadata = await abortable(() => lstat(current), signal);
+        if (metadata.isSymbolicLink()) {
+          throw new InvalidTargetError(
+            `Path targets must not contain symbolic links: ${value}`,
+          );
+        }
+      }
       canonical = await abortable(() => realpath(candidate), signal);
     } catch (error) {
       throwIfAborted(signal);
+      if (error instanceof InvalidTargetError) throw error;
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
         cause: error,
       });

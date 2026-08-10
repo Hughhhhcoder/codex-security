@@ -131,6 +131,20 @@ describe("scan target normalization", () => {
     );
   });
 
+  test("rejects symbolic path targets before canonicalizing them", async () => {
+    const repo = await repository();
+    const linked = join(repo, "linked");
+    await symlink(
+      join(repo, "src"),
+      linked,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await expect(normalizeTarget(repo, ["linked/app.ts"])).rejects.toThrow(
+      "symbolic links",
+    );
+  });
+
   test("reports a path that disappears during normalization as invalid", async () => {
     const repo = await repository();
     const script = `
