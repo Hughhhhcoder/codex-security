@@ -1452,6 +1452,40 @@ describe("live scan cost tracking", () => {
     });
   });
 
+  test("discards oversized malformed events without losing later usage", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+
+    await appendFile(path, "x".repeat(2 * 1_024 * 1_024));
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+    await appendFile(path, "x".repeat(2 * 1_024 * 1_024));
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+
+    const usage = JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: { input_tokens: 250, output_tokens: 20 },
+        },
+      },
+    });
+    await appendFile(path, `\n${usage}\n`);
+
+    expect((await tracker.stop()).cost).toMatchObject({
+      inputTokens: 250,
+      outputTokens: 20,
+    });
+  });
+
   test("reports a changed running cost only once", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
