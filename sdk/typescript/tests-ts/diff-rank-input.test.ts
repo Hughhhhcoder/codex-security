@@ -383,6 +383,32 @@ describe("diff rank input", () => {
     expect(finding?.preview).toContain("Git file mode: 100644 → 100755");
   });
 
+  test("preserves executable modes for binary merge-conflict stages", async () => {
+    const fixture = await createRepository();
+    const action = ".github/actions/local/run.sh";
+    await writeRepositoryFile(fixture.repository, action, "run safe\n");
+    git(fixture.repository, "add", action);
+    git(fixture.repository, "commit", "-qm", "add local action");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+
+    const stages = ["100644", "100755", "100644"].map((mode, index) => {
+      const object = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: fixture.repository,
+        encoding: "utf8",
+        input: Buffer.from([0, index + 1]),
+      }).trim();
+      return `${mode} ${object} ${index + 1}\t${action}\n`;
+    });
+    execFileSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      input: `0 ${"0".repeat(40)}\t${action}\n${stages.join("")}`,
+    });
+
+    const [finding] = await runDiffRankInput(fixture, "local-patch");
+    expect(finding?.preview).toContain("Git merge stage 2 (mode 100755):");
+    expect(finding?.preview).toContain("(binary content)");
+  });
+
   test.skipIf(process.platform === "win32")(
     "includes unstaged executable mode changes in local patch previews",
     async () => {
@@ -686,6 +712,30 @@ describe("diff rank input", () => {
         `Git submodule commit ${revision}`,
       );
     }
+
+    const conflictingFile = execFileSync(
+      "git",
+      ["hash-object", "-w", "--stdin"],
+      {
+        cwd: fixture.repository,
+        encoding: "utf8",
+        input: "runs: conflicting file\n",
+      },
+    ).trim();
+    const mixedStages = [
+      `160000 ${revisions[0]} 1\t${action}\n`,
+      `160000 ${revisions[1]} 2\t${action}\n`,
+      `100755 ${conflictingFile} 3\t${action}\n`,
+    ];
+    execFileSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      input: `0 ${"0".repeat(40)}\t${action}\n${mixedStages.join("")}`,
+    });
+
+    const [mixed] = await runDiffRankInput(fixture, "local-patch");
+    expect(mixed?.preview).toContain("Git merge stage 3 (mode 100755):");
+    expect(mixed?.preview).toContain("runs: conflicting file");
+    expect(mixed?.preview).toContain(`Git submodule commit ${worktree}`);
   });
 
   test("records unstaged local-action submodule revisions from their worktree", async () => {

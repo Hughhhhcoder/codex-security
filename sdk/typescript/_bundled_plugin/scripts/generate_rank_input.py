@@ -499,8 +499,9 @@ def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
         for entry in result.stdout.split("\0")
         if entry
     ]
-    submodule_conflict = bool(entries) and all(mode == "160000" for mode, _, _ in entries)
-    if submodule_conflict:
+    submodule_conflict = any(mode == "160000" for mode, _, _ in entries)
+    directory_conflict = submodule_conflict and path.is_dir()
+    if directory_conflict:
         try:
             if path.is_symlink() or (path.exists() and not path.is_dir()):
                 raise ValueError
@@ -520,11 +521,10 @@ def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
             lines.extend((stage_header, f"Git submodule commit {object_name}"))
             continue
         preview, binary = git_blob_preview(repo, path, object_name, preview_bytes)
-        if not binary:
-            lines.extend((stage_header, preview))
+        lines.extend((stage_header, "(binary content)" if binary else preview))
 
-    if submodule_conflict:
-        worktree = submodule_worktree_revision(repo, path) if path.is_dir() else None
+    if directory_conflict:
+        worktree = submodule_worktree_revision(repo, path)
         if worktree is not None and all(worktree != revision for _, revision, _ in entries):
             lines.extend(("Worktree:", f"Git submodule commit {worktree}"))
     else:
