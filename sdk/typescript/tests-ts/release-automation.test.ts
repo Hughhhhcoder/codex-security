@@ -2059,6 +2059,21 @@ describe("GitHub release workflow safeguards", () => {
     expect(protectedReleaseWorkflow).not.toMatch(/^\s+queue:/mu);
   });
 
+  test("waits for older npm publishers without dropping pending release tags", () => {
+    const ordering = workflowStepShell(
+      protectedReleaseWorkflow,
+      "Wait for older npm releases",
+    );
+    expect(ordering).toContain(
+      "actions/workflows/node-release.yml/runs?per_page=100",
+    );
+    expect(ordering).toContain(
+      'require-increase "$RELEASE_VERSION" "$candidate"',
+    );
+    expect(ordering).toContain("sleep 15");
+    expect(protectedReleaseWorkflow).toContain("      actions: read");
+  });
+
   test("dispatches GitHub releases after publishing with isolated permissions", () => {
     expect(protectedReleaseWorkflow).toContain(
       [
