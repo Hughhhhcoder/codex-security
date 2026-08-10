@@ -2046,13 +2046,15 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("serializes release-cut and protected publishing without canceling active runs", () => {
-    expect(releaseCutWorkflow).toMatch(
-      /concurrency:\s*\n\s+group: node-release-cut\s*\n\s+cancel-in-progress: false/u,
+  test("keeps distinct release commits and tags in separate concurrency groups", () => {
+    expect(releaseCutWorkflow).toContain(
+      "group: node-release-cut-${{ github.event.workflow_run.head_sha || github.sha }}",
     );
-    expect(protectedReleaseWorkflow).toMatch(
-      /concurrency:\s*\n\s+group: \$\{\{ github\.workflow \}\}\s*\n\s+cancel-in-progress: false/u,
+    expect(protectedReleaseWorkflow).toContain(
+      "group: ${{ github.workflow }}-${{ github.ref }}",
     );
+    expect(releaseCutWorkflow).toContain("cancel-in-progress: false");
+    expect(protectedReleaseWorkflow).toContain("cancel-in-progress: false");
     expect(releaseCutWorkflow).not.toMatch(/^\s+queue:/mu);
     expect(protectedReleaseWorkflow).not.toMatch(/^\s+queue:/mu);
   });
@@ -2111,14 +2113,12 @@ describe("GitHub release workflow safeguards", () => {
     ]);
   });
 
-  test("serializes every GitHub release and historical backfill", () => {
-    expect(githubReleaseWorkflow).toMatch(
-      /concurrency:\s*\n\s+group: node-github-release\s*\n\s+cancel-in-progress: false/u,
+  test("preserves GitHub releases and historical backfills for distinct tags", () => {
+    expect(githubReleaseWorkflow).toContain(
+      "group: node-github-release-${{ inputs.tag }}",
     );
+    expect(githubReleaseWorkflow).toContain("cancel-in-progress: false");
     expect(githubReleaseWorkflow).not.toMatch(/^\s+queue:/mu);
-    expect(githubReleaseWorkflow).not.toContain(
-      "group: node-github-release-${{",
-    );
   });
 
   test("runs manually dispatched GitHub releases from trusted main", () => {

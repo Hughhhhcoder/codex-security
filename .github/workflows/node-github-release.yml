@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: node-github-release
+  group: node-github-release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:

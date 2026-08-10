@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: node-release-cut
+  group: node-release-cut-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
