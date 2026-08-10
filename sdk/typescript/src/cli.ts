@@ -118,6 +118,7 @@ const MAX_CODEX_OVERRIDE_VALUE_LENGTH = 64 * 1_024;
 const MAX_CODEX_OVERRIDE_DEPTH = 64;
 const MAX_SKILL_INPUT_BYTES = 1_024 * 1_024;
 const MAX_SKILL_INPUT_COUNT = 64;
+const MAX_SKILL_EVENT_BYTES = 16 * 1_024 * 1_024;
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
@@ -1060,7 +1061,7 @@ export async function main(
             .describe("Append scan instructions from FILE."),
           postScanPromptFile: optionValue("--post-scan-prompt-file")
             .optional()
-            .describe("Run instructions from FILE after a validated scan."),
+            .describe("Run FILE after each scan, including failures."),
           diff: optionValue("--diff")
             .optional()
             .describe("Scan committed Git changes from BASE to --head."),
@@ -1354,7 +1355,7 @@ export async function main(
           .describe("Append instructions from FILE to every scan."),
         postScanPromptFile: optionValue("--post-scan-prompt-file")
           .optional()
-          .describe("Run FILE after each completed, validated scan."),
+          .describe("Run FILE after each scan, including failures."),
         model: optionValue("--model")
           .optional()
           .describe(
@@ -2406,7 +2407,31 @@ export async function readSkillCommandOutput(
   let error: string | undefined;
   let malformed = false;
 
-  for await (const line of createInterface({ input: Readable.from(stream) })) {
+  async function* boundedOutput(): AsyncGenerator<Buffer> {
+    let lineBytes = 0;
+    for await (const value of stream) {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
+      let start = 0;
+      while (start < chunk.length) {
+        const newline = chunk.indexOf(0x0a, start);
+        const end = newline === -1 ? chunk.length : newline;
+        lineBytes += end - start;
+        if (lineBytes > MAX_SKILL_EVENT_BYTES) {
+          throw new CodexSecurityError(
+            "Codex skill event exceeded the 16 MiB safety limit.",
+          );
+        }
+        if (newline === -1) break;
+        lineBytes = 0;
+        start = newline + 1;
+      }
+      yield chunk;
+    }
+  }
+
+  for await (const line of createInterface({
+    input: Readable.from(boundedOutput()),
+  })) {
     if (line.trim().length === 0) continue;
     let event: unknown;
     try {

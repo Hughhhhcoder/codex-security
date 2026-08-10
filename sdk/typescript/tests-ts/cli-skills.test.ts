@@ -510,6 +510,20 @@ describe("CLI skill commands", () => {
     expect(stderr.text()).toBe("");
   });
 
+  test("bounds malformed skill events without limiting ordinary large responses", async () => {
+    async function* unboundedLine(): AsyncGenerator<Buffer> {
+      for (let remaining = 16 * 1_024 * 1_024 + 1; remaining > 0; ) {
+        const length = Math.min(64 * 1_024, remaining);
+        yield Buffer.alloc(length, 0x78);
+        remaining -= length;
+      }
+    }
+
+    await expect(readSkillCommandOutput(unboundedLine())).rejects.toThrow(
+      "Codex skill event exceeded the 16 MiB safety limit.",
+    );
+  });
+
   test("does not terminate a child that emits a large skill response", async () => {
     const stdout = capture();
     const stderr = capture();
