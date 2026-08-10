@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -421,10 +422,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if candidate.is_symlink() or not candidate.is_file():
                 continue
             try:
-                resolved = candidate.resolve(strict=True)
-                if resolved != candidate:
+                current = candidate
+                while current != repository:
+                    metadata = current.stat(follow_symlinks=False)
+                    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                    if stat.S_ISLNK(metadata.st_mode) or (
+                        getattr(metadata, "st_file_attributes", 0) & reparse_point
+                    ):
+                        break
+                    current = current.parent
+                if current != repository:
                     continue
-                resolved.relative_to(repository)
+                candidate.resolve(strict=True).relative_to(repository)
             except (OSError, ValueError):
                 continue
             relative_path = prefix + relative
