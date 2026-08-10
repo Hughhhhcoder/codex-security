@@ -489,18 +489,20 @@ def submodule_worktree_revision(repo: Path, path: Path) -> str | None:
 def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
     relative = path.relative_to(repo).as_posix()
     result = subprocess.run(
-        ["git", "--no-replace-objects", "-C", str(repo), "ls-files", "--stage", "-z", "--", relative],
+        ["git", "--no-replace-objects", "--literal-pathspecs", "-C", str(repo), "ls-files", "--stage", "-z", "--", relative],
         check=True,
         capture_output=True,
         text=True,
     )
-    entries = [
-        entry.split("\t", 1)[0].split()
-        for entry in result.stdout.split("\0")
-        if entry
-    ]
-    submodule_conflict = any(mode == "160000" for mode, _, _ in entries)
-    directory_conflict = submodule_conflict and path.is_dir()
+    entries: list[list[str]] = []
+    for entry in result.stdout.split("\0"):
+        if not entry:
+            continue
+        metadata, recorded_path = entry.split("\t", 1)
+        if recorded_path != relative:
+            raise SystemExit("Git returned an unexpected changed path: " + recorded_path)
+        entries.append(metadata.split())
+    directory_conflict = path.is_dir() and any(mode == "160000" for mode, _, _ in entries)
     if directory_conflict:
         try:
             if path.is_symlink() or (path.exists() and not path.is_dir()):
@@ -577,10 +579,36 @@ def require_reviewable_diff_path(
         ) from None
 
 
-def resolve_scope(repo: Path, scope: str, *, expand_user: bool = True) -> Path:
+def resolve_scope(
+    repo: Path,
+    scope: str,
+    *,
+    expand_user: bool = True,
+    reject_symlinks: bool = False,
+) -> Path:
     scope_path = Path(scope).expanduser() if expand_user else Path(scope)
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
+    if reject_symlinks:
+        repository = repo.resolve()
+        try:
+            relative = scope_path.relative_to(repository)
+        except ValueError as exc:
+            raise SystemExit(f"Scope must be inside repo: {scope_path}") from exc
+        ancestor = repository
+        for part in relative.parts:
+            if part == "..":
+                if ancestor == repository:
+                    raise SystemExit(f"Scope must be inside repo: {scope_path}")
+                ancestor = ancestor.parent
+                continue
+            ancestor /= part
+            try:
+                metadata = ancestor.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise SystemExit(f"Scope path not found: {ancestor}") from exc
+            if ancestor.is_symlink() or getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
+                raise SystemExit(f"Requested scope must not contain symbolic links: {ancestor}")
     scope_path = scope_path.resolve()
     repo_resolved = repo.resolve()
     try:
@@ -770,7 +798,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
     scopes = load_scopes_file(Path(args.scopes_file).expanduser())
     rows_by_path: dict[str, JsonRow] = {}
     for scope in scopes:
-        scope_path = resolve_scope(repo, scope, expand_user=False)
+        scope_path = resolve_scope(repo, scope, expand_user=False, reject_symlinks=True)
         if scope_path.is_file():
             candidates = (scope_path,)
         else:

@@ -673,7 +673,16 @@ describe("diff rank input", () => {
 
   test("records every unresolved local-action submodule pin", async () => {
     const fixture = await createRepository();
-    const action = ".github/actions/local";
+    const action = ".github/actions/[local]";
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${fixture.base},.github/actions/l`,
+    );
+    git(fixture.repository, "commit", "-qm", "pin sibling local action");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
     const revisions = [fixture.base];
     for (const label of ["ours", "theirs"]) {
       git(fixture.repository, "commit", "--allow-empty", "-qm", label);
