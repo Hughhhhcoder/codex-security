@@ -546,20 +546,20 @@ describe("security scan file inventory", () => {
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     expect(python).not.toBeNull();
     if (python === null) throw new Error("A Python interpreter is required.");
-    const enumerate = (scope: string) =>
+    const enumerate = (scope: string, target = repository) =>
       execFileSync(
         python,
         [
           "-B",
           join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
           "--repo",
-          repository,
+          target,
           "--scope",
           scope,
           "--out",
           output,
         ],
-        { cwd: repository, stdio: "pipe" },
+        { cwd: target, stdio: "pipe" },
       );
 
     enumerate("selected.skip");
@@ -577,6 +577,24 @@ describe("security scan file inventory", () => {
     });
 
     enumerate("ignored");
+    expect((await readFile(output, "utf8")).trim()).toBe("ignored/public.py");
+
+    const snapshot = join(root, "snapshot");
+    const nested = join(snapshot, "ignored");
+    await mkdir(nested, { recursive: true });
+    await Promise.all([
+      writeFile(join(snapshot, ".gitignore"), "ignored/\n"),
+      writeFile(join(nested, "private.py"), "ignored source\n"),
+    ]);
+
+    enumerate("ignored", snapshot);
+    expect((await readFile(output, "utf8")).trim()).toBe("");
+
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await writeFile(join(nested, "public.py"), "tracked nested source\n");
+    execFileSync("git", ["add", "public.py"], { cwd: nested });
+
+    enumerate("ignored", snapshot);
     expect((await readFile(output, "utf8")).trim()).toBe("ignored/public.py");
   });
 

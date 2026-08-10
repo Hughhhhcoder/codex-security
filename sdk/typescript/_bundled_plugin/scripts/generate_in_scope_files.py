@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -117,13 +118,19 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "!.git/**",
     ]
 
-    def ripgrep_inventory(directory: Path, requested_scope: str) -> set[bytes]:
+    def ripgrep_inventory(
+        directory: Path, requested_scope: str, *, directory_guard: bool = False
+    ) -> set[bytes]:
         arguments = command.copy()
         for name in IGNORE_FILE_NAMES:
             ignore = directory / name
             if ignore.is_file() and not ignore.is_symlink():
                 arguments.extend(["--ignore-file", str(ignore)])
-        arguments.extend(["--", requested_scope])
+        if directory_guard:
+            relative_scope = requested_scope.removeprefix("./")
+            arguments.extend(["--glob", f"/{re.escape(relative_scope)}/**", "--", "."])
+        else:
+            arguments.extend(["--", requested_scope])
         with tempfile.TemporaryFile(mode="w+b") as inventory:
             try:
                 result = subprocess.run(
@@ -150,6 +157,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         return path.replace(b"\\", b"/") if os.name == "nt" else path
 
     rows = ripgrep_inventory(repository, scope)
+    if selected.is_dir() and scope not in (".", "./") and not ripgrep_inventory(
+        repository, scope, directory_guard=True
+    ):
+        rows.clear()
     for ancestor in ancestors[1:]:
         if not any((ancestor / name).is_file() for name in IGNORE_FILE_NAMES):
             continue
