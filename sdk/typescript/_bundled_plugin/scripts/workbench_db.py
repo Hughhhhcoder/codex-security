@@ -2937,7 +2937,7 @@ def finding_result(
     severity = severity if isinstance(severity, dict) else {}
     locations = []
     try:
-        target = require_scan_target_identity(scan)
+        target = require_scan_target_identity(scan, target_path=scan["target_path"])
     except SystemExit:
         current_target = connection.execute(
             "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
