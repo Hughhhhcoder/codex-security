@@ -1,7 +1,6 @@
 import { mkdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { McpToolCallItem, ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runScanEvents } from "../src/api.js";
 import {
@@ -21,7 +20,19 @@ import {
   createApiTestFixtures,
   runEvents,
   type ScanObserverName,
+  type ThreadEvent,
 } from "./support/api-events.js";
+
+interface McpToolCallItem {
+  readonly [key: string]: unknown;
+  id: string;
+  type: "mcp_tool_call";
+  server: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  result: unknown;
+  status: string;
+}
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();

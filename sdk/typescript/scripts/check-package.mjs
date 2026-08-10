@@ -140,6 +140,8 @@ const allowedRoot = new Set([
 ]);
 const distFiles = new Set(
   [
+    "agents-auth",
+    "agents-runtime",
     "api",
     "auth",
     "bulk-scan-discovery",

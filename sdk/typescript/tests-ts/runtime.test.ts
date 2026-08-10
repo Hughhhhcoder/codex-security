@@ -1591,17 +1591,15 @@ describe("plugin runtime preparation", () => {
     );
   });
 
-  test("launches the bundled Codex through the Deep Scan MCP environment without a global executable", async () => {
+  test("does not propagate a Codex executable into Agents SDK workers", async () => {
     const configuration = JSON.parse(
       await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
     ) as {
       mcpServers: Record<string, { env_vars: string[] }>;
     };
     const parentEnvironment = pluginExecutionEnvironment(process.execPath, {
+      CODEX_CLI_PATH: "/ambient/codex",
       PATH: "",
-      ...(process.env["SystemRoot"] === undefined
-        ? {}
-        : { SystemRoot: process.env["SystemRoot"] }),
     });
     const allowed = new Set(
       configuration.mcpServers["codex-security"]!.env_vars,
@@ -1609,47 +1607,24 @@ describe("plugin runtime preparation", () => {
     const workerEnvironment = Object.fromEntries(
       Object.entries(parentEnvironment).filter(
         ([name, value]) =>
-          value !== undefined &&
-          (name === "PATH" || name === "SystemRoot" || allowed.has(name)),
+          value !== undefined && (name === "PATH" || allowed.has(name)),
       ),
     ) as Record<string, string>;
 
-    expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
-      resolveCodexCommand().command,
-    );
-    const globalCodex = spawnSync("codex", ["--version"], {
-      encoding: "utf8",
-      env: workerEnvironment,
-    });
-    expect(globalCodex.error).toMatchObject({ code: "ENOENT" });
-
-    const nestedCodex = spawnSync(
-      workerEnvironment["CODEX_CLI_PATH"]!,
-      ["--version"],
-      { encoding: "utf8", env: workerEnvironment },
-    );
-    expect(nestedCodex.status).toBe(0);
-    expect(nestedCodex.stdout).toMatch(/^codex-cli\s+\d/u);
+    expect(workerEnvironment["CODEX_CLI_PATH"]).toBeUndefined();
+    expect(workerEnvironment["PYTHON"]).toBe(process.execPath);
   });
 
-  test("preserves an explicit Codex executable override for nested workers", () => {
-    const configured = join(tmpdir(), "custom codex", "codex");
-
+  test("drops an explicit Codex executable override", () => {
     expect(
       pluginExecutionEnvironment("/managed/python", {
-        CODEX_CLI_PATH: ` ${configured} `,
+        CODEX_CLI_PATH: "/custom/codex",
         PATH: "",
       }),
     ).toEqual({
-      CODEX_CLI_PATH: configured,
       PATH: "",
       PYTHON: "/managed/python",
     });
-    expect(
-      pluginExecutionEnvironment("/managed/python", {
-        CODEX_CLI_PATH: "   ",
-      })["CODEX_CLI_PATH"],
-    ).toBe(resolveCodexCommand().command);
   });
 
   test("selects the native Windows Codex executable package", () => {
@@ -4379,7 +4354,6 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(pluginExecutionEnvironment(managed, { TEST: "1" })).toEqual({
       TEST: "1",
       PYTHON: managed,
-      CODEX_CLI_PATH: resolveCodexCommand().command,
     });
     await expect(
       resolvePluginPython({

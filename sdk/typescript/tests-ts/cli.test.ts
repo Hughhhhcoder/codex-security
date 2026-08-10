@@ -990,8 +990,8 @@ describe("CLI", () => {
       bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
       scanMcp: false,
       cliVersion: VERSION,
-      codexVersion: "0.144.6",
-      codexSdkVersion: "0.144.6",
+      agentsSdkVersion: "0.14.3",
+      sandboxRuntimeVersion: "0.14.3",
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       nextStep: "codex-security scan . --dry-run",
@@ -3482,7 +3482,7 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain(
-      "Codex connection interrupted; retrying (2/5)",
+      "Agents SDK connection interrupted; retrying (2/5)",
     );
     expect(stderr.text()).toContain("Running scan");
   });
@@ -4946,7 +4946,7 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain(
-      "Isolated Codex runtime directory must be outside the scanned directory and any enclosing Git worktree.",
+      "Isolated Agents SDK runtime directory must be outside the scanned directory and any enclosing Git worktree.",
     );
     expect(stderr.text()).toContain(`Partial output was kept at ${partial}.`);
     expect(stderr.text()).not.toContain("codex-security:");

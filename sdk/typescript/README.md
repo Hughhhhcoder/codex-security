@@ -2,7 +2,7 @@
 
 Open-source TypeScript SDK and CLI for running Codex Security scans. The
 ESM-only package includes TypeScript declarations, the `codex-security`
-executable, and the matching Codex runtime.
+executable, and an OpenAI Agents SDK sandbox runtime.
 
 > [!NOTE]
 > This package follows semantic versioning. Its public API may change between
@@ -15,7 +15,8 @@ npm install @openai/codex-security
 npx @openai/codex-security --version
 ```
 
-The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
+The package supports macOS and Linux through the local Agents SDK sandbox, and
+Windows through the Docker sandbox client. It requires Node.js 22.13.0 or
 later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scanning and
 exporting findings also require Python 3.10 or later. If you use Python 3.10,
 install the `tomli` package. Select another interpreter with `--python`,
@@ -27,7 +28,7 @@ notice. Notices are also disabled in CI and when stderr is not a terminal.
 
 ## Run a scan from TypeScript
 
-Sign in with `npx @openai/codex-security login` or set `OPENAI_API_KEY` or
+Store a key with `npx @openai/codex-security login --with-api-key` or set `OPENAI_API_KEY` or
 `CODEX_API_KEY`. Then create a client and scan a repository you own or have
 permission to assess:
 
@@ -65,7 +66,7 @@ Pass runtime configuration to the `CodexSecurity` constructor:
 | ---------------- | --------------------------------------------------------------------------- |
 | `pluginPath`     | Use a Codex Security plugin directory or ZIP instead of the bundled plugin. |
 | `pythonPath`     | Select the Python interpreter before consulting `PYTHON`.                   |
-| `codexOverrides` | Deep-merge supported settings into the isolated Codex configuration.        |
+| `codexOverrides` | Backward-compatible model, reasoning, and delegate-concurrency settings.    |
 
 Pass scan configuration to `security.run(repository, options)` or
 `security.preflight(repository, options)`:
@@ -92,33 +93,31 @@ Python, inspect the plugin, or run those scan-lifecycle callbacks.
 
 ## Authentication
 
-For local use, sign in with ChatGPT:
+The Agents SDK runtime uses API keys. For CI or one-off scans, set
+`OPENAI_API_KEY` or `CODEX_API_KEY`:
 
 ```bash
-npx @openai/codex-security login
+export OPENAI_API_KEY="<your-api-key>"
 npx @openai/codex-security scan .
 ```
 
-On a remote or headless machine, use device authentication:
-
-```bash
-npx @openai/codex-security login --device-auth
-```
-
-For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY`. To store an API key instead,
-pass it on stdin:
+To store an API key in Codex Security's existing private runtime home, pass
+it on stdin:
 
 ```bash
 printenv OPENAI_API_KEY | npx @openai/codex-security login --with-api-key
 ```
 
-Environment API keys are supplied directly to the current scan and are never
-saved to the Codex credential home or system keyring. Only an explicit
-`login --with-api-key` stores an API key.
+Environment API keys are supplied directly to the current Agents SDK run and
+are never mounted into the model-facing sandbox. An explicit
+`login --with-api-key` stores the key as `agents-auth.json` under the private
+runtime home. Check or remove it with `codex-security login status` and
+`codex-security logout`.
 
-To pass a Codex access token explicitly, use
-`login --with-access-token` and provide the token on stdin. An access token
-environment variable is not automatically used as a scan API key.
+ChatGPT login, device login, and access-token login are not available in the
+Agents SDK runtime. `--auth chatgpt` remains accepted as the compatibility
+spelling for the stored API-key path; `--auth api-key` requires an environment
+key.
 
 To use another inference provider, set its API key and select its provider:
 
@@ -129,10 +128,10 @@ npx @openai/codex-security scan . --provider openrouter --model anthropic/claude
 export FIREWORKS_API_KEY="<your-fireworks-api-key>"
 npx @openai/codex-security scan . --provider fireworks --model accounts/fireworks/models/qwen3-235b-a22b
 
-export AWS_BEARER_TOKEN_BEDROCK="<your-bedrock-api-key>"
-export AWS_REGION="us-east-2"
-npx @openai/codex-security scan . --provider amazon-bedrock --model openai.gpt-5.6-luna
 ```
+
+Amazon Bedrock is not supported by this Agents SDK prototype until a dedicated
+Agents SDK model provider is added.
 
 On Windows, set the API key in PowerShell:
 
@@ -141,51 +140,16 @@ $env:OPENAI_API_KEY = "<your-api-key>"
 npx @openai/codex-security scan C:\code\repository
 ```
 
-Check or remove the stored sign-in with `npx @openai/codex-security login status`
-and `npx @openai/codex-security logout`. Codex Security keeps its sign-in in a
-private, stable Codex home at `$CODEX_SECURITY_STATE_DIR/codex-home`, or at
-`$CODEX_HOME/state/plugins/codex-security/codex-home` when no state directory is
-configured. On managed Windows devices, inherited access for `SYSTEM` and local
-`Administrators` is preserved while protecting the home against future changes
-to its parents. Other users and broad groups are rejected, and PowerShell
-Constrained Language Mode is supported. Login,
-status, logout, and scans use the same home. Codex manages
-credentials using its configured file or system-keyring backend and honors
-managed-device policies. An existing file-based Codex sign-in is imported only
-when the dedicated home does not already contain stored credentials. Logging
-out prevents later scans from automatically reimporting that ambient sign-in
-until you explicitly log in again.
-
-An environment API key takes precedence over a stored sign-in by default.
-When both a stored ChatGPT sign-in and an environment API key are available, an
-interactive scan asks which credential to use. JSON output, dry runs, CI, and
-other noninteractive scans never prompt and retain automatic API-key
-precedence. Select the credential source explicitly with `--auth`:
+The private credential home remains at `$CODEX_SECURITY_STATE_DIR/codex-home`,
+or `$CODEX_HOME/state/plugins/codex-security/codex-home` when no state
+directory is configured. On managed Windows devices, the existing private-home
+ACL protections remain in place. Environment keys take precedence over a
+stored Agents SDK key by default.
 
 ```bash
-npx @openai/codex-security scan . --auth chatgpt
-npx @openai/codex-security scan . --auth api-key
+npx @openai/codex-security scan . --auth chatgpt  # stored API-key compatibility path
+npx @openai/codex-security scan . --auth api-key  # environment key only
 ```
-
-`--auth chatgpt` uses the stored sign-in and ignores `OPENAI_API_KEY` and
-`CODEX_API_KEY`. `--auth api-key` requires one of those environment variables.
-Omit `--auth`, or pass `--auth auto`, to preserve automatic API-key precedence
-for existing CI and unattended scans. The SDK accepts the same selection as
-`security.run(repository, { auth: "chatgpt" })` and
-`security.preflight(repository, { auth: "chatgpt" })`.
-
-To make the stored ChatGPT sign-in the automatic default instead, unset any
-configured API-key variables:
-
-```bash
-unset OPENAI_API_KEY CODEX_API_KEY
-```
-
-The interactive choice applies only to the current scan and is not persisted.
-
-When an environment key is configured, ChatGPT login and
-`codex-security login status` identify the effective scan credential source
-without printing its value, including when no stored sign-in exists.
 
 Some cybersecurity requests and protected findings require approval through
 Trusted Access for Cyber. To apply or check your access, visit
@@ -225,17 +189,17 @@ npx @openai/codex-security findings false-positive OCCURRENCE_ID --reason "The r
 npx @openai/codex-security export /path/outside/repository/results --export-format sarif --output /path/outside/repository/results.sarif
 npx @openai/codex-security export /path/outside/repository/results --export-format csv --output /path/outside/repository/findings.csv
 npx @openai/codex-security export /path/outside/repository/results --export-format json --output /path/outside/repository/findings.json
-npx @openai/codex-security validate /path/outside/repository/findings.json "Possible SQL injection in src/query.ts:42"
-npx @openai/codex-security validate "Possible SQL injection" --effort high
-npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
-npx @openai/codex-security patch "Missing authorization check" --effort high
 ```
 
+The prototype replaces scan and deep-scan execution first. `validate` and
+`patch` remain disabled until their legacy Codex skill-command path is moved
+to Agents SDK agents.
+
 Run `npx @openai/codex-security --version` for the installed CLI version or
-`npx @openai/codex-security info --json` for the package, bundled plugin, Codex runtime,
+`npx @openai/codex-security info --json` for the package, bundled plugin, Agents runtime,
 default model, reasoning effort, and first-scan command. A scan with `--dry-run`
 also reports its effective model and reasoning effort, including `--codex`
-overrides, without starting Codex or contacting the network.
+overrides, without starting an Agents run or contacting the network.
 
 `install-hook` scans staged and unstaged changes before each commit. It respects
 `core.hooksPath`, does not replace an existing hook, and blocks high-severity
@@ -269,8 +233,9 @@ await security.run("/path/to/repository", {
 });
 ```
 
-Set defaults in `~/.codex/codex-security/config.toml`, or under `$CODEX_HOME`
-when it is configured. Explicit CLI and SDK settings override these defaults:
+Set defaults in `~/.codex/codex-security/config.toml`, or
+`$CODEX_HOME/codex-security/config.toml` when `CODEX_HOME` is configured.
+Explicit CLI and SDK settings override these defaults:
 
 ```toml
 [deep_scan]
@@ -301,32 +266,22 @@ mode.
 Scans use `gpt-5.6-sol` with extra-high reasoning effort by default. OpenAI is
 the implied provider. Use `--model gpt-5.6-terra` to switch models and
 `--effort minimal|low|medium|high|xhigh` to set reasoning effort. Repeat
-`--codex KEY=VALUE` for other Codex settings; existing
+`--codex KEY=VALUE` for backward-compatible runtime settings; existing
 `--codex 'model_reasoning_effort="high"'` overrides remain supported.
 
 ### Runtime configuration and worker limits
 
-The standalone CLI and SDK do not load an unrelated user or repository Codex
-configuration. Each scan starts with a private runtime and these Codex
-defaults:
+The standalone CLI and SDK do not load unrelated user or repository
+configuration. Each scan starts with a private runtime and projects these
+backward-compatible settings into the Agents SDK:
 
 ```toml
-cli_auth_credentials_store = "file"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"
-show_raw_agent_reasoning = true
-
-[features]
-plugins = true
-goals = true
 
 [features.multi_agent_v2]
-enabled = true
 max_concurrent_threads_per_session = 9
-
-[windows]
-sandbox = "unelevated"
 ```
 
 Use `--model` and `--effort` for model selection. Repeat
@@ -351,23 +306,22 @@ Quote string values as TOML, for example
 `--codex 'model_reasoning_effort="..."'`: conflicting or repeated keys are
 rejected.
 
-Plugin and marketplace loading belong to Codex Security. Overrides of
-`plugins`, `marketplaces`, or `features.plugins`, including profile-specific
-plugin overrides, are rejected; choose `--plugin-path` instead. Native
-multi-agent v2 must remain enabled. The legacy `agents.max_threads` setting
-and `features.multi_agent_v2.enabled=false` are incompatible and rejected.
-`validate` and `patch` accept `--effort` and only the `model` and
-`model_reasoning_effort` `--codex` keys; they do not accept general scan
-runtime overrides.
+Plugin loading belongs to Codex Security. Overrides of `plugins`,
+`marketplaces`, or `features.plugins`, including profile-specific plugin
+overrides, are rejected; choose `--plugin-path` instead. The legacy
+`agents.max_threads` setting and
+`features.multi_agent_v2.enabled=false` remain rejected because they cannot
+be projected into the Agents SDK delegate limit.
 
 These overrides do not change the scan's approval policy or filesystem
 permissions. See [Local security model](#local-security-model).
 
 ### Deep-scan engine configuration
 
-When the bundled plugin runs in a normal Codex host, its repeated-discovery
-engine reads `$CODEX_HOME/codex-security/config.toml`, defaulting to
-`~/.codex/codex-security/config.toml`:
+Deep scans keep the same repeated-discovery intent, but the Agents SDK parent
+uses `delegate_security_investigation` instead of the Codex CLI multi-agent
+runtime. The CLI flags and `[deep_scan]` settings still bound worker count,
+subagent count, no-new saturation, and maximum discovery runs:
 
 ```toml
 [deep_scan]
@@ -377,41 +331,41 @@ stop_after_no_new = 6
 max_discovery_runs = 60
 ```
 
-`workers = "auto"` uses half the available parallelism, with a minimum of one
-and a maximum of six discovery workers. Set `workers` to a positive integer to
-choose an explicit count. `subagents` must be a nonnegative integer;
-`stop_after_no_new` and `max_discovery_runs` must be positive integers. Unknown
-`[deep_scan]` keys are rejected.
+Override those defaults for a narrower run, for example:
 
-These settings are separate from Codex's
-`features.multi_agent_v2.max_concurrent_threads_per_session` and
-`bulk-scan --workers`. Importantly, standalone CLI and SDK scans create an
-isolated `CODEX_HOME` and do not import the ambient deep-scan configuration
-file. Consequently, `scan --mode deep` currently uses the deep engine's
-defaults; there are no standalone CLI flags for these four settings. Use
-`--codex` to adjust the Codex session thread limit, not to set `[deep_scan]`
-values.
+```toml
+[deep_scan]
+workers = 2
+subagents = 0
+stop_after_no_new = 3
+max_discovery_runs = 10
+```
+
+The workbench still receives one merged candidate set, then validates, seals,
+and reports the canonical result once. See `AGENTS-SDK-MIGRATION.md` for the
+prototype's remaining production gaps.
 
 ### Environment variables
 
 The CLI and SDK recognize the following user-configurable environment:
 
-| Variable                                                                    | Effect                                                                                        |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
-| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for redacted diagnostics.                                            |
-| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
-| `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
-| `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
-| `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.                     |
-| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.                           |
-| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Select the update-check registry, in the listed precedence order.                             |
-| `CI`                                                                        | Disable interactive update notices in automated environments.                                 |
-| `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`.                |
+| Variable                                                                    | Effect                                                                         |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.              |
+| `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for redacted diagnostics.                             |
+| `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                    |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.  |
+| `CODEX_HOME`                                                                | Select the default Codex Security state parent; defaults to `~/.codex`.        |
+| `CODEX_SECURITY_AGENTS_DOCKER_IMAGE`                                        | Select the Windows Docker sandbox image; defaults to `python:3.12-bookworm`.   |
+| `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.    |
+| `GH_HOST`                                                                   | Select a GitHub Enterprise host during interactive `bulk-scan` discovery.      |
+| `CODEX_SECURITY_NO_UPDATE_NOTICE`, `NO_UPDATE_NOTIFIER`                     | Disable interactive update notices when either variable is defined.            |
+| `CODEX_SECURITY_NPM_REGISTRY`, `npm_config_registry`, `NPM_CONFIG_REGISTRY` | Select the update-check registry, in the listed precedence order.              |
+| `CI`                                                                        | Disable interactive update notices in automated environments.                  |
+| `NO_COLOR`, `TERM`                                                          | Disable colored scan-history output when `NO_COLOR` is defined or `TERM=dumb`. |
 
 Interpreter discovery uses `--python` or `pythonPath` first, then `PYTHON`,
-the managed Codex runtime, and finally `python3` or `python` from `PATH`.
+and finally `python3` or `python` from `PATH`.
 `CODEX_SECURITY_STATE_DIR` takes precedence over `CODEX_HOME`; keep both
 state and result paths outside the scanned repository.
 
@@ -572,27 +526,23 @@ before writing, accepts `--output -` for stdout, and can use
 `--source-root /path/to/repository` with SARIF to add source-line fingerprints.
 Run `npx @openai/codex-security export --help` for all export options.
 
-Use `validate` to run the bundled validation skill on candidate findings and
-`patch` to run the bundled fix-finding skill on security issues. Each positional
-input can be either a file, whose contents are read into the request, or literal
-text. Both commands operate on the current directory, use the scan model
-and reasoning defaults, ignore unrelated user configuration and plugins, and
-print the final response without the underlying Codex event stream. Override
-the model with `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with
-`--effort high` or `--codex 'model_reasoning_effort="high"'`.
+`validate` and `patch` are disabled in this prototype because their legacy
+skill-command path has not yet moved to Agents SDK agents. Scan and deep-scan
+execution, workbench history, export, rerun, match, and compare stay available.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or
 a runtime/export error, `130` for interruption, and `143` for termination.
 
 Use `--dry-run` or `await security.preflight(...)` to validate the repository,
-target, mode, output location, and Codex overrides without initializing the
+target, mode, output location, and runtime overrides without initializing the
 runtime or loading credentials. Dry runs do not inspect the plugin or probe its
 Python interpreter. The preflight result includes the selected authentication
 method and, for an environment API key, its variable name. Authentication and
 model access remain unverified until a real scan starts.
 
-Scan progress identifies the selected credential source before Codex starts.
+Scan progress identifies the selected credential source before the Agents run
+starts.
 Terminals and noninteractive CI logs also show how to retry with
 `--auth chatgpt` when an environment API key overrides the stored sign-in.
 Progress remains on stderr so JSON output stays machine readable. Network
@@ -609,8 +559,8 @@ payments,https://github.com/example/payments.git,0123456789abcdef0123456789abcde
 ```
 
 Once the approved image has been published, prepare private results and
-authentication directories, sign in, and run the Docker Compose configuration
-from the root of the Codex Security repository:
+authentication directories, store an API key, and run the Docker Compose
+configuration from the root of the Codex Security repository:
 
 ```bash
 mkdir -p results state
@@ -618,14 +568,14 @@ chmod 700 results state
 export CODEX_SECURITY_USER="$(id -u):$(id -g)"
 export CODEX_SECURITY_IMAGE=ghcr.io/openai/codex-security:0.1.4
 docker compose pull codex-security
-docker compose run --rm codex-security login --device-auth
+printenv OPENAI_API_KEY | docker compose run --rm -T codex-security login --with-api-key
 docker compose run --rm codex-security
 ```
 
 Reports and resumable scan results are written to `results/`; the reusable
-device login remains in `state/`. For unattended scans, set `OPENAI_API_KEY`
-or `CODEX_API_KEY` instead. Set `GH_TOKEN` or `GITHUB_TOKEN` for private
-GitHub repositories.
+Agents SDK API key remains in `state/`. For unattended scans, set
+`OPENAI_API_KEY` or `CODEX_API_KEY` instead. Set `GH_TOKEN` or
+`GITHUB_TOKEN` for private GitHub repositories.
 
 On Ubuntu hosts that restrict unprivileged user namespaces, an administrator
 can install the optional, narrowly scoped AppArmor profile once:
@@ -647,17 +597,19 @@ repositories you trust and either own or are authorized to assess. Your
 repository, Git installation, configured tools, and other scans under the
 same account are not separate security principals.
 
-Every scan uses the `codex_security_scan` filesystem profile and
-`approvalPolicy: "never"`. It can read the local filesystem and write to
-workspace roots and the selected scan state directory. Scans do not request
-interactive approval. Setting `approval_policy`, `sandbox_mode`, or permissions
-through `--codex` or SDK `codexOverrides` does not replace these controls or
-make them more restrictive. Independently enforced host and network
-restrictions still apply.
+Every scan uses an Agents SDK sandbox manifest with read-only repository and
+bundled-plugin mounts plus writable scan, state, and per-scan runtime mounts.
+The host-owned credential home is not mounted.
+The model receives no web tools and scans do not request interactive approval.
+Setting `approval_policy`, `sandbox_mode`, or permissions through `--codex`
+or SDK `codexOverrides` does not replace these controls. On macOS and Linux,
+the local sandbox still runs with the current user's operating-system
+permissions; use the Docker client when a stronger process boundary is
+required.
 
-Scan and workbench subprocesses can inherit your environment, including
-unrelated API tokens and cloud credentials. Start a scan with only the
-credentials it needs.
+Workbench subprocesses can inherit your environment. The Agents sandbox filters
+key, token, secret, password, and credential variables before model-visible
+tool execution; still start a scan with only the credentials it needs.
 
 The scanner must stay within the target and output paths you authorize and
 must not disclose private data beyond the operation you requested. Its results

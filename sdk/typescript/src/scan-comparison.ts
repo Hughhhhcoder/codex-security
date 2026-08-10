@@ -1,22 +1,29 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import {
-  Codex,
-  type ModelReasoningEffort,
-  type ThreadOptions,
-  type TurnOptions,
-} from "@openai/codex-sdk";
+import { Agent, OpenAIProvider, Runner } from "@openai/agents";
 import { z } from "incur";
-import { accountStatus } from "./auth.js";
+import { storedAgentsApiKey } from "./agents-auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   codexSecurityCredentialHome,
   prepareCodexSecurityCredentialHome,
-  resolveCodexCommand,
 } from "./runtime.js";
 
 type Finding = { occurrenceId: string } & Record<string, unknown>;
+type ModelReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh";
+interface ThreadOptions {
+  model?: string;
+  modelReasoningEffort?: ModelReasoningEffort;
+  sandboxMode?: "read-only";
+  approvalPolicy?: "never";
+  networkAccessEnabled?: false;
+  webSearchMode?: "disabled";
+  workingDirectory: string;
+  skipGitRepoCheck: true;
+}
+interface TurnOptions {
+  outputSchema?: unknown;
+  signal?: AbortSignal;
+}
 
 export interface ScanComparisonInput {
   before: readonly Finding[];
@@ -76,33 +83,30 @@ export async function matchScanFindings(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
 ): Promise<ScanComparisonResult> {
-  const codex =
-    options.codex ??
-    new Codex({
-      env: await comparisonEnvironment(
-        options.environment,
-        accountStatus,
-        options.signal,
-      ),
-      config: {
-        allow_login_shell: false,
-        "features.apps": false,
-        "features.code_mode": false,
-        "features.code_mode_only": false,
-        "features.js_repl": false,
-        "features.multi_agent": false,
-        "features.multi_agent_v2": false,
-        "features.plugins": false,
-        "features.shell_tool": false,
-        "features.unified_exec": false,
-        shell_environment_policy: {
-          inherit: "core",
-          ignore_default_excludes: false,
-          exclude: ["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
-        },
-      },
+  const finalResponse =
+    options.codex === undefined
+      ? await runAgentsComparison(input, options)
+      : await runCompatibleComparison(input, options);
+  let response: unknown;
+  try {
+    response = JSON.parse(finalResponse);
+  } catch (error) {
+    throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
+      cause: error,
     });
-  const thread = codex.startThread({
+  }
+  return validateComparison(
+    input,
+    response,
+    options.allowHistoricalUncertainty ?? false,
+  );
+}
+
+async function runCompatibleComparison(
+  input: ScanComparisonInput,
+  options: ScanComparisonOptions,
+): Promise<string> {
+  const thread = options.codex!.startThread({
     ...(options.model === undefined ? {} : { model: options.model }),
     modelReasoningEffort: options.reasoningEffort ?? "medium",
     sandboxMode: "read-only",
@@ -116,19 +120,45 @@ export async function matchScanFindings(
     outputSchema: z.toJSONSchema(comparisonSchema, { target: "openapi-3.0" }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
-  let response: unknown;
-  try {
-    response = JSON.parse(turn.finalResponse);
-  } catch (error) {
-    throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
-      cause: error,
-    });
-  }
-  return validateComparison(
-    input,
-    response,
-    options.allowHistoricalUncertainty ?? false,
+  return turn.finalResponse;
+}
+
+async function runAgentsComparison(
+  input: ScanComparisonInput,
+  options: ScanComparisonOptions,
+): Promise<string> {
+  const environment = await comparisonEnvironment(
+    options.environment,
+    options.signal,
   );
+  const apiKey =
+    environment["OPENAI_API_KEY"]?.trim() ??
+    environment["CODEX_API_KEY"]?.trim();
+  const provider = new OpenAIProvider(apiKey === undefined ? {} : { apiKey });
+  const runner = new Runner({
+    modelProvider: provider,
+    tracingDisabled: true,
+    traceIncludeSensitiveData: false,
+    workflowName: "Codex Security scan comparison",
+  });
+  const agent = new Agent({
+    name: "Codex Security scan comparison",
+    model: options.model ?? "gpt-5.6-sol",
+    modelSettings: {
+      reasoning: { effort: options.reasoningEffort ?? "medium" },
+    },
+    instructions:
+      "Return only the requested JSON. Do not use tools, files, or the network.",
+  });
+  try {
+    const result = await runner.run(agent, comparisonPrompt(input), {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      maxTurns: 1,
+    });
+    return typeof result.finalOutput === "string" ? result.finalOutput : "";
+  } finally {
+    await provider.close();
+  }
 }
 
 function comparisonPrompt(input: ScanComparisonInput): string {
@@ -146,7 +176,6 @@ function comparisonPrompt(input: ScanComparisonInput): string {
 
 export async function comparisonEnvironment(
   source: NodeJS.ProcessEnv = process.env,
-  nativeAccountStatus: typeof accountStatus = accountStatus,
   signal?: AbortSignal,
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
@@ -165,40 +194,18 @@ export async function comparisonEnvironment(
     return environment;
   }
   const credentialHome = codexSecurityCredentialHome(source);
-  if (existsSync(credentialHome)) {
-    const canonicalCredentialHome =
-      await prepareCodexSecurityCredentialHome(source);
-    signal?.throwIfAborted();
-    const storedEnvironment: Record<string, string> = {
+  if (!existsSync(credentialHome)) return environment;
+  const canonicalCredentialHome =
+    await prepareCodexSecurityCredentialHome(source);
+  signal?.throwIfAborted();
+  const storedApiKey = await storedAgentsApiKey(canonicalCredentialHome);
+  signal?.throwIfAborted();
+  if (storedApiKey !== null) {
+    return {
       ...environment,
+      OPENAI_API_KEY: storedApiKey,
       CODEX_HOME: canonicalCredentialHome,
     };
-    for (const key of Object.keys(storedEnvironment)) {
-      if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase())) {
-        delete storedEnvironment[key];
-      }
-    }
-    const status = await nativeAccountStatus(
-      resolveCodexCommand(),
-      storedEnvironment,
-      signal,
-    );
-    if (status.authenticated) return storedEnvironment;
-  }
-  const configuredHome = environment["CODEX_HOME"]?.trim();
-  const codexHome = configuredHome
-    ? configuredHome === "~"
-      ? homedir()
-      : configuredHome.startsWith("~/")
-        ? join(homedir(), configuredHome.slice(2))
-        : configuredHome
-    : join(homedir(), ".codex");
-  if (existsSync(join(codexHome, "auth.json"))) {
-    for (const key of Object.keys(environment)) {
-      if (["OPENAI_API_KEY", "CODEX_API_KEY"].includes(key.toUpperCase())) {
-        delete environment[key];
-      }
-    }
   }
   return environment;
 }

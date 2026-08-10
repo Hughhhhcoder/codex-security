@@ -2186,6 +2186,21 @@ export async function bootstrapPlugin(
   };
 }
 
+export async function prepareAgentsPlugin(
+  pluginRoot: string,
+): Promise<PluginInstall> {
+  const root = await realpath(pluginRoot);
+  const { name, version } = await pluginMetadata(root);
+  return {
+    pluginRoot: root,
+    marketplaceRoot: root,
+    installedRoot: root,
+    marketplaceName: MARKETPLACE_NAME,
+    name,
+    version,
+  };
+}
+
 export async function pluginMetadata(
   root: string,
 ): Promise<{ name: typeof PLUGIN_NAME; version: string }> {
@@ -2291,10 +2306,12 @@ export function pluginExecutionEnvironment(
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
   return {
-    ...environment,
+    ...Object.fromEntries(
+      Object.entries(environment).filter(
+        ([name]) => name.toUpperCase() !== "CODEX_CLI_PATH",
+      ),
+    ),
     PYTHON: python,
-    CODEX_CLI_PATH:
-      environment["CODEX_CLI_PATH"]?.trim() || resolveCodexCommand().command,
   };
 }
 

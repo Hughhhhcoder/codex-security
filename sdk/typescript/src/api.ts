@@ -9,22 +9,23 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
-import { Codex, type CodexOptions } from "@openai/codex-sdk";
+import {
+  createAgentsClient,
+  type AgentsClientOptions,
+} from "./agents-runtime.js";
+import {
+  persistAgentsApiKey,
+  removeStoredAgentsApiKey,
+  storedAgentsApiKey,
+} from "./agents-auth.js";
 import {
   parse as parseToml,
   stringify as stringifyToml,
   type TomlTable,
 } from "smol-toml";
-import {
-  accountStatus,
-  CodexLoginHandle,
-  loginApiKey as persistApiKey,
-  logout as codexLogout,
-  type AccountStatus,
-} from "./auth.js";
+import type { CodexLoginHandle, AccountStatus } from "./auth.js";
 import {
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
@@ -68,25 +69,20 @@ import {
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
-  bootstrapPlugin,
   cleanupSdkDirectory,
-  codexSecurityCredentialAllowsAmbientImport,
-  codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
-  importAmbientAuth,
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
   planOutputArchive,
   prepareOutputDir,
   preparePersistentScanRoot,
+  prepareAgentsPlugin,
   requireModelSafeOutputDir,
-  resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
   runWorkbench,
-  setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
@@ -112,6 +108,7 @@ interface CodexThreadLike {
     input: string,
     options: { signal: AbortSignal },
   ): Promise<{ events: AsyncGenerator<ScanEvent> }>;
+  close?(): Promise<void>;
 }
 
 interface ScanEvent {
@@ -251,14 +248,14 @@ interface LocalScanInputs
 }
 
 export interface CodexSecurityMetadata {
-  sdk: "@openai/codex-sdk";
+  sdk: "@openai/agents";
   sdkVersion: string;
-  executable: "@openai/codex";
+  executable: "agents-sdk-sandbox";
   executableVersion: string;
 }
 
 interface ClientDependencies {
-  createCodex(options: CodexOptions): CodexClientLike;
+  createCodex(options: AgentsClientOptions): CodexClientLike;
   environment: ProcessEnvironment;
   prepareRuntime?: (
     config: Readonly<CodexSecurityConfig>,
@@ -272,7 +269,7 @@ interface ClientDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: ClientDependencies = {
-  createCodex: (options) => new Codex(options),
+  createCodex: (options) => createAgentsClient(options),
   environment: process.env,
 };
 
@@ -290,19 +287,17 @@ const DEEP_SCAN_SETTINGS = [
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
-    sdk: "@openai/codex-sdk",
+    sdk: "@openai/agents",
     sdkVersion: CODEX_SDK_VERSION,
-    executable: "@openai/codex",
+    executable: "agents-sdk-sandbox",
     executableVersion: CODEX_EXECUTABLE_VERSION,
   };
 
   readonly #dependencies: ClientDependencies;
-  readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
   #runtimePromise: Promise<PreparedRuntime> | null = null;
   #runtime: PreparedRuntime | null = null;
-  #runtimeCredentialSource: "api_key" | "stored_credentials" | null = null;
   #closed = false;
   #closePromise: Promise<void> | null = null;
 
@@ -347,6 +342,11 @@ export class CodexSecurity {
     const configuration = await mergedCodexConfig(this.config);
     const model = scanModelConfiguration(configuration);
     const modelProvider = scanModelProvider(configuration);
+    if (modelProvider === "amazon-bedrock") {
+      throw new CodexSecurityError(
+        "Amazon Bedrock is not supported by the Agents SDK runtime. Configure an Agents SDK model provider before using --provider amazon-bedrock.",
+      );
+    }
     validateScanCostLimit(options.maxCostUsd, model.model);
     const archiveDir =
       options.archiveExisting === true
@@ -393,6 +393,7 @@ export class CodexSecurity {
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
     let preparedTargetWarnings: string[] = [];
+    let activeThread: CodexThreadLike | null = null;
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
     let activeScan: {
@@ -445,6 +446,11 @@ export class CodexSecurity {
 
       const requestedConfig = await mergedCodexConfig(this.config);
       const modelProvider = scanModelProvider(requestedConfig);
+      if (modelProvider === "amazon-bedrock") {
+        throw new CodexSecurityError(
+          "Amazon Bedrock is not supported by the Agents SDK runtime. Configure an Agents SDK model provider before using --provider amazon-bedrock.",
+        );
+      }
       const externalProvider = isExternalModelProvider(modelProvider)
         ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
         : null;
@@ -453,7 +459,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
-      const apiKey =
+      let apiKey =
         authentication.method === "api_key"
           ? environmentApiKey(this.#dependencies.environment, modelProvider)
           : null;
@@ -523,37 +529,9 @@ export class CodexSecurity {
         );
       }
       checkOpen();
-      if (
-        authentication.method === "stored_credentials" &&
-        this.#runtimeCredentialSource === "api_key"
-      ) {
-        const ambientHome =
-          environmentValue(this.#dependencies.environment, "CODEX_HOME") ??
-          join(homedir(), ".codex");
-        runtime.credentialsAvailable = await importAmbientAuth(
-          ambientHome,
-          runtime.codexHome,
-        );
-        this.#runtimeCredentialSource = runtime.credentialsAvailable
-          ? "stored_credentials"
-          : null;
-      }
-      if (externalProvider === null && apiKey !== null) {
-        this.#runtimeCredentialSource = "api_key";
-      }
-      if (
-        !runtime.credentialsAvailable &&
-        authentication.method === "stored_credentials"
-      ) {
-        const status = await accountStatus(
-          this.#codexCommand(),
-          runtime.environment,
-          signal,
-        );
-        runtime.credentialsAvailable = status.authenticated;
-        this.#runtimeCredentialSource = status.authenticated
-          ? "stored_credentials"
-          : null;
+      if (authentication.method === "stored_credentials") {
+        apiKey = await storedAgentsApiKey(runtime.codexHome);
+        runtime.credentialsAvailable = apiKey !== null;
       }
       if (
         !runtime.credentialsAvailable &&
@@ -561,9 +539,7 @@ export class CodexSecurity {
         authentication.method !== "aws_credentials"
       ) {
         throw new AuthenticationRequiredError(
-          "No credentials were found. Run 'codex-security login', use " +
-            "'codex-security login --device-auth' on a remote or headless machine, or set " +
-            "OPENAI_API_KEY or CODEX_API_KEY for CI.",
+          "No Agents SDK API key was found. Run 'codex-security login --with-api-key', or set OPENAI_API_KEY or CODEX_API_KEY.",
         );
       }
       authentication = await runtimeScanAuthentication(
@@ -655,7 +631,8 @@ export class CodexSecurity {
         mode,
         pluginVersion: runtime.plugin.version,
       };
-      const { model } = scanModelConfiguration(effectiveConfig);
+      const { model, reasoningEffort } =
+        scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model);
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
@@ -892,11 +869,20 @@ export class CodexSecurity {
       checkOpen();
       targetPathsFile =
         normalized.kind === "paths"
-          ? join(
-              dirname(runtime.codexHome),
-              `codex-security-target-paths-${randomUUID()}.json`,
-            )
+          ? join(scanDir, ".target-paths.json")
           : null;
+      const agentsRuntimeDirectory = join(scanDir, ".agents-runtime");
+      await mkdir(agentsRuntimeDirectory, { mode: 0o700 });
+      const agentsConfigPath =
+        runtime.configPath === undefined
+          ? undefined
+          : join(agentsRuntimeDirectory, "config-preflight.toml");
+      if (agentsConfigPath !== undefined) {
+        await writeCodexConfig(
+          agentsConfigPath,
+          scanPreflightCodexConfig(effectiveConfig),
+        );
+      }
       const runtimePaths = {
         PYTHON: python,
         CODEX_SECURITY_STARTED_AT: new Date().toISOString(),
@@ -904,6 +890,7 @@ export class CodexSecurity {
         CODEX_SECURITY_SCAN_DIR: scanDir,
         CODEX_SECURITY_PLUGIN_ROOT: shellPluginRoot,
         CODEX_SECURITY_STATE_DIR: stateDirectory,
+        CODEX_SECURITY_AGENTS_RUNTIME_DIR: agentsRuntimeDirectory,
         CODEX_SECURITY_SCAN_ID: scanId,
         CODEX_SECURITY_TARGET_ID: targetId,
         CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
@@ -917,9 +904,9 @@ export class CodexSecurity {
         ...(knowledgeBase === null
           ? {}
           : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
-        ...(runtime.configPath === undefined
+        ...(agentsConfigPath === undefined
           ? {}
-          : { CODEX_SECURITY_CONFIG_PATH: runtime.configPath }),
+          : { CODEX_SECURITY_CONFIG_PATH: agentsConfigPath }),
         ...(targetPathsFile === null
           ? {}
           : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
@@ -942,20 +929,23 @@ export class CodexSecurity {
         ...runtimePaths,
       };
       const codex = this.#dependencies.createCodex({
-        ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+        ...(apiKey === null ? {} : { apiKey }),
         env: definedEnvironment(
           selectedScanEnvironment(environment, "chatgpt"),
         ),
-        config: {
-          default_permissions: SCAN_PERMISSION_PROFILE,
-          allow_login_shell: false,
-        },
+        config: runtime.effectiveConfig,
+        model,
+        reasoningEffort,
+        ...(externalProvider === null
+          ? {}
+          : { providerBaseUrl: externalProvider.base_url }),
       });
       const thread = codex.startThread({
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
         approvalPolicy: "never",
       });
+      activeThread = thread;
       const serializedPaths =
         normalized.kind === "paths"
           ? JSON.stringify(normalized.paths)
@@ -1149,6 +1139,7 @@ export class CodexSecurity {
         for (const cleanup of await Promise.allSettled([
           knowledgeBase?.cleanup(),
           removeTargetPathsFile(targetPathsFile),
+          activeThread?.close?.(),
         ])) {
           if (cleanup.status === "rejected") {
             warnCleanupFailed(options, cleanup.reason);
@@ -1176,112 +1167,45 @@ export class CodexSecurity {
   }
 
   public async loginApiKey(apiKey: string): Promise<void> {
-    const { result, runtime } = await this.#runOperation(
-      async (preparedRuntime, signal) => ({
-        runtime: preparedRuntime,
-        result: await persistApiKey(
-          this.#codexCommand(),
-          preparedRuntime.environment,
-          apiKey,
-          signal,
-        ),
-      }),
-      "chatgpt",
-    );
-    if (!result.success) {
-      throw new CodexSecurityError(
-        `Codex API-key login failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
-      );
-    }
-    if (runtime.persistentCredentialHome === true) {
-      await setCodexSecurityCredentialLogout(runtime.codexHome, false);
-    }
+    const runtime = await this.#runOperation(async (preparedRuntime) => {
+      await persistAgentsApiKey(preparedRuntime.codexHome, apiKey);
+      return preparedRuntime;
+    }, "chatgpt");
     runtime.credentialsAvailable = true;
-    this.#runtimeCredentialSource = "api_key";
   }
 
   public async loginChatGPT(): Promise<CodexLoginHandle> {
-    const runtime = await this.#ensureRuntime(
-      undefined,
-      undefined,
-      undefined,
-      "chatgpt",
+    throw new CodexSecurityError(
+      "ChatGPT login is not available with the Agents SDK runtime. Use 'codex-security login --with-api-key', OPENAI_API_KEY, or CODEX_API_KEY.",
     );
-    this.#requireOpen();
-    const handle = this.#trackLoginHandle(
-      new CodexLoginHandle(
-        this.#codexCommand(),
-        ["login"],
-        runtime.environment,
-        () => {
-          runtime.credentialsAvailable = true;
-          this.#runtimeCredentialSource = "stored_credentials";
-        },
-      ),
-    );
-    await handle.waitForInstructions();
-    this.#requireOpen();
-    return handle;
   }
 
   public async loginChatGPTDeviceCode(): Promise<CodexLoginHandle> {
-    const runtime = await this.#ensureRuntime(
-      undefined,
-      undefined,
-      undefined,
-      "chatgpt",
+    throw new CodexSecurityError(
+      "Device login is not available with the Agents SDK runtime. Use 'codex-security login --with-api-key', OPENAI_API_KEY, or CODEX_API_KEY.",
     );
-    this.#requireOpen();
-    const handle = this.#trackLoginHandle(
-      new CodexLoginHandle(
-        this.#codexCommand(),
-        ["login", "--device-auth"],
-        runtime.environment,
-        () => {
-          runtime.credentialsAvailable = true;
-          this.#runtimeCredentialSource = "stored_credentials";
-        },
-      ),
-    );
-    await handle.waitForInstructions({ deviceCode: true });
-    this.#requireOpen();
-    return handle;
   }
 
   public async account(): Promise<AccountStatus> {
-    return await this.#runOperation(async (runtime, signal) => {
+    return await this.#runOperation(async (runtime) => {
       const apiKey = environmentApiKey(this.#dependencies.environment);
-      if (apiKey !== null) {
-        return {
-          authenticated: true,
-          details: "Authenticated with an API key.",
-        };
-      }
-      return await accountStatus(
-        this.#codexCommand(),
-        runtime.environment,
-        signal,
-      );
+      const stored = await storedAgentsApiKey(runtime.codexHome);
+      return {
+        authenticated: apiKey !== null || stored !== null,
+        details:
+          apiKey !== null || stored !== null
+            ? "Authenticated with an Agents SDK API key."
+            : "No Agents SDK API key is configured.",
+      };
     });
   }
 
   public async logout(): Promise<void> {
-    const runtime = await this.#runOperation(
-      async (preparedRuntime, signal) => {
-        await codexLogout(
-          this.#codexCommand(),
-          preparedRuntime.environment,
-          signal,
-        );
-        return preparedRuntime;
-      },
-      "chatgpt",
-    );
-    if (runtime.persistentCredentialHome === true) {
-      await setCodexSecurityCredentialLogout(runtime.codexHome, true);
-    }
+    const runtime = await this.#runOperation(async (preparedRuntime) => {
+      await removeStoredAgentsApiKey(preparedRuntime.codexHome);
+      return preparedRuntime;
+    }, "chatgpt");
     runtime.credentialsAvailable = false;
-    this.#runtimeCredentialSource = null;
   }
 
   public async close(): Promise<void> {
@@ -1293,17 +1217,14 @@ export class CodexSecurity {
 
   async #finishClose(): Promise<void> {
     const activeOperation = this.#activeOperation;
-    const loginHandles = [...this.#loginHandles];
     if (
       activeOperation !== null ||
-      loginHandles.length > 0 ||
       (this.#runtime === null && this.#runtimePromise !== null)
     ) {
       this.#abortController.abort();
     }
-    for (const handle of loginHandles) handle.cancel();
     await Promise.allSettled(
-      [activeOperation, ...loginHandles.map((handle) => handle.wait())].filter(
+      [activeOperation].filter(
         (operation): operation is Promise<unknown> => operation !== null,
       ),
     );
@@ -1393,7 +1314,6 @@ export class CodexSecurity {
       await this.#cleanupRuntime(this.#runtime);
       this.#runtime = null;
       this.#runtimePromise = null;
-      this.#runtimeCredentialSource = null;
       this.#requireOpen();
     }
     if (this.#runtimePromise === null) {
@@ -1414,23 +1334,7 @@ export class CodexSecurity {
     const runtime = await this.#runtimePromise;
     this.#requireOpen();
     this.#runtime = runtime;
-    this.#runtimeCredentialSource = runtime.credentialsAvailable
-      ? "stored_credentials"
-      : null;
     return this.#runtime;
-  }
-
-  #trackLoginHandle(handle: CodexLoginHandle): CodexLoginHandle {
-    this.#loginHandles.add(handle);
-    void handle.wait().then(
-      () => this.#loginHandles.delete(handle),
-      () => this.#loginHandles.delete(handle),
-    );
-    return handle;
-  }
-
-  #codexCommand(): CodexCommand {
-    return (this.#dependencies.resolveCodexCommand ?? resolveCodexCommand)();
   }
 
   async #refreshPersistentRuntime(
@@ -1455,14 +1359,7 @@ export class CodexSecurity {
         scanPreflightCodexConfig(mergedConfig),
       );
     }
-    runtime.plugin = await bootstrapPlugin(
-      runtime.codexHome,
-      runtime.plugin.pluginRoot,
-      {
-        environment: withoutCodexHome(environment),
-        signal,
-      },
-    );
+    runtime.plugin = await prepareAgentsPlugin(runtime.plugin.pluginRoot);
     runtime.effectiveConfig = mergedConfig;
   }
 
@@ -1543,12 +1440,6 @@ export class CodexSecurity {
         bootstrapWorkspace,
         signal,
       );
-      const nodeAmbientHome = join(homedir(), ".codex");
-      const configuredAmbientHome = environmentValue(
-        processEnvironment,
-        "CODEX_HOME",
-      );
-      const ambientHome = configuredAmbientHome ?? nodeAmbientHome;
       const mergedConfig = await mergedCodexConfig(this.config);
       const codexConfig = await preserveCodexSecurityPluginRegistration(
         codexHome,
@@ -1559,23 +1450,20 @@ export class CodexSecurity {
         ),
       );
       await writeCodexConfig(join(codexHome, "config.toml"), codexConfig);
-      const configPath = join(bootstrapWorkspace, "config-preflight.toml");
+      const configPath = join(codexHome, "config-preflight.toml");
       await writeCodexConfig(
         configPath,
         scanPreflightCodexConfig(mergedConfig),
       );
       throwIfAborted(signal);
-      const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
-        environment: withoutCodexHome(processEnvironment),
-        signal,
-      });
+      const plugin = await prepareAgentsPlugin(pluginRoot);
       const credentialsAvailable =
         isExternalModelProvider(modelProvider) ||
         modelProvider === "amazon-bedrock"
           ? false
           : await initialCredentialsAvailable(
               processEnvironment,
-              ambientHome,
+              "",
               codexHome,
             );
       return {
@@ -1691,16 +1579,12 @@ async function prepareDeepScanConfig(
 
 export async function initialCredentialsAvailable(
   environment: ProcessEnvironment,
-  ambientHome: string,
+  _ambientHome: string,
   isolatedHome: string,
-  importer: typeof importAmbientAuth = importAmbientAuth,
+  _importer?: unknown,
 ): Promise<boolean> {
   if (environmentApiKey(environment) !== null) return false;
-  if (!(await codexSecurityCredentialAllowsAmbientImport(isolatedHome))) {
-    return false;
-  }
-  if (await codexSecurityHasStoredFileCredentials(isolatedHome)) return true;
-  return await importer(ambientHome, isolatedHome);
+  return (await storedAgentsApiKey(isolatedHome)) !== null;
 }
 
 // Reports a cleanup failure without letting it decide the result of the scan. Only the
@@ -2271,24 +2155,9 @@ async function runtimeScanAuthentication(
   const authentication = scanAuthentication(environment, auth, modelProvider);
   if (authentication.method !== "stored_credentials") return authentication;
 
-  try {
-    const stored = JSON.parse(
-      await readFile(join(codexHome, "auth.json"), "utf8"),
-    ) as unknown;
-    if (!isRecord(stored)) return authentication;
-
-    const mode = stored["auth_mode"];
-    if (mode === "apikey" || mode === "api_key") {
-      return { ...authentication, credentialType: "api_key" };
-    }
-    if (mode === "chatgpt") {
-      return { ...authentication, credentialType: "chatgpt" };
-    }
-  } catch {
-    return authentication;
-  }
-
-  return authentication;
+  return (await storedAgentsApiKey(codexHome)) === null
+    ? authentication
+    : { ...authentication, credentialType: "api_key" };
 }
 
 function selectedScanEnvironment(

@@ -4,7 +4,6 @@ import { execFileSync, spawn } from "node:child_process";
 import {
   accessSync,
   constants,
-  existsSync,
   lstatSync,
   realpathSync,
   writeSync,
@@ -26,7 +25,6 @@ import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { ModelReasoningEffort } from "@openai/codex-sdk";
 import { Cli, z } from "incur";
 import { parse as parseToml } from "smol-toml";
 import {
@@ -39,7 +37,16 @@ import {
   type ScanOptions,
   type ScanPreflight,
 } from "./api.js";
-import { accountStatus } from "./auth.js";
+
+type ModelReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+import type { AccountStatus } from "./auth.js";
 import {
   createBulkScanDiscoveryDependencies,
   runBulkScanWizard,
@@ -75,14 +82,12 @@ import { runMultiscan } from "./multiscan.js";
 import type { ScanResult } from "./result.js";
 import {
   bundledPluginRoot,
-  codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   expandHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
-  setCodexSecurityCredentialLogout,
   type CodexCommand,
 } from "./runtime.js";
 import {
@@ -354,6 +359,9 @@ interface CliDependencies {
   bulkScan?: BulkScanDiscoveryDependencies;
   runWorkbench(args: readonly string[]): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
+  agentsAccount?: () => Promise<AccountStatus>;
+  agentsLoginApiKey?: (apiKey: string) => Promise<void>;
+  agentsLogout?: () => Promise<void>;
   checkForUpdate(): Promise<UpdateNotice | undefined>;
 }
 
@@ -362,32 +370,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: () => checkForUpdate({ environment: process.env }),
-  hasStoredChatGPTSignIn: async () => {
-    const environment = Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([name]) =>
-          name.toUpperCase() !== "OPENAI_API_KEY" &&
-          name.toUpperCase() !== "CODEX_API_KEY",
-      ),
-    );
-    const command = resolveCodexCommand();
-    if (existsSync(codexSecurityCredentialHome(process.env))) {
-      const dedicatedStatus = await accountStatus(command, {
-        ...environment,
-        CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
-      });
-      if (
-        dedicatedStatus.authenticated &&
-        /\bchatgpt\b/iu.test(dedicatedStatus.details)
-      ) {
-        return true;
-      }
-    }
-    const ambientStatus = await accountStatus(command, environment);
-    return (
-      ambientStatus.authenticated && /\bchatgpt\b/iu.test(ambientStatus.details)
-    );
-  },
+  hasStoredChatGPTSignIn: async () => false,
   currentDirectory: cwd,
   now: Date.now,
   setInterval: (callback, milliseconds) => setInterval(callback, milliseconds),
@@ -403,8 +386,11 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     writeSync(stream.fd, value);
   },
   forceExit: (signal) => process.kill(process.pid, signal),
-  runCodex: (args, output, environment) =>
-    runCodexSkillCommand(args, output, resolveCodexCommand(), environment),
+  runCodex: async () => {
+    throw new CodexSecurityError(
+      "This command still requires the removed Codex CLI runtime. Use scan, bulk-scan, or the SDK Agents runtime instead.",
+    );
+  },
   exportFindings: async (arguments_, output) => {
     const environment = exportEnvironment();
     const python = await resolvePluginPython({
@@ -484,7 +470,34 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     );
   },
   matchFindings: matchScanFindings,
+  agentsAccount: () => withSecurity((security) => security.account()),
+  agentsLoginApiKey: (apiKey) =>
+    withSecurity((security) => security.loginApiKey(apiKey)),
+  agentsLogout: () => withSecurity((security) => security.logout()),
 };
+
+async function withSecurity<Result>(
+  operation: (security: CodexSecurity) => Promise<Result>,
+): Promise<Result> {
+  const security = new CodexSecurity();
+  try {
+    return await operation(security);
+  } finally {
+    await security.close();
+  }
+}
+
+async function readApiKeyFromStdin(): Promise<string> {
+  let value = "";
+  for await (const chunk of process.stdin) {
+    value += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+  }
+  const apiKey = value.trim();
+  if (apiKey === "") {
+    throw new CodexSecurityError("The API key must be non-empty.");
+  }
+  return apiKey;
+}
 
 export async function runCodexSkillCommand(
   args: readonly string[],
@@ -1032,7 +1045,7 @@ export async function main(
             .enum(["auto", "chatgpt", "api-key"])
             .default("auto")
             .describe(
-              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+              "Select the stored Agents SDK key, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
             ),
           verbose: z
             .boolean()
@@ -1646,7 +1659,7 @@ export async function main(
       },
     })
     .command("login", {
-      description: "Sign in with ChatGPT or store credentials.",
+      description: "Store or inspect an Agents SDK API key.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -1656,7 +1669,7 @@ export async function main(
         deviceAuth: z
           .boolean()
           .default(false)
-          .describe("Use device-code authentication."),
+          .describe("Unsupported with the Agents SDK runtime."),
         withApiKey: z
           .boolean()
           .default(false)
@@ -1664,110 +1677,45 @@ export async function main(
         withAccessToken: z
           .boolean()
           .default(false)
-          .describe("Read an access token from stdin."),
+          .describe("Unsupported with the Agents SDK runtime."),
       }),
       async run({ args, options }) {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
-        const authenticationEnvironment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        exitCode = await dependencies.runCodex(
-          [
-            "login",
-            ...(args.action === undefined ? [] : [args.action]),
-            ...(options.deviceAuth ? ["--device-auth"] : []),
-            ...(options.withApiKey ? ["--with-api-key"] : []),
-            ...(options.withAccessToken ? ["--with-access-token"] : []),
-          ],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (
-          args.action === undefined &&
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
-          await setCodexSecurityCredentialLogout(credentialHome, false);
-        }
         if (args.action === "status") {
-          const authentication = scanAuthentication(dependencies.environment);
-          if (
-            authentication.method === "api_key" &&
-            (exitCode === 0 || exitCode === 1)
-          ) {
-            exitCode = 0;
-            errorOutput.write(
-              `Effective scan authentication: API key from ${authentication.source}.\n`,
-            );
-            errorOutput.write(
-              "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.\n",
-            );
-          }
-        } else if (exitCode === 0 && !options.withApiKey) {
-          const authentication = scanAuthentication(dependencies.environment);
-          if (authentication.method === "api_key") {
-            const configuredApiKeyVariables = Object.entries(
-              dependencies.environment,
-            )
-              .filter(
-                ([name, value]) =>
-                  value?.trim() &&
-                  (name.toUpperCase() === "OPENAI_API_KEY" ||
-                    name.toUpperCase() === "CODEX_API_KEY"),
-              )
-              .map(([name]) => name);
-            const loginWarning = options.withAccessToken
-              ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
-              : "ChatGPT login succeeded. Interactive scans will ask which account to use; " +
-                `noninteractive scans will use ${authentication.source}.\n`;
-            const storedCredentials = options.withAccessToken
-              ? "your stored credentials"
-              : "your ChatGPT sign-in";
-            errorOutput.write(
-              loginWarning +
-                `To use ${storedCredentials}, pass '--auth chatgpt' or run ` +
-                `'unset ${configuredApiKeyVariables.join(" ")}'.\n`,
-            );
-          }
+          const status = await (
+            dependencies.agentsAccount ?? DEFAULT_DEPENDENCIES.agentsAccount!
+          )();
+          exitCode = status.authenticated ? 0 : 1;
+          errorOutput.write(status.details + "\n");
+          return;
         }
+        if (
+          options.deviceAuth ||
+          options.withAccessToken ||
+          !options.withApiKey
+        ) {
+          throw new CodexSecurityError(
+            "The Agents SDK runtime supports API-key authentication only. Pipe an API key to 'codex-security login --with-api-key', or set OPENAI_API_KEY or CODEX_API_KEY.",
+          );
+        }
+        const apiKey = await readApiKeyFromStdin();
+        await (
+          dependencies.agentsLoginApiKey ??
+          DEFAULT_DEPENDENCIES.agentsLoginApiKey!
+        )(apiKey);
+        exitCode = 0;
+        return;
       },
     })
     .command("logout", {
-      description: "Remove the stored sign-in.",
+      description: "Remove the stored Agents SDK API key.",
       destructive: true,
       mcp: false,
       async run() {
-        const credentialHome =
-          dependencies.prepareAuthenticationHome !== undefined
-            ? await dependencies.prepareAuthenticationHome(
-                dependencies.environment,
-              )
-            : await prepareCodexSecurityCredentialHome(
-                dependencies.environment,
-              );
-        const authenticationEnvironment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        exitCode = await dependencies.runCodex(
-          ["logout"],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (
-          exitCode === 0 &&
-          dependencies.prepareAuthenticationHome !== undefined
-        ) {
-          await setCodexSecurityCredentialLogout(credentialHome, true);
-        }
+        await (
+          dependencies.agentsLogout ?? DEFAULT_DEPENDENCIES.agentsLogout!
+        )();
+        exitCode = 0;
+        return;
       },
     })
     .command("info", {
@@ -1786,8 +1734,8 @@ export async function main(
         scanMcp: z.literal(false),
         cancellationNote: z.string(),
         cliVersion: z.string(),
-        codexVersion: z.string(),
-        codexSdkVersion: z.string(),
+        agentsSdkVersion: z.string(),
+        sandboxRuntimeVersion: z.string(),
         model: z.string(),
         reasoningEffort: z.string(),
         nextStep: z.string(),
@@ -1800,8 +1748,8 @@ export async function main(
           cancellationNote:
             "Scans are CLI-only because the MCP transport cannot cancel active commands.",
           cliVersion: VERSION,
-          codexVersion: CODEX_EXECUTABLE_VERSION,
-          codexSdkVersion: CODEX_SDK_VERSION,
+          agentsSdkVersion: CODEX_SDK_VERSION,
+          sandboxRuntimeVersion: CODEX_EXECUTABLE_VERSION,
           ...scanModelConfiguration(DEFAULT_CODEX_CONFIG),
           nextStep: "codex-security scan . --dry-run",
         };
@@ -2092,8 +2040,8 @@ function validateCliArguments(
       "scanMcp",
       "cancellationNote",
       "cliVersion",
-      "codexVersion",
-      "codexSdkVersion",
+      "agentsSdkVersion",
+      "sandboxRuntimeVersion",
       "model",
       "reasoningEffort",
       "nextStep",
@@ -2916,7 +2864,7 @@ async function runScan(
               ? `Using API key from ${authentication.source}`
               : authentication.method === "aws_credentials"
                 ? `Using AWS credentials from ${authentication.source}`
-                : "Using stored Codex credentials",
+                : "Using stored Agents SDK API key",
           );
           return;
         }
@@ -2926,14 +2874,14 @@ async function runScan(
             `Authentication: API key from ${authentication.source}.`,
           );
           progress?.stage(
-            "To use your ChatGPT sign-in, retry with --auth chatgpt.",
+            "To use the stored Agents SDK key, retry with --auth chatgpt.",
           );
         } else if (authentication.method === "aws_credentials") {
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
           );
         } else {
-          progress?.stage("Authentication: stored Codex credentials.");
+          progress?.stage("Authentication: stored Agents SDK API key.");
         }
         progress?.startTimer("Preparing scan");
       },
@@ -2974,7 +2922,7 @@ async function runScan(
                 ? `Authentication interrupted; retrying (${attempt}/${maxAttempts}).`
                 : details?.reason === "authorization"
                   ? `Model access interrupted; retrying (${attempt}/${maxAttempts}).`
-                  : `Codex connection interrupted; retrying (${attempt}/${maxAttempts})`;
+                  : `Agents SDK connection interrupted; retrying (${attempt}/${maxAttempts})`;
         if (dashboard !== null) {
           dashboard.note(message);
           return;
@@ -3283,9 +3231,9 @@ function scanFailureMessage(
       }
       return authentication?.method === "api_key"
         ? `Authentication failed using ${authentication.source}. ` +
-            "Your ChatGPT sign-in was not used. " +
+            "Your stored Agents SDK key was not used. " +
             "Retry with '--auth chatgpt' or provide a valid API key."
-        : "Authentication failed using stored ChatGPT credentials. " +
+        : "Authentication failed using the stored Agents SDK key. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
       if (authentication?.method === "aws_credentials") {
@@ -3297,7 +3245,7 @@ function scanFailureMessage(
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
-        : "The stored ChatGPT credentials cannot access the configured model. " +
+        : "The stored Agents SDK key cannot access the configured model. " +
             "Use an account or API key with model access.";
     case "rate_limited":
       return "The configured account reached its rate limit. Wait and retry.";
@@ -3438,7 +3386,7 @@ function protectedRootErrorMessage(
       ? "Scan output directory"
       : error.pathKind === "temporary"
         ? "Temporary directory"
-        : "Isolated Codex runtime directory";
+        : "Isolated Agents SDK runtime directory";
   const reason =
     error.pathKind === "output"
       ? "Scan artifacts cannot be written inside the protected scan root."

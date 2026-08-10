@@ -184,24 +184,21 @@ function packageVersions(url: URL): {
       throw new Error("dependencies must be an object");
     }
     const sdk =
-      "@openai/codex-sdk" in dependencies
-        ? dependencies["@openai/codex-sdk"]
+      "@openai/agents" in dependencies
+        ? dependencies["@openai/agents"]
         : undefined;
-    const executable =
-      "@openai/codex" in dependencies
-        ? dependencies["@openai/codex"]
-        : undefined;
+    const executable = sdk;
     if (
       typeof sdk !== "string" ||
       sdk.length === 0 ||
       typeof executable !== "string" ||
       executable.length === 0
     ) {
-      throw new Error("Codex dependencies must have non-empty versions");
+      throw new Error("Agents SDK dependency must have a non-empty version");
     }
     return { package: manifest.version, sdk, executable };
   } catch (error) {
-    throw new Error("Unable to read Codex Security package versions.", {
+    throw new Error("Unable to read Codex Security runtime versions.", {
       cause: error,
     });
   }

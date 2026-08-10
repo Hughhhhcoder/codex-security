@@ -1,10 +1,14 @@
 import { chmod, cp, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ThreadEvent } from "@openai/codex-sdk";
 import { runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT } from "../plugin-root.js";
+
+export interface ThreadEvent {
+  readonly type: string;
+  readonly [key: string]: unknown;
+}
 
 export type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>

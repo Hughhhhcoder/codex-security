@@ -143,10 +143,10 @@ describe("TypeScript package skeleton", () => {
     const client = new CodexSecurity({ pluginPath: "/tmp/plugin" });
     expect(client.config.pluginPath).toBe("/tmp/plugin");
     expect(client.metadata).toEqual({
-      sdk: "@openai/codex-sdk",
-      sdkVersion: packageJson.dependencies["@openai/codex-sdk"],
-      executable: "@openai/codex",
-      executableVersion: packageJson.dependencies["@openai/codex"],
+      sdk: "@openai/agents",
+      sdkVersion: packageJson.dependencies["@openai/agents"],
+      executable: "agents-sdk-sandbox",
+      executableVersion: packageJson.dependencies["@openai/agents"],
     });
     expect(new CodexSecurityError("failure").name).toBe("CodexSecurityError");
     await client.close();
