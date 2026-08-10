@@ -89,6 +89,16 @@ describe("security scan file inventory", () => {
       execFileSync("git", ["add", "--force", "--", "tracked-link"], {
         cwd: repository,
       });
+      const externalRepository = join(root, "external-repository");
+      await mkdir(externalRepository);
+      execFileSync("git", ["init", "-q"], { cwd: externalRepository });
+      await symlink(
+        externalRepository,
+        join(repository, "tracked-repository-link"),
+      );
+      execFileSync("git", ["add", "--", "tracked-repository-link"], {
+        cwd: repository,
+      });
     }
 
     const python =
@@ -152,6 +162,46 @@ describe("security scan file inventory", () => {
     );
     expect((await readFile(output, "utf8")).trim()).toBe("src/handler.ts");
   });
+
+  test.each(["repository ", "repository\t"])(
+    "preserves trailing whitespace in the Git worktree root %j",
+    async (directory) => {
+      if (process.platform === "win32" || Bun.which("rg") === null) return;
+
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-whitespace-inventory-")),
+      );
+      temporaryDirectories.push(root);
+      const repository = join(root, directory);
+      const output = join(root, "in-scope-files.txt");
+      await mkdir(repository);
+      execFileSync("git", ["init", "-q"], { cwd: repository });
+      await writeFile(join(repository, ".ignore"), "tracked.py\n");
+      await writeFile(join(repository, "tracked.py"), "print('tracked')\n");
+      execFileSync("git", ["add", "--", "tracked.py"], { cwd: repository });
+
+      const python =
+        Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+      if (python === null) throw new Error("A Python interpreter is required.");
+      execFileSync(
+        python,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          ".",
+          "--out",
+          output,
+        ],
+        { cwd: repository, stdio: "pipe" },
+      );
+      expect((await readFile(output, "utf8")).split("\n")).toContain(
+        "./tracked.py",
+      );
+    },
+  );
 
   test("respects ignore files in non-Git directory snapshots", async () => {
     if (Bun.which("rg") === null) return;
@@ -401,6 +451,53 @@ describe("security scan file inventory", () => {
     expect((await readFile(output, "utf8")).split("\n")).toContain(
       "./nested/inner/security.py",
     );
+  });
+
+  test("discovers embedded repositories beneath outer tracked directories", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-embedded-inventory-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const embedded = join(repository, "shared");
+    const output = join(root, "in-scope-files.txt");
+    await mkdir(embedded, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: repository });
+    await writeFile(join(embedded, "outer.py"), "print('outer')\n");
+    execFileSync("git", ["add", "--", "shared/outer.py"], {
+      cwd: repository,
+    });
+
+    execFileSync("git", ["init", "-q"], { cwd: embedded });
+    await writeFile(join(embedded, ".ignore"), "hidden.py\n");
+    await writeFile(join(embedded, "hidden.py"), "print('tracked')\n");
+    execFileSync("git", ["add", "--", "hidden.py"], { cwd: embedded });
+
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) throw new Error("A Python interpreter is required.");
+    execFileSync(
+      python,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        output,
+      ],
+      { cwd: repository, stdio: "pipe" },
+    );
+
+    const rows = (await readFile(output, "utf8"))
+      .split("\n")
+      .map((path) => path.replaceAll("\\", "/"));
+    expect(rows).toContain("./shared/outer.py");
+    expect(rows).toContain("./shared/hidden.py");
   });
 
   test("retains an explicitly scoped Git-ignored file", async () => {

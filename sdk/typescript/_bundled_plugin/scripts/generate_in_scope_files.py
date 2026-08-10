@@ -96,12 +96,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if any((directory / name).is_symlink() for name in IGNORE_FILE_NAMES):
             raise InventoryError("symbolic ignore files are not supported")
 
+    discovered_roots: set[Path] = set()
     for ancestor in ancestors:
         reject_symbolic_ignore(ancestor)
     if selected.is_dir():
         for directory, children, _ in os.walk(selected, followlinks=False):
+            directory_path = Path(directory)
+            if directory_path != repository and (directory_path / ".git").exists():
+                discovered_roots.add(directory_path)
             children[:] = [name for name in children if name != ".git"]
-            reject_symbolic_ignore(Path(directory))
+            reject_symbolic_ignore(directory_path)
 
     command = [
         "rg",
@@ -225,7 +229,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
     if worktree is not None:
         try:
-            worktree_root = Path(os.fsdecode(worktree.stdout.strip())).resolve(strict=True)
+            root_path = worktree.stdout.removesuffix(b"\n")
+            if os.name == "nt":
+                root_path = root_path.removesuffix(b"\r")
+            worktree_root = Path(os.fsdecode(root_path)).resolve(strict=True)
         except (OSError, ValueError) as error:
             raise InventoryError(f"could not resolve Git worktree root: {error}") from error
         if worktree_root != repository:
@@ -244,7 +251,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError(message)
             listed.append(result.stdout)
 
-        nested_roots: set[Path] = set()
+        nested_roots = discovered_roots.copy()
         current = selected if selected.is_dir() else selected.parent
         while current != repository:
             if (current / ".git").exists():
@@ -255,8 +262,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if not relative:
                     continue
                 candidate = repository / os.fsdecode(relative)
-                if candidate.is_dir() and (candidate / ".git").exists():
-                    nested_roots.add(candidate.resolve(strict=True))
+                if candidate.is_symlink() or not candidate.is_dir():
+                    continue
+                if not (candidate / ".git").exists():
+                    continue
+                try:
+                    discovered = candidate.resolve(strict=True)
+                    discovered.relative_to(repository)
+                except (OSError, ValueError):
+                    continue
+                nested_roots.add(discovered)
 
         pending_roots = sorted(nested_roots)
         inspected_roots: set[Path] = set()
