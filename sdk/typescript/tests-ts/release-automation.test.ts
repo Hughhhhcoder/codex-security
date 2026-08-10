@@ -2072,6 +2072,22 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(ordering).toContain("sleep 15");
     expect(protectedReleaseWorkflow).toContain("      actions: read");
+
+    const failedLookup = spawnSync(
+      "bash",
+      ["-c", `gh() { return 17; }\n${ordering}`],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GITHUB_REPOSITORY: "test/codex-security",
+          GITHUB_RUN_ID: "1",
+          RELEASE_VERSION: "0.2.0",
+        },
+      },
+    );
+    expect(failedLookup.status).toBe(17);
+    expect(failedLookup.stdout).not.toContain("No older npm release");
   });
 
   test("dispatches GitHub releases after publishing with isolated permissions", () => {

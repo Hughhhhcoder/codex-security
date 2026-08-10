@@ -397,6 +397,11 @@ jobs:
 
           for attempt in {1..120}; do
             waiting=
+            active_runs="$(
+              gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/node-release.yml/runs?per_page=100" \
+                --jq '.workflow_runs[] | select(.status != "completed") | [.id, (.head_branch // "")] | @tsv'
+            )"
             while IFS=$'\t' read -r run_id ref_name; do
               [[ -n "$run_id" && "$run_id" != "$GITHUB_RUN_ID" ]] || continue
               [[ "$ref_name" == npm-v* ]] || continue
@@ -406,11 +411,7 @@ jobs:
                 waiting="$run_id"
                 break
               fi
-            done < <(
-              gh api --paginate \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/node-release.yml/runs?per_page=100" \
-                --jq '.workflow_runs[] | select(.status != "completed") | [.id, (.head_branch // "")] | @tsv'
-            )
+            done <<< "$active_runs"
 
             if [[ -z "$waiting" ]]; then
               echo "No older npm release is still running."
