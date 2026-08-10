@@ -10,8 +10,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-GIT_TIMEOUT_SECONDS = 10
-INVENTORY_TIMEOUT_SECONDS = 120
 IGNORE_FILE_NAMES = (".gitignore", ".ignore", ".rgignore")
 
 
@@ -58,9 +56,8 @@ def resolve_scope(repository: Path, value: str) -> str:
     if not resolved.is_dir() and not resolved.is_file():
         raise InventoryError(f"--scope: expected a file or directory: {value}")
 
-    if requested.is_absolute():
-        return relative.as_posix() if relative.parts else "."
-    return value
+    canonical = relative.as_posix() if relative.parts else "."
+    return f"./{canonical}" if value.startswith("./") and canonical != "." else canonical
 
 
 def resolve_output(value: str) -> Path:
@@ -134,9 +131,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     stdout=inventory,
                     stderr=subprocess.PIPE,
                     check=False,
-                    timeout=INVENTORY_TIMEOUT_SECONDS,
                 )
-            except (OSError, subprocess.TimeoutExpired) as error:
+            except OSError as error:
                 raise InventoryError(f"could not run ripgrep: {error}") from error
 
             if result.returncode not in (0, 1):
@@ -210,9 +206,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 stderr=subprocess.PIPE,
                 env=git_environment,
                 check=False,
-                timeout=GIT_TIMEOUT_SECONDS,
             )
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except OSError as error:
             raise InventoryError(f"could not run Git: {error}") from error
 
     def resolve_git_root(value: bytes) -> Path:
@@ -241,18 +236,21 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if worktree_root != repository:
             worktree = None
 
-    if worktree is not None:
+    if worktree is not None or discovered_roots:
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
-        listed: list[bytes] = []
-        for arguments in (["--cached"], ["--others", "--exclude-standard"]):
-            result = run_git(["ls-files", *arguments, "-z", "--", scope])
-            if result.returncode:
-                detail = result.stderr.decode("utf-8", errors="replace").strip()
-                message = f"git ls-files exited with status {result.returncode}"
-                if detail:
-                    message = f"{message}: {detail}"
-                raise InventoryError(message)
-            listed.append(result.stdout)
+        listed = [b"", b""]
+        if worktree is not None:
+            for index, arguments in enumerate(
+                (["--cached"], ["--others", "--exclude-standard"])
+            ):
+                result = run_git(["ls-files", *arguments, "-z", "--", scope])
+                if result.returncode:
+                    detail = result.stderr.decode("utf-8", errors="replace").strip()
+                    message = f"git ls-files exited with status {result.returncode}"
+                    if detail:
+                        message = f"{message}: {detail}"
+                    raise InventoryError(message)
+                listed[index] = result.stdout
 
         nested_roots = discovered_roots.copy()
         current = selected if selected.is_dir() else selected.parent
@@ -286,7 +284,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 ["rev-parse", "--show-toplevel"], directory=nested
             )
             if nested_worktree.returncode:
-                continue
+                detail = nested_worktree.stderr.decode("utf-8", errors="replace").strip()
+                if any(
+                    reason in detail.lower()
+                    for reason in (
+                        "not a git repository",
+                        "gitfile does not point to a valid repository",
+                    )
+                ):
+                    continue
+                raise InventoryError(
+                    f"nested git rev-parse exited with status {nested_worktree.returncode}: {detail}"
+                )
             try:
                 if resolve_git_root(nested_worktree.stdout) != nested:
                     continue
@@ -337,11 +346,24 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for relative in collection.split(b"\0")
             if relative
         }
-        nested_worktrees = tuple(path for path in allowed if path.endswith(b"/"))
+        inspected_prefixes = tuple(
+            normalized(prefix + os.fsencode(root.relative_to(repository).as_posix()) + b"/")
+            for root in inspected_roots
+        )
+        nested_worktrees = tuple(
+            path
+            for path in allowed
+            if path.endswith(b"/") and path not in inspected_prefixes
+        )
         explicitly_ignored = False
-        if scope not in (".", "./"):
+        enclosing_roots = inspected_roots.copy()
+        if worktree is not None:
+            enclosing_roots.add(repository)
+        if scope not in (".", "./") and any(
+            selected.is_relative_to(root) for root in enclosing_roots
+        ):
             enclosing = max(
-                (root for root in (repository, *inspected_roots) if selected.is_relative_to(root)),
+                (root for root in enclosing_roots if selected.is_relative_to(root)),
                 key=lambda root: len(root.parts),
             )
             explicit_relative = selected.relative_to(enclosing).as_posix()
@@ -364,6 +386,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 row
                 for row in rows
                 if (path := normalized(row.removesuffix(b"\n"))) in allowed
+                or (
+                    worktree is None
+                    and not any(path.startswith(root) for root in inspected_prefixes)
+                )
                 or any(path.startswith(worktree) for worktree in nested_worktrees)
             }
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
