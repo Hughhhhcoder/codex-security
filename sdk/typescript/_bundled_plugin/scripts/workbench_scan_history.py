@@ -35,6 +35,8 @@ def _same_repository(
         if not scan["target_id"] or not all(
             field in scan.keys() for field in ("target_device", "target_inode")
         ):
+            if require_ownership:
+                return False
             continue
         device, inode = scan["target_device"], scan["target_inode"]
         if device is None and inode is None:
@@ -90,10 +92,15 @@ def _same_repository(
         or after_target.resolve().is_relative_to(before_target.resolve())
     ):
         return False
-    return after_target.resolve().is_relative_to(after_worktree_path) and any(
-        record.startswith("worktree ")
-        and Path(record.removeprefix("worktree ")).resolve() == after_worktree_path
+    registered_paths = {
+        Path(record.removeprefix("worktree ")).resolve()
         for record in registered_worktrees.split("\0")
+        if record.startswith("worktree ")
+    }
+    return (
+        before_target.resolve().is_relative_to(before_worktree_path)
+        and after_target.resolve().is_relative_to(after_worktree_path)
+        and {before_worktree_path, after_worktree_path} <= registered_paths
     )
 
 
