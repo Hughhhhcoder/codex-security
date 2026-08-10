@@ -27,6 +27,17 @@ def symbolic_metadata(metadata: os.stat_result) -> bool:
     )
 
 
+def git_metadata_path(parent: Path, name: str) -> bool:
+    if name == ".git":
+        return True
+    if name.casefold() != ".git":
+        return False
+    try:
+        return (parent / name).samefile(parent / ".git")
+    except OSError:
+        return False
+
+
 def resolve_repository(value: str) -> Path:
     """Resolve the repository once so every scope is bound to its real root."""
     try:
@@ -54,8 +65,11 @@ def resolve_scope(repository: Path, value: str) -> str:
         relative = resolved.relative_to(repository)
     except ValueError as error:
         raise InventoryError(f"--scope: path must remain inside --repo: {value}") from error
-    if any(component.casefold() == ".git" for component in relative.parts):
-        raise InventoryError("--scope: Git metadata paths are not supported")
+    parent = repository
+    for component in relative.parts:
+        if git_metadata_path(parent, component):
+            raise InventoryError("--scope: Git metadata paths are not supported")
+        parent /= component
 
     current = scope
     while current != repository:
@@ -118,21 +132,27 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         return metadata.st_dev, metadata.st_ino
 
     discovered_roots: dict[tuple[int, int], Path] = {}
+    case_insensitive_metadata = False
     for ancestor in ancestors:
         reject_symbolic_ignore(ancestor)
     if selected.is_dir():
-        for directory, children, _ in os.walk(selected, followlinks=False):
+        for directory, children, files in os.walk(selected, followlinks=False):
             directory_path = Path(directory)
             if directory_path != repository and (directory_path / ".git").exists():
                 discovered_roots[directory_identity(directory_path)] = directory_path
+            case_insensitive_metadata = case_insensitive_metadata or any(
+                name != ".git" and git_metadata_path(directory_path, name)
+                for name in (*children, *files)
+            )
             children[:] = [
                 name
                 for name in children
-                if name.casefold() != ".git"
+                if not git_metadata_path(directory_path, name)
                 and not symbolic_metadata((directory_path / name).stat(follow_symlinks=False))
             ]
             reject_symbolic_ignore(directory_path)
 
+    metadata_glob = "--iglob" if case_insensitive_metadata else "--glob"
     command = [
         "rg",
         "--no-config",
@@ -141,9 +161,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--no-require-git",
         "--no-ignore-parent",
         "--no-ignore-global",
-        "--iglob",
+        metadata_glob,
         "!.git",
-        "--iglob",
+        metadata_glob,
         "!.git/**",
     ]
 

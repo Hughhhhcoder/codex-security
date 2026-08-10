@@ -299,6 +299,51 @@ describe("security scan file inventory", () => {
     ).toThrow("Git metadata paths are not supported");
   });
 
+  test("preserves case-distinct Git-like source directories", async () => {
+    if (process.platform === "win32" || Bun.which("rg") === null) return;
+
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-case-sensitive-inventory-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "snapshot");
+    await mkdir(join(repository, ".GIT"), { recursive: true });
+    try {
+      await realpath(join(repository, ".git"));
+      return;
+    } catch {
+      // A case-distinct source directory exists only on case-sensitive volumes.
+    }
+    await Promise.all([
+      writeFile(join(repository, ".GIT", "source.py"), "print('source')\n"),
+      writeFile(join(repository, "visible.py"), "print('visible')\n"),
+    ]);
+
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) throw new Error("A Python interpreter is required.");
+    const output = join(root, "in-scope-files.txt");
+    for (const scope of [".", ".GIT/source.py"]) {
+      execFileSync(
+        python,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          scope,
+          "--out",
+          output,
+        ],
+        { cwd: repository, stdio: "pipe" },
+      );
+      expect((await readFile(output, "utf8")).split("\n")).toContain(
+        scope === "." ? "./.GIT/source.py" : ".GIT/source.py",
+      );
+    }
+  });
+
   test.each([false, true])(
     "applies intermediate scope ignore files (Git repository: %s)",
     async (useGit) => {
