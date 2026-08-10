@@ -250,6 +250,18 @@ const nestedDirectoryScanProbe = [
   "    for label, path in [('forgedTargetlessIdentity', forged_clone), ('forgedGitDirectoryIdentity', forged_git_directory), ('relatedTargetlessIdentity', related_clone)]:",
   "        targetless_checkout = connection.execute('SELECT NULL AS target_id, ? AS target_path', (str(path),)).fetchone()",
   "        output[label] = _same_repository(targetless_original, targetless_checkout)",
+  "    relocated_target = ensure_security_target(connection, str(related_clone))",
+  "    relocated_metadata = related_clone.stat()",
+  "    connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ('relocated-worktree-workspace', relocated_target, str(related_clone), timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_device, target_inode, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('relocated-worktree-scan', 'relocated-worktree-workspace', relocated_target, str(related_clone), serialize_filesystem_identity(relocated_metadata.st_dev), serialize_filesystem_identity(relocated_metadata.st_ino), 'unversioned', '.', 'standard', directory + '/results/relocated-worktree', 'complete', 'reporting', timestamp, timestamp, timestamp, timestamp))",
+  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('relocated-worktree-scan', timestamp))",
+  "    relocated_worktree = related_clone.with_name('portable-relocated-worktree')",
+  "    related_clone.rename(relocated_worktree)",
+  "    subprocess.run(['git', '-C', str(original_clone), 'worktree', 'repair', str(relocated_worktree)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+  "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(relocated_worktree), relocated_target))",
+  "    relocated_reads = []",
+  "    relocated_matching = list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(original_clone), force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda scan: relocated_reads.append(scan['id']) or {})",
+  "    output['relocatedWorktreeMatching'] = {'scanCount': relocated_matching['scanCount'], 'coverageReads': relocated_reads}",
   "    reused_services = (pathlib.Path(directory) / 'reused-services').resolve()",
   "    previous_services = (pathlib.Path(directory) / 'previous-services').resolve()",
   "    reused_services.mkdir()",
@@ -279,10 +291,10 @@ const nestedDirectoryScanProbe = [
 ].join("\n");
 
 const relocatedFindingProbe = [
-  "import json, os, pathlib, sqlite3, subprocess, sys, tempfile",
+  "import argparse, json, os, pathlib, sqlite3, subprocess, sys, tempfile",
   "sys.path.insert(0, sys.argv[1])",
   "from workbench_db import apply_migrations, finding_result, serialize_filesystem_identity",
-  "from workbench_scan_history import finding_occurrence_rows",
+  "from workbench_scan_history import finding_occurrence_rows, list_scans, list_unmatched_scan_pairs",
   "from workbench_target_state import ensure_security_target",
   "with tempfile.TemporaryDirectory(prefix='codex-security-relocated-finding-') as directory:",
   "    checkout = (pathlib.Path(directory) / 'original-checkout').resolve()",
@@ -306,6 +318,11 @@ const relocatedFindingProbe = [
   "    connection.execute('INSERT INTO finding_occurrences(id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('occurrence', 'finding', 'scan', 'Äuthorization bypass', 'Über account access', 'high', 'high', 'Require authorization.', '{}', timestamp))",
   "    connection.execute('INSERT INTO finding_locations(occurrence_id, relative_path, start_line, end_line, role, sort_order) VALUES (?, ?, ?, ?, ?, ?)', ('occurrence', 'src/ÄUTH-Straße.py', 1, 1, 'root_control', 0))",
   "    searches = {query: [row['id'] for row in finding_occurrence_rows(connection, 'scan', offset=0, limit=20, query=query)] for query in ['äuthorization', 'über', 'äuth-strasse']}",
+  "    connection.execute('UPDATE scans SET target_device = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev + 1), 'scan'))",
+  "    remount_args = argparse.Namespace(repository=str(checkout), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+  "    remounted_scans = [row['scanId'] for row in list_scans(connection, remount_args)['scans']]",
+  "    remounted_matching = list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(checkout), force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda *_: {})['scanCount']",
+  "    connection.execute('UPDATE scans SET target_device = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev), 'scan'))",
   "    scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
   "    occurrence = connection.execute('SELECT * FROM finding_occurrences WHERE id = ?', ('occurrence',)).fetchone()",
   "    moved_checkout = checkout.with_name('moved-checkout')",
@@ -319,7 +336,7 @@ const relocatedFindingProbe = [
   "    replacement.mkdir()",
   "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(replacement), target))",
   "    replaced = finding_result(connection, scan, occurrence, full_details=True)",
-  "    print(json.dumps({'searches': searches, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'mismatchedDeviceAbsolutePath': mismatched_device['locations'][0].get('absolutePath'), 'mismatchedDeviceSourceExcerpt': mismatched_device.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
+  "    print(json.dumps({'searches': searches, 'remountedScans': remounted_scans, 'remountedMatching': remounted_matching, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'mismatchedDeviceAbsolutePath': mismatched_device['locations'][0].get('absolutePath'), 'mismatchedDeviceSourceExcerpt': mismatched_device.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
 ].join("\n");
 
 const findingDetailProbe = [
@@ -632,6 +649,10 @@ describe("workbench findings index", () => {
       forgedTargetlessIdentity: false,
       forgedGitDirectoryIdentity: false,
       relatedTargetlessIdentity: true,
+      relocatedWorktreeMatching: {
+        scanCount: 2,
+        coverageReads: ["portable-scan", "relocated-worktree-scan"],
+      },
       reusedRootDescendantScans: ["current-service-a", "current-service-b"],
       directTargetScanIds: ["scan"],
       directTargetLookupBounded: true,
@@ -662,6 +683,8 @@ describe("workbench findings index", () => {
     expect(result.exitCode).toBe(0);
     const output = JSON.parse(new TextDecoder().decode(result.stdout)) as {
       searches: Record<string, string[]>;
+      remountedScans: string[];
+      remountedMatching: number;
       movedAbsolutePath: string;
       expectedMovedAbsolutePath: string;
       movedSourceExcerpt?: string;
@@ -675,6 +698,8 @@ describe("workbench findings index", () => {
       über: ["occurrence"],
       "äuth-strasse": ["occurrence"],
     });
+    expect(output.remountedScans).toEqual(["scan"]);
+    expect(output.remountedMatching).toBe(1);
     expect(output.movedAbsolutePath).toBe(output.expectedMovedAbsolutePath);
     expect(output.movedSourceExcerpt).toContain("dangerous_sink(user_input)");
     expect(output.mismatchedDeviceAbsolutePath).toBeNull();

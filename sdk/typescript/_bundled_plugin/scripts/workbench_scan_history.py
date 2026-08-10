@@ -25,13 +25,14 @@ def _same_repository(
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
+    before_target_path: str | None = None,
     after_git_directory: str | None = None,
 ) -> bool:
     before_target_id = before["target_id"]
     after_target_id = after["target_id"]
     if before_target_id and before_target_id == after_target_id:
         return True
-    before_target = Path(before["target_path"])
+    before_target = Path(before["target_path"] if before_target_path is None else before_target_path)
     after_target = Path(after["target_path"])
     if before_target.resolve() == after_target.resolve():
         return not before_target_id and not after_target_id
@@ -81,7 +82,7 @@ def _requested_repository(
         return requested, None
     recorded = connection.execute(
         """
-        SELECT target_device, target_inode
+        SELECT target_path, target_device, target_inode
         FROM scans
         WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
         ORDER BY started_at DESC, id DESC
@@ -95,9 +96,11 @@ def _requested_repository(
         metadata = repository.stat()
     except OSError:
         metadata = None
-    if metadata is not None and (
-        stored_filesystem_identity_matches(recorded["target_device"], metadata.st_dev)
-        and stored_filesystem_identity_matches(recorded["target_inode"], metadata.st_ino)
+    if metadata is not None and stored_filesystem_identity_matches(
+        recorded["target_inode"], metadata.st_ino
+    ) and (
+        recorded["target_path"] == str(repository)
+        or stored_filesystem_identity_matches(recorded["target_device"], metadata.st_dev)
     ):
         return requested, None
     return (
@@ -122,13 +125,15 @@ def _verified_target_metadata(
         """
         SELECT 1
         FROM scans
-        WHERE target_id = ? AND target_device = ? AND target_inode = ?
+        WHERE target_id = ? AND target_inode = ?
+            AND (target_path = ? OR target_device = ?)
         LIMIT 1
         """,
         (
             target_id,
-            serialize_filesystem_identity(metadata.st_dev),
             serialize_filesystem_identity(metadata.st_ino),
+            str(repository),
+            serialize_filesystem_identity(metadata.st_dev),
         ),
     ).fetchone()
     return metadata, recorded is not None
@@ -293,13 +298,14 @@ def list_scans(
                 continue
             clauses.append(
                 "(scans.target_id IS NOT ? "
-                "OR (scans.target_device = ? AND scans.target_inode = ?))"
+                "OR (scans.target_inode = ? "
+                "AND (scans.target_path = targets.current_path OR scans.target_device = ?)))"
             )
             values.extend(
                 (
                     target_id,
-                    serialize_filesystem_identity(metadata.st_dev),
                     serialize_filesystem_identity(metadata.st_ino),
+                    serialize_filesystem_identity(metadata.st_dev),
                 )
             )
     if args is not None and args.scan_root:
@@ -476,20 +482,22 @@ def list_unmatched_scan_pairs(
             return False
         if not target_metadata[1]:
             return scan["target_device"] is None and scan["target_inode"] is None
-        return (
-            stored_filesystem_identity_matches(scan["target_device"], target_metadata[0].st_dev)
-            and stored_filesystem_identity_matches(
-                scan["target_inode"], target_metadata[0].st_ino
-            )
+        return stored_filesystem_identity_matches(
+            scan["target_inode"], target_metadata[0].st_ino
+        ) and (
+            scan["target_path"] == scan["current_target_path"]
+            or stored_filesystem_identity_matches(scan["target_device"], target_metadata[0].st_dev)
         )
 
     selected = [
         scan
         for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
+            "SELECT scans.*, targets.current_path AS current_target_path "
+            "FROM scans LEFT JOIN security_targets AS targets ON targets.id = scans.target_id "
+            "WHERE scans.status = 'complete' ORDER BY scans.started_at, scans.id"
         )
         if metadata is not None
-        and _same_repository(scan, requested)
+        and _same_repository(scan, requested, before_target_path=scan["current_target_path"])
         and belongs_to_current_owner(scan)
     ]
 
