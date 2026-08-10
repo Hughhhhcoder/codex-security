@@ -583,6 +583,27 @@ describe("security scan file inventory", () => {
     enumerate("ignored");
     expect((await readFile(output, "utf8")).trim()).toBe("ignored/public.py");
 
+    const tracked = join(repository, "tracked");
+    await mkdir(tracked);
+    await writeFile(join(tracked, "private.py"), "previous tracked source\n");
+    execFileSync("git", ["add", "--", "tracked/private.py"], {
+      cwd: repository,
+    });
+    await rm(tracked, { recursive: true });
+    await symlink(
+      ignored,
+      tracked,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    enumerate(".");
+    const rows = (await readFile(output, "utf8"))
+      .split("\n")
+      .map((path) => path.replaceAll("\\", "/"));
+    expect(rows).toContain("./ignored/public.py");
+    expect(rows).not.toContain("./tracked/private.py");
+    expect(rows).not.toContain("./ignored/private.py");
+
     const snapshot = join(root, "snapshot");
     const nested = join(snapshot, "ignored");
     await mkdir(nested, { recursive: true });

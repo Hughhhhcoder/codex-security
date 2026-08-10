@@ -258,11 +258,9 @@ export async function normalizeTarget(
     }
     let canonical: string;
     try {
-      for (
-        let current = candidate;
-        current !== root;
-        current = dirname(current)
-      ) {
+      let current = root;
+      for (const component of requestedPath.split(sep).filter(Boolean)) {
+        current = join(current, component);
         const metadata = await abortable(() => lstat(current), signal);
         if (metadata.isSymbolicLink()) {
           throw new InvalidTargetError(

@@ -421,7 +421,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if candidate.is_symlink() or not candidate.is_file():
                 continue
             try:
-                candidate.resolve(strict=True).relative_to(repository)
+                resolved = candidate.resolve(strict=True)
+                if resolved != candidate:
+                    continue
+                resolved.relative_to(repository)
             except (OSError, ValueError):
                 continue
             relative_path = prefix + relative
