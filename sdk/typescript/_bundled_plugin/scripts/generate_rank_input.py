@@ -552,14 +552,17 @@ def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, s
         else ["ls-files", "--stage", "-z", "--", relative]
     )
     result = subprocess.run(
-        ["git", "--no-replace-objects", "-C", str(repo), *arguments],
+        ["git", "--no-replace-objects", "--literal-pathspecs", "-C", str(repo), *arguments],
         check=True,
         capture_output=True,
         text=True,
     )
     if not result.stdout:
         return None
-    fields = result.stdout.split("\0", 1)[0].split("\t", 1)[0].split()
+    entry, recorded_path = result.stdout.split("\0", 1)[0].split("\t", 1)
+    if recorded_path != relative:
+        raise SystemExit(f"Git returned an unexpected changed path: {recorded_path}")
+    fields = entry.split()
     revision = fields[2] if mode == "revisions" else fields[1]
     if mode == "local-patch" and fields[0] == "160000" and path.is_dir():
         worktree = submodule_worktree_revision(repo, path)

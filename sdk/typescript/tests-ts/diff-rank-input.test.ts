@@ -163,6 +163,26 @@ async function runDiffRankInput(
 }
 
 describe("diff rank input", () => {
+  test("treats changed tree paths as literal Git pathspecs", async () => {
+    if (process.platform === "win32") return;
+
+    const fixture = await createRepository();
+    const path = ":!literal.py";
+    await writeRepositoryFile(fixture.repository, path, "print('committed')\n");
+    git(fixture.repository, "--literal-pathspecs", "add", "--", path);
+    git(fixture.repository, "commit", "-qm", "add literal path");
+
+    expect(
+      (await runDiffRankInput(fixture, "revisions")).map((row) => row.path),
+    ).toContain(path);
+
+    await writeRepositoryFile(fixture.repository, path, "print('staged')\n");
+    git(fixture.repository, "--literal-pathspecs", "add", "--", path);
+    expect(
+      (await runDiffRankInput(fixture, "local-patch")).map((row) => row.path),
+    ).toContain(path);
+  });
+
   test("inventories committed security-sensitive workflows, containers, and agent instructions", async () => {
     const fixture = await createRepository();
     const files: Record<string, string> = {
