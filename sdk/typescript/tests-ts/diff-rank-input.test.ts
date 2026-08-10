@@ -513,6 +513,30 @@ describe("diff rank input", () => {
     ]);
   });
 
+  test("keeps staged gitlink pins when the local action is uninitialized", async () => {
+    const fixture = await createRepository();
+    const pin = fixture.base;
+    git(fixture.repository, "commit", "--allow-empty", "-qm", "advance parent");
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    const submodule = join(fixture.repository, ".github", "actions", "local");
+    await mkdir(submodule, { recursive: true });
+    git(
+      fixture.repository,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${pin},.github/actions/local`,
+    );
+
+    expect(await runDiffRankInput(fixture, "local-patch")).toEqual([
+      {
+        path: ".github/actions/local",
+        area: "diff",
+        preview: `Git submodule commit ${pin}`,
+      },
+    ]);
+  });
+
   test.skipIf(process.platform === "win32")(
     "refuses to assign changed workflow symlinks to deep reviewers",
     async () => {

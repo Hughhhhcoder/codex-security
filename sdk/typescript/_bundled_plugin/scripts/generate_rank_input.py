@@ -447,14 +447,17 @@ def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, s
         try:
             path.resolve(strict=True).relative_to(repo)
             worktree = subprocess.run(
-                ["git", "-C", str(path), "rev-parse", "--verify", "HEAD"],
+                ["git", "-C", str(path), "rev-parse", "--show-toplevel", "--verify", "HEAD"],
                 check=True,
                 capture_output=True,
                 text=True,
             )
         except (OSError, ValueError, subprocess.CalledProcessError):
             return fields[0], revision
-        revision = worktree.stdout.strip()
+        lines = worktree.stdout.splitlines()
+        if len(lines) != 2 or Path(lines[0]).resolve() != path.resolve():
+            return fields[0], revision
+        revision = lines[1]
     return fields[0], revision
 
 
