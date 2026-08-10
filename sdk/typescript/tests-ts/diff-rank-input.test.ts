@@ -394,6 +394,24 @@ describe("diff rank input", () => {
   );
 
   test.skipIf(process.platform === "win32")(
+    "does not invent executable mode changes when Git ignores file modes",
+    async () => {
+      const fixture = await createRepository();
+      git(fixture.repository, "config", "core.filemode", "false");
+      await writeRepositoryFile(
+        fixture.repository,
+        "src/app.ts",
+        "export const value = 2;\n",
+      );
+      await chmod(join(fixture.repository, "src", "app.ts"), 0o755);
+
+      const [finding] = await runDiffRankInput(fixture, "local-patch");
+      expect(finding?.path).toBe("src/app.ts");
+      expect(finding?.preview).not.toContain("Git file mode:");
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "rejects changed worktree files with another hard link",
     async () => {
       const fixture = await createRepository();
@@ -409,6 +427,28 @@ describe("diff rank input", () => {
       await expect(runDiffRankInput(fixture, "local-patch")).rejects.toThrow(
         /hard links/,
       );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "reads revision objects even when the current checkout has another hard link",
+    async () => {
+      const fixture = await createRepository();
+      await writeRepositoryFile(
+        fixture.repository,
+        "src/app.ts",
+        "export const value = 2;\n",
+      );
+      git(fixture.repository, "add", "src/app.ts");
+      git(fixture.repository, "commit", "-qm", "update linked source");
+      await link(
+        join(fixture.repository, "src", "app.ts"),
+        join(fixture.root, "linked-source.ts"),
+      );
+
+      const [finding] = await runDiffRankInput(fixture, "revisions");
+      expect(finding?.path).toBe("src/app.ts");
+      expect(finding?.preview).toContain("value = 2");
     },
   );
 
@@ -601,6 +641,30 @@ describe("diff rank input", () => {
         preview: `Git submodule commit ${fixture.base}`,
       },
     ]);
+  });
+
+  test("records every unresolved local-action submodule pin", async () => {
+    const fixture = await createRepository();
+    const action = ".github/actions/local";
+    const revisions = [fixture.base];
+    for (const label of ["ours", "theirs"]) {
+      git(fixture.repository, "commit", "--allow-empty", "-qm", label);
+      revisions.push(git(fixture.repository, "rev-parse", "HEAD"));
+    }
+    fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    const stages = revisions.map(
+      (revision, index) => `160000 ${revision} ${index + 1}\t${action}\n`,
+    );
+    execFileSync("git", ["update-index", "--index-info"], {
+      cwd: fixture.repository,
+      input: `0 ${"0".repeat(40)}\t${action}\n${stages.join("")}`,
+    });
+
+    const [finding] = await runDiffRankInput(fixture, "local-patch");
+    expect(finding?.path).toBe(action);
+    for (const revision of revisions) {
+      expect(finding?.preview).toContain(`Git submodule commit ${revision}`);
+    }
   });
 
   test("records unstaged local-action submodule revisions from their worktree", async () => {

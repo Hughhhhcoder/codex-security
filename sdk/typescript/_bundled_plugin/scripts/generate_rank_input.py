@@ -486,6 +486,9 @@ def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
         mode, object_name, stage = entry.split("\t", 1)[0].split()
         if mode == "120000":
             raise SystemExit("Changed diff paths must not contain symbolic links: " + relative)
+        if mode == "160000":
+            lines.extend((f"Git merge stage {stage}:", f"Git submodule commit {object_name}"))
+            continue
         preview, binary = git_blob_preview(repo, path, object_name, preview_bytes)
         if not binary:
             lines.extend((f"Git merge stage {stage}:", preview))
@@ -531,11 +534,15 @@ def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, s
     return fields[0], revision
 
 
-def require_reviewable_diff_path(repo: Path, path: Path) -> None:
+def require_reviewable_diff_path(
+    repo: Path, path: Path, *, reject_hard_links: bool = False
+) -> None:
     if not path.exists() and not path.is_symlink():
         return
     try:
-        if path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1:
+        if path.is_symlink() or not path.is_file() or (
+            reject_hard_links and path.stat().st_nlink != 1
+        ):
             raise ValueError
         path.resolve(strict=True).relative_to(repo)
     except (OSError, ValueError):
@@ -895,6 +902,18 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
 
+    track_worktree_filemode = False
+    if args.mode == "local-patch" and os.name != "nt":
+        filemode = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(repo), "config", "--bool", "core.filemode"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if filemode.returncode not in (0, 1):
+            raise SystemExit("Could not determine whether Git tracks working-tree file modes.")
+        track_worktree_filemode = filemode.stdout.strip() != "false"
+
     rows: list[JsonRow] = []
     for path, status in git_changed_paths(repo, args.base, args.head, args.mode):
         rel = path.relative_to(repo)
@@ -912,9 +931,9 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 if is_binary:
                     continue
         elif status == "U":
-            require_reviewable_diff_path(repo, path)
+            require_reviewable_diff_path(repo, path, reject_hard_links=True)
             preview = unmerged_diff_preview(repo, path, args.preview_bytes)
-            require_reviewable_diff_path(repo, path)
+            require_reviewable_diff_path(repo, path, reject_hard_links=True)
         else:
             entry = git_diff_entry(repo, path, args.mode, args.head)
             if entry is not None and entry[0] == "160000":
@@ -924,13 +943,17 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     raise SystemExit(
                         "Changed diff paths must not contain symbolic links: " + rel.as_posix()
                     )
-                require_reviewable_diff_path(repo, path)
+                require_reviewable_diff_path(
+                    repo, path, reject_hard_links=args.mode == "local-patch"
+                )
                 preview, is_binary = (
                     revision_diff_preview(repo, path, args.head, args.preview_bytes)
                     if args.mode == "revisions"
                     else local_patch_preview(repo, path, entry, args.preview_bytes)
                 )
-                require_reviewable_diff_path(repo, path)
+                require_reviewable_diff_path(
+                    repo, path, reject_hard_links=args.mode == "local-patch"
+                )
                 if is_binary:
                     continue
                 base_entry = git_diff_entry(repo, path, "revisions", args.base)
@@ -941,7 +964,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     and entry[0].startswith("100")
                 ):
                     modes = [base_entry[0], entry[0]]
-                    if args.mode == "local-patch" and os.name != "nt":
+                    if track_worktree_filemode:
                         worktree_mode = "100755" if path.stat().st_mode & 0o111 else "100644"
                         if worktree_mode != modes[-1]:
                             modes.append(worktree_mode)
