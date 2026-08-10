@@ -218,6 +218,10 @@ describe("security scan file inventory", () => {
     execFileSync("git", ["init", "-q"], { cwd: nested });
     await writeFile(join(root, ".gitignore"), "snapshot/source.ts\n");
     await Promise.all([
+      writeFile(
+        join(repository, ".git"),
+        `gitdir: ${join(root, "missing-snapshot-metadata")}\n`,
+      ),
       writeFile(join(repository, ".gitignore"), ".env\n"),
       writeFile(join(repository, ".env"), "SECRET=private\n"),
       writeFile(join(repository, "source.ts"), "export {};\n"),

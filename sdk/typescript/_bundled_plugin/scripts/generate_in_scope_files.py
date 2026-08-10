@@ -124,6 +124,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--no-ignore-parent",
         "--no-ignore-global",
         "--glob",
+        "!.git",
+        "--glob",
         "!.git/**",
     ]
 
@@ -250,10 +252,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     )
     if worktree is not None and worktree.returncode:
         detail = worktree.stderr.decode("utf-8", errors="replace").strip()
-        message = f"git rev-parse exited with status {worktree.returncode}"
-        if detail:
-            message = f"{message}: {detail}"
-        raise InventoryError(message)
+        if any(
+            reason in detail.lower()
+            for reason in ("not a git repository", "gitfile does not point to a valid repository")
+        ):
+            worktree = None
+        else:
+            message = f"git rev-parse exited with status {worktree.returncode}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise InventoryError(message)
 
     if worktree is not None:
         try:
