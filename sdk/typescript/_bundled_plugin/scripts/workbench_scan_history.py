@@ -38,6 +38,27 @@ def _same_repository(
             if any(value is not None for value in (*before_identity, *after_identity)):
                 return before_identity == after_identity and None not in before_identity
         return True
+    for scan in (before, after):
+        if not scan["target_id"] or not all(
+            field in scan.keys() for field in ("target_device", "target_inode")
+        ):
+            continue
+        device, inode = scan["target_device"], scan["target_inode"]
+        if device is None and inode is None:
+            continue
+        target = (
+            before_target_path
+            if scan is before and before_target_path is not None
+            else scan["target_path"]
+        )
+        try:
+            metadata = Path(target).stat()
+        except OSError:
+            return False
+        if not stored_filesystem_identity_matches(
+            device, metadata.st_dev
+        ) or not stored_filesystem_identity_matches(inode, metadata.st_ino):
+            return False
     before_target = Path(before["target_path"] if before_target_path is None else before_target_path)
     after_target = Path(after["target_path"])
     if before_target.resolve() == after_target.resolve():
