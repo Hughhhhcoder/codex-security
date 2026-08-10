@@ -496,6 +496,23 @@ describe("security scan file inventory", () => {
     await writeFile(join(embedded, "hidden.py"), "print('tracked')\n");
     execFileSync("git", ["add", "--", "hidden.py"], { cwd: embedded });
 
+    const caseDistinct = join(repository, "SHARED");
+    let distinctRoot = false;
+    try {
+      await mkdir(caseDistinct);
+      distinctRoot = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    if (distinctRoot) {
+      execFileSync("git", ["init", "-q"], { cwd: caseDistinct });
+      await writeFile(join(caseDistinct, ".ignore"), "hidden.py\n");
+      await writeFile(join(caseDistinct, "hidden.py"), "print('distinct')\n");
+      execFileSync("git", ["add", "--", "hidden.py"], {
+        cwd: caseDistinct,
+      });
+    }
+
     const stale = join(repository, "vendor");
     await mkdir(stale);
     await writeFile(
@@ -527,6 +544,7 @@ describe("security scan file inventory", () => {
       .map((path) => path.replaceAll("\\", "/"));
     expect(rows).toContain("./shared/outer.py");
     expect(rows).toContain("./shared/hidden.py");
+    if (distinctRoot) expect(rows).toContain("./SHARED/hidden.py");
     expect(rows).toContain("./vendor/source.py");
   });
 

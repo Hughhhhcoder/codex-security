@@ -100,14 +100,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if any((directory / name).is_symlink() for name in IGNORE_FILE_NAMES):
             raise InventoryError("symbolic ignore files are not supported")
 
-    discovered_roots: set[Path] = set()
+    def directory_identity(path: Path) -> tuple[int, int]:
+        metadata = path.stat()
+        return metadata.st_dev, metadata.st_ino
+
+    discovered_roots: dict[tuple[int, int], Path] = {}
     for ancestor in ancestors:
         reject_symbolic_ignore(ancestor)
     if selected.is_dir():
         for directory, children, _ in os.walk(selected, followlinks=False):
             directory_path = Path(directory)
             if directory_path != repository and (directory_path / ".git").exists():
-                discovered_roots.add(directory_path)
+                discovered_roots[directory_identity(directory_path)] = directory_path
             children[:] = [name for name in children if name != ".git"]
             reject_symbolic_ignore(directory_path)
 
@@ -284,7 +288,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         current = selected if selected.is_dir() else selected.parent
         while current != repository:
             if (current / ".git").exists():
-                nested_roots.add(current)
+                nested_roots[directory_identity(current)] = current
             current = current.parent
         for index in range(len(listed)):
             for relative in listed_paths(index):
@@ -298,13 +302,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     discovered.relative_to(repository)
                 except (OSError, ValueError):
                     continue
-                nested_roots.add(discovered)
+                nested_roots[directory_identity(discovered)] = discovered
 
-        pending_roots = sorted(nested_roots)
-        inspected_roots: set[Path] = set()
+        pending_roots = sorted(nested_roots.values())
+        inspected_roots: dict[tuple[int, int], Path] = {}
         while pending_roots:
             nested = pending_roots.pop(0)
-            if nested in inspected_roots:
+            nested_identity = directory_identity(nested)
+            if nested_identity in inspected_roots:
                 continue
             nested_worktree = run_git(
                 ["rev-parse", "--show-toplevel"], directory=nested
@@ -327,7 +332,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     continue
             except (OSError, ValueError):
                 continue
-            inspected_roots.add(nested)
+            inspected_roots[nested_identity] = nested
             try:
                 nested_scope = selected.relative_to(nested).as_posix() or "."
             except ValueError:
@@ -365,7 +370,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         discovered.relative_to(repository)
                     except (OSError, ValueError):
                         continue
-                    if discovered not in inspected_roots:
+                    if directory_identity(discovered) not in inspected_roots:
                         pending_roots.append(discovered)
 
         allowed = {
@@ -375,7 +380,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         }
         inspected_prefixes = tuple(
             normalized(prefix + os.fsencode(root.relative_to(repository).as_posix()) + b"/")
-            for root in inspected_roots
+            for root in inspected_roots.values()
         )
         nested_worktrees = tuple(
             path
@@ -383,9 +388,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if path.endswith(b"/") and path not in inspected_prefixes
         )
         explicitly_ignored = False
-        enclosing_roots = inspected_roots.copy()
+        enclosing_roots = list(inspected_roots.values())
         if worktree is not None:
-            enclosing_roots.add(repository)
+            enclosing_roots.append(repository)
         if scope not in (".", "./") and any(
             selected.is_relative_to(root) for root in enclosing_roots
         ):
