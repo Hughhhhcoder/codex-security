@@ -471,6 +471,21 @@ def local_patch_preview(
     return preview, False
 
 
+def submodule_worktree_revision(repo: Path, path: Path) -> str | None:
+    try:
+        path.resolve(strict=True).relative_to(repo)
+        result = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(path), "rev-parse", "--show-toplevel", "--verify", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return None
+    lines = result.stdout.splitlines()
+    return lines[1] if len(lines) == 2 and Path(lines[0]).resolve() == path.resolve() else None
+
+
 def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
     relative = path.relative_to(repo).as_posix()
     result = subprocess.run(
@@ -479,22 +494,44 @@ def unmerged_diff_preview(repo: Path, path: Path, preview_bytes: int) -> str:
         capture_output=True,
         text=True,
     )
+    entries = [
+        entry.split("\t", 1)[0].split()
+        for entry in result.stdout.split("\0")
+        if entry
+    ]
+    submodule_conflict = bool(entries) and all(mode == "160000" for mode, _, _ in entries)
+    if submodule_conflict:
+        try:
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                raise ValueError
+            if path.exists():
+                path.resolve(strict=True).relative_to(repo)
+        except (OSError, ValueError):
+            raise SystemExit("Changed diff paths must not contain symbolic links: " + relative)
+    else:
+        require_reviewable_diff_path(repo, path, reject_hard_links=True)
+
     lines: list[str] = []
-    for entry in result.stdout.split("\0"):
-        if not entry:
-            continue
-        mode, object_name, stage = entry.split("\t", 1)[0].split()
+    for mode, object_name, stage in entries:
         if mode == "120000":
             raise SystemExit("Changed diff paths must not contain symbolic links: " + relative)
+        stage_header = f"Git merge stage {stage} (mode {mode}):"
         if mode == "160000":
-            lines.extend((f"Git merge stage {stage}:", f"Git submodule commit {object_name}"))
+            lines.extend((stage_header, f"Git submodule commit {object_name}"))
             continue
         preview, binary = git_blob_preview(repo, path, object_name, preview_bytes)
         if not binary:
-            lines.extend((f"Git merge stage {stage}:", preview))
-    current, binary = confined_diff_preview(repo, path, preview_bytes)
-    if current and not binary:
-        lines.extend(("Worktree:", current))
+            lines.extend((stage_header, preview))
+
+    if submodule_conflict:
+        worktree = submodule_worktree_revision(repo, path) if path.is_dir() else None
+        if worktree is not None and all(worktree != revision for _, revision, _ in entries):
+            lines.extend(("Worktree:", f"Git submodule commit {worktree}"))
+    else:
+        current, binary = confined_diff_preview(repo, path, preview_bytes)
+        if current and not binary:
+            lines.extend(("Worktree:", current))
+        require_reviewable_diff_path(repo, path, reject_hard_links=True)
     return fit_preview_lines(lines, preview_bytes)
 
 
@@ -516,21 +553,9 @@ def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, s
     fields = result.stdout.split("\0", 1)[0].split("\t", 1)[0].split()
     revision = fields[2] if mode == "revisions" else fields[1]
     if mode == "local-patch" and fields[0] == "160000" and path.is_dir():
-        try:
-            path.resolve(strict=True).relative_to(repo)
-            worktree = subprocess.run(
-                ["git", "--no-replace-objects", "-C", str(path), "rev-parse", "--show-toplevel", "--verify", "HEAD"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except (OSError, ValueError, subprocess.CalledProcessError):
-            return fields[0], revision
-        lines = worktree.stdout.splitlines()
-        if len(lines) != 2 or Path(lines[0]).resolve() != path.resolve():
-            return fields[0], revision
-        if revision != lines[1]:
-            revision = f"{revision} (staged); {lines[1]} (worktree)"
+        worktree = submodule_worktree_revision(repo, path)
+        if worktree is not None and revision != worktree:
+            revision = f"{revision} (staged); {worktree} (worktree)"
     return fields[0], revision
 
 
@@ -931,9 +956,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 if is_binary:
                     continue
         elif status == "U":
-            require_reviewable_diff_path(repo, path, reject_hard_links=True)
             preview = unmerged_diff_preview(repo, path, args.preview_bytes)
-            require_reviewable_diff_path(repo, path, reject_hard_links=True)
         else:
             entry = git_diff_entry(repo, path, args.mode, args.head)
             if entry is not None and entry[0] == "160000":

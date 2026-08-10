@@ -356,7 +356,8 @@ describe("diff rank input", () => {
         encoding: "utf8",
         input: `run: ${label}\n`,
       }).trim();
-      return `100644 ${object} ${index + 1}\t${workflow}\n`;
+      const mode = index === 1 ? "100755" : "100644";
+      return `${mode} ${object} ${index + 1}\t${workflow}\n`;
     });
     execFileSync("git", ["update-index", "--index-info"], {
       cwd: fixture.repository,
@@ -369,6 +370,7 @@ describe("diff rank input", () => {
     for (const label of ["base", "ours", "theirs", "worktree"]) {
       expect(finding?.preview).toContain(`run: ${label}`);
     }
+    expect(finding?.preview).toContain("Git merge stage 2 (mode 100755):");
   });
 
   test("includes executable mode changes in committed diff previews", async () => {
@@ -664,6 +666,25 @@ describe("diff rank input", () => {
     expect(finding?.path).toBe(action);
     for (const revision of revisions) {
       expect(finding?.preview).toContain(`Git submodule commit ${revision}`);
+    }
+
+    const submodule = join(fixture.repository, action);
+    await mkdir(submodule, { recursive: true });
+    git(submodule, "init", "-q", "-b", "main");
+    git(submodule, "config", "user.name", "Codex Security Test");
+    git(submodule, "config", "user.email", "codex-security@example.invalid");
+    git(submodule, "config", "commit.gpgsign", "false");
+    await writeRepositoryFile(submodule, "action.yml", "runs: worktree\n");
+    git(submodule, "add", "action.yml");
+    git(submodule, "commit", "-qm", "initialize conflicted action");
+    const worktree = git(submodule, "rev-parse", "HEAD");
+
+    const [initialized] = await runDiffRankInput(fixture, "local-patch");
+    expect(initialized?.path).toBe(action);
+    for (const revision of [...revisions, worktree]) {
+      expect(initialized?.preview).toContain(
+        `Git submodule commit ${revision}`,
+      );
     }
   });
 
