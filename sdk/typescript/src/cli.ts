@@ -51,6 +51,7 @@ import {
   isExternalModelProvider,
   mergedCodexConfig,
   scanModelConfiguration,
+  scanModelProvider,
   type CodexSecurityConfig,
   type ExternalModelProvider,
   type JsonObject,
@@ -172,6 +173,8 @@ const VALUE_OPTIONS = new Set([
   "--auth",
   "--path",
   "--knowledge-base",
+  "--scan-prompt-file",
+  "--post-scan-prompt-file",
   "--diff",
   "--head",
   "--base",
@@ -207,7 +210,7 @@ const VALUE_OPTIONS = new Set([
   "--reason",
 ]);
 const PROVIDER_OPTION = z
-  .enum(["openai", "openrouter", "fireworks"])
+  .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
   .describe("Inference provider for scans.");
 
@@ -253,12 +256,33 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
     .describe("Maximum deep-scan discovery runs."),
 };
 
+async function readPromptFiles(
+  directory: string,
+  scanPromptFile?: string,
+  postScanPromptFile?: string,
+): Promise<Pick<ScanOptions, "scanPrompt" | "postScanPrompt">> {
+  const [scanPrompt, postScanPrompt] = await Promise.all([
+    scanPromptFile === undefined
+      ? undefined
+      : readFile(resolve(directory, scanPromptFile), "utf8"),
+    postScanPromptFile === undefined
+      ? undefined
+      : readFile(resolve(directory, postScanPromptFile), "utf8"),
+  ]);
+  return {
+    ...(scanPrompt?.trim() ? { scanPrompt } : {}),
+    ...(postScanPrompt?.trim() ? { postScanPrompt } : {}),
+  };
+}
+
 interface ScanArguments extends DeepScanOptions {
   auth?: ScanAuthMode;
   verbose?: boolean;
   repository?: string;
   paths: string[];
   knowledgeBasePaths: string[];
+  scanPromptFile?: string;
+  postScanPromptFile?: string;
   diff?: string;
   workingTree: boolean;
   head?: string;
@@ -266,7 +290,7 @@ interface ScanArguments extends DeepScanOptions {
   mode: ScanMode;
   model?: string;
   effort?: ModelReasoningEffort;
-  provider?: "openai" | ExternalModelProvider;
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider;
   outputDir?: string;
   archiveExisting: boolean;
   pluginPath?: string;
@@ -1266,6 +1290,12 @@ export async function main(
             .describe(
               "Add security-context files or directories; repeat for multiple paths.",
             ),
+          scanPromptFile: optionValue("--scan-prompt-file")
+            .optional()
+            .describe("Append scan instructions from FILE."),
+          postScanPromptFile: optionValue("--post-scan-prompt-file")
+            .optional()
+            .describe("Run FILE after each scan, including failures."),
           diff: optionValue("--diff")
             .optional()
             .describe("Scan committed Git changes from BASE to --head."),
@@ -1399,6 +1429,8 @@ export async function main(
             repository: args.repository,
             paths: options.path,
             knowledgeBasePaths: options.knowledgeBase,
+            scanPromptFile: options.scanPromptFile,
+            postScanPromptFile: options.postScanPromptFile,
             diff: options.diff,
             workingTree: options.workingTree,
             head: options.head,
@@ -1552,6 +1584,12 @@ export async function main(
           .enum(["standard", "deep"])
           .default("standard")
           .describe("Default scan mode for repositories without a CSV mode."),
+        scanPromptFile: optionValue("--scan-prompt-file")
+          .optional()
+          .describe("Append instructions from FILE to every scan."),
+        postScanPromptFile: optionValue("--post-scan-prompt-file")
+          .optional()
+          .describe("Run FILE after each scan, including failures."),
         model: optionValue("--model")
           .optional()
           .describe(
@@ -1602,6 +1640,11 @@ export async function main(
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
           const currentDirectory = dependencies.currentDirectory();
+          const prompts = await readPromptFiles(
+            currentDirectory,
+            options.scanPromptFile,
+            options.postScanPromptFile,
+          );
           let inputPath: string;
           let outputDir: string;
           let githubHost: string | undefined;
@@ -1614,7 +1657,9 @@ export async function main(
                 argument === "--effort" ||
                 argument === "--provider" ||
                 argument === "--codex" ||
-                argument === "--knowledge-base"
+                argument === "--knowledge-base" ||
+                argument === "--scan-prompt-file" ||
+                argument === "--post-scan-prompt-file"
               ) {
                 optionIndex += 2;
               } else if (
@@ -1622,7 +1667,9 @@ export async function main(
                 argument.startsWith("--effort=") ||
                 argument.startsWith("--provider=") ||
                 argument.startsWith("--codex=") ||
-                argument.startsWith("--knowledge-base=")
+                argument.startsWith("--knowledge-base=") ||
+                argument.startsWith("--scan-prompt-file=") ||
+                argument.startsWith("--post-scan-prompt-file=")
               ) {
                 optionIndex += 1;
               } else {
@@ -1664,6 +1711,7 @@ export async function main(
             mode: options.mode,
             maxAttempts: options.maxAttempts,
             knowledgeBasePaths: options.knowledgeBase,
+            ...prompts,
             config: {
               pluginPath: options.pluginPath,
               pythonPath: options.python,
@@ -1676,13 +1724,16 @@ export async function main(
             },
             createSecurity: dependencies.createSecurity,
             signal: controller.signal,
-            onProgress: ({ repository, status, attempt, error }) => {
+            onProgress: ({ repository, status, attempt, error, warning }) => {
+              const detail = error ?? warning;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${error === undefined ? "" : `: ${redactedErrorMessage(error)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${redactedErrorMessage(detail)}`}\n`,
               );
             },
           });
-          exitCode = interruptedExitCode() ?? (result.failed > 0 ? 2 : 0);
+          exitCode =
+            interruptedExitCode() ??
+            (result.failed > 0 || result.incomplete > 0 ? 2 : 0);
           return { ...result };
         } catch (error) {
           exitCode =
@@ -2943,6 +2994,11 @@ async function runScan(
   try {
     const repository = arguments_.repository ?? dependencies.currentDirectory();
     const target = targetFromArguments(arguments_);
+    const prompts = await readPromptFiles(
+      dependencies.currentDirectory(),
+      arguments_.scanPromptFile,
+      arguments_.postScanPromptFile,
+    );
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
@@ -2956,13 +3012,14 @@ async function runScan(
         ),
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
+    const effectiveConfiguration = {
+      ...DEFAULT_CODEX_CONFIG,
+      ...config.codexOverrides,
+    };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
-      scanModelConfiguration({
-        ...DEFAULT_CODEX_CONFIG,
-        ...config.codexOverrides,
-      }));
+      scanModelConfiguration(effectiveConfiguration));
     let auth = arguments_.auth;
-    const provider = config.codexOverrides?.["model_provider"];
+    const provider = scanModelProvider(effectiveConfiguration);
     selectedAuthentication = scanAuthentication(
       dependencies.environment,
       auth,
@@ -3093,6 +3150,7 @@ async function runScan(
       auth,
       target,
       knowledgeBasePaths: arguments_.knowledgeBasePaths,
+      ...prompts,
       mode: arguments_.mode,
       workers: arguments_.workers,
       subagents: arguments_.subagents,
@@ -3165,7 +3223,7 @@ async function runScan(
           requested: auth ?? "auto",
           method: authentication.method,
           source:
-            authentication.method === "api_key"
+            authentication.method !== "stored_credentials"
               ? authentication.source
               : undefined,
           verified: authentication.verified,
@@ -3174,7 +3232,9 @@ async function runScan(
           dashboard.note(
             authentication.method === "api_key"
               ? `Using API key from ${authentication.source}`
-              : "Using stored Codex credentials",
+              : authentication.method === "aws_credentials"
+                ? `Using AWS credentials from ${authentication.source}`
+                : "Using stored Codex credentials",
           );
           return;
         }
@@ -3185,6 +3245,10 @@ async function runScan(
           );
           progress?.stage(
             "To use your ChatGPT sign-in, retry with --auth chatgpt.",
+          );
+        } else if (authentication.method === "aws_credentials") {
+          progress?.stage(
+            `Authentication: AWS credentials from ${authentication.source}.`,
           );
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
@@ -3406,7 +3470,7 @@ async function runScan(
       reasoning_effort: effectivePreflight.reasoningEffort,
       method: effectivePreflight.authentication.method,
       source:
-        effectivePreflight.authentication.method === "api_key"
+        effectivePreflight.authentication.method !== "stored_credentials"
           ? effectivePreflight.authentication.source
           : undefined,
       verified: effectivePreflight.authentication.verified,
@@ -3529,6 +3593,12 @@ function scanFailureMessage(
   if (isLocalScanFailure(error)) return sanitizeDiagnosticValue(error);
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `Authentication failed using AWS credentials from ${authentication.source}. ` +
+          "Check your Amazon Bedrock bearer token or AWS credential chain."
+        );
+      }
       return authentication?.method === "api_key"
         ? `Authentication failed using ${authentication.source}. ` +
             "Your ChatGPT sign-in was not used. " +
@@ -3536,6 +3606,12 @@ function scanFailureMessage(
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
+      if (authentication?.method === "aws_credentials") {
+        return (
+          `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions."
+        );
+      }
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
@@ -3759,7 +3835,7 @@ export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
   effort?: ModelReasoningEffort,
-  provider?: "openai" | ExternalModelProvider,
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
@@ -3769,6 +3845,8 @@ export function parseCodexOverrides(
     result["model_providers"] = {
       [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
     };
+  } else if (provider === "amazon-bedrock") {
+    result["model_provider"] = provider;
   }
   for (const value of values) {
     const separator = value.indexOf("=");
@@ -3825,7 +3903,10 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
-      if (isExternalModelProvider(provider) && key === "model_provider") {
+      if (
+        (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+        key === "model_provider"
+      ) {
         throw new CodexSecurityError(
           "--provider conflicts with --codex model_provider",
         );
@@ -3834,7 +3915,10 @@ export function parseCodexOverrides(
     }
     cursor[final] = parsed;
   }
-  if (isExternalModelProvider(provider) && !("model" in result)) {
+  if (
+    (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+    !("model" in result)
+  ) {
     throw new CodexSecurityError(
       `--model is required when using --provider ${provider}`,
     );
