@@ -422,8 +422,10 @@ def git_blob_preview(
             if process.stdout is None:
                 raise OSError("Git did not provide object contents")
             data = process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES)
+            while process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES):
+                pass
             process.stdout.close()
-        if process.returncode and len(data) < DIRECT_SCOPE_PREVIEW_READ_BYTES:
+        if process.returncode:
             raise OSError("Git could not read the requested object")
     except (OSError, ValueError) as error:
         raise SystemExit(f"Could not read changed Git object: {object_name}") from error
@@ -446,7 +448,7 @@ def local_patch_preview(
 
     relative = path.relative_to(repo).as_posix()
     comparison = subprocess.run(
-        ["git", "--no-replace-objects", "-C", str(repo), "diff", "--quiet", "--no-ext-diff", "--", relative],
+        ["git", "--no-replace-objects", "--literal-pathspecs", "-C", str(repo), "diff", "--quiet", "--no-ext-diff", "--", relative],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -464,7 +466,8 @@ def local_patch_preview(
             "Staged Git index:",
             staged_preview or "(binary content)",
             "Worktree:",
-            worktree_preview or "(binary content)",
+            worktree_preview
+            or ("(deleted)" if not path.exists() else "(binary content)"),
         ],
         preview_bytes,
     )
@@ -474,16 +477,33 @@ def local_patch_preview(
 def submodule_worktree_revision(repo: Path, path: Path) -> str | None:
     try:
         path.resolve(strict=True).relative_to(repo)
-        result = subprocess.run(
-            ["git", "--no-replace-objects", "-C", str(path), "rev-parse", "--show-toplevel", "--verify", "HEAD"],
+        top_level = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(path), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        revision = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(path), "rev-parse", "--verify", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
         )
     except (OSError, ValueError, subprocess.CalledProcessError):
         return None
-    lines = result.stdout.splitlines()
-    return lines[1] if len(lines) == 2 and Path(lines[0]).resolve() == path.resolve() else None
+    if Path(top_level.stdout.removesuffix("\n")).resolve() != path.resolve():
+        return None
+    try:
+        changed = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(path), "status", "--porcelain", "-z", "--untracked-files=all"],
+            check=True,
+            capture_output=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise SystemExit("Could not inspect Git submodule worktree: " + str(path)) from error
+    if changed:
+        raise SystemExit("Dirty Git submodules must be reviewed separately: " + str(path))
+    return revision.stdout.strip()
 
 
 def unmerged_diff_preview(
@@ -564,10 +584,13 @@ def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, s
         raise SystemExit(f"Git returned an unexpected changed path: {recorded_path}")
     fields = entry.split()
     revision = fields[2] if mode == "revisions" else fields[1]
-    if mode == "local-patch" and fields[0] == "160000" and path.is_dir():
-        worktree = submodule_worktree_revision(repo, path)
-        if worktree is not None and revision != worktree:
-            revision = f"{revision} (staged); {worktree} (worktree)"
+    if mode == "local-patch" and fields[0] == "160000":
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise SystemExit("Changed diff paths must not contain symbolic links: " + relative)
+        if path.is_dir():
+            worktree = submodule_worktree_revision(repo, path)
+            if worktree is not None and revision != worktree:
+                revision = f"{revision} (staged); {worktree} (worktree)"
     return fields[0], revision
 
 
@@ -954,7 +977,9 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
         staged = run_git_changed_paths(repo, ["--cached", base])
         combined = dict(staged)
         for path, status in unstaged:
-            if combined.get(path) != "U":
+            if combined.get(path) != "U" and not (
+                status == "D" and combined.get(path) not in (None, "D")
+            ):
                 combined[path] = status
         return sorted(combined.items())
     raise SystemExit(f"Unknown diff mode: {mode}")
@@ -992,7 +1017,12 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     repo, path, args.base, args.preview_bytes
                 )
                 if is_binary:
-                    continue
+                    if entry is None or entry[0] != "100755":
+                        continue
+                    preview = fit_preview_lines(
+                        [f"Deleted Git file (mode {entry[0]}):", "(binary content)"],
+                        args.preview_bytes,
+                    )
         elif status == "U":
             preview = unmerged_diff_preview(
                 repo,
