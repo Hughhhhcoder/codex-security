@@ -2072,6 +2072,20 @@ describe("GitHub release workflow safeguards", () => {
     );
     expect(ordering).toContain("sleep 15");
     expect(protectedReleaseWorkflow).toContain("      actions: read");
+    expect(
+      protectedReleaseWorkflow.indexOf("- name: Wait for older npm releases"),
+    ).toBeLessThan(
+      protectedReleaseWorkflow.indexOf(
+        "- name: Revalidate protected release tag",
+      ),
+    );
+    expect(
+      protectedReleaseWorkflow.indexOf(
+        "- name: Revalidate protected release tag",
+      ),
+    ).toBeLessThan(
+      protectedReleaseWorkflow.indexOf("- name: Publish initial npm release"),
+    );
 
     const failedLookup = spawnSync(
       "bash",

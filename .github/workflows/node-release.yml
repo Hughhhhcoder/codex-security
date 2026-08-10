@@ -332,6 +332,44 @@ jobs:
               "$GITHUB_SHA" \
               "$GITHUB_REPOSITORY"
 
+      - name: Wait for older npm releases
+        if: needs.verify.outputs.mode == 'publish'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..120}; do
+            waiting=
+            active_runs="$(
+              gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/node-release.yml/runs?per_page=100" \
+                --jq '.workflow_runs[] | select(.status != "completed") | [.id, (.head_branch // "")] | @tsv'
+            )"
+            while IFS=$'\t' read -r run_id ref_name; do
+              [[ -n "$run_id" && "$run_id" != "$GITHUB_RUN_ID" ]] || continue
+              [[ "$ref_name" == npm-v* ]] || continue
+              candidate="${ref_name#npm-v}"
+              if node sdk/typescript/scripts/release-automation.mjs \
+                require-increase "$RELEASE_VERSION" "$candidate" >/dev/null 2>&1; then
+                waiting="$run_id"
+                break
+              fi
+            done <<< "$active_runs"
+
+            if [[ -z "$waiting" ]]; then
+              echo "No older npm release is still running."
+              break
+            fi
+            if [[ "$attempt" == 120 ]]; then
+              echo "Timed out waiting for older npm release run $waiting." >&2
+              exit 1
+            fi
+            sleep 15
+          done
+
       - name: Revalidate protected release tag
         if: needs.verify.outputs.mode == 'publish'
         shell: bash
@@ -385,44 +423,6 @@ jobs:
             invalid_tag
           fi
           echo "Protected npm release tag matches the verified commit."
-
-      - name: Wait for older npm releases
-        if: needs.verify.outputs.mode == 'publish'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
-        run: |
-          set -euo pipefail
-
-          for attempt in {1..120}; do
-            waiting=
-            active_runs="$(
-              gh api --paginate \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/node-release.yml/runs?per_page=100" \
-                --jq '.workflow_runs[] | select(.status != "completed") | [.id, (.head_branch // "")] | @tsv'
-            )"
-            while IFS=$'\t' read -r run_id ref_name; do
-              [[ -n "$run_id" && "$run_id" != "$GITHUB_RUN_ID" ]] || continue
-              [[ "$ref_name" == npm-v* ]] || continue
-              candidate="${ref_name#npm-v}"
-              if node sdk/typescript/scripts/release-automation.mjs \
-                require-increase "$RELEASE_VERSION" "$candidate" >/dev/null 2>&1; then
-                waiting="$run_id"
-                break
-              fi
-            done <<< "$active_runs"
-
-            if [[ -z "$waiting" ]]; then
-              echo "No older npm release is still running."
-              break
-            fi
-            if [[ "$attempt" == 120 ]]; then
-              echo "Timed out waiting for older npm release run $waiting." >&2
-              exit 1
-            fi
-            sleep 15
-          done
 
       - name: Publish initial npm release
         if: needs.verify.outputs.mode == 'publish' && github.ref_name == 'npm-v0.1.0'
