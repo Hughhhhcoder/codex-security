@@ -411,6 +411,25 @@ describe("diff rank input", () => {
     ]);
   });
 
+  test("requires full revision reviews from their exact immutable Git objects", async () => {
+    const guidance = await readFile(
+      join(
+        PLUGIN_ROOT,
+        "skills",
+        "security-scan",
+        "references",
+        "scan-artifacts-and-ledger.md",
+      ),
+      "utf8",
+    );
+
+    expect(guidance).toContain('git --no-replace-objects show "<head>:<path>"');
+    expect(guidance).toContain('git --no-replace-objects show "<base>:<path>"');
+    expect(guidance).toContain(
+      "Never substitute the current checkout for either immutable revision.",
+    );
+  });
+
   test("does not apply repository replacement refs to selected revision content", async () => {
     const fixture = await createRepository();
     await writeRepositoryFile(
