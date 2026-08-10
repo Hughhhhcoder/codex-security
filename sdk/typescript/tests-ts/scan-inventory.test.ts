@@ -475,6 +475,14 @@ describe("security scan file inventory", () => {
     await writeFile(join(embedded, "hidden.py"), "print('tracked')\n");
     execFileSync("git", ["add", "--", "hidden.py"], { cwd: embedded });
 
+    const stale = join(repository, "vendor");
+    await mkdir(stale);
+    await writeFile(
+      join(stale, ".git"),
+      `gitdir: ${join(root, "missing-git-metadata")}\n`,
+    );
+    await writeFile(join(stale, "source.py"), "print('copied source')\n");
+
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     if (python === null) throw new Error("A Python interpreter is required.");
@@ -498,6 +506,7 @@ describe("security scan file inventory", () => {
       .map((path) => path.replaceAll("\\", "/"));
     expect(rows).toContain("./shared/outer.py");
     expect(rows).toContain("./shared/hidden.py");
+    expect(rows).toContain("./vendor/source.py");
   });
 
   test("retains an explicitly scoped Git-ignored file", async () => {

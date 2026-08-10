@@ -215,6 +215,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         except (OSError, subprocess.TimeoutExpired) as error:
             raise InventoryError(f"could not run Git: {error}") from error
 
+    def resolve_git_root(value: bytes) -> Path:
+        root_path = value.removesuffix(b"\n")
+        if os.name == "nt":
+            root_path = root_path.removesuffix(b"\r")
+        return Path(os.fsdecode(root_path)).resolve(strict=True)
+
     worktree = (
         run_git(["rev-parse", "--show-toplevel"])
         if (repository / ".git").exists()
@@ -229,10 +235,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
     if worktree is not None:
         try:
-            root_path = worktree.stdout.removesuffix(b"\n")
-            if os.name == "nt":
-                root_path = root_path.removesuffix(b"\r")
-            worktree_root = Path(os.fsdecode(root_path)).resolve(strict=True)
+            worktree_root = resolve_git_root(worktree.stdout)
         except (OSError, ValueError) as error:
             raise InventoryError(f"could not resolve Git worktree root: {error}") from error
         if worktree_root != repository:
@@ -278,6 +281,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         while pending_roots:
             nested = pending_roots.pop(0)
             if nested in inspected_roots:
+                continue
+            nested_worktree = run_git(
+                ["rev-parse", "--show-toplevel"], directory=nested
+            )
+            if nested_worktree.returncode:
+                continue
+            try:
+                if resolve_git_root(nested_worktree.stdout) != nested:
+                    continue
+            except (OSError, ValueError):
                 continue
             inspected_roots.add(nested)
             try:
