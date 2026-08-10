@@ -611,6 +611,15 @@ describe("security scan file inventory", () => {
       writeFile(join(snapshot, ".gitignore"), "ignored/\n"),
       writeFile(join(nested, "private.py"), "ignored source\n"),
     ]);
+    const alias = join(snapshot, "alias");
+    await symlink(
+      nested,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    expect(() => enumerate("alias/private.py", snapshot)).toThrow(
+      "symbolic links",
+    );
 
     enumerate("ignored", snapshot);
     expect((await readFile(output, "utf8")).trim()).toBe("");

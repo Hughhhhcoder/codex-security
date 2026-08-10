@@ -52,7 +52,11 @@ def resolve_scope(repository: Path, value: str) -> str:
     while current != repository:
         if current == current.parent:
             raise InventoryError("--scope: symbolic links are not supported")
-        if current.is_symlink():
+        metadata = current.stat(follow_symlinks=False)
+        reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0) & reparse_point
+        ):
             raise InventoryError("--scope: symbolic links are not supported")
         current = current.parent
 
