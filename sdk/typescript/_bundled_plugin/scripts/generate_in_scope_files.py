@@ -123,9 +123,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--no-require-git",
         "--no-ignore-parent",
         "--no-ignore-global",
-        "--glob",
+        "--iglob",
         "!.git",
-        "--glob",
+        "--iglob",
         "!.git/**",
     ]
 
@@ -254,7 +254,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         detail = worktree.stderr.decode("utf-8", errors="replace").strip()
         if any(
             reason in detail.lower()
-            for reason in ("not a git repository", "gitfile does not point to a valid repository")
+            for reason in (
+                "not a git repository",
+                "gitfile does not point to a valid repository",
+                "invalid gitfile format",
+            )
         ):
             worktree = None
         else:

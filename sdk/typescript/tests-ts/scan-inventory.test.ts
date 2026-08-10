@@ -219,7 +219,7 @@ describe("security scan file inventory", () => {
     await writeFile(join(root, ".gitignore"), "snapshot/source.ts\n");
     await Promise.all([
       writeFile(
-        join(repository, ".git"),
+        join(repository, process.platform === "win32" ? ".GIT" : ".git"),
         `gitdir: ${join(root, "missing-snapshot-metadata")}\n`,
       ),
       writeFile(join(repository, ".gitignore"), ".env\n"),
@@ -259,6 +259,28 @@ describe("security scan file inventory", () => {
       "./nested/tracked.py",
       "./source.ts",
     ]);
+
+    await writeFile(
+      join(repository, process.platform === "win32" ? ".GIT" : ".git"),
+      "malformed snapshot marker\n",
+    );
+    execFileSync(
+      python,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        output,
+      ],
+      { cwd: repository, stdio: "pipe" },
+    );
+    expect((await readFile(output, "utf8")).split("\n")).toContain(
+      "./source.ts",
+    );
   });
 
   test.each([false, true])(
