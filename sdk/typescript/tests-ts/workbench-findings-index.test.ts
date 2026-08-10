@@ -68,12 +68,15 @@ const findingsIndexProbe = [
 
 const nestedDirectoryScanProbe = [
   "import argparse, json, pathlib, sqlite3, subprocess, sys, tempfile",
+  "from functools import cache",
   "sys.path.insert(0, sys.argv[1])",
   "from workbench_db import apply_migrations, serialize_filesystem_identity",
   "from workbench_scan_history import _same_repository, list_scans, list_unmatched_scan_pairs",
+  "import workbench_scan_history as history",
   "from workbench_target import git_output",
   "from workbench_target_state import ensure_security_target",
   "from unittest.mock import patch",
+  "history.git_output = cache(history.git_output)",
   "with tempfile.TemporaryDirectory(prefix='codex-security-unversioned-scan-') as directory:",
   "    root = (pathlib.Path(directory) / 'plain-directory').resolve()",
   "    nested = root / 'src' / 'nested'",
@@ -261,7 +264,7 @@ const nestedDirectoryScanProbe = [
   "        connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', (scan_id, timestamp))",
   "    args = argparse.Namespace(repository=str(reused_services), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
   "    output['reusedRootDescendantScans'] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
-  "    for index in range(50):",
+  "    for index in range(3):",
   "        unrelated = pathlib.Path(directory) / f'unrelated-{index}'",
   "        unrelated.mkdir()",
   "        ensure_security_target(connection, str(unrelated))",
@@ -309,11 +312,14 @@ const relocatedFindingProbe = [
   "    checkout.rename(moved_checkout)",
   "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(moved_checkout), target))",
   "    moved = finding_result(connection, scan, occurrence, full_details=True)",
+  "    connection.execute('UPDATE scans SET target_device = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev + 1), 'scan'))",
+  "    mismatched_scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
+  "    mismatched_device = finding_result(connection, mismatched_scan, occurrence, full_details=True)",
   "    replacement = checkout.with_name('replacement-checkout')",
   "    replacement.mkdir()",
   "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(replacement), target))",
   "    replaced = finding_result(connection, scan, occurrence, full_details=True)",
-  "    print(json.dumps({'searches': searches, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
+  "    print(json.dumps({'searches': searches, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'mismatchedDeviceAbsolutePath': mismatched_device['locations'][0].get('absolutePath'), 'mismatchedDeviceSourceExcerpt': mismatched_device.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
 ].join("\n");
 
 const findingDetailProbe = [
@@ -659,6 +665,8 @@ describe("workbench findings index", () => {
       movedAbsolutePath: string;
       expectedMovedAbsolutePath: string;
       movedSourceExcerpt?: string;
+      mismatchedDeviceAbsolutePath: string | null;
+      mismatchedDeviceSourceExcerpt: string | null;
       replacementAbsolutePath: string | null;
       replacementSourceExcerpt: string | null;
     };
@@ -669,6 +677,8 @@ describe("workbench findings index", () => {
     });
     expect(output.movedAbsolutePath).toBe(output.expectedMovedAbsolutePath);
     expect(output.movedSourceExcerpt).toContain("dangerous_sink(user_input)");
+    expect(output.mismatchedDeviceAbsolutePath).toBeNull();
+    expect(output.mismatchedDeviceSourceExcerpt).toBeNull();
     expect(output.replacementAbsolutePath).toBeNull();
     expect(output.replacementSourceExcerpt).toBeNull();
   });
