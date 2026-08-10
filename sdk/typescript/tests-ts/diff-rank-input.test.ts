@@ -194,6 +194,7 @@ describe("diff rank input", () => {
       "docs/AGENTS.md":
         "Example instructions, not executable repository scope.\n",
       "docs/CODEOWNERS": "* @documentation-owners\n",
+      "docs/SECURITY.md": "Report repository vulnerabilities privately.\n",
       "infra/main.tf": 'resource "example" "service" {}\n',
       "infra/variables.hcl": 'environment = "production"\n',
       "node_modules/AGENTS.md": "External dependency instructions.\n",
@@ -254,6 +255,7 @@ describe("diff rank input", () => {
         "config/nginx.conf",
         "docker-compose.yml",
         "docs/CODEOWNERS",
+        "docs/SECURITY.md",
         "infra/main.tf",
         "infra/variables.hcl",
         "policy/security.rego",
@@ -409,6 +411,35 @@ describe("diff rank input", () => {
     ]);
   });
 
+  test("does not apply repository replacement refs to selected revision content", async () => {
+    const fixture = await createRepository();
+    await writeRepositoryFile(
+      fixture.repository,
+      "src/app.ts",
+      "dangerous();\n",
+    );
+    git(fixture.repository, "add", "src/app.ts");
+    git(fixture.repository, "commit", "-qm", "record actual head");
+    const head = git(fixture.repository, "rev-parse", "HEAD");
+    await writeRepositoryFile(fixture.repository, "src/app.ts", "safe();\n");
+    git(fixture.repository, "add", "src/app.ts");
+    const replacementTree = git(fixture.repository, "write-tree");
+    const replacement = git(
+      fixture.repository,
+      "commit-tree",
+      replacementTree,
+      "-p",
+      fixture.base,
+      "-m",
+      "substitute safe source",
+    );
+    git(fixture.repository, "replace", head, replacement);
+
+    expect(
+      await runDiffRankInput(fixture, "revisions", undefined, head),
+    ).toEqual([{ path: "src/app.ts", area: "diff", preview: "dangerous();" }]);
+  });
+
   test("keeps security-relevant rename sources when destinations are excluded", async () => {
     const fixture = await createRepository();
     await mkdir(join(fixture.repository, "docs"));
@@ -420,7 +451,11 @@ describe("diff rank input", () => {
     git(fixture.repository, "commit", "-qm", "archive active security policy");
 
     expect(await runDiffRankInput(fixture, "revisions")).toEqual([
-      { path: "AGENTS.md", area: "diff", preview: "" },
+      {
+        path: "AGENTS.md",
+        area: "diff",
+        preview: "Follow the existing policy.",
+      },
     ]);
   });
 
@@ -435,7 +470,7 @@ describe("diff rank input", () => {
     git(fixture.repository, "commit", "-qm", "archive reviewable source");
 
     expect(await runDiffRankInput(fixture, "revisions")).toEqual([
-      { path: "src/old.py", area: "diff", preview: "" },
+      { path: "src/old.py", area: "diff", preview: "print('rename')" },
     ]);
   });
 
@@ -456,6 +491,29 @@ describe("diff rank input", () => {
     expect(
       (await runDiffRankInput(fixture, "revisions")).map(({ path }) => path),
     ).toEqual(payloads);
+  });
+
+  test("keeps executable UTF-16 local-action scripts reviewable", async () => {
+    const fixture = await createRepository();
+    const script = ".github/actions/local/run.ps1";
+    await writeRepositoryFile(
+      fixture.repository,
+      script,
+      Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from("Invoke-Expression $command\n", "utf16le"),
+      ]),
+    );
+    git(fixture.repository, "add", script);
+    git(fixture.repository, "commit", "-qm", "add PowerShell action");
+
+    expect(await runDiffRankInput(fixture, "revisions")).toEqual([
+      {
+        path: script,
+        area: "diff",
+        preview: "Invoke-Expression $command",
+      },
+    ]);
   });
 
   test("records the pinned commit for local-action submodules", async () => {
@@ -508,7 +566,17 @@ describe("diff rank input", () => {
       {
         path: ".github/actions/local",
         area: "diff",
-        preview: `Git submodule commit ${unstaged}`,
+        preview: `Git submodule commit ${staged} (staged); ${unstaged} (worktree)`,
+      },
+    ]);
+
+    git(fixture.repository, "add", "--", ".github/actions/local");
+    git(submodule, "checkout", "--quiet", staged);
+    expect(await runDiffRankInput(fixture, "local-patch")).toEqual([
+      {
+        path: ".github/actions/local",
+        area: "diff",
+        preview: `Git submodule commit ${unstaged} (staged); ${staged} (worktree)`,
       },
     ]);
   });
@@ -557,6 +625,30 @@ describe("diff rank input", () => {
       );
     },
   );
+
+  test("exposes both staged and working-tree source when they differ", async () => {
+    const fixture = await createRepository();
+    const workflow = ".github/workflows/deploy.yml";
+    await writeRepositoryFile(
+      fixture.repository,
+      workflow,
+      "run: stagedDangerousCommand\n",
+    );
+    git(fixture.repository, "add", workflow);
+    await writeRepositoryFile(
+      fixture.repository,
+      workflow,
+      "run: worktreeSafeCommand\n",
+    );
+
+    const rows = await runDiffRankInput(fixture, "local-patch");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ path: workflow, area: "diff" });
+    expect(rows[0]?.preview).toContain("Staged Git index:");
+    expect(rows[0]?.preview).toContain("stagedDangerousCommand");
+    expect(rows[0]?.preview).toContain("Worktree:");
+    expect(rows[0]?.preview).toContain("worktreeSafeCommand");
+  });
 
   test.skipIf(process.platform === "win32")(
     "refuses repository paths escaping through a symlinked parent",
@@ -706,7 +798,11 @@ describe("diff rank input", () => {
     const rows = await runDiffRankInput(fixture, "revisions");
 
     expect(rows).toEqual([
-      { path: "src/remove.py", area: "diff", preview: "" },
+      {
+        path: "src/remove.py",
+        area: "diff",
+        preview: "print('remove')",
+      },
       {
         path: "src/renamed.py",
         area: "diff",

@@ -345,7 +345,7 @@ def diff_path_is_security_relevant(path: Path) -> bool:
 
 
 def diff_path_is_included(path: Path) -> bool:
-    if path.parts == ("docs", "CODEOWNERS"):
+    if path.parts in {("docs", "CODEOWNERS"), ("docs", "SECURITY.md")}:
         return True
     if path.parts[:2] == (".github", "actions"):
         return ".git" not in path.parts
@@ -388,7 +388,7 @@ def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[s
                 return "", False
 
             sample = source.read(4096)
-            if is_binary_sample(sample):
+            if is_binary_sample(sample) and not sample.startswith((b"\xff\xfe", b"\xfe\xff")):
                 return "", True
 
             remaining = source.read(max(0, DIRECT_SCOPE_PREVIEW_READ_BYTES - len(sample)))
@@ -399,22 +399,23 @@ def confined_diff_preview(repo: Path, path: Path, preview_bytes: int) -> tuple[s
 
 
 def diff_preview_data(path: Path, data: bytes, preview_bytes: int) -> tuple[str, bool]:
-    if is_binary_sample(data):
+    utf16 = data.startswith((b"\xff\xfe", b"\xfe\xff"))
+    if is_binary_sample(data) and not utf16:
         return "", True
 
-    text = data.decode("utf-8", errors="ignore")
+    text = data.decode("utf-16" if utf16 else "utf-8", errors="ignore")
     outline = structural_outline(path, text)
-    preview_lines = select_preview_lines(outline or text.splitlines())
+    source_lines = text.splitlines() if path.suffix.lower() in {".yml", ".yaml"} else outline
+    preview_lines = select_preview_lines(source_lines or text.splitlines())
     return fit_preview_lines(preview_lines, preview_bytes), False
 
 
-def revision_diff_preview(
-    repo: Path, path: Path, revision: str, preview_bytes: int
+def git_blob_preview(
+    repo: Path, path: Path, object_name: str, preview_bytes: int
 ) -> tuple[str, bool]:
-    relative = path.relative_to(repo).as_posix()
     try:
         with subprocess.Popen(
-            ["git", "-C", str(repo), "cat-file", "blob", f"{revision}:{relative}"],
+            ["git", "--no-replace-objects", "-C", str(repo), "cat-file", "blob", object_name],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         ) as process:
@@ -429,6 +430,47 @@ def revision_diff_preview(
     return diff_preview_data(path, data, preview_bytes)
 
 
+def revision_diff_preview(
+    repo: Path, path: Path, revision: str, preview_bytes: int
+) -> tuple[str, bool]:
+    relative = path.relative_to(repo).as_posix()
+    return git_blob_preview(repo, path, f"{revision}:{relative}", preview_bytes)
+
+
+def local_patch_preview(
+    repo: Path, path: Path, entry: tuple[str, str] | None, preview_bytes: int
+) -> tuple[str, bool]:
+    worktree_preview, worktree_binary = confined_diff_preview(repo, path, preview_bytes)
+    if entry is None:
+        return worktree_preview, worktree_binary
+
+    relative = path.relative_to(repo).as_posix()
+    comparison = subprocess.run(
+        ["git", "--no-replace-objects", "-C", str(repo), "diff", "--quiet", "--no-ext-diff", "--", relative],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    if comparison.returncode == 0:
+        return worktree_preview, worktree_binary
+    if comparison.returncode != 1:
+        raise SystemExit(f"Could not compare staged and working-tree contents: {relative}")
+
+    staged_preview, staged_binary = git_blob_preview(repo, path, f":{relative}", preview_bytes)
+    if staged_binary and worktree_binary:
+        return "", True
+    preview = fit_preview_lines(
+        [
+            "Staged Git index:",
+            staged_preview or "(binary content)",
+            "Worktree:",
+            worktree_preview or "(binary content)",
+        ],
+        preview_bytes,
+    )
+    return preview, False
+
+
 def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, str] | None:
     relative = path.relative_to(repo).as_posix()
     arguments = (
@@ -437,7 +479,10 @@ def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, s
         else ["ls-files", "--stage", "-z", "--", relative]
     )
     result = subprocess.run(
-        ["git", "-C", str(repo), *arguments], check=True, capture_output=True, text=True
+        ["git", "--no-replace-objects", "-C", str(repo), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
     )
     if not result.stdout:
         return None
@@ -447,7 +492,7 @@ def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, s
         try:
             path.resolve(strict=True).relative_to(repo)
             worktree = subprocess.run(
-                ["git", "-C", str(path), "rev-parse", "--show-toplevel", "--verify", "HEAD"],
+                ["git", "--no-replace-objects", "-C", str(path), "rev-parse", "--show-toplevel", "--verify", "HEAD"],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -457,7 +502,8 @@ def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, s
         lines = worktree.stdout.splitlines()
         if len(lines) != 2 or Path(lines[0]).resolve() != path.resolve():
             return fields[0], revision
-        revision = lines[1]
+        if revision != lines[1]:
+            revision = f"{revision} (staged); {lines[1]} (worktree)"
     return fields[0], revision
 
 
@@ -767,6 +813,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
     result = subprocess.run(
         [
             "git",
+            "--no-replace-objects",
             "-C",
             str(repo),
             "diff",
@@ -814,7 +861,7 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
         combined = dict(staged)
         combined.update(unstaged)
         untracked = subprocess.run(
-            ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
+            ["git", "--no-replace-objects", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"],
             check=True,
             capture_output=True,
             text=True,
@@ -837,7 +884,17 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         if not diff_path_is_included(rel):
             continue
 
-        if status in {"D", "U"}:
+        if status == "D":
+            entry = git_diff_entry(repo, path, "revisions", args.base)
+            if entry is not None and entry[0] == "160000":
+                preview = f"Deleted Git submodule commit {entry[1]}"
+            else:
+                preview, is_binary = revision_diff_preview(
+                    repo, path, args.base, args.preview_bytes
+                )
+                if is_binary:
+                    continue
+        elif status == "U":
             preview = ""
         else:
             entry = git_diff_entry(repo, path, args.mode, args.head)
@@ -852,7 +909,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                 preview, is_binary = (
                     revision_diff_preview(repo, path, args.head, args.preview_bytes)
                     if args.mode == "revisions"
-                    else confined_diff_preview(repo, path, args.preview_bytes)
+                    else local_patch_preview(repo, path, entry, args.preview_bytes)
                 )
                 require_reviewable_diff_path(repo, path)
                 if is_binary:
