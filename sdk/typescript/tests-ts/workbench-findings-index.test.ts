@@ -205,6 +205,8 @@ const nestedDirectoryScanProbe = [
   "    reused_scan = lambda scan_id: connection.execute('SELECT * FROM scans WHERE id = ?', (scan_id,)).fetchone()",
   "    output['reusedRegisteredScanIdentity'] = _same_repository(reused_scan('stale-owned-scan'), reused_scan('current-owned-scan'))",
   "    output['reusedStalePairIdentity'] = _same_repository(reused_scan('stale-owned-scan'), reused_scan('stale-owned-scan'))",
+  "    unverified_owner = connection.execute('SELECT ? AS target_id, ? AS target_path, NULL AS target_device, NULL AS target_inode', (stale_owned_target, str(stale_owned_checkout))).fetchone()",
+  "    output['unverifiedLegacyComparison'] = _same_repository(unverified_owner, unverified_owner, require_ownership=True)",
   "    try:",
   "        compare_scans(connection, argparse.Namespace(before_scan_id='stale-owned-scan', after_scan_id='current-owned-scan'), require_scan=lambda _, scan_id: reused_scan(scan_id), read_coverage=lambda _: {})",
   "        output['reusedRegisteredComparison'] = 'accepted'",
@@ -636,6 +638,7 @@ describe("workbench findings index", () => {
       reusedRegisteredCheckout: ["current-owned-scan"],
       reusedRegisteredScanIdentity: false,
       reusedStalePairIdentity: false,
+      unverifiedLegacyComparison: false,
       reusedRegisteredComparison:
         "Semantic scan comparisons require the same repository target.",
       unscannedSiblingService: [],

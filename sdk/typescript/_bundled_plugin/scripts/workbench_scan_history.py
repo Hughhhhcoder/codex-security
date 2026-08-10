@@ -27,6 +27,7 @@ def _same_repository(
     *,
     before_target_path: str | None = None,
     after_git_directory: str | None = None,
+    require_ownership: bool = False,
 ) -> bool:
     before_target_id = before["target_id"]
     after_target_id = after["target_id"]
@@ -37,6 +38,8 @@ def _same_repository(
             continue
         device, inode = scan["target_device"], scan["target_inode"]
         if device is None and inode is None:
+            if require_ownership:
+                return False
             continue
         target = (
             before_target_path
@@ -611,7 +614,7 @@ def compare_scans(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after):
+    if not _same_repository(before, after, require_ownership=True):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     cached = connection.execute(
         "SELECT result_json FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
@@ -751,7 +754,7 @@ def save_scan_comparison(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after):
+    if not _same_repository(before, after, require_ownership=True):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     read_coverage(after)
     before_findings = _scan_findings(connection, before["id"])
