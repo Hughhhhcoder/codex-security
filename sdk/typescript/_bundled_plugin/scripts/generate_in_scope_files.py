@@ -171,6 +171,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         directory: Path, requested_scope: str, *, directory_guard: bool = False
     ) -> set[bytes]:
         arguments = command.copy()
+        directory_parts = directory.relative_to(repository).parts
+        for alias in sorted(metadata_aliases):
+            if alias[: len(directory_parts)] != directory_parts:
+                continue
+            relative_alias = "/".join(re.escape(part) for part in alias[len(directory_parts) :])
+            if relative_alias:
+                arguments.extend(
+                    ["--glob", f"!/{relative_alias}", "--glob", f"!/{relative_alias}/**"]
+                )
         for name in IGNORE_FILE_NAMES:
             ignore = directory / name
             if ignore.is_file() and not ignore.is_symlink():
@@ -207,7 +216,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if not metadata_aliases:
                 return set(inventory)
             rows = set()
-            directory_parts = directory.relative_to(repository).parts
             for row in inventory:
                 parts = (
                     *directory_parts,
@@ -440,16 +448,32 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for index in range(len(listed))
             for relative in listed_paths(index)
         }
-        visible_by_case: dict[str, list[bytes]] = {}
+        visible_by_case: dict[bytes, list[bytes]] = {}
         for row in rows:
             visible = normalized(row.removesuffix(b"\n"))
-            visible_by_case.setdefault(os.fsdecode(visible).casefold(), []).append(visible)
-        for relative in listed_paths(0):
-            matches = visible_by_case.get(
-                os.fsdecode(normalized(prefix + relative)).casefold(), []
-            )
-            if len(matches) == 1:
-                allowed.add(matches[0])
+            visible_by_case.setdefault(visible.lower(), []).append(visible)
+        tracked_candidates = list(listed_paths(0))
+        if scope not in (".", "./"):
+            roots = ([] if worktree is None else [repository]) + list(inspected_roots.values())
+            for root in roots:
+                tracked = run_git(["ls-files", "--cached", "-z"], directory=root)
+                if tracked.returncode:
+                    detail = tracked.stderr.decode("utf-8", errors="replace").strip()
+                    raise InventoryError(
+                        f"git ls-files exited with status {tracked.returncode}: {detail}"
+                    )
+                root_prefix = (
+                    b""
+                    if root == repository
+                    else os.fsencode(root.relative_to(repository).as_posix()) + b"/"
+                )
+                tracked_candidates.extend(
+                    root_prefix + relative
+                    for relative in tracked.stdout.split(b"\0")
+                    if relative
+                )
+        for relative in tracked_candidates:
+            allowed.update(visible_by_case.get(normalized(prefix + relative).lower(), []))
         inspected_prefixes = tuple(
             normalized(prefix + os.fsencode(root.relative_to(repository).as_posix()) + b"/")
             for root in inspected_roots.values()
@@ -516,7 +540,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     visible in recorded
                     and candidate.samefile(repository / os.fsdecode(visible))
                     for visible in visible_by_case.get(
-                        os.fsdecode(normalized(prefix + relative)).casefold(), []
+                        normalized(prefix + relative).lower(), []
                     )
                 ):
                     continue
