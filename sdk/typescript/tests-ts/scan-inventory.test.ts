@@ -326,13 +326,14 @@ describe("security scan file inventory", () => {
   });
 
   test.each([
-    ["SS", "ss", true],
-    ["Ä", "ä", true],
-    ["ss", "\u00df", false],
-    ["caf\u00e9", "cafe\u0301", true],
+    ["SS", "ss"],
+    ["Ä", "ä"],
+    ["Σ", "ς"],
+    ["ss", "\u00df"],
+    ["caf\u00e9", "cafe\u0301"],
   ])(
     "matches indexed %s against replacement %s using filesystem identity",
-    async (indexed, replacement, allowAlias) => {
+    async (indexed, replacement) => {
       if (Bun.which("rg") === null) return;
 
       const checkout = await repository();
@@ -349,14 +350,13 @@ describe("security scan file inventory", () => {
         "replacement\n",
       );
       await writeFile(join(checkout, ".gitignore"), `${replacement}/\n`);
-      const expected =
-        allowAlias &&
-        (await realpath(join(checkout, indexed, "private.ts")).then(
-          async (path) =>
-            path ===
-            (await realpath(join(checkout, replacement, "private.ts"))),
-          () => false,
-        ));
+      const expected = await realpath(
+        join(checkout, indexed, "private.ts"),
+      ).then(
+        async (path) =>
+          path === (await realpath(join(checkout, replacement, "private.ts"))),
+        () => false,
+      );
 
       expect(
         (await inventory(checkout)).includes(`./${replacement}/private.ts`),

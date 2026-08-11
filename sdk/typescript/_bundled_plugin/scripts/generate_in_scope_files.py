@@ -1431,7 +1431,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
 
         def indexed_name_key(value: str) -> bytes:
-            return os.fsencode(unicodedata.normalize("NFC", value).lower())
+            return os.fsencode(unicodedata.normalize("NFC", value).casefold())
 
         selected_parts = tuple(
             os.fsencode(part) for part in selected.relative_to(repository).parts
