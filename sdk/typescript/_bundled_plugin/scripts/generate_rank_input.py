@@ -414,6 +414,26 @@ def git_blob_preview(
     repo: Path, path: Path, object_name: str, preview_bytes: int
 ) -> tuple[str, bool]:
     try:
+        description = subprocess.run(
+            [
+                "git",
+                "--no-replace-objects",
+                "-C",
+                str(repo),
+                "cat-file",
+                "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+                "-Z",
+            ],
+            input=os.fsencode(object_name) + b"\0",
+            check=True,
+            capture_output=True,
+        ).stdout.removesuffix(b"\0")
+        expected, object_type, size = description.split(b" ")
+        algorithm = {40: "sha1", 64: "sha256"}.get(len(expected))
+        if object_type != b"blob" or algorithm is None or int(size) < 0:
+            raise ValueError("Git did not identify a supported blob object")
+        digest = hashlib.new(algorithm)
+        digest.update(b"blob " + size + b"\0")
         with subprocess.Popen(
             ["git", "--no-replace-objects", "-C", str(repo), "cat-file", "blob", object_name],
             stdout=subprocess.PIPE,
@@ -422,12 +442,13 @@ def git_blob_preview(
             if process.stdout is None:
                 raise OSError("Git did not provide object contents")
             data = process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES)
-            while process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES):
-                pass
+            digest.update(data)
+            while chunk := process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES):
+                digest.update(chunk)
             process.stdout.close()
-        if process.returncode:
+        if process.returncode or digest.hexdigest().encode("ascii") != expected:
             raise OSError("Git could not read the requested object")
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
         raise SystemExit(f"Could not read changed Git object: {object_name}") from error
     return diff_preview_data(path, data, preview_bytes)
 
@@ -458,7 +479,7 @@ def local_patch_preview(
     if comparison.returncode != 1:
         raise SystemExit(f"Could not compare staged and working-tree contents: {relative}")
 
-    staged_preview, staged_binary = git_blob_preview(repo, path, f":{relative}", preview_bytes)
+    staged_preview, staged_binary = git_blob_preview(repo, path, entry[1], preview_bytes)
     if staged_binary and worktree_binary:
         return "", True
     preview = fit_preview_lines(
@@ -1009,6 +1030,12 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             continue
 
         if status == "D":
+            if args.mode == "local-patch" and (path.exists() or path.is_symlink()):
+                require_reviewable_diff_path(repo, path, reject_hard_links=True)
+                raise SystemExit(
+                    "Deleted Git paths must not have working-tree replacements: "
+                    + rel.as_posix()
+                )
             entry = git_diff_entry(repo, path, "revisions", args.base)
             if entry is not None and entry[0] == "160000":
                 preview = f"Deleted Git submodule commit {entry[1]}"

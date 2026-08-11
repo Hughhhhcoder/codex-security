@@ -949,6 +949,20 @@ describe("diff rank input", () => {
     expect(rows[0]?.preview).toContain("worktreeSafeCommand");
   });
 
+  test("rejects recreated working-tree files after staged deletions", async () => {
+    const fixture = await createRepository();
+    git(fixture.repository, "rm", "--quiet", "--", "src/remove.py");
+    await writeRepositoryFile(
+      fixture.repository,
+      "src/remove.py",
+      "print('working-tree replacement')\n",
+    );
+
+    await expect(runDiffRankInput(fixture, "local-patch")).rejects.toThrow(
+      /Deleted Git paths must not have working-tree replacements/,
+    );
+  });
+
   test.skipIf(process.platform === "win32")(
     "refuses repository paths escaping through a symlinked parent",
     async () => {
