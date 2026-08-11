@@ -1087,8 +1087,10 @@ describe("security scan file inventory", () => {
 
   test.skipIf(process.platform === "win32").each([
     ["primary", "pack"],
+    ["primary-uppercase", "pack"],
     ["primary", "ab"],
     ["alternate", "pack"],
+    ["alternate-uppercase", "pack"],
     ["alternate", "ab"],
   ])("rejects symbolic %s Git object files in %s", async (owner, kind) => {
     if (Bun.which("rg") === null) return;
@@ -1096,11 +1098,10 @@ describe("security scan file inventory", () => {
     const checkout = await repository();
     const external = join(dirname(checkout), "external-object");
     await writeFile(external, "external\n");
-    const objects =
-      owner === "primary"
-        ? join(checkout, ".git", "objects")
-        : join(checkout, ".git", "extra-objects");
-    if (owner === "alternate") {
+    const objects = owner.startsWith("primary")
+      ? join(checkout, ".git", "objects")
+      : join(checkout, ".git", "extra-objects");
+    if (owner.startsWith("alternate")) {
       await mkdir(join(objects, "info"), { recursive: true });
       await mkdir(join(objects, "pack"));
       await writeFile(
@@ -1110,8 +1111,9 @@ describe("security scan file inventory", () => {
     }
     const directory = join(objects, kind);
     if (kind !== "pack") await mkdir(directory);
+    const hex = owner.endsWith("uppercase") ? "A" : "0";
     const member =
-      kind === "pack" ? `pack-${"0".repeat(40)}.pack` : "0".repeat(38);
+      kind === "pack" ? `pack-${hex.repeat(40)}.pack` : hex.repeat(38);
     await symlink(external, join(directory, member));
 
     await expect(inventory(checkout)).rejects.toThrow(
@@ -1293,7 +1295,7 @@ describe("security scan file inventory", () => {
   );
 
   test.skipIf(process.platform === "win32")(
-    "disables lazy Git object fetching during inventory",
+    "disables lazy Git object fetching and replacement during inventory",
     async () => {
       const git = Bun.which("git");
       if (Bun.which("rg") === null || git === null) return;
@@ -1306,7 +1308,7 @@ describe("security scan file inventory", () => {
       const wrapper = join(wrappers, "git");
       await writeFile(
         wrapper,
-        `#!/bin/sh\nprintf '%s\\n' "$GIT_NO_LAZY_FETCH" >> ${JSON.stringify(trace)}\nexec ${JSON.stringify(git)} "$@"\n`,
+        `#!/bin/sh\nprintf '%s:%s\\n' "$GIT_NO_LAZY_FETCH" "$GIT_NO_REPLACE_OBJECTS" >> ${JSON.stringify(trace)}\nexec ${JSON.stringify(git)} "$@"\n`,
       );
       await chmod(wrapper, 0o755);
 
@@ -1314,12 +1316,13 @@ describe("security scan file inventory", () => {
         await inventory(checkout, ".", {
           ...process.env,
           GIT_NO_LAZY_FETCH: "0",
+          GIT_NO_REPLACE_OBJECTS: "0",
           PATH: `${wrappers}:${process.env["PATH"] ?? ""}`,
         }),
       ).toContain("./visible.ts");
       expect((await readFile(trace, "utf8")).trim().split("\n")).toSatisfy(
         (values: string[]) =>
-          values.length > 0 && values.every((value) => value === "1"),
+          values.length > 0 && values.every((value) => value === "1:1"),
       );
     },
   );
@@ -1483,6 +1486,7 @@ describe("security scan file inventory", () => {
       "packed-refs",
       "refs",
       "refs/heads",
+      "refs/replace",
     ])("rejects a symbolic Git metadata %s", async (relative) => {
     if (Bun.which("rg") === null) return;
 
@@ -1491,7 +1495,7 @@ describe("security scan file inventory", () => {
     await writeFile(join(external, "source.ts"), "tracked\n");
     execFileSync("git", ["add", "source.ts"], { cwd: external });
     const metadata = join(checkout, ".git", relative);
-    const directory = relative === "refs" || relative === "refs/heads";
+    const directory = relative === "refs" || relative.startsWith("refs/");
     const target = join(external, ".git", relative);
     if (relative === "info/sparse-checkout" || relative === "packed-refs") {
       await writeFile(target, "external\n");
@@ -1504,6 +1508,25 @@ describe("security scan file inventory", () => {
       "symbolic Git metadata paths are not supported",
     );
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects symbolic Git object replacement refs",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const replacement = join(checkout, ".git", "refs", "replace");
+      const external = join(dirname(checkout), "external-replacement");
+      await mkdir(replacement);
+      await writeFile(external, `${"0".repeat(40)}\n`);
+      await symlink(external, join(replacement, "a".repeat(40)));
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
 
   test("inventories linked worktrees with regular Git metadata", async () => {
     if (Bun.which("rg") === null) return;

@@ -200,7 +200,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         for member in entry.iterdir():
                             if canonical == "pack":
                                 if member.name != "multi-pack-index" and not re.fullmatch(
-                                    r"(?:pack|multi-pack-index)-[0-9a-f]{40}(?:[0-9a-f]{24})?"
+                                    r"(?:pack|multi-pack-index)-[0-9a-fA-F]{40}"
+                                    r"(?:[0-9a-fA-F]{24})?"
                                     r"\.(?:pack|idx|rev|bitmap|keep|promisor|mtimes)",
                                     member.name,
                                 ):
@@ -332,6 +333,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 "packed-refs",
                 "refs",
                 "refs/heads",
+                "refs/replace",
                 "refs/tags",
                 "config",
                 "config.worktree",
@@ -348,6 +350,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     directory=relative in (
                         "refs",
                         "refs/heads",
+                        "refs/replace",
                         "refs/tags",
                         "info",
                         "objects",
@@ -356,6 +359,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 )
                 if metadata is not None and relative == "objects":
                     inspect_object_store(path)
+                if metadata is not None and relative == "refs/replace":
+                    try:
+                        for reference in path.iterdir():
+                            if re.fullmatch(
+                                r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", reference.name
+                            ):
+                                inspect_metadata(reference, directory=False)
+                    except OSError as error:
+                        raise InventoryError(
+                            f"could not inspect Git metadata: {directory}"
+                        ) from error
                 if metadata is not None and relative in (
                     "config",
                     "config.worktree",
@@ -793,6 +807,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
     environment["GIT_NO_LAZY_FETCH"] = "1"
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     environment["LC_ALL"] = "C"
     git = [
         "git",
