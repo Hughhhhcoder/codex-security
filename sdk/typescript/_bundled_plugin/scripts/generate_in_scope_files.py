@@ -151,7 +151,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if not git_metadata_path(directory_path, name)
                 and not symbolic_metadata((directory_path / name).stat(follow_symlinks=False))
             ]
-            reject_symbolic_ignore(directory_path)
 
     command = [
         "rg",
@@ -234,6 +233,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         return path.replace(b"\\", b"/") if os.name == "nt" else path
 
     rows = ripgrep_inventory(repository, scope)
+    validated_directories = set(ancestors)
+    for row in rows:
+        relative = normalized(row.removesuffix(b"\n")).removeprefix(b"./")
+        directory = (repository / os.fsdecode(relative)).parent
+        while directory != repository and directory not in validated_directories:
+            reject_symbolic_ignore(directory)
+            validated_directories.add(directory)
+            directory = directory.parent
     if selected.is_dir() and scope not in (".", "./") and not ripgrep_inventory(
         repository, scope, directory_guard=True
     ):
@@ -344,7 +351,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         def listed_paths(index: int) -> Iterator[bytes]:
             for chunk in listed[index]:
-                yield from (relative for relative in chunk.split(b"\0") if relative)
+                for relative in chunk.split(b"\0"):
+                    if not relative:
+                        continue
+                    if b"\n" in relative or b"\r" in relative:
+                        raise InventoryError("line separators are not supported in inventory paths")
+                    yield relative
 
         if worktree is not None:
             for index, arguments in enumerate(
@@ -364,7 +376,26 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         [relative for relative in result.stdout.split(b"\0") if relative],
                     )
 
-        nested_roots = discovered_roots.copy()
+        visible_paths = {
+            normalized(row.removesuffix(b"\n")).removeprefix(b"./") for row in rows
+        }
+        outer_tracked_paths = set(listed_paths(0))
+
+        def visible_nested_root(root: Path) -> bool:
+            relative = os.fsencode(root.relative_to(repository).as_posix())
+            if selected != repository and (selected == root or selected.is_relative_to(root)):
+                return True
+            return any(
+                path == relative or path.startswith(relative + b"/")
+                for paths in (visible_paths, outer_tracked_paths)
+                for path in paths
+            )
+
+        nested_roots = {
+            identity: root
+            for identity, root in discovered_roots.items()
+            if visible_nested_root(root)
+        }
         current = selected if selected.is_dir() else selected.parent
         while current != repository:
             if (current / ".git").exists():
@@ -532,7 +563,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 or any(path.startswith(worktree) for worktree in nested_worktrees)
             }
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
-        directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
+        directory_entries: dict[tuple[int, int], dict[str, list[Path]]] = {}
         selected_parts = tuple(
             os.fsencode(part) for part in selected.relative_to(repository).parts
         )
@@ -555,7 +586,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if index < len(root_parts) or not case_insensitive_roots[root_identity]:
                     if indexed != requested:
                         return
-                elif indexed.lower() != requested.lower():
+                elif os.fsdecode(indexed).casefold() != os.fsdecode(requested).casefold():
                     return
 
             def descend(parent: Path, index: int) -> list[Path]:
@@ -564,21 +595,19 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 except OSError:
                     return []
                 if parent_identity not in directory_entries:
-                    grouped: dict[bytes, list[Path]] = {}
+                    grouped: dict[str, list[Path]] = {}
                     try:
                         with os.scandir(parent) as entries:
                             for entry in entries:
                                 if not git_metadata_path(parent, entry.name):
-                                    grouped.setdefault(
-                                        os.fsencode(entry.name).lower(), []
-                                    ).append(parent / entry.name)
+                                    grouped.setdefault(entry.name.casefold(), []).append(
+                                        parent / entry.name
+                                    )
                     except OSError:
                         return []
                     directory_entries[parent_identity] = grouped
                 component = components[index]
-                variants = directory_entries[parent_identity].get(
-                    os.fsencode(component).lower(), []
-                )
+                variants = directory_entries[parent_identity].get(component.casefold(), [])
                 exact = [candidate for candidate in variants if candidate.name == component]
                 alternatives = [candidate for candidate in variants if candidate.name != component]
                 groups = [exact]

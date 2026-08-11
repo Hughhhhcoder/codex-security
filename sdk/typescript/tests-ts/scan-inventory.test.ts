@@ -204,6 +204,44 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "rejects tracked paths that cannot fit in a line-based inventory",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "codex-security-newline-inventory-")),
+      );
+      temporaryDirectories.push(root);
+      const repository = join(root, "repository");
+      const output = join(root, "in-scope-files.txt");
+      await mkdir(repository);
+      execFileSync("git", ["init", "-q"], { cwd: repository });
+      const unsafePath = "tracked\nprivate.env";
+      await writeFile(join(repository, unsafePath), "tracked source\n");
+      execFileSync("git", ["add", "--", unsafePath], { cwd: repository });
+      const python = Bun.which("python3") ?? Bun.which("python");
+      if (python === null) throw new Error("A Python interpreter is required.");
+
+      expect(() =>
+        execFileSync(
+          python,
+          [
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+            "--repo",
+            repository,
+            "--scope",
+            ".",
+            "--out",
+            output,
+          ],
+          { cwd: repository, stdio: "pipe" },
+        ),
+      ).toThrow("line separators are not supported");
+    },
+  );
+
   test("respects ignore files in non-Git directory snapshots", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -360,18 +398,27 @@ describe("security scan file inventory", () => {
       cwd: repository,
     });
     await writeFile(join(repository, "tracked.py"), "print('tracked')\n");
+    await writeFile(join(repository, "ÄUTH.py"), "print('unicode')\n");
     await writeFile(
       join(repository, "nested", "source.py"),
       "print('nested')\n",
     );
-    await writeFile(join(repository, ".ignore"), "source.py\n.ignore\n");
-    execFileSync("git", ["add", "--", "tracked.py", "nested/source.py"], {
-      cwd: repository,
-    });
+    await writeFile(
+      join(repository, ".ignore"),
+      "source.py\näuth.py\n.ignore\n",
+    );
+    execFileSync(
+      "git",
+      ["add", "--", "tracked.py", "ÄUTH.py", "nested/source.py"],
+      {
+        cwd: repository,
+      },
+    );
     await rename(
       join(repository, "tracked.py"),
       join(repository, "TRACKED.py"),
     );
+    await rename(join(repository, "ÄUTH.py"), join(repository, "äuth.py"));
     await rename(join(repository, "nested"), join(repository, "NESTED"));
     try {
       await mkdir(join(repository, "nested"));
@@ -383,8 +430,9 @@ describe("security scan file inventory", () => {
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     if (python === null) throw new Error("A Python interpreter is required.");
     for (const [scope, expected] of [
-      [".", ["./NESTED/source.py", "./TRACKED.py"]],
+      [".", ["./NESTED/source.py", "./TRACKED.py", "./äuth.py"]],
       ["TRACKED.py", ["TRACKED.py"]],
+      ["äuth.py", ["äuth.py"]],
       ["NESTED", ["NESTED/source.py"]],
       ["NESTED/source.py", ["NESTED/source.py"]],
     ] as const) {
@@ -600,6 +648,29 @@ describe("security scan file inventory", () => {
       { cwd: nested },
     );
     await writeFile(join(repository, ".gitignore"), "nested/\n");
+    if (process.platform !== "win32") {
+      await symlink(join(repository, ".gitignore"), join(nested, ".ignore"));
+    }
+    execFileSync(
+      python,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        output,
+      ],
+      { cwd: repository, stdio: "pipe" },
+    );
+    expect((await readFile(output, "utf8")).split("\n")).not.toContain(
+      "./nested/tracked.py",
+    );
+    if (process.platform !== "win32") {
+      await rm(join(nested, ".ignore"));
+    }
     execFileSync("git", ["add", "--force", "--", "nested"], {
       cwd: repository,
       stdio: "ignore",
