@@ -218,7 +218,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if not common.is_absolute():
                 common = gitdir / common
             common = Path(os.path.abspath(common))
-            if (common / "worktrees" / gitdir.name).parts != gitdir.parts:
+            owner = common / "worktrees" / gitdir.name
+            equivalent = tuple(
+                unicodedata.normalize("NFC", part).casefold() for part in owner.parts
+            ) == tuple(unicodedata.normalize("NFC", part).casefold() for part in gitdir.parts)
+            if not equivalent or directory_identity(owner) != directory_identity(gitdir):
                 raise InventoryError("Git common directory does not own selected worktree")
             for current in reversed((common, *common.parents)):
                 if inspect_metadata(current, directory=True) is None:
@@ -682,40 +686,56 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         pending = [selected]
         inspected_directories: set[tuple[int, int]] = set()
         while pending:
-            directory = pending.pop()
-            identity = directory_identity(directory)
-            if identity in inspected_directories:
-                continue
-            inspected_directories.add(identity)
-            reject_symbolic_ignore(directory)
-            entries = list(directory.iterdir())
-            children = [
-                entry
-                for entry in entries
-                if nonsymbolic_directory(entry) and not git_metadata_path(directory, entry.name)
-            ]
-            if scope not in (".", "./"):
-                scoped_files[directory] = [
+            visibility_groups: dict[tuple[tuple[str, ...], ...], list[Path]] = {}
+            for directory in pending:
+                identity = directory_identity(directory)
+                if identity in inspected_directories:
+                    continue
+                inspected_directories.add(identity)
+                reject_symbolic_ignore(directory)
+                entries = list(directory.iterdir())
+                children = [
                     entry
                     for entry in entries
-                    if not git_metadata_path(directory, entry.name)
-                    and not entry.is_symlink()
-                    and entry.is_file()
+                    if nonsymbolic_directory(entry)
+                    and not git_metadata_path(directory, entry.name)
                 ]
-            for entry in children:
-                if has_git_marker(entry):
-                    candidate = run_git(["rev-parse", "--show-toplevel"], directory=entry)
-                    if candidate.returncode == 0:
-                        try:
-                            if owns_git_root(candidate.stdout, entry):
-                                identity = directory_identity(entry)
-                                discovered_roots[identity] = entry
-                        except (OSError, ValueError):
-                            pass
-            if children:
-                visible = visible_to_outer_ignores(
-                    children[0], children, directories_only=True
-                )
+                if scope not in (".", "./"):
+                    scoped_files[directory] = [
+                        entry
+                        for entry in entries
+                        if not git_metadata_path(directory, entry.name)
+                        and not entry.is_symlink()
+                        and entry.is_file()
+                    ]
+                for entry in children:
+                    if has_git_marker(entry):
+                        candidate = run_git(["rev-parse", "--show-toplevel"], directory=entry)
+                        if candidate.returncode == 0:
+                            try:
+                                if owns_git_root(candidate.stdout, entry):
+                                    discovered_roots[directory_identity(entry)] = entry
+                            except (OSError, ValueError):
+                                pass
+                if children:
+                    context: list[tuple[str, ...]] = []
+                    current = directory
+                    while True:
+                        relative = current.relative_to(repository).parts
+                        context.extend(
+                            (*relative, name)
+                            for name in IGNORE_FILE_NAMES
+                            if (current / name).is_file()
+                        )
+                        if has_git_marker(current):
+                            context.append((*relative, ".git"))
+                        if current == repository:
+                            break
+                        current = current.parent
+                    visibility_groups.setdefault(tuple(context), []).extend(children)
+            pending = []
+            for children in visibility_groups.values():
+                visible = visible_to_outer_ignores(children[0], children, directories_only=True)
                 pending.extend(
                     entry
                     for entry in children
@@ -778,6 +798,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         listed: list[list[bytes]] = [[], []]
         cached_by_root: dict[tuple[int, int], tuple[Path, list[bytes]]] = {}
 
+        def validated_git_path(relative: bytes) -> bytes:
+            portable = normalized(relative)
+            components = portable.removesuffix(b"/").split(b"/")
+            if Path(os.fsdecode(portable)).is_absolute() or any(
+                component in (b"", b".", b"..") for component in components
+            ):
+                raise InventoryError("out-of-scope Git inventory paths are not supported")
+            return relative
+
         def listed_paths(index: int) -> Iterator[bytes]:
             for chunk in listed[index]:
                 for relative in chunk.split(b"\0"):
@@ -785,7 +814,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         continue
                     if b"\n" in relative or b"\r" in relative:
                         raise InventoryError("line separators are not supported in inventory paths")
-                    yield relative
+                    yield validated_git_path(relative)
 
         if worktree is not None:
             for index, arguments in enumerate(
@@ -910,6 +939,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 for relative in result.stdout.split(b"\0"):
                     if not relative:
                         continue
+                    validated_git_path(relative)
                     candidate = nested / os.fsdecode(relative)
                     if not nonsymbolic_directory(candidate):
                         continue

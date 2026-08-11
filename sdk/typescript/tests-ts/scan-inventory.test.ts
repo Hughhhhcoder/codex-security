@@ -127,6 +127,27 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test("shares ignore probes across directories with the same rules", async () => {
+    if (Bun.which("rg") === null) return;
+
+    async function countLookups(branches: number): Promise<number> {
+      const checkout = await repository();
+      const trace = join(dirname(checkout), "git-trace.log");
+      await writeFile(join(checkout, ".ignore"), "ignored/\n");
+      for (let index = 0; index < branches; index++) {
+        const nested = join(checkout, `branch-${index}`, "nested");
+        await mkdir(nested, { recursive: true });
+        await writeFile(join(nested, "source.ts"), "visible\n");
+      }
+      await inventory(checkout, ".", { ...process.env, GIT_TRACE: trace });
+      return (
+        (await readFile(trace, "utf8")).match(/--git-path info\/exclude/g) ?? []
+      ).length;
+    }
+
+    expect(await countLookups(18)).toBeLessThanOrEqual(await countLookups(2));
+  });
+
   test.each([".ignore", ".rgignore"])(
     "preserves ancestor %s precedence for explicit directory scopes",
     async (override) => {
@@ -868,6 +889,35 @@ describe("security scan file inventory", () => {
   });
 
   test.skipIf(process.platform === "win32")(
+    "rejects escaped Git index entries before probing sibling metadata",
+    async () => {
+      const git = Bun.which("git");
+      if (Bun.which("rg") === null || git === null) return;
+
+      const checkout = await repository();
+      const outside = join(dirname(checkout), "outside");
+      const wrappers = join(dirname(checkout), "bin");
+      await mkdir(outside);
+      await mkdir(wrappers);
+      execFileSync("git", ["init", "-q"], { cwd: outside });
+      await writeFile(join(checkout, "source.ts"), "visible\n");
+      const wrapper = join(wrappers, "git");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh\ncase " $* " in\n  *" ls-files --cached "*) printf '../outside\\000' ;;\n  *) exec ${JSON.stringify(git)} "$@" ;;\nesac\n`,
+      );
+      await chmod(wrapper, 0o755);
+
+      await expect(
+        inventory(checkout, ".", {
+          ...process.env,
+          PATH: `${wrappers}:${process.env["PATH"] ?? ""}`,
+        }),
+      ).rejects.toThrow("out-of-scope Git inventory paths are not supported");
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "rejects split-index backing files that leave the checkout",
     async () => {
       if (Bun.which("rg") === null) return;
@@ -984,6 +1034,19 @@ describe("security scan file inventory", () => {
       cwd: checkout,
       stdio: "ignore",
     });
+
+    expect(await inventory(linked)).toContain("./visible.ts");
+
+    const aliased = join(dirname(checkout), "REPOSITORY", ".git");
+    const equivalent = await realpath(aliased).then(
+      async (resolved) => resolved === (await realpath(join(checkout, ".git"))),
+      () => false,
+    );
+    if (!equivalent) return;
+    const gitdir = (await readFile(join(linked, ".git"), "utf8"))
+      .replace(/^gitdir: /, "")
+      .trim();
+    await writeFile(join(gitdir, "commondir"), `${aliased}\n`);
 
     expect(await inventory(linked)).toContain("./visible.ts");
   });
