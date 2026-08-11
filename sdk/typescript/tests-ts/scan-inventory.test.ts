@@ -128,6 +128,27 @@ describe("security scan file inventory", () => {
   );
 
   test.each([".ignore", ".rgignore"])(
+    "preserves ancestor %s precedence for explicit directory scopes",
+    async (override) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      await Promise.all([
+        writeFile(join(checkout, override), "!nested/visible.ts\n"),
+        writeFile(join(nested, ".gitignore"), "*.ts\n"),
+        writeFile(join(nested, "visible.ts"), "visible\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+      ]);
+
+      const rows = await inventory(checkout, "nested");
+      expect(rows).toContain("nested/visible.ts");
+      expect(rows).not.toContain("nested/private.ts");
+    },
+  );
+
+  test.each([".ignore", ".rgignore"])(
     "keeps nested checkout files re-included by higher-precedence %s rules",
     async (override) => {
       if (Bun.which("rg") === null) return;
@@ -1069,6 +1090,25 @@ describe("security scan file inventory", () => {
       "symbolic ignore files are not supported",
     );
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects descendant ignore links before invoking repository-wide ripgrep",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const visible = join(checkout, "visible");
+      const external = join(dirname(checkout), "external.ignore");
+      await mkdir(visible);
+      await writeFile(join(visible, "source.ts"), "visible\n");
+      await writeFile(external, "source.ts\n");
+      await symlink(external, join(visible, ".ignore"));
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic ignore files are not supported",
+      );
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "rejects snapshot ignore links without discovering a parent checkout",

@@ -118,18 +118,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             break
         current = current.parent
     ancestors.reverse()
-    deferred_ignore_checks: list[tuple[Path, os.stat_result]] = []
-
-    def reject_symbolic_ignore(directory: Path, *, allow_ignored: bool = False) -> None:
+    def reject_symbolic_ignore(directory: Path) -> None:
         for name in IGNORE_FILE_NAMES:
             try:
                 metadata = (directory / name).stat(follow_symlinks=False)
             except FileNotFoundError:
                 continue
             if not symbolic_metadata(metadata) and stat.S_ISREG(metadata.st_mode):
-                continue
-            if allow_ignored and directory != repository:
-                deferred_ignore_checks.append((directory, metadata))
                 continue
             if symbolic_metadata(metadata):
                 raise InventoryError("symbolic ignore files are not supported")
@@ -190,9 +185,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for current in reversed((gitdir, *gitdir.parents)):
                 if inspect_metadata(current, directory=True) is None:
                     break
-            try:
-                gitdir.relative_to(repository)
-            except ValueError:
+            repository_parts = repository.parts
+            internally_owned = gitdir.parts[: len(repository_parts)] == repository_parts
+            if internally_owned:
+                ancestor = gitdir
+                for _ in range(len(gitdir.parts) - len(repository_parts)):
+                    ancestor = ancestor.parent
+                internally_owned = directory_identity(ancestor) == directory_identity(repository)
+            if not internally_owned:
                 backpointer = gitdir / "gitdir"
                 if inspect_metadata(backpointer, directory=False) is None:
                     raise InventoryError("Git metadata directory does not own selected worktree")
@@ -287,10 +287,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             relative_alias = "/".join(re.escape(part) for part in alias[len(directory_parts) :])
             if relative_alias and "\n" not in relative_alias and "\r" not in relative_alias:
                 ignored_aliases.append(f"/{relative_alias}\n")
-        for name in IGNORE_FILE_NAMES:
-            ignore = directory / name
-            if ignore.is_file() and not ignore.is_symlink():
-                arguments.extend(["--ignore-file", str(ignore)])
         with tempfile.TemporaryDirectory() as temporary_directory, tempfile.TemporaryFile(
             mode="w+b"
         ) as inventory:
@@ -357,58 +353,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
     def normalized(path: bytes) -> bytes:
         return path.replace(b"\\", b"/") if os.name == "nt" else path
-
-    rows = ripgrep_inventory(repository, scope)
-    visible_directories = set(ancestors)
-    for row in rows:
-        current = (repository / os.fsdecode(row.removesuffix(b"\n"))).parent
-        while current != repository:
-            visible_directories.add(current)
-            current = current.parent
-    for directory in sorted(visible_directories):
-        reject_symbolic_ignore(directory, allow_ignored=True)
-        if directory != repository and has_git_marker(directory):
-            discovered_roots[directory_identity(directory)] = directory
-        if not selected.is_dir():
-            continue
-        for entry in directory.iterdir():
-            if entry.name != ".git" and git_metadata_path(directory, entry.name):
-                metadata_aliases.add(entry.relative_to(repository).parts)
-            elif (
-                entry.name != ".git"
-                and nonsymbolic_directory(entry)
-                and has_git_marker(entry)
-            ):
-                discovered_roots[directory_identity(entry)] = entry
-    if metadata_aliases:
-        rows = {
-            row
-            for row in rows
-            if not any(
-                Path(os.fsdecode(row.removesuffix(b"\n"))).parts[: len(alias)] == alias
-                for alias in metadata_aliases
-            )
-        }
-    if selected.is_dir() and scope not in (".", "./") and not ripgrep_inventory(
-        repository, scope, directory_guard=True
-    ):
-        rows.clear()
-    for ancestor in ancestors[1:]:
-        if not any((ancestor / name).is_file() for name in IGNORE_FILE_NAMES):
-            continue
-        ancestor_scope = selected.relative_to(ancestor).as_posix() or "."
-        ancestor_prefix = os.fsencode(ancestor.relative_to(repository).as_posix()) + b"/"
-        visible = {
-            normalized(
-                ancestor_prefix + normalized(row.removesuffix(b"\n")).removeprefix(b"./")
-            )
-            for row in ripgrep_inventory(ancestor, ancestor_scope)
-        }
-        rows = {
-            row
-            for row in rows
-            if normalized(row.removesuffix(b"\n")).removeprefix(b"./") in visible
-        }
 
     def visible_to_outer_ignores(
         root: Path,
@@ -733,29 +677,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if not valid_worktree:
             worktree = None
 
-    for directory, metadata in deferred_ignore_checks:
-        if worktree is not None:
-            ignored = run_git(
-                [
-                    "check-ignore",
-                    "--quiet",
-                    "--no-index",
-                    "--",
-                    directory.relative_to(repository).as_posix(),
-                ],
-                literal=False,
-            )
-            ripgrep_overrides = any(
-                (repository / parent / ignore).is_file()
-                for parent in directory.relative_to(repository).parents
-                for ignore in (".ignore", ".rgignore")
-            )
-            if ignored.returncode == 0 and not ripgrep_overrides:
-                continue
-        if symbolic_metadata(metadata):
-            raise InventoryError("symbolic ignore files are not supported")
-        raise InventoryError("non-regular ignore files are not supported")
-
+    scoped_files: dict[Path, list[Path]] = {}
     if selected.is_dir():
         pending = [selected]
         inspected_directories: set[tuple[int, int]] = set()
@@ -766,12 +688,20 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 continue
             inspected_directories.add(identity)
             reject_symbolic_ignore(directory)
+            entries = list(directory.iterdir())
             children = [
                 entry
-                for entry in directory.iterdir()
+                for entry in entries
                 if nonsymbolic_directory(entry) and not git_metadata_path(directory, entry.name)
             ]
-            valid_roots: set[tuple[int, int]] = set()
+            if scope not in (".", "./"):
+                scoped_files[directory] = [
+                    entry
+                    for entry in entries
+                    if not git_metadata_path(directory, entry.name)
+                    and not entry.is_symlink()
+                    and entry.is_file()
+                ]
             for entry in children:
                 if has_git_marker(entry):
                     candidate = run_git(["rev-parse", "--show-toplevel"], directory=entry)
@@ -780,19 +710,68 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             if owns_git_root(candidate.stdout, entry):
                                 identity = directory_identity(entry)
                                 discovered_roots[identity] = entry
-                                valid_roots.add(identity)
                         except (OSError, ValueError):
                             pass
-            ordinary = [entry for entry in children if directory_identity(entry) not in valid_roots]
-            if ordinary:
+            if children:
                 visible = visible_to_outer_ignores(
-                    ordinary[0], ordinary, directories_only=True
+                    children[0], children, directories_only=True
                 )
                 pending.extend(
                     entry
-                    for entry in ordinary
+                    for entry in children
                     if normalized(os.fsencode(entry.relative_to(repository).as_posix())) in visible
                 )
+
+    rows = ripgrep_inventory(repository, scope)
+    visible_directories = set(ancestors)
+    for row in rows:
+        current = (repository / os.fsdecode(row.removesuffix(b"\n"))).parent
+        while current != repository:
+            visible_directories.add(current)
+            current = current.parent
+    for directory in sorted(visible_directories):
+        reject_symbolic_ignore(directory)
+        if directory != repository and has_git_marker(directory):
+            discovered_roots[directory_identity(directory)] = directory
+        if not selected.is_dir():
+            continue
+        for entry in directory.iterdir():
+            if entry.name != ".git" and git_metadata_path(directory, entry.name):
+                metadata_aliases.add(entry.relative_to(repository).parts)
+            elif (
+                entry.name != ".git"
+                and nonsymbolic_directory(entry)
+                and has_git_marker(entry)
+            ):
+                discovered_roots[directory_identity(entry)] = entry
+    if metadata_aliases:
+        rows = {
+            row
+            for row in rows
+            if not any(
+                Path(os.fsdecode(row.removesuffix(b"\n"))).parts[: len(alias)] == alias
+                for alias in metadata_aliases
+            )
+        }
+    if selected.is_dir() and scope not in (".", "./") and not ripgrep_inventory(
+        repository, scope, directory_guard=True
+    ):
+        rows.clear()
+    elif scope not in (".", "./"):
+        prefix = b"./" if scope.startswith("./") else b""
+        for candidates in scoped_files.values():
+            if not candidates:
+                continue
+            visible = visible_to_outer_ignores(candidates[0], candidates)
+            for candidate in candidates:
+                relative = normalized(os.fsencode(candidate.relative_to(repository).as_posix()))
+                if b"\n" in relative or b"\r" in relative:
+                    raise InventoryError("line separators are not supported in inventory paths")
+                row = prefix + relative + b"\n"
+                if relative in visible:
+                    rows.add(row)
+                else:
+                    rows.discard(row)
 
     if worktree is not None or discovered_roots:
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
