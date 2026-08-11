@@ -986,6 +986,7 @@ describe("security scan file inventory", () => {
     "disabled-symlink",
     "hash-comment-override",
     "semicolon-comment-override",
+    "indented-override",
     "default-inheritance",
     "unquoted-escape",
     "case-alias",
@@ -1029,6 +1030,7 @@ describe("security scan file inventory", () => {
         "extensions.worktreeConfig",
         ownership.startsWith("disabled") ||
         ownership.endsWith("comment-override") ||
+        ownership === "indented-override" ||
         ownership === "default-inheritance" ||
         ownership === "unquoted-escape"
           ? "false"
@@ -1065,6 +1067,14 @@ describe("security scan file inventory", () => {
           (await readFile(config, "utf8")).replace(
             /^([ \t]*worktree[ \t]*=.*)$/im,
             `$1\n\t${comment} owner comment \\\n\tworktree = ${external}`,
+          ),
+        );
+      } else if (ownership === "indented-override") {
+        await writeFile(
+          config,
+          (await readFile(config, "utf8")).replace(
+            /^([ \t]*worktree[ \t]*=.*)$/im,
+            `$1 # selected owner\n\t\tworktree = ${external}`,
           ),
         );
       } else if (ownership === "default-inheritance") {
@@ -1104,6 +1114,7 @@ describe("security scan file inventory", () => {
         ownership === "external" ||
         ownership === "mixed-case-external" ||
         ownership.endsWith("comment-override") ||
+        ownership === "indented-override" ||
         ownership === "default-inheritance" ||
         ownership === "unquoted-escape"
       ) {

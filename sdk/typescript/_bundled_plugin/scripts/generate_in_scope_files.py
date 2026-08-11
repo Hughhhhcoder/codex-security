@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import codecs
-import configparser
 import io
 import os
 import re
@@ -345,18 +344,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 position += 1
             return bytes(joined)
 
-        config = configparser.ConfigParser(
-            interpolation=None, strict=False, allow_no_value=True, default_section="\0"
-        )
+        options: dict[tuple[str, str], str | None] = {}
         config_path = roots[-1] / "config"
         worktree_config_enabled = False
         if inspect_metadata(config_path, directory=False) is not None:
             try:
                 for candidate in (config_path, gitdir / "config.worktree"):
                     if candidate != config_path:
-                        extension = config_value(
-                            config.get("extensions", "worktreeconfig", fallback="false")
-                        )
+                        extension = options.get(("extensions", "worktreeconfig"), "false")
                         normalized = "true" if extension is None else extension.strip().strip('"').casefold()
                         worktree_config_enabled = normalized not in ("", "false", "no", "off", "0")
                         if not worktree_config_enabled:
@@ -365,16 +360,46 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             continue
                     contents = candidate.read_bytes().removeprefix(codecs.BOM_UTF8)
                     contents = join_config_lines(contents)
-                    contents = re.sub(
-                        rb"(?im)^([ \t]*\[[ \t]*)(core|extensions)(?=[ \t]*\])",
-                        lambda section: section.group(1) + section.group(2).lower(),
-                        contents,
-                    )
-                    config.read_string(os.fsdecode(contents))
-            except (OSError, UnicodeError, ValueError, configparser.Error) as error:
+                    section = None
+                    for raw in os.fsdecode(contents).split("\n"):
+                        line = raw.lstrip(" \t").rstrip("\r")
+                        if not line or line.startswith(("#", ";")):
+                            continue
+                        if line.startswith("["):
+                            match = re.match(
+                                r"\[[ \t]*(core|extensions)[ \t]*\](?=[ \t]*(?:[#;]|$))",
+                                line,
+                                re.IGNORECASE,
+                            )
+                            section = None if match is None else match.group(1).casefold()
+                            continue
+                        if section is None:
+                            continue
+                        assignment = re.match(
+                            r"([a-z][a-z0-9-]*)(?:([ \t]*=)[ \t]*(.*))?",
+                            line,
+                            re.IGNORECASE,
+                        )
+                        if assignment is None:
+                            continue
+                        if assignment.group(2) is None:
+                            remainder = line[assignment.end() :].lstrip(" \t")
+                            if remainder and not remainder.startswith(("#", ";")):
+                                continue
+                        key = assignment.group(1).casefold()
+                        if (section, key) in (
+                            ("core", "worktree"),
+                            ("extensions", "worktreeconfig"),
+                        ):
+                            options[(section, key)] = (
+                                None
+                                if assignment.group(2) is None
+                                else config_value(assignment.group(3))
+                            )
+            except (OSError, UnicodeError, ValueError) as error:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
 
-        configured_worktree = config_value(config.get("core", "worktree", fallback=None))
+        configured_worktree = options.get(("core", "worktree"))
         if gitfile:
             if configured_worktree is None:
                 if not backpointer_owned:
