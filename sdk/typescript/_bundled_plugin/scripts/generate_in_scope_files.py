@@ -33,7 +33,7 @@ def symbolic_metadata(metadata: os.stat_result) -> bool:
 def git_metadata_path(parent: Path, name: str) -> bool:
     if name == ".git":
         return True
-    if name.casefold().rstrip(". ") != ".git":
+    if name.upper().casefold().rstrip(". ") != ".git":
         return False
     try:
         candidate = (parent / name).stat(follow_symlinks=False)

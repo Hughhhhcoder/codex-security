@@ -1191,9 +1191,11 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test.each([".GIT", ".GIT."])(
+  test.each([".GIT", ".GIT.", ".g\u0131t", ".g\u0131t."])(
     "rejects symbolic %s metadata before resolving its filesystem alias",
     async (alias) => {
+      if (process.platform === "win32" && alias.endsWith(".")) return;
+
       const checkout = await repository();
       const nested = join(checkout, "visible");
       const external = join(dirname(checkout), "external-metadata");
@@ -1213,7 +1215,7 @@ describe("security scan file inventory", () => {
           "from pathlib import Path",
           "original = Path.samefile",
           "def guarded(self, other):",
-          "    if self.parent.name == 'visible' and self.name.casefold().rstrip('. ') == '.git':",
+          "    if self.parent.name == 'visible' and self.name.upper().casefold().rstrip('. ') == '.git':",
           "        raise RuntimeError('followed symbolic Git metadata alias')",
           "    return original(self, other)",
           "Path.samefile = guarded",
