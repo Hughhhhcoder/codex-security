@@ -32,7 +32,7 @@ def symbolic_metadata(metadata: os.stat_result) -> bool:
 
 
 def filesystem_name_key(value: str) -> str:
-    return unicodedata.normalize("NFC", value).upper().casefold()
+    return unicodedata.normalize("NFC", value).upper().casefold().rstrip(". ")
 
 
 def split_index_backing(index: Path, hash_size: int) -> str | None:
@@ -84,7 +84,7 @@ def split_index_backing(index: Path, hash_size: int) -> str | None:
 def git_metadata_path(parent: Path, name: str) -> bool:
     if name == ".git":
         return True
-    if filesystem_name_key(name).rstrip(". ") != ".git":
+    if filesystem_name_key(name) != ".git":
         return False
     try:
         candidate = (parent / name).stat(follow_symlinks=False)

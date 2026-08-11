@@ -149,6 +149,25 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "preserves distinct POSIX trailing-dot and trailing-space source paths",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const names = ["source.ts", "source.ts.", "source.ts "];
+      await Promise.all(
+        names.map((name) => writeFile(join(checkout, name), "tracked\n")),
+      );
+      execFileSync("git", ["add", ...names], { cwd: checkout });
+
+      const entries = await inventory(checkout);
+      for (const name of names) {
+        expect(entries).toContain(`./${name}`);
+      }
+    },
+  );
+
   test.each([".ignore", ".rgignore"])(
     "keeps ordinary files re-included by higher-precedence %s rules",
     async (override) => {
@@ -2417,6 +2436,19 @@ describe("security scan file inventory", () => {
     "incremental-index-directory",
     "incremental-index-chain",
     "incremental-index-bitmap",
+    ...(process.platform === "win32"
+      ? []
+      : [
+          "object-store-trailing-dot",
+          "object-store-trailing-space",
+          "object-prefix-trailing-dot",
+          "pack-index-trailing-dot",
+          "pack-index-trailing-space",
+          "multi-pack-index-trailing-dot",
+          "incremental-index-directory-trailing-space",
+          "incremental-index-chain-trailing-dot",
+          "incremental-index-bitmap-trailing-space",
+        ]),
   ])("rejects Windows-compatible %s metadata aliases", async (kind) => {
     const sha256 = kind.startsWith("shared-index-sha256");
     const checkout = await repository(!sha256);
@@ -2456,20 +2488,30 @@ describe("security scan file inventory", () => {
       directory = gitdir;
       canonical = shared;
       await rm(join(directory, canonical));
-    } else if (kind === "pack-index-suffix") {
+    } else if (kind.startsWith("object-store")) {
+      directory = join(gitdir, "objects");
+      canonical = "pack";
+      await rm(join(directory, canonical), { recursive: true });
+    } else if (kind.startsWith("object-prefix")) {
+      directory = join(gitdir, "objects");
+      canonical = "aa";
+    } else if (kind.startsWith("pack-index")) {
       canonical = `pack-${"a".repeat(40)}.idx`;
-    } else if (kind === "incremental-index-directory") {
+    } else if (kind.startsWith("incremental-index-directory")) {
       canonical = "multi-pack-index.d";
     } else if (kind.startsWith("incremental-index-")) {
       directory = join(directory, "multi-pack-index.d");
       await mkdir(directory);
-      canonical =
-        kind === "incremental-index-chain"
-          ? "multi-pack-index-chain"
-          : `multi-pack-index-${"a".repeat(40)}.bitmap`;
+      canonical = kind.startsWith("incremental-index-chain")
+        ? "multi-pack-index-chain"
+        : `multi-pack-index-${"a".repeat(40)}.bitmap`;
     }
 
-    const alias = canonical.replace("i", "\u0131");
+    const alias = kind.endsWith("-trailing-dot")
+      ? `${canonical}.`
+      : kind.endsWith("-trailing-space")
+        ? `${canonical} `
+        : canonical.replace("i", "\u0131");
     const external = join(dirname(checkout), "external-metadata");
     await mkdir(external);
     await symlink(
