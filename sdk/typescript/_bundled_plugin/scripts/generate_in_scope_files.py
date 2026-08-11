@@ -461,7 +461,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             continue
                         while line.startswith("["):
                             match = re.match(
-                                r'\[[ \t]*([a-z][a-z0-9-]*)'
+                                r'\[[ \t]*([a-z0-9-]*)'
                                 r'(?:([.][^\]\r\n]*)|[ \t\r]+("(?:[^"\\]|\\.)*"))?'
                                 r'[ \t]*\]',
                                 line,
@@ -1467,6 +1467,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 and exact_descendant(nested, owner)
                 and os.fsencode(nested.relative_to(owner).as_posix()) in indexed_paths
             )
+        tracked_gitlink_identities = {
+            (directory_identity(owner), directory_identity(nested))
+            for owner, nested in tracked_gitlinks
+        }
 
         def tracked_variants(
             root_identity: tuple[int, int], root: Path, relative: bytes
@@ -1541,7 +1545,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             if not stat.S_ISDIR(metadata.st_mode):
                                 continue
                             owner_identity = (metadata.st_dev, metadata.st_ino)
-                            if owner_identity in inspected_roots and owner_identity != root_identity:
+                            if (root_identity, owner_identity) in tracked_gitlink_identities:
                                 continue
                             matches.extend(descend(candidate, index + 1))
                         elif stat.S_ISREG(metadata.st_mode):

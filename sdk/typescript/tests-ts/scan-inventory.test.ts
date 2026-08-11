@@ -421,6 +421,35 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./nested/.env");
   });
 
+  test.each([".", "nested"])(
+    "retains outer tracked source inside an embedded checkout for %s",
+    async (scope) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      await Promise.all([
+        writeFile(join(nested, "outer.ts"), "outer tracked\n"),
+        writeFile(join(nested, "inner.ts"), "inner tracked\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+      ]);
+      execFileSync("git", ["add", "nested/outer.ts"], { cwd: checkout });
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await writeFile(
+        join(nested, ".ignore"),
+        "outer.ts\ninner.ts\nprivate.ts\n",
+      );
+      execFileSync("git", ["add", "inner.ts"], { cwd: nested });
+
+      const prefix = scope === "." ? "./nested" : "nested";
+      const rows = await inventory(checkout, scope);
+      expect(rows).toContain(`${prefix}/outer.ts`);
+      expect(rows).toContain(`${prefix}/inner.ts`);
+      expect(rows).not.toContain(`${prefix}/private.ts`);
+    },
+  );
+
   test("recovers an embedded checkout hidden only by its own ignore file", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -1353,7 +1382,7 @@ describe("security scan file inventory", () => {
       ) {
         const header =
           ownership === "chained-section-override"
-            ? "[feature][unused.value][core]"
+            ? '[0][-][.legacy][ "quoted"][feature][unused.value][core]'
             : "[core]";
         const whitespace = ownership === "inline-carriage-override" ? "\r" : "";
         await writeFile(
@@ -2271,7 +2300,7 @@ describe("security scan file inventory", () => {
       const configuredSection = section.replace(" ", whitespace);
       const headers =
         bom === "with chained section headers"
-          ? `[feature][unused.value][${configuredSection}]`
+          ? `[0][-][.legacy][ "quoted"][feature][unused.value][${configuredSection}]`
           : `[${configuredSection}]`;
       const assignment =
         bom === "with same-line carriage path"
