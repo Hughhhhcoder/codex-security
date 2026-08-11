@@ -200,21 +200,25 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     inspect_metadata(entry, directory=True)
                     if canonical != "info":
                         for member in entry.iterdir():
+                            member_canonical = member.name.casefold()
                             if canonical == "pack":
-                                if member.name != "multi-pack-index" and not member.name.endswith(
+                                if member_canonical == "multi-pack-index":
+                                    expected = member_canonical
+                                elif not member_canonical.endswith(
                                     (".pack", ".idx", ".rev", ".bitmap", ".keep", ".promisor", ".mtimes")
                                 ):
                                     continue
+                                else:
+                                    stem, _, suffix = member.name.rpartition(".")
+                                    expected = f"{stem}.{suffix.casefold()}"
                             else:
-                                member_canonical = member.name.casefold()
                                 if not re.fullmatch(
                                     r"(?:[0-9a-f]{38}|[0-9a-f]{62})", member_canonical
                                 ):
                                     continue
-                                if member.name != member_canonical and not aliases_canonical_path(
-                                    member, member_canonical
-                                ):
-                                    continue
+                                expected = member_canonical
+                            if member.name != expected and not aliases_canonical_path(member, expected):
+                                continue
                             inspect_metadata(member, directory=False)
                 validated_object_stores.add(identity)
             except OSError as error:
@@ -399,8 +403,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 if line.startswith(b'"'):
                                     if not line.endswith(b'"'):
                                         raise InventoryError("invalid Git object alternate paths")
+                                    quoted = line[1:-1]
+                                    if not re.fullmatch(
+                                        rb'(?:[^"\\]|\\(?:["\\abfnrtv]|[0-3][0-7]{2}))*', quoted
+                                    ):
+                                        raise InventoryError("invalid Git object alternate paths")
                                     try:
-                                        line = codecs.escape_decode(line[1:-1])[0]
+                                        line = codecs.escape_decode(quoted)[0]
                                     except (ValueError, UnicodeError) as error:
                                         raise InventoryError(
                                             "invalid Git object alternate paths"

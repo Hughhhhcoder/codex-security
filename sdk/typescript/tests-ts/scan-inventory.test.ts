@@ -1090,12 +1090,18 @@ describe("security scan file inventory", () => {
     ["primary-uppercase", "pack"],
     ["primary-arbitrary-pack", "pack"],
     ["primary-arbitrary-index", "pack"],
+    ["primary-midx", "pack"],
+    ["primary-uppercase-midx", "pack"],
+    ["primary-uppercase-extension", "pack"],
     ["primary", "ab"],
     ["primary-uppercase", "ab"],
     ["alternate", "pack"],
     ["alternate-uppercase", "pack"],
     ["alternate-arbitrary-pack", "pack"],
     ["alternate-arbitrary-index", "pack"],
+    ["alternate-midx", "pack"],
+    ["alternate-uppercase-midx", "pack"],
+    ["alternate-uppercase-extension", "pack"],
     ["alternate", "ab"],
     ["alternate-uppercase", "ab"],
   ])("rejects symbolic %s Git object files in %s", async (owner, kind) => {
@@ -1121,11 +1127,28 @@ describe("security scan file inventory", () => {
     const basename = owner.includes("arbitrary")
       ? "arbitrary"
       : `pack-${hex.repeat(40)}`;
-    const suffix = owner.endsWith("index") ? "idx" : "pack";
-    const member = kind === "pack" ? `${basename}.${suffix}` : hex.repeat(38);
+    const suffix = owner.endsWith("index")
+      ? "idx"
+      : owner.endsWith("extension")
+        ? "PACK"
+        : "pack";
+    const member =
+      kind !== "pack"
+        ? hex.repeat(38)
+        : owner.endsWith("midx")
+          ? owner.includes("uppercase")
+            ? "MULTI-PACK-INDEX"
+            : "multi-pack-index"
+          : `${basename}.${suffix}`;
     await symlink(external, join(directory, member));
-    if (kind !== "pack" && hex === "A") {
-      const aliases = await realpath(join(directory, "a".repeat(38))).then(
+    if (
+      (kind !== "pack" && hex === "A") ||
+      member === "MULTI-PACK-INDEX" ||
+      member.endsWith(".PACK")
+    ) {
+      const aliases = await realpath(
+        join(directory, member.toLowerCase()),
+      ).then(
         () => true,
         () => false,
       );
@@ -1223,6 +1246,24 @@ describe("security scan file inventory", () => {
     await expect(readFile(trace, "utf8")).rejects.toThrow();
   });
 
+  test.each(["\\x61", "\\400"])(
+    "rejects quoted Git object alternates with unsupported escape %s",
+    async (escape) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const objects = join(checkout, ".git", "extra-objects");
+      await writeFile(
+        join(checkout, ".git", "objects", "info", "alternates"),
+        `"${objects}${escape}"\n`,
+      );
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "invalid Git object alternate paths",
+      );
+    },
+  );
+
   test("rejects differently cased sibling Git object alternates", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -1249,12 +1290,12 @@ describe("security scan file inventory", () => {
     if (Bun.which("rg") === null) return;
 
     const checkout = await repository();
-    const objects = join(checkout, ".git", "extra-objects");
+    const objects = join(checkout, ".git", "extra objects");
     await mkdir(join(objects, "info"), { recursive: true });
     await mkdir(join(objects, "pack"));
     await writeFile(
       join(checkout, ".git", "objects", "info", "alternates"),
-      `${JSON.stringify(objects)}\n`,
+      `${JSON.stringify(objects).replace("extra objects", "extra\\040objects")}\n`,
     );
     await writeFile(join(checkout, "visible.ts"), "visible\n");
 
