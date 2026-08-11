@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { normalizeTarget } from "../src/targets.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -989,7 +989,10 @@ describe("security scan file inventory", () => {
     "indented-override",
     "default-inheritance",
     "unquoted-escape",
+    "literal-tab",
+    "literal-tab-owned",
     "case-alias",
+    "short-alias",
     "owned",
     "external",
     "mixed-case-external",
@@ -1001,17 +1004,30 @@ describe("security scan file inventory", () => {
         return;
       if (ownership === "unquoted-escape" && process.platform === "win32")
         return;
+      if (ownership.startsWith("literal-tab") && process.platform === "win32")
+        return;
+      if (
+        ownership === "short-alias" &&
+        (process.platform !== "win32" || python === null)
+      )
+        return;
 
       const checkout = await repository();
       const nested = join(
         checkout,
-        ownership === "unquoted-escape" ? "nested\\towner" : "nested",
+        ownership === "unquoted-escape"
+          ? "nested\\towner"
+          : ownership.startsWith("literal-tab")
+            ? "nested\towner"
+            : "nested",
       );
       const metadata = join(checkout, ".git", "modules", "nested");
       const external =
         ownership === "unquoted-escape"
           ? join(checkout, "nested\towner")
-          : join(dirname(checkout), "external-worktree");
+          : ownership === "literal-tab"
+            ? join(checkout, "nested owner")
+            : join(dirname(checkout), "external-worktree");
       await mkdir(dirname(metadata), { recursive: true });
       await mkdir(external);
       execFileSync(
@@ -1031,14 +1047,19 @@ describe("security scan file inventory", () => {
         ownership.endsWith("comment-override") ||
         ownership === "indented-override" ||
         ownership === "default-inheritance" ||
-        ownership === "unquoted-escape"
+        ownership === "unquoted-escape" ||
+        ownership.startsWith("literal-tab")
           ? "false"
           : "true",
       ]);
       await writeFile(join(nested, "visible.ts"), "tracked\n");
       execFileSync("git", ["-C", nested, "add", "visible.ts"]);
       const effective =
-        ownership === "owned" || ownership === "case-alias" ? nested : external;
+        ownership === "owned" ||
+        ownership === "case-alias" ||
+        ownership === "short-alias"
+          ? nested
+          : external;
       const config = join(metadata, "config");
       if (ownership === "mixed-case-external") {
         await writeFile(
@@ -1085,7 +1106,10 @@ describe("security scan file inventory", () => {
           config,
           `${withoutOwner}\n[DEFAULT]\n\tworktree = ${nested}\n`,
         );
-      } else if (ownership === "unquoted-escape") {
+      } else if (
+        ownership === "unquoted-escape" ||
+        ownership.startsWith("literal-tab")
+      ) {
         await writeFile(
           config,
           (await readFile(config, "utf8")).replace(
@@ -1102,8 +1126,32 @@ describe("security scan file inventory", () => {
       } else {
         await writeFile(join(metadata, "config.worktree"), override);
       }
-      if (ownership === "case-alias") {
-        const alias = metadata.toUpperCase();
+      if (ownership === "case-alias" || ownership === "short-alias") {
+        const alias =
+          ownership === "case-alias"
+            ? metadata.toUpperCase()
+            : execFileSync(
+                python!,
+                [
+                  "-B",
+                  "-c",
+                  [
+                    "import ctypes, sys",
+                    "function = ctypes.windll.kernel32.GetShortPathNameW",
+                    "size = function(sys.argv[1], None, 0)",
+                    "buffer = ctypes.create_unicode_buffer(size) if size else None",
+                    "print(buffer.value if buffer is not None and function(sys.argv[1], buffer, size) else '')",
+                  ].join("\n"),
+                  metadata,
+                ],
+                { encoding: "utf8" },
+              ).trim();
+        if (
+          !alias ||
+          (ownership === "short-alias" &&
+            alias.toLowerCase() === metadata.toLowerCase())
+        )
+          return;
         const equivalent = await realpath(alias).then(
           async (resolved) => resolved === (await realpath(metadata)),
           () => false,
@@ -1118,13 +1166,16 @@ describe("security scan file inventory", () => {
         ownership.endsWith("comment-override") ||
         ownership === "indented-override" ||
         ownership === "default-inheritance" ||
-        ownership === "unquoted-escape"
+        ownership === "unquoted-escape" ||
+        ownership === "literal-tab"
       ) {
         await expect(inventory(checkout)).rejects.toThrow(
           "Git metadata directory does not own selected worktree",
         );
       } else {
-        expect(await inventory(checkout)).toContain("./nested/visible.ts");
+        expect(await inventory(checkout)).toContain(
+          `./${basename(nested)}/visible.ts`,
+        );
       }
     },
   );
@@ -1791,6 +1842,9 @@ describe("security scan file inventory", () => {
     const gitdir = (await readFile(join(linked, ".git"), "utf8"))
       .replace(/^gitdir: /, "")
       .trim();
+    await writeFile(join(gitdir, "objects"), "inactive worktree metadata\n");
+    expect(await inventory(linked)).toContain("./visible.ts");
+
     const alternateBackpointer = join(
       dirname(linked),
       "LINKED-WORKTREE",

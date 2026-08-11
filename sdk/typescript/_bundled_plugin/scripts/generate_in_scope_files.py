@@ -254,7 +254,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 ancestor = gitdir
                 for _ in range(len(gitdir.parts) - len(repository.parts)):
                     ancestor = ancestor.parent
-                internally_owned = same_filesystem_path(ancestor, repository)
+                internally_owned = directory_identity(ancestor) == directory_identity(repository)
             backpointer = gitdir / "gitdir"
             if inspect_metadata(backpointer, directory=False) is not None:
                 backpointer_owned = True
@@ -406,6 +406,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     raise InventoryError("Git metadata directory does not own selected worktree")
             else:
                 decoded = bytearray()
+                normalized = bytearray()
                 quoted = False
                 escaped = False
                 for character in os.fsencode(configured_worktree):
@@ -413,7 +414,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         replacements = {ord("n"): ord("\n"), ord("t"): ord("\t"), ord("b"): ord("\b")}
                         if character not in (*replacements, ord('"'), ord("\\")):
                             raise InventoryError("invalid Git worktree path")
-                        decoded.append(replacements.get(character, character))
+                        replacement = replacements.get(character, character)
+                        decoded.append(replacement)
+                        normalized.append(replacement)
                         escaped = False
                     elif character == ord("\\"):
                         escaped = True
@@ -421,12 +424,31 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         quoted = not quoted
                     else:
                         decoded.append(character)
+                        normalized.append(
+                            ord(" ") if character == ord("\t") and not quoted else character
+                        )
                 if quoted or escaped:
                     raise InventoryError("invalid Git worktree path")
                 configured_worktree = os.fsdecode(bytes(decoded))
                 target = Path(configured_worktree)
                 if not target.is_absolute():
                     target = gitdir / target
+                if decoded != normalized:
+                    normalized_target = Path(os.fsdecode(bytes(normalized)))
+                    if not normalized_target.is_absolute():
+                        normalized_target = gitdir / normalized_target
+                    try:
+                        normalized_metadata = normalized_target.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if symbolic_metadata(normalized_metadata) or (
+                            normalized_metadata.st_dev,
+                            normalized_metadata.st_ino,
+                        ) != directory_identity(directory):
+                            raise InventoryError(
+                                "Git metadata directory does not own selected worktree"
+                            )
                 if not same_filesystem_path(Path(os.path.abspath(target)), directory):
                     raise InventoryError("Git metadata directory does not own selected worktree")
 
@@ -451,6 +473,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if relative == "config.worktree" and (
                     not worktree_config_enabled or root != gitdir
                 ):
+                    continue
+                if root != roots[-1] and (relative == "objects" or relative.startswith("objects/")):
                     continue
                 path = root / relative
                 metadata = inspect_metadata(
