@@ -127,6 +127,26 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each([".ignore", ".rgignore"])(
+    "keeps nested checkout files re-included by higher-precedence %s rules",
+    async (override) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(join(nested, ".gitignore"), "source.ts\n"),
+        writeFile(join(nested, override), "!source.ts\n"),
+        writeFile(join(nested, "source.ts"), "visible\n"),
+      ]);
+
+      expect(await inventory(checkout)).toContain("./nested/source.ts");
+      expect(await inventory(checkout, "nested")).toContain("nested/source.ts");
+    },
+  );
+
   test("applies snapshot ignores without inheriting unrelated parent rules", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -575,14 +595,44 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./.RGIGNORE/private.ts");
   });
 
-  test("keeps slash-only ignores inert when isolating nested checkout names", async () => {
+  test.each([
+    ["slash-only", "/\n"],
+    ["whitespace-only", "   \n"],
+  ])(
+    "keeps %s ignores inert when isolating nested checkout names",
+    async (_description, contents) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const container = join(checkout, "container");
+      const nested = join(container, ".IGNORE");
+      await mkdir(container);
+      await writeFile(join(container, ".ignore"), contents);
+      try {
+        await mkdir(nested);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+        throw error;
+      }
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await writeFile(join(nested, ".ignore"), "*\n");
+      await writeFile(join(nested, "tracked.ts"), "tracked\n");
+      execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
+
+      expect(await inventory(checkout)).toContain(
+        "./container/.IGNORE/tracked.ts",
+      );
+    },
+  );
+
+  test("preserves BOM-prefixed ignores when isolating nested checkout names", async () => {
     if (Bun.which("rg") === null) return;
 
     const checkout = await repository();
     const container = join(checkout, "container");
     const nested = join(container, ".IGNORE");
     await mkdir(container);
-    await writeFile(join(container, ".ignore"), "/\n");
+    await writeFile(join(container, ".ignore"), "\ufeff.IGNORE/private.ts\n");
     try {
       await mkdir(nested);
     } catch (error) {
@@ -592,11 +642,14 @@ describe("security scan file inventory", () => {
     execFileSync("git", ["init", "-q"], { cwd: nested });
     await writeFile(join(nested, ".ignore"), "*\n");
     await writeFile(join(nested, "tracked.ts"), "tracked\n");
-    execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
+    await writeFile(join(nested, "private.ts"), "private\n");
+    execFileSync("git", ["add", "tracked.ts", "private.ts"], {
+      cwd: nested,
+    });
 
-    expect(await inventory(checkout)).toContain(
-      "./container/.IGNORE/tracked.ts",
-    );
+    const rows = await inventory(checkout);
+    expect(rows).toContain("./container/.IGNORE/tracked.ts");
+    expect(rows).not.toContain("./container/.IGNORE/private.ts");
   });
 
   test("preserves canonically equivalent tracked directory spellings", async () => {

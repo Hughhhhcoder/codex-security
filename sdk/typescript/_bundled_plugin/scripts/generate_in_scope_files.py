@@ -514,15 +514,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 )
                             )
                             rebased = []
-                            for line in contents.splitlines():
+                            for line in contents.removeprefix(b"\xef\xbb\xbf").splitlines():
                                 if not line or line.startswith(b"#"):
                                     continue
                                 negated = line.startswith(b"!")
                                 pattern = line[1:] if negated else line
+                                if not pattern.rstrip(b" ").strip(b"/"):
+                                    continue
                                 if pattern.startswith(b"/"):
                                     pattern = pattern[1:]
-                                    if not pattern:
-                                        continue
                                 elif b"/" not in pattern.rstrip(b"/"):
                                     pattern = b"**/" + pattern
                                 rebased.append(
@@ -920,11 +920,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     if directory_identity(discovered) not in inspected_roots:
                         pending_roots.append(discovered)
 
-        allowed = {
-            normalized(prefix + relative)
-            for index in range(len(listed))
-            for relative in listed_paths(index)
-        }
         if scope not in (".", "./"):
             for identity, (root, _) in list(cached_by_root.items()):
                 tracked = run_git(["ls-files", "--cached", "-z"], directory=root)
@@ -946,54 +941,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     f"git config exited with status {setting.returncode}: {detail}"
                 )
             case_insensitive_roots[identity] = setting.stdout.strip().lower() == b"true"
-        inspected_prefixes = tuple(
-            normalized(prefix + os.fsencode(root.relative_to(repository).as_posix()) + b"/")
-            for root in inspected_roots.values()
-        )
-        nested_worktrees = tuple(
-            path
-            for path in allowed
-            if path.endswith(b"/") and path not in inspected_prefixes
-        )
-        explicitly_ignored = False
-        enclosing_roots = list(inspected_roots.values())
-        if worktree is not None:
-            enclosing_roots.append(repository)
-        if scope not in (".", "./") and any(
-            selected.is_relative_to(root) for root in enclosing_roots
-        ):
-            enclosing = max(
-                (root for root in enclosing_roots if selected.is_relative_to(root)),
-                key=lambda root: len(root.parts),
-            )
-            explicit_relative = selected.relative_to(enclosing).as_posix()
-            explicit_path = f"./{explicit_relative}"
-            ignored = run_git(
-                ["check-ignore", "--quiet", "--no-index", "--", explicit_path],
-                directory=enclosing,
-                literal=False,
-            )
-            if ignored.returncode not in (0, 1):
-                detail = ignored.stderr.decode("utf-8", errors="replace").strip()
-                message = f"git check-ignore exited with status {ignored.returncode}"
-                if detail:
-                    message = f"{message}: {detail}"
-                raise InventoryError(message)
-            explicitly_ignored = ignored.returncode == 0 and selected.is_file()
-
-        if not explicitly_ignored:
-            rows = {
-                row
-                for row in rows
-                if (path := normalized(row.removesuffix(b"\n"))) in allowed
-                or (
-                    selected.is_file()
-                    and path.removeprefix(b"./")
-                    == os.fsencode(selected.relative_to(repository).as_posix())
-                )
-                or not any(path.startswith(root) for root in inspected_prefixes)
-                or any(path.startswith(worktree) for worktree in nested_worktrees)
-            }
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
         directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
 
