@@ -402,21 +402,7 @@ describe("plugin runtime preparation", () => {
             id: number;
             result: {
               capabilities?: Record<string, unknown>;
-              tools?: Array<{
-                name: string;
-                inputSchema?: {
-                  properties?: {
-                    diffTarget?: {
-                      oneOf?: Array<{
-                        properties?: {
-                          kind?: { const?: string };
-                          contentDigest?: unknown;
-                        };
-                      }>;
-                    };
-                  };
-                };
-              }>;
+              tools?: Array<{ name: string }>;
             };
           },
       );
@@ -447,19 +433,6 @@ describe("plugin runtime preparation", () => {
       "set_codex_security_capability_preflight",
     ]) {
       expect(names.has(name)).toBe(false);
-    }
-
-    const setupTool = responses
-      .find((response) => response.id === 2)
-      ?.result.tools?.find(
-        (tool) => tool.name === "submit_codex_security_setup",
-      );
-    const targets = setupTool?.inputSchema?.properties?.diffTarget?.oneOf;
-    for (const kind of ["commit", "range"]) {
-      expect(
-        targets?.find((target) => target.properties?.kind?.const === kind)
-          ?.properties,
-      ).toHaveProperty("contentDigest");
     }
   });
 

@@ -282,51 +282,6 @@ def resolve_git_commit(target: Path, revision: str, label: str) -> str:
     return resolved
 
 
-def immutable_diff_content_digest(target: Path, kind: str, base: str, head: str) -> str:
-    trees = []
-    for revision in (base, head):
-        tree = (
-            revision
-            if revision == EMPTY_GIT_TREE
-            else git_output(target, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{tree}}")
-        )
-        if tree is None:
-            raise SystemExit(f"The selected diff tree is not available in the local checkout: {revision}")
-        trees.append(tree)
-    replacements = git_command(target, "replace", "--list", "--format=long", text=True)
-    if replacements.returncode:
-        raise SystemExit("The selected diff's Git object replacements could not be inspected.")
-    replacement_mode = git_command(
-        target,
-        "config",
-        "--type=bool",
-        "--default=true",
-        "--get",
-        "core.useReplaceRefs",
-        text=True,
-    )
-    if replacement_mode.returncode:
-        raise SystemExit("The selected diff's Git replacement settings could not be inspected.")
-    replacement_override = (
-        "unset"
-        if "GIT_NO_REPLACE_OBJECTS" not in os.environ
-        else f"set:{os.environ['GIT_NO_REPLACE_OBJECTS']}"
-    )
-    return "codex-security-snapshot/v1:sha256:" + hashlib.sha256(
-        "\0".join(
-            (
-                kind,
-                base,
-                head,
-                *trees,
-                replacements.stdout,
-                replacement_mode.stdout.strip(),
-                replacement_override,
-            )
-        ).encode("utf-8")
-    ).hexdigest()
-
-
 def require_diff_target(
     target: Path,
     kind: str | None,
@@ -382,22 +337,12 @@ def require_diff_target(
             )
             if supplied_base != parent:
                 raise SystemExit("Commit base revision must match the selected commit's parent.")
-        base = parent
-    else:
-        base = resolve_git_commit(target, base_revision or "", "Base revision")
-        head = resolve_git_commit(target, head_revision or "", "Head revision")
-        if base == head:
-            raise SystemExit("Base and head revisions must identify different commits.")
-
-    digest = immutable_diff_content_digest(target, kind, base, head)
-    if content_digest and content_digest != digest:
-        raise SystemExit("The selected diff snapshot does not match its immutable Git revisions.")
-    return {
-        "kind": kind,
-        "baseRevision": base,
-        "headRevision": head,
-        "contentDigest": digest,
-    }
+        return {"kind": kind, "baseRevision": parent, "headRevision": head}
+    base = resolve_git_commit(target, base_revision or "", "Base revision")
+    head = resolve_git_commit(target, head_revision or "", "Head revision")
+    if base == head:
+        raise SystemExit("Base and head revisions must identify different commits.")
+    return {"kind": kind, "baseRevision": base, "headRevision": head}
 
 
 def inspect_setup_values(
@@ -543,22 +488,6 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
-def require_immutable_diff_snapshot(scan: sqlite3.Row) -> None:
-    if (
-        scan["mode"] == "diff"
-        and scan["diff_target_kind"] in {"commit", "range"}
-        and scan["diff_content_digest"]
-        and immutable_diff_content_digest(
-            Path(scan["target_path"]),
-            scan["diff_target_kind"],
-            scan["diff_base_revision"],
-            scan["diff_head_revision"],
-        )
-        != scan["diff_content_digest"]
-    ):
-        raise SystemExit("The selected Git diff snapshot changed before scan completion.")
-
-
 def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[str, Any]:
     contract = scan_contract(scan)
     target_contract = contract["target"]
@@ -575,8 +504,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_content_digest"]:
-            require_immutable_diff_snapshot(scan)
+        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":
@@ -645,10 +573,12 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
                 "scan-manifest.json target headRevision must match the workbench diff target."
             )
         if (
-            scan["diff_target_kind"] == "working_tree" or scan["diff_content_digest"] is not None
-        ) and target.get("snapshotDigest") != scan["diff_content_digest"]:
+            scan["diff_target_kind"] == "working_tree"
+            and target.get("snapshotDigest") != scan["diff_content_digest"]
+        ):
             raise SystemExit(
-                "scan-manifest.json target snapshotDigest must match the selected diff snapshot."
+                "scan-manifest.json target snapshotDigest must match the selected "
+                "working-tree contents."
             )
     scope = manifest_scan.get("scope")
     if not isinstance(scope, dict):
@@ -1359,7 +1289,6 @@ def complete_scan_locked(
             """,
             (finding_count, len(artifacts), len(artifacts), timestamp, scan["id"]),
         )
-        require_immutable_diff_snapshot(scan)
         updated = connection.execute(
             """
             UPDATE scans
@@ -1414,10 +1343,6 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             if head != current_head:
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
-        else:
-            diff_target["contentDigest"] = immutable_diff_content_digest(
-                repository, "range", base, head
-            )
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
