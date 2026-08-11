@@ -198,46 +198,56 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test("applies file exclusions beneath tracked Git checkouts", async () => {
-    if (Bun.which("rg") === null) return;
+  test.each([".ignore", ".gitignore", ".git/info/exclude"])(
+    "applies %s file exclusions beneath tracked Git checkouts",
+    async (outerIgnore) => {
+      if (Bun.which("rg") === null) return;
 
-    const checkout = await repository();
-    const nested = join(checkout, "nested");
-    await mkdir(nested);
-    execFileSync("git", ["init", "-q"], { cwd: nested });
-    await Promise.all([
-      writeFile(join(checkout, ".gitignore"), "nested/\n"),
-      writeFile(join(checkout, ".ignore"), "nested/private.ts\n"),
-      writeFile(join(nested, "private.ts"), "private\n"),
-      writeFile(join(nested, "visible.ts"), "visible\n"),
-    ]);
-    execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
-    execFileSync(
-      "git",
-      [
-        "-c",
-        "user.name=Inventory Test",
-        "-c",
-        "user.email=inventory@example.test",
-        "commit",
-        "-qm",
-        "Track nested source",
-      ],
-      { cwd: nested },
-    );
-    execFileSync("git", ["add", "--force", "nested"], {
-      cwd: checkout,
-      stdio: "ignore",
-    });
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(
+          join(checkout, ".gitignore"),
+          outerIgnore === ".gitignore"
+            ? "nested/\nnested/private.ts\n"
+            : "nested/\n",
+        ),
+        ...(outerIgnore === ".gitignore"
+          ? []
+          : [writeFile(join(checkout, outerIgnore), "nested/private.ts\n")]),
+        writeFile(join(nested, "private.ts"), "private\n"),
+        writeFile(join(nested, "visible.ts"), "visible\n"),
+      ]);
+      execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=Inventory Test",
+          "-c",
+          "user.email=inventory@example.test",
+          "commit",
+          "-qm",
+          "Track nested source",
+        ],
+        { cwd: nested },
+      );
+      execFileSync("git", ["add", "--force", "nested"], {
+        cwd: checkout,
+        stdio: "ignore",
+      });
 
-    const rows = await inventory(checkout);
-    expect(rows).toContain("./nested/visible.ts");
-    expect(rows).not.toContain("./nested/private.ts");
+      const rows = await inventory(checkout);
+      expect(rows).toContain("./nested/visible.ts");
+      expect(rows).not.toContain("./nested/private.ts");
 
-    const scoped = await inventory(checkout, "nested");
-    expect(scoped).toContain("nested/visible.ts");
-    expect(scoped).not.toContain("nested/private.ts");
-  });
+      const scoped = await inventory(checkout, "nested");
+      expect(scoped).toContain("nested/visible.ts");
+      expect(scoped).not.toContain("nested/private.ts");
+    },
+  );
 
   test("applies configured excludes from every enclosing Git checkout", async () => {
     if (Bun.which("rg") === null) return;
@@ -300,22 +310,33 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./middle/nested/private.ts");
   });
 
-  test("preserves outer Git file exclusions for explicit nested scopes", async () => {
-    if (Bun.which("rg") === null) return;
+  test.each([
+    ["visible", "nested/private.ts\n"],
+    ["ignored", "nested/\nnested/private.ts\n"],
+  ])(
+    "preserves outer Git file exclusions for %s explicit nested scopes",
+    async (_visibility, outerIgnores) => {
+      if (Bun.which("rg") === null) return;
 
-    const checkout = await repository();
-    const nested = join(checkout, "nested");
-    await mkdir(nested);
-    execFileSync("git", ["init", "-q"], { cwd: nested });
-    await Promise.all([
-      writeFile(join(checkout, ".gitignore"), "nested/private.ts\n"),
-      writeFile(join(nested, "private.ts"), "private\n"),
-      writeFile(join(nested, "visible.ts"), "visible\n"),
-    ]);
-    execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(join(checkout, ".gitignore"), outerIgnores),
+        writeFile(join(nested, "private.ts"), "private\n"),
+        writeFile(join(nested, "visible.ts"), "visible\n"),
+      ]);
+      execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
 
-    expect(await inventory(checkout, "nested")).toEqual(["nested/visible.ts"]);
-  });
+      expect(await inventory(checkout, "nested")).toEqual([
+        "nested/visible.ts",
+      ]);
+
+      await writeFile(join(checkout, ".git", "info", "exclude"), "nested/\n");
+      expect(await inventory(checkout, "nested")).toEqual([]);
+    },
+  );
 
   test("does not grant Git link exemptions to replaced tracked files", async () => {
     if (Bun.which("rg") === null) return;
@@ -374,6 +395,50 @@ describe("security scan file inventory", () => {
     );
   });
 
+  test("discovers Git-hidden checkouts reopened by ripgrep ignore rules", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "container", "nested");
+    await mkdir(nested, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(checkout, ".gitignore"), "container/\n"),
+      writeFile(join(checkout, ".ignore"), "!container/\n!container/nested/\n"),
+      writeFile(join(nested, ".ignore"), "*\n"),
+      writeFile(join(nested, "tracked.ts"), "export {};\n"),
+    ]);
+    execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
+
+    expect(await inventory(checkout)).toContain(
+      "./container/nested/tracked.ts",
+    );
+  });
+
+  test("keeps ignore scaffolding separate from case-distinct checkouts", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    await writeFile(join(checkout, ".ignore"), ".IGNORE/private.ts\n");
+    const nested = join(checkout, ".IGNORE");
+    try {
+      await mkdir(nested);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(nested, "tracked.ts"), "visible\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+    ]);
+    execFileSync("git", ["add", "tracked.ts", "private.ts"], { cwd: nested });
+
+    const rows = await inventory(checkout);
+    expect(rows).toContain("./.IGNORE/tracked.ts");
+    expect(rows).not.toContain("./.IGNORE/private.ts");
+  });
+
   test("keeps tracked files when an ignored snapshot checkout is explicitly selected", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -396,13 +461,21 @@ describe("security scan file inventory", () => {
     async () => {
       if (Bun.which("rg") === null) return;
 
-      const checkout = await repository(false);
-      const external = join(dirname(checkout), "outside");
-      await mkdir(join(external, ".ignore"), { recursive: true });
-      await symlink(external, join(checkout, "junction"), "junction");
-      await writeFile(join(checkout, "visible.ts"), "visible\n");
+      for (const initializeGit of [false, true]) {
+        const checkout = await repository(initializeGit);
+        const external = join(dirname(checkout), "outside");
+        await mkdir(join(external, ".ignore"), { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: external });
+        if (initializeGit) {
+          await writeFile(join(checkout, "junction"), "tracked\n");
+          execFileSync("git", ["add", "junction"], { cwd: checkout });
+          await rm(join(checkout, "junction"));
+        }
+        await symlink(external, join(checkout, "junction"), "junction");
+        await writeFile(join(checkout, "visible.ts"), "visible\n");
 
-      expect(await inventory(checkout)).toEqual(["./visible.ts"]);
+        expect(await inventory(checkout)).toEqual(["./visible.ts"]);
+      }
     },
   );
 
