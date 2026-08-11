@@ -351,6 +351,7 @@ def list_scans(
                 continue
             clauses.append(
                 "(scans.target_id IS NOT ? "
+                "OR (scans.target_inode IS NULL AND scans.target_device IS NULL) "
                 "OR (scans.target_inode = ? AND scans.target_device = ?))"
             )
             values.extend(

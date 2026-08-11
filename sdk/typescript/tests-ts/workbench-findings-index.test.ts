@@ -309,6 +309,15 @@ const nestedDirectoryScanProbe = [
   "        output['directTargetLookupBounded'] = observed_git.call_count <= 3",
   "    output['directTargetSkipsDescendants'] = len(descendant_queries) == previous_descendant_queries",
   "    output['descendantQueriesScoped'] = bool(descendant_queries) and all('WHERE substr(target_path, 1,' in statement for statement in descendant_queries)",
+  "    root_target = ensure_security_target(connection, str(root))",
+  "    root_metadata = root.stat()",
+  "    connection.execute('INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', ('verified-root-workspace', root_target, str(root), current_timestamp, current_timestamp))",
+  "    connection.execute('INSERT INTO scans(id, workspace_id, target_id, target_path, target_device, target_inode, target_revision, scope, mode, scan_dir, status, phase, started_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('verified-root-scan', 'verified-root-workspace', root_target, str(root), serialize_filesystem_identity(root_metadata.st_dev), serialize_filesystem_identity(root_metadata.st_ino), 'unversioned', '.', 'standard', directory + '/results/verified-root', 'complete', 'reporting', current_timestamp, current_timestamp, current_timestamp, current_timestamp))",
+  "    connection.execute('INSERT INTO scan_progress(scan_id, updated_at) VALUES (?, ?)', ('verified-root-scan', current_timestamp))",
+  "    output['mixedLegacyHistory'] = [scan['scanId'] for scan in list_scans(connection, args)['scans']]",
+  "    mixed_reads = []",
+  "    mixed_matching = list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(root), force=False), backfill_finding_details=lambda *_: None, read_coverage=lambda scan: mixed_reads.append(scan['id']) or {})",
+  "    output['mixedLegacyMatching'] = {'scanCount': mixed_matching['scanCount'], 'coverageReads': mixed_reads}",
   "    print(json.dumps(output))",
 ].join("\n");
 
@@ -695,6 +704,11 @@ describe("workbench findings index", () => {
       directTargetLookupBounded: true,
       directTargetSkipsDescendants: true,
       descendantQueriesScoped: true,
+      mixedLegacyHistory: ["verified-root-scan", "scan"],
+      mixedLegacyMatching: {
+        scanCount: 1,
+        coverageReads: ["verified-root-scan"],
+      },
     });
   }, 30_000);
 
