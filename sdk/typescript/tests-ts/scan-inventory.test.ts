@@ -1091,11 +1091,13 @@ describe("security scan file inventory", () => {
     ["primary-arbitrary-pack", "pack"],
     ["primary-arbitrary-index", "pack"],
     ["primary", "ab"],
+    ["primary-uppercase", "ab"],
     ["alternate", "pack"],
     ["alternate-uppercase", "pack"],
     ["alternate-arbitrary-pack", "pack"],
     ["alternate-arbitrary-index", "pack"],
     ["alternate", "ab"],
+    ["alternate-uppercase", "ab"],
   ])("rejects symbolic %s Git object files in %s", async (owner, kind) => {
     if (Bun.which("rg") === null) return;
 
@@ -1122,6 +1124,17 @@ describe("security scan file inventory", () => {
     const suffix = owner.endsWith("index") ? "idx" : "pack";
     const member = kind === "pack" ? `${basename}.${suffix}` : hex.repeat(38);
     await symlink(external, join(directory, member));
+    if (kind !== "pack" && hex === "A") {
+      const aliases = await realpath(join(directory, "a".repeat(38))).then(
+        () => true,
+        () => false,
+      );
+      if (!aliases) {
+        await writeFile(join(checkout, "visible.ts"), "visible\n");
+        expect(await inventory(checkout)).toContain("./visible.ts");
+        return;
+      }
+    }
 
     await expect(inventory(checkout)).rejects.toThrow(
       "symbolic Git metadata paths are not supported",
@@ -1638,10 +1651,49 @@ describe("security scan file inventory", () => {
       /^([ \t]*worktree[ \t]*=[ \t]*)(.+)$/m,
       '$1"$2" # valid Git comment',
     );
-    await writeFile(config, `${configured}\n[feature]\n\tenabled\n`);
+    const suffix =
+      process.platform === "win32"
+        ? Buffer.alloc(0)
+        : Buffer.from([0x23, 0x20, 0xff, 0x0a]);
+    await writeFile(
+      config,
+      Buffer.concat([
+        Buffer.from(`${configured}\n[feature]\n\tenabled\n`),
+        suffix,
+      ]),
+    );
 
     expect(await inventory(checkout)).toContain("./nested/visible.ts");
   });
+
+  test.skipIf(process.platform !== "linux")(
+    "preserves non-UTF-8 paths in genuine Git worktree configurations",
+    async () => {
+      if (Bun.which("rg") === null || python === null) return;
+
+      const checkout = await repository();
+      const configure = [
+        "import os, subprocess, sys",
+        "root = os.fsencode(sys.argv[1])",
+        "worktree = root + b'/nested-\\xff'",
+        "gitdir = root + b'/.git/modules/nested-bytes'",
+        "os.makedirs(os.path.dirname(gitdir), exist_ok=True)",
+        "subprocess.run([b'git', b'init', b'-q', b'--separate-git-dir', gitdir, worktree], check=True)",
+        "subprocess.run([b'git', b'--git-dir=' + gitdir, b'config', b'core.worktree', worktree], check=True)",
+        "with open(worktree + b'/visible.ts', 'wb') as source: source.write(b'tracked\\n')",
+        "subprocess.run([b'git', b'-C', worktree, b'add', b'visible.ts'], check=True)",
+      ].join("\n");
+      execFileSync(python, ["-B", "-c", configure, checkout], {
+        stdio: "pipe",
+      });
+
+      expect(
+        (await inventory(checkout)).some((path) =>
+          path.endsWith("/visible.ts"),
+        ),
+      ).toBe(true);
+    },
+  );
 
   test("does not inspect a differently cased checkout outside an explicit scope", async () => {
     if (Bun.which("rg") === null) return;

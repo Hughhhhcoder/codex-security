@@ -176,6 +176,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             return metadata
 
         def inspect_object_store(objects: Path) -> None:
+            def aliases_canonical_path(path: Path, canonical: str) -> bool:
+                try:
+                    actual = path.stat(follow_symlinks=False)
+                    expected = (path.parent / canonical).stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    return False
+                return (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
+
             try:
                 identity = directory_identity(objects)
                 if identity in validated_object_stores:
@@ -187,14 +195,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         r"[0-9a-f]{2}", canonical
                     ):
                         continue
-                    if entry.name != canonical:
-                        try:
-                            actual = entry.stat(follow_symlinks=False)
-                            expected = (objects / canonical).stat(follow_symlinks=False)
-                        except FileNotFoundError:
-                            continue
-                        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
-                            continue
+                    if entry.name != canonical and not aliases_canonical_path(entry, canonical):
+                        continue
                     inspect_metadata(entry, directory=True)
                     if canonical != "info":
                         for member in entry.iterdir():
@@ -203,8 +205,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     (".pack", ".idx", ".rev", ".bitmap", ".keep", ".promisor", ".mtimes")
                                 ):
                                     continue
-                            elif not re.fullmatch(r"(?:[0-9a-f]{38}|[0-9a-f]{62})", member.name):
-                                continue
+                            else:
+                                member_canonical = member.name.casefold()
+                                if not re.fullmatch(
+                                    r"(?:[0-9a-f]{38}|[0-9a-f]{62})", member_canonical
+                                ):
+                                    continue
+                                if member.name != member_canonical and not aliases_canonical_path(
+                                    member, member_canonical
+                                ):
+                                    continue
                             inspect_metadata(member, directory=False)
                 validated_object_stores.add(identity)
             except OSError as error:
@@ -259,7 +269,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     interpolation=None, strict=False, allow_no_value=True
                 )
                 try:
-                    config.read_string(config_path.read_text(encoding="utf-8-sig"))
+                    config.read_string(
+                        os.fsdecode(config_path.read_bytes().removeprefix(codecs.BOM_UTF8))
+                    )
                     configured_worktree = config.get("core", "worktree", fallback=None)
                 except (OSError, UnicodeError, configparser.Error) as error:
                     raise InventoryError(f"could not inspect Git metadata: {directory}") from error
