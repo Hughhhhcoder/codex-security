@@ -250,11 +250,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for current in reversed((gitdir, *gitdir.parents)):
                 if inspect_metadata(current, directory=True) is None:
                     break
-            repository_parts = repository.parts
-            internally_owned = gitdir.parts[: len(repository_parts)] == repository_parts
+            internally_owned = gitdir.is_relative_to(repository)
             if internally_owned:
                 ancestor = gitdir
-                for _ in range(len(gitdir.parts) - len(repository_parts)):
+                for _ in range(len(gitdir.parts) - len(repository.parts)):
                     ancestor = ancestor.parent
                 internally_owned = directory_identity(ancestor) == directory_identity(repository)
             backpointer = gitdir / "gitdir"
@@ -535,7 +534,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             try:
                 for shared_index in root.iterdir():
                     canonical = shared_index.name.casefold()
-                    if not canonical.startswith("sharedindex."):
+                    if not re.fullmatch(
+                        r"sharedindex\.(?:[0-9a-f]{40}|[0-9a-f]{64})", canonical
+                    ):
                         continue
                     if shared_index.name != canonical and not aliases_canonical_path(
                         shared_index, canonical

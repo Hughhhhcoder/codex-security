@@ -988,6 +988,7 @@ describe("security scan file inventory", () => {
     "semicolon-comment-override",
     "default-inheritance",
     "unquoted-escape",
+    "case-alias",
     "owned",
     "external",
     "mixed-case-external",
@@ -999,6 +1000,7 @@ describe("security scan file inventory", () => {
         return;
       if (ownership === "unquoted-escape" && process.platform === "win32")
         return;
+      if (ownership === "case-alias" && process.platform !== "win32") return;
 
       const checkout = await repository();
       const nested = join(
@@ -1034,7 +1036,8 @@ describe("security scan file inventory", () => {
       ]);
       await writeFile(join(nested, "visible.ts"), "tracked\n");
       execFileSync("git", ["-C", nested, "add", "visible.ts"]);
-      const effective = ownership === "owned" ? nested : external;
+      const effective =
+        ownership === "owned" || ownership === "case-alias" ? nested : external;
       const config = join(metadata, "config");
       if (ownership === "mixed-case-external") {
         await writeFile(
@@ -1089,6 +1092,12 @@ describe("security scan file inventory", () => {
         await symlink(unused, join(metadata, "config.worktree"));
       } else {
         await writeFile(join(metadata, "config.worktree"), override);
+      }
+      if (ownership === "case-alias") {
+        await writeFile(
+          join(nested, ".git"),
+          `gitdir: ${metadata.toUpperCase()}\n`,
+        );
       }
 
       if (
@@ -1615,6 +1624,7 @@ describe("security scan file inventory", () => {
         name.startsWith("sharedindex."),
       );
       if (shared === undefined) throw new Error("Expected a split Git index.");
+      await mkdir(join(gitdir, "sharedindex.notes"));
 
       expect(await inventory(checkout)).toContain("./tracked.ts");
       const original = join(gitdir, shared);
