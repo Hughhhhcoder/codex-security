@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -480,6 +481,34 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./nested/private.ts");
   });
 
+  test.skipIf(process.platform === "win32").each([".ignore", ".rgignore"])(
+    "rejects a hidden Gitlink ancestor's symbolic %s",
+    async (name) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const hidden = join(checkout, "hidden");
+      const nested = join(hidden, "nested");
+      const external = join(dirname(checkout), "external.ignore");
+      await mkdir(nested, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await writeFile(join(nested, "private.ts"), "tracked\n");
+      execFileSync("git", ["add", "private.ts"], { cwd: nested });
+      commit(nested);
+      await writeFile(join(checkout, ".gitignore"), "hidden/\n");
+      execFileSync("git", ["add", "--force", "hidden/nested"], {
+        cwd: checkout,
+        stdio: "ignore",
+      });
+      await writeFile(external, "nested/private.ts\n");
+      await symlink(external, join(hidden, name));
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic ignore files are not supported",
+      );
+    },
+  );
+
   test.each([
     ["visible", "nested/private.ts\n"],
     ["ignored", "nested/\nnested/private.ts\n"],
@@ -934,6 +963,39 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test("rejects external Git object alternates before invoking Git", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const external = await repository();
+    const trace = join(dirname(checkout), "git-trace.log");
+    await writeFile(
+      join(checkout, ".git", "objects", "info", "alternates"),
+      `${join(external, ".git", "objects")}\n`,
+    );
+
+    await expect(
+      inventory(checkout, ".", { ...process.env, GIT_TRACE: trace }),
+    ).rejects.toThrow("external Git object alternates are not supported");
+    await expect(readFile(trace, "utf8")).rejects.toThrow();
+  });
+
+  test("allows repository-owned Git object alternates", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const objects = join(checkout, ".git", "extra-objects");
+    await mkdir(join(objects, "info"), { recursive: true });
+    await mkdir(join(objects, "pack"));
+    await writeFile(
+      join(checkout, ".git", "objects", "info", "alternates"),
+      `${objects}\n`,
+    );
+    await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+    expect(await inventory(checkout)).toContain("./visible.ts");
+  });
+
   test.skipIf(process.platform === "win32")(
     "rejects escaped Git index entries before probing sibling metadata",
     async () => {
@@ -960,6 +1022,33 @@ describe("security scan file inventory", () => {
           PATH: `${wrappers}:${process.env["PATH"] ?? ""}`,
         }),
       ).rejects.toThrow("out-of-scope Git inventory paths are not supported");
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "rejects drive-relative Git index entries before probing another drive",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const original = "D-checkout";
+      await writeFile(join(checkout, original), "tracked\n");
+      execFileSync("git", ["add", original], { cwd: checkout });
+      const indexPath = join(checkout, ".git", "index");
+      const index = await readFile(indexPath);
+      const offset = index.indexOf(Buffer.from(`${original}\0`));
+      if (offset === -1)
+        throw new Error("Expected the staged Git index entry.");
+      index.write("D:checkout", offset, "utf8");
+      createHash("sha1")
+        .update(index.subarray(0, index.length - 20))
+        .digest()
+        .copy(index, index.length - 20);
+      await writeFile(indexPath, index);
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "out-of-scope Git inventory paths are not supported",
+      );
     },
   );
 

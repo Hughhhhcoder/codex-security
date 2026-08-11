@@ -257,12 +257,44 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         "objects/info",
                     ),
                 )
-                if metadata is not None and relative in ("config", "config.worktree"):
+                if metadata is not None and relative in (
+                    "config",
+                    "config.worktree",
+                    "objects/info/alternates",
+                ):
                     try:
                         contents = path.read_bytes()
                     except OSError as error:
                         raise InventoryError(f"could not inspect Git metadata: {directory}") from error
-                    if GIT_CONFIG_INCLUDE.search(contents.removeprefix(b"\xef\xbb\xbf")):
+                    if relative == "objects/info/alternates":
+                        for line in contents.split(b"\n"):
+                            line = line.removesuffix(b"\r")
+                            if not line:
+                                continue
+                            alternate = Path(os.fsdecode(line))
+                            if not alternate.is_absolute():
+                                alternate = root / "objects" / alternate
+                            alternate = Path(os.path.abspath(alternate))
+                            owner = next(
+                                (
+                                    candidate
+                                    for candidate in (repository, *roots)
+                                    if alternate.is_relative_to(candidate)
+                                ),
+                                None,
+                            )
+                            if owner is None:
+                                raise InventoryError(
+                                    "external Git object alternates are not supported"
+                                )
+                            current = owner
+                            for component in alternate.relative_to(owner).parts:
+                                current /= component
+                                if inspect_metadata(current, directory=True) is None:
+                                    raise InventoryError(
+                                        "missing Git object alternates are not supported"
+                                    )
+                    elif GIT_CONFIG_INCLUDE.search(contents.removeprefix(b"\xef\xbb\xbf")):
                         raise InventoryError("Git config includes are not supported")
             try:
                 shared_indexes = (
@@ -397,6 +429,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if current == repository:
                 break
             current = current.parent
+        for directory in directories:
+            reject_symbolic_ignore(directory)
         ignore_files = [
             directory / name
             for directory in directories
@@ -812,8 +846,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         def validated_git_path(relative: bytes) -> bytes:
             portable = normalized(relative)
             components = portable.removesuffix(b"/").split(b"/")
-            if Path(os.fsdecode(portable)).is_absolute() or any(
-                component in (b"", b".", b"..") for component in components
+            path = Path(os.fsdecode(portable))
+            if (
+                path.is_absolute()
+                or path.drive
+                or not (repository / path).is_relative_to(repository)
+                or any(component in (b"", b".", b"..") for component in components)
             ):
                 raise InventoryError("out-of-scope Git inventory paths are not supported")
             return relative
