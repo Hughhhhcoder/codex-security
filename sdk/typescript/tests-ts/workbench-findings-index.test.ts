@@ -27,6 +27,10 @@ const findingsIndexProbe = [
   "    ('orphan-old', None, '/orphan/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/orphan-old'),",
   "    ('orphan-new', None, '/orphan/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/orphan-new'),",
   "])",
+  "if settings.get('mixedLegacyOwnership'):",
+  "    connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
+  "    connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
+  "    connection.execute(\"UPDATE scans SET target_device = 7, target_inode = 9 WHERE id = 'current-new'\")",
   "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'current-old-finding', 'current-old', 'high', '2026-01-01', 'Resolved current finding', 'Older issue'),",
   "    ('current-new-occurrence', 'current-new-finding', 'current-new', 'critical', '2026-02-01', 'Current CLI finding', 'Latest issue'),",
@@ -50,6 +54,8 @@ const findingsIndexProbe = [
   "coverage_reads = []",
   "def coverage(scan):",
   "    coverage_reads.append(scan['id'])",
+  "    if settings.get('mixedLegacyOwnership') and scan['id'] == 'current-new':",
+  "        return {'completeness': 'partial', 'includePaths': ['src/new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    if scan['id'] == 'stale-new':",
   "        if settings.get('coverageFailure') == 'tampered':",
   "            raise SystemExit('The sealed scan manifest changed after completion.')",
@@ -325,6 +331,7 @@ const relocatedFindingProbe = [
   "import argparse, json, os, pathlib, sqlite3, subprocess, sys, tempfile",
   "sys.path.insert(0, sys.argv[1])",
   "from workbench_db import apply_migrations, finding_result, serialize_filesystem_identity",
+  "import workbench_native_indexes as indexes",
   "from workbench_scan_history import finding_occurrence_rows, list_scans, list_unmatched_scan_pairs",
   "from workbench_target_state import ensure_security_target",
   "with tempfile.TemporaryDirectory(prefix='codex-security-relocated-finding-') as directory:",
@@ -348,6 +355,9 @@ const relocatedFindingProbe = [
   "    connection.execute('INSERT INTO findings(id, fingerprint, rule_id, identity_anchor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', ('finding', 'fingerprint', 'rule', 'anchor', timestamp, timestamp))",
   "    connection.execute('INSERT INTO finding_occurrences(id, finding_id, scan_id, title, summary, severity, confidence, remediation, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', ('occurrence', 'finding', 'scan', 'Äuthorization bypass', 'Über account access', 'high', 'high', 'Require authorization.', '{}', timestamp))",
   "    connection.execute('INSERT INTO finding_locations(occurrence_id, relative_path, start_line, end_line, role, sort_order) VALUES (?, ?, ?, ?, ?, ?)', ('occurrence', 'src/ÄUTH-Straße.py', 1, 1, 'root_control', 0))",
+  "    connection.execute('UPDATE scans SET seal_manifest_digest = ? WHERE id = ?', ('sealed', 'scan'))",
+  "    finding_args = argparse.Namespace(repository=str(checkout), query=None, severity=None, status=None, target_id=None, target_path=None, offset=0, limit=20)",
+  "    scoped_findings = [row['occurrenceId'] for row in indexes.list_global_findings(connection, finding_args, read_coverage=lambda _: {})['findings']]",
   "    searches = {query: [row['id'] for row in finding_occurrence_rows(connection, 'scan', offset=0, limit=20, query=query)] for query in ['äuthorization', 'über', 'äuth-strasse']}",
   "    occurrence = connection.execute('SELECT * FROM finding_occurrences WHERE id = ?', ('occurrence',)).fetchone()",
   "    connection.execute('UPDATE scans SET target_device = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev + 1), 'scan'))",
@@ -364,6 +374,8 @@ const relocatedFindingProbe = [
   "    unregistered_moved_scan_ids = [row['scanId'] for row in list_scans(connection, moved_args)['scans']]",
   "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(moved_checkout), target))",
   "    moved_scan_ids = [row['scanId'] for row in list_scans(connection, moved_args)['scans']]",
+  "    finding_args.repository = str(moved_checkout)",
+  "    moved_scoped_findings = [row['occurrenceId'] for row in indexes.list_global_findings(connection, finding_args, read_coverage=lambda _: {})['findings']]",
   "    moved = finding_result(connection, scan, occurrence, full_details=True)",
   "    connection.execute('UPDATE scans SET target_device = ? WHERE id = ?', (serialize_filesystem_identity(metadata.st_dev + 1), 'scan'))",
   "    mismatched_scan = connection.execute('SELECT * FROM scans WHERE id = ?', ('scan',)).fetchone()",
@@ -372,7 +384,9 @@ const relocatedFindingProbe = [
   "    replacement.mkdir()",
   "    connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (str(replacement), target))",
   "    replaced = finding_result(connection, scan, occurrence, full_details=True)",
-  "    print(json.dumps({'searches': searches, 'mismatchedOwnerScans': mismatched_owner_scans, 'mismatchedOwnerMatching': mismatched_owner_matching, 'mismatchedOriginalAbsolutePath': mismatched_original['locations'][0].get('absolutePath'), 'mismatchedOriginalSourceExcerpt': mismatched_original.get('sourceExcerpt'), 'unregisteredMovedScans': unregistered_moved_scan_ids, 'movedScans': moved_scan_ids, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'mismatchedDeviceAbsolutePath': mismatched_device['locations'][0].get('absolutePath'), 'mismatchedDeviceSourceExcerpt': mismatched_device.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
+  "    finding_args.repository = str(replacement)",
+  "    replacement_scoped_findings = [row['occurrenceId'] for row in indexes.list_global_findings(connection, finding_args, read_coverage=lambda _: {})['findings']]",
+  "    print(json.dumps({'searches': searches, 'scopedFindings': scoped_findings, 'movedScopedFindings': moved_scoped_findings, 'replacementScopedFindings': replacement_scoped_findings, 'mismatchedOwnerScans': mismatched_owner_scans, 'mismatchedOwnerMatching': mismatched_owner_matching, 'mismatchedOriginalAbsolutePath': mismatched_original['locations'][0].get('absolutePath'), 'mismatchedOriginalSourceExcerpt': mismatched_original.get('sourceExcerpt'), 'unregisteredMovedScans': unregistered_moved_scan_ids, 'movedScans': moved_scan_ids, 'movedAbsolutePath': moved['locations'][0].get('absolutePath'), 'expectedMovedAbsolutePath': str(moved_checkout / 'src' / 'ÄUTH-Straße.py'), 'movedSourceExcerpt': moved.get('sourceExcerpt'), 'mismatchedDeviceAbsolutePath': mismatched_device['locations'][0].get('absolutePath'), 'mismatchedDeviceSourceExcerpt': mismatched_device.get('sourceExcerpt'), 'replacementAbsolutePath': replaced['locations'][0].get('absolutePath'), 'replacementSourceExcerpt': replaced.get('sourceExcerpt')}))",
 ].join("\n");
 
 const findingDetailProbe = [
@@ -421,6 +435,7 @@ function runFindingsIndex(
     query?: string;
     coverageFailure?: "tampered" | "noncanonical" | "pruned";
     lateCompletion?: boolean;
+    mixedLegacyOwnership?: boolean;
   } = {},
 ) {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -453,6 +468,7 @@ function probeFindingsIndex(
     query?: string;
     coverageFailure?: "pruned";
     lateCompletion?: boolean;
+    mixedLegacyOwnership?: boolean;
   } = {},
 ): {
   findings: Array<{
@@ -482,6 +498,20 @@ describe("workbench findings index", () => {
       }),
     ]);
     expect(result.coverageReads).toEqual(["current-new"]);
+    expect(result.findings).not.toContainEqual(
+      expect.objectContaining({ occurrenceId: "reused-legacy-occurrence" }),
+    );
+  });
+
+  test("keeps legacy findings after newer scans record filesystem ownership", () => {
+    const result = probeFindingsIndex("current-target", {
+      mixedLegacyOwnership: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+      expect.objectContaining({ occurrenceId: "current-old-occurrence" }),
+    ]);
     expect(result.findings).not.toContainEqual(
       expect.objectContaining({ occurrenceId: "reused-legacy-occurrence" }),
     );
@@ -734,6 +764,9 @@ describe("workbench findings index", () => {
     expect(result.exitCode).toBe(0);
     const output = JSON.parse(new TextDecoder().decode(result.stdout)) as {
       searches: Record<string, string[]>;
+      scopedFindings: string[];
+      movedScopedFindings: string[];
+      replacementScopedFindings: string[];
       mismatchedOwnerScans: string[];
       mismatchedOwnerMatching: number;
       mismatchedOriginalAbsolutePath: string | null;
@@ -753,6 +786,9 @@ describe("workbench findings index", () => {
       über: ["occurrence"],
       "äuth-strasse": ["occurrence"],
     });
+    expect(output.scopedFindings).toEqual(["occurrence"]);
+    expect(output.movedScopedFindings).toEqual(["occurrence"]);
+    expect(output.replacementScopedFindings).toEqual([]);
     expect(output.mismatchedOwnerScans).toEqual([]);
     expect(output.mismatchedOwnerMatching).toBe(0);
     expect(output.mismatchedOriginalAbsolutePath).toBeNull();

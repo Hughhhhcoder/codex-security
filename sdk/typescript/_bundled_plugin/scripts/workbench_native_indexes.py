@@ -40,6 +40,7 @@ def list_global_findings(
         if selected_paths is not None
         else None
     )
+    repository = getattr(args, "repository", None)
     findings = (
         row
         for row in _active_findings(
@@ -47,6 +48,7 @@ def list_global_findings(
             read_coverage,
             target_ids=target_ids,
             target_paths=target_paths,
+            repository=repository,
             query=query,
         )
         if (
@@ -64,7 +66,7 @@ def list_global_findings(
                     row["title"],
                     row["summary"],
                     row["target_path"]
-                    if target_ids is None and target_paths is None
+                    if target_ids is None and target_paths is None and repository is None
                     else None,
                     row["location_path"],
                 )
@@ -107,6 +109,7 @@ def _active_findings(
     *,
     target_ids: set[str] | None = None,
     target_paths: set[str] | None = None,
+    repository: str | None = None,
     query: str = "",
 ) -> Iterator[sqlite3.Row]:
     target_filters = []
@@ -120,6 +123,15 @@ def _active_findings(
         target_filters.append(f"scans.target_path IN ({placeholders})")
         target_values.extend(target_paths)
     target_filter = "" if not target_filters else "AND (" + " OR ".join(target_filters) + ")"
+    repository_clauses, repository_values, _, _ = (
+        scan_history.repository_scan_scope(connection, repository)
+        if repository is not None
+        else ([], [], [], [])
+    )
+    repository_filter = (
+        "AND (" + " AND ".join(repository_clauses) + ")" if repository_clauses else ""
+    )
+    target_values.extend(repository_values)
     current_owner_only = (
         "AND NOT (scans.target_id IS NULL AND EXISTS ("
         "SELECT 1 FROM security_targets AS path_owner "
@@ -137,7 +149,8 @@ def _active_findings(
             "ORDER BY ownership_scan.started_at DESC, ownership_scan.id DESC LIMIT 1"
         )
         current_owner_only += (
-            " AND (scans.target_id IS NULL OR ("
+            " AND (scans.target_id IS NULL "
+            "OR (scans.target_device IS NULL AND scans.target_inode IS NULL) OR ("
             f"scans.target_device IS (SELECT ownership_scan.target_device {latest_identity}) "
             f"AND scans.target_inode IS (SELECT ownership_scan.target_inode {latest_identity})"
             "))"
@@ -149,7 +162,7 @@ def _active_findings(
         FROM scans
         LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
         WHERE scans.status = 'complete' AND scans.seal_manifest_digest IS NOT NULL
-            {target_filter} {current_owner_only}
+            {target_filter} {repository_filter} {current_owner_only}
         ORDER BY scans.started_at DESC, scans.id DESC
         """,
         target_values,
@@ -195,7 +208,7 @@ def _active_findings(
             JOIN scans ON scans.id = occurrences.scan_id
             LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
             LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
-            WHERE 1 = 1 {target_filter} {current_owner_only}
+            WHERE 1 = 1 {target_filter} {repository_filter} {current_owner_only}
         )
         SELECT
             selected_findings.*,

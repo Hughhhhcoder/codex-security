@@ -864,47 +864,10 @@ export async function main(
         const repository = options.allRepositories
           ? undefined
           : dependencies.currentDirectory();
-        const targetIds = new Set<string>();
-        const targetPaths = new Set<string>();
-        if (repository !== undefined) {
-          const result = await history([
-            "list-scans",
-            "--repository",
-            repository,
-          ]);
-          if (result === undefined) return undefined;
-          const scans = checkoutScans(
-            result["scans"] as JsonObject[],
-            repository,
-          );
-          for (const scan of scans) {
-            const targetId = scan["targetId"];
-            const targetPath = scan["targetPath"];
-            if (typeof targetId === "string") {
-              targetIds.add(targetId);
-            } else if (typeof targetPath === "string") {
-              targetPaths.add(targetPath);
-            }
-          }
-          if (targetIds.size === 0 && targetPaths.size === 0) {
-            return presentHistory(
-              {
-                findings: [],
-                limit: options.limit,
-                nextOffset: null,
-                offset: options.offset,
-              },
-              "findings",
-              format,
-              { repository },
-            );
-          }
-        }
         return presentHistory(
           await history([
             "list-global-findings",
-            ...[...targetIds].flatMap((id) => ["--target-id", id]),
-            ...[...targetPaths].flatMap((path) => ["--target-path", path]),
+            ...(repository === undefined ? [] : ["--repository", repository]),
             ...filters,
           ]),
           "findings",

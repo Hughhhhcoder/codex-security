@@ -168,6 +168,7 @@ def parse_args(description: str) -> argparse.Namespace:
     list_global_findings.add_argument("--query")
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
+    list_global_findings.add_argument("--repository")
     list_global_findings.add_argument("--target-id", action="append")
     list_global_findings.add_argument("--target-path", action="append")
     list_global_findings.add_argument("--offset", type=non_negative_int, default=0)

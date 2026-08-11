@@ -62,3 +62,37 @@ test("loads each scan's matching findings once across historical batches", () =>
     },
   });
 });
+
+test("compares registered scan history after its checkout moves", () => {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  if (python === null) throw new Error("A Python interpreter is required.");
+
+  const probe = [
+    "import json, os, pathlib, sqlite3, sys, tempfile",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_history as history",
+    "from filesystem_identity import serialize_filesystem_identity",
+    "with tempfile.TemporaryDirectory() as temporary:",
+    "    old = pathlib.Path(temporary) / 'old-checkout'",
+    "    old.mkdir()",
+    "    identity = os.stat(old)",
+    "    moved = pathlib.Path(temporary) / 'moved-checkout'",
+    "    old.rename(moved)",
+    "    connection = sqlite3.connect(':memory:')",
+    "    connection.row_factory = sqlite3.Row",
+    "    connection.execute('CREATE TABLE security_targets (id TEXT, current_path TEXT)')",
+    "    connection.execute('INSERT INTO security_targets VALUES (?, ?)', ('owned-target', str(moved)))",
+    "    rows = [connection.execute('SELECT ? AS target_id, ? AS target_path, ? AS target_device, ? AS target_inode', ('owned-target', str(path), serialize_filesystem_identity(identity.st_dev), serialize_filesystem_identity(identity.st_ino))).fetchone() for path in (old, moved)]",
+    "    print(json.dumps(history._same_registered_repository(connection, *rows)))",
+  ].join("\n");
+
+  const result = spawnSync(
+    python,
+    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
+    { encoding: "utf8" },
+  );
+
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(JSON.parse(result.stdout)).toBe(true);
+});

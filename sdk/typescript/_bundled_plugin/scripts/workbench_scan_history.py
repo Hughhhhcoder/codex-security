@@ -26,6 +26,7 @@ def _same_repository(
     after: sqlite3.Row,
     *,
     before_target_path: str | None = None,
+    after_target_path: str | None = None,
     after_git_directory: str | None = None,
     require_ownership: bool = False,
 ) -> bool:
@@ -46,6 +47,8 @@ def _same_repository(
         target = (
             before_target_path
             if scan is before and before_target_path is not None
+            else after_target_path
+            if scan is after and after_target_path is not None
             else scan["target_path"]
         )
         try:
@@ -65,7 +68,7 @@ def _same_repository(
                 return before_identity == after_identity and None not in before_identity
         return True
     before_target = Path(before["target_path"] if before_target_path is None else before_target_path)
-    after_target = Path(after["target_path"])
+    after_target = Path(after["target_path"] if after_target_path is None else after_target_path)
     if before_target.resolve() == after_target.resolve():
         return not before_target_id and not after_target_id
     before_git_dir = git_output(
@@ -173,16 +176,17 @@ def _verified_target_metadata(
     return metadata, recorded is not None
 
 
-def list_scans(
-    connection: sqlite3.Connection, args: argparse.Namespace | None = None
-) -> dict[str, Any]:
+def repository_scan_scope(
+    connection: sqlite3.Connection, repository: str | Path
+) -> tuple[list[str], list[Any], list[str], list[str]]:
     clauses: list[str] = []
     values: list[Any] = []
-    if args is not None and args.repository:
-        repository = Path(args.repository).expanduser().resolve()
+    related_target_ids: list[str] = []
+    repository_paths: list[str] = []
+    if repository:
+        repository = Path(repository).expanduser().resolve()
         requested_repository, replaced_target_id = _requested_repository(connection, repository)
         requested_target_id = requested_repository["target_id"]
-        related_target_ids: list[str] = []
         verified_targets: dict[str, tuple[os.stat_result | None, bool]] = {}
         if requested_target_id:
             requested_metadata = _verified_target_metadata(
@@ -361,6 +365,17 @@ def list_scans(
                     serialize_filesystem_identity(metadata.st_dev),
                 )
             )
+    return clauses, values, related_target_ids, repository_paths
+
+
+def list_scans(
+    connection: sqlite3.Connection, args: argparse.Namespace | None = None
+) -> dict[str, Any]:
+    clauses, values, related_target_ids, repository_paths = (
+        repository_scan_scope(connection, args.repository)
+        if args is not None and args.repository
+        else ([], [], [], [])
+    )
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
         prefix = scan_root.rstrip(os.sep) + os.sep
@@ -593,6 +608,27 @@ def list_unmatched_scan_pairs(
     }
 
 
+def _same_registered_repository(
+    connection: sqlite3.Connection, before: sqlite3.Row, after: sqlite3.Row
+) -> bool:
+    paths = []
+    for scan in (before, after):
+        target = connection.execute(
+            "SELECT current_path FROM security_targets WHERE id = ?",
+            (scan["target_id"],),
+        ).fetchone()
+        if target is None:
+            return False
+        paths.append(target["current_path"])
+    return _same_repository(
+        before,
+        after,
+        before_target_path=paths[0],
+        after_target_path=paths[1],
+        require_ownership=True,
+    )
+
+
 def compare_scans(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
@@ -609,7 +645,7 @@ def compare_scans(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after, require_ownership=True):
+    if not _same_registered_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     cached = connection.execute(
         "SELECT result_json FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
@@ -749,7 +785,7 @@ def save_scan_comparison(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after, require_ownership=True):
+    if not _same_registered_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     read_coverage(after)
     before_findings = _scan_findings(connection, before["id"])
