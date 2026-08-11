@@ -116,16 +116,37 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         current = current.parent
     ancestors.reverse()
 
-    def reject_symbolic_ignore(directory: Path) -> None:
+    def reject_symbolic_ignore(directory: Path, *, allow_ignored: bool = False) -> None:
         for name in IGNORE_FILE_NAMES:
             try:
                 metadata = (directory / name).stat(follow_symlinks=False)
             except FileNotFoundError:
                 continue
+            if not symbolic_metadata(metadata) and stat.S_ISREG(metadata.st_mode):
+                continue
+            if allow_ignored and directory != repository:
+                ignored = subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-C",
+                        str(repository),
+                        "check-ignore",
+                        "--quiet",
+                        "--no-index",
+                        "--",
+                        directory.relative_to(repository).as_posix(),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if ignored.returncode == 0:
+                    continue
             if symbolic_metadata(metadata):
                 raise InventoryError("symbolic ignore files are not supported")
-            if not stat.S_ISREG(metadata.st_mode):
-                raise InventoryError("non-regular ignore files are not supported")
+            raise InventoryError("non-regular ignore files are not supported")
 
     def directory_identity(path: Path) -> tuple[int, int]:
         metadata = path.stat()
@@ -151,11 +172,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if not git_metadata_path(directory_path, name)
                 and not symbolic_metadata((directory_path / name).stat(follow_symlinks=False))
             ]
+            reject_symbolic_ignore(directory_path, allow_ignored=True)
 
     command = [
         "rg",
         "--no-config",
         "--files",
+        "--null",
         "--hidden",
         "--no-require-git",
         "--no-ignore-parent",
@@ -217,10 +240,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if directory_guard:
                 return {b""} if result.returncode == 0 else set()
             inventory.seek(0)
-            if not metadata_aliases:
-                return set(inventory)
             rows = set()
-            for row in inventory:
+            for path in inventory.read().split(b"\0"):
+                if not path:
+                    continue
+                if b"\n" in path or b"\r" in path:
+                    raise InventoryError("line separators are not supported in inventory paths")
+                row = path + b"\n"
+                if not metadata_aliases:
+                    rows.add(row)
+                    continue
                 parts = (
                     *directory_parts,
                     *Path(os.fsdecode(row.removesuffix(b"\n"))).parts,
@@ -233,14 +262,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         return path.replace(b"\\", b"/") if os.name == "nt" else path
 
     rows = ripgrep_inventory(repository, scope)
-    validated_directories = set(ancestors)
-    for row in rows:
-        relative = normalized(row.removesuffix(b"\n")).removeprefix(b"./")
-        directory = (repository / os.fsdecode(relative)).parent
-        while directory != repository and directory not in validated_directories:
-            reject_symbolic_ignore(directory)
-            validated_directories.add(directory)
-            directory = directory.parent
     if selected.is_dir() and scope not in (".", "./") and not ripgrep_inventory(
         repository, scope, directory_guard=True
     ):
@@ -412,6 +433,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     discovered = candidate.resolve(strict=True)
                     discovered.relative_to(repository)
                 except (OSError, ValueError):
+                    continue
+                if index != 0 and not visible_nested_root(discovered):
                     continue
                 nested_roots[directory_identity(discovered)] = discovered
 

@@ -204,10 +204,10 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test.skipIf(process.platform === "win32")(
-    "rejects tracked paths that cannot fit in a line-based inventory",
-    async () => {
-      if (Bun.which("rg") === null) return;
+  test.each([false, true])(
+    "rejects paths that cannot fit in a line-based inventory (Git repository: %s)",
+    async (useGit) => {
+      if (process.platform === "win32" || Bun.which("rg") === null) return;
 
       const root = await realpath(
         await mkdtemp(join(tmpdir(), "codex-security-newline-inventory-")),
@@ -216,10 +216,12 @@ describe("security scan file inventory", () => {
       const repository = join(root, "repository");
       const output = join(root, "in-scope-files.txt");
       await mkdir(repository);
-      execFileSync("git", ["init", "-q"], { cwd: repository });
       const unsafePath = "tracked\nprivate.env";
       await writeFile(join(repository, unsafePath), "tracked source\n");
-      execFileSync("git", ["add", "--", unsafePath], { cwd: repository });
+      if (useGit) {
+        execFileSync("git", ["init", "-q"], { cwd: repository });
+        execFileSync("git", ["add", "--", unsafePath], { cwd: repository });
+      }
       const python = Bun.which("python3") ?? Bun.which("python");
       if (python === null) throw new Error("A Python interpreter is required.");
 
@@ -647,6 +649,28 @@ describe("security scan file inventory", () => {
       ],
       { cwd: nested },
     );
+    for (const ignoreFile of [".ignore", ".rgignore"]) {
+      await writeFile(join(repository, ignoreFile), "nested/\n");
+      execFileSync(
+        python,
+        [
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          ".",
+          "--out",
+          output,
+        ],
+        { cwd: repository, stdio: "pipe" },
+      );
+      expect((await readFile(output, "utf8")).split("\n")).not.toContain(
+        "./nested/tracked.py",
+      );
+      await rm(join(repository, ignoreFile));
+    }
+
     await writeFile(join(repository, ".gitignore"), "nested/\n");
     if (process.platform !== "win32") {
       await symlink(join(repository, ".gitignore"), join(nested, ".ignore"));
