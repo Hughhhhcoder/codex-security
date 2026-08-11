@@ -39,7 +39,7 @@ TARGET_COORDINATE_FIELDS = {
 TARGET_REQUIRED_COORDINATE_FIELDS = {
     "git_revision": {"revision"},
     "git_worktree": {"snapshotDigest"},
-    "git_diff": {"snapshotDigest"},
+    "git_diff": {"baseRevision", "headRevision"},
     "directory_snapshot": {"snapshotDigest"},
 }
 DISPOSITIONS = {"reported", "no_issue_found", "rejected", "not_applicable", "needs_follow_up"}
@@ -672,7 +672,8 @@ def _validate_target(target: dict[str, Any]) -> None:
     elif kind == "git_worktree":
         _require_str(target, "snapshotDigest", "scan.target")
     elif kind == "git_diff":
-        _require_str(target, "snapshotDigest", "scan.target")
+        _require_str(target, "baseRevision", "scan.target")
+        _require_str(target, "headRevision", "scan.target")
     elif kind == "directory_snapshot":
         _require_str(target, "snapshotDigest", "scan.target")
 

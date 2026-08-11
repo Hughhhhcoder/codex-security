@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -890,11 +891,88 @@ describe("canonical scan contract", () => {
     ).rejects.toThrow("Scan target revision does not match the repository.");
   });
 
+  test("binds immutable diffs without retaining invented snapshot digests", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const manifest = await readJson(manifestPath);
+    const coverage = await readJson(coveragePath);
+    const target = manifest["scan"]["target"];
+    target["kind"] = "git_diff";
+    target["baseRevision"] = "base-revision";
+    target["headRevision"] = "head-revision";
+    delete target["revision"];
+    delete target["snapshotDigest"];
+    coverage["mode"] = "branch_diff";
+    await writeJson(manifestPath, manifest);
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+        expectation: expectation({
+          kind: "refs",
+          paths: [],
+          base: "base-revision",
+          head: "head-revision",
+        }),
+      }),
+    ).resolves.toBeDefined();
+
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) throw new Error("A Python interpreter is required.");
+    const probe = [
+      "import json, sys",
+      "from pathlib import Path",
+      "sys.path.insert(0, sys.argv[1])",
+      "import finalize_scan_contract as finalizer",
+      "schema = json.loads((Path(sys.argv[1]).parent / 'schemas' / 'scan-manifest.schema.json').read_text())['properties']['scan']['properties']['target']",
+      "digest = 'codex-security-snapshot/v1:sha256:' + 'a' * 64",
+      "coordinates = {'targetId': 'target', 'displayName': 'repository', 'baseRevision': 'base', 'headRevision': 'head'}",
+      "result = []",
+      "for binding in (coordinates, {**coordinates, 'snapshotDigest': digest}):",
+      "    target = {'kind': 'git_diff', 'snapshotDigest': digest}",
+      "    finalizer._populate_unsealed_target_binding(target, binding)",
+      "    finalizer._validate_target(target)",
+      "    finalizer._validate_schema_node(target, schema, 'scan.target')",
+      "    result.append(target)",
+      "for missing in ('baseRevision', 'headRevision'):",
+      "    target = {**result[0]}",
+      "    target.pop(missing)",
+      "    try:",
+      "        finalizer._validate_target(target)",
+      "    except finalizer.ContractError:",
+      "        pass",
+      "    else:",
+      "        raise SystemExit('accepted a diff without its authoritative revision')",
+      "print(json.dumps(result))",
+    ].join("\n");
+    const result = spawnSync(
+      python,
+      ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    const [committed, workingTree] = JSON.parse(result.stdout) as Array<
+      Record<string, string>
+    >;
+    expect(committed).not.toHaveProperty("snapshotDigest");
+    expect(workingTree?.["snapshotDigest"]).toMatch(
+      /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
+    );
+  });
+
   test("rejects diff targets for repository scans", async () => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
     const manifest = await readJson(manifestPath);
     manifest["scan"]["target"]["kind"] = "git_diff";
+    manifest["scan"]["target"]["baseRevision"] = "base-revision";
+    manifest["scan"]["target"]["headRevision"] = "head-revision";
     await writeJson(manifestPath, manifest);
     await reseal(scanDir);
 
