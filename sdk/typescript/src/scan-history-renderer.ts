@@ -716,19 +716,6 @@ export function renderScanHistory(
           "",
           `  ${strong("FINDING HISTORY")}  codex-security scans show ${clean(result["scanId"]).slice(0, 8)} --show-linked-findings`,
         );
-      } else if (!linked && !truncated && options.showLinkedFindings) {
-        const matchingRepository =
-          result["currentTargetPath"] ?? result["targetPath"];
-        const repositoryContext =
-          typeof matchingRepository === "string" &&
-          options.currentDirectory !== undefined &&
-          matchingRepository !== options.currentDirectory
-            ? `from ${clean(matchingRepository)}, run`
-            : "run";
-        lines.push(
-          "",
-          `  ${strong("FINDING HISTORY")}  No saved links; ${repositoryContext} codex-security scans match --all (uses Codex).`,
-        );
       }
     }
   } else if (command === "compare") {

@@ -155,18 +155,33 @@ def _active_findings(
             f"AND scans.target_inode IS (SELECT ownership_scan.target_inode {latest_identity})"
             "))"
         )
-        replaced_targets = [
-            target["id"]
-            for target in connection.execute("SELECT id, current_path FROM security_targets")
-            if (checkout := Path(target["current_path"])).exists()
-            and scan_history._verified_target_metadata(connection, target["id"], checkout) is None
-        ]
+        replaced_targets = []
+        transitioned_targets = []
+        for target in connection.execute("SELECT id, current_path FROM security_targets"):
+            checkout = Path(target["current_path"])
+            if not checkout.exists():
+                continue
+            verified = scan_history._verified_target_metadata(connection, target["id"], checkout)
+            if verified is None:
+                replaced_targets.append(target["id"])
+            elif verified[0] is not None and scan_history._has_ownership_transition(
+                connection, target["id"], verified[0]
+            ):
+                transitioned_targets.append(target["id"])
         if replaced_targets:
             placeholders = ", ".join("?" for _ in replaced_targets)
             current_owner_only += (
                 f" AND (scans.target_id IS NULL OR scans.target_id NOT IN ({placeholders}))"
             )
             target_values.extend(replaced_targets)
+        if transitioned_targets:
+            placeholders = ", ".join("?" for _ in transitioned_targets)
+            current_owner_only += (
+                " AND (scans.target_id IS NULL "
+                f"OR scans.target_id NOT IN ({placeholders}) "
+                "OR scans.target_device IS NOT NULL OR scans.target_inode IS NOT NULL)"
+            )
+            target_values.extend(transitioned_targets)
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""
@@ -277,11 +292,8 @@ def _active_findings(
                             coverage_by_scan_id[scan["id"]] = None
                         else:
                             raise
-                    elif (
-                        "missing" in message.lower()
-                        or ": expected a regular file inside the scan directory." in message
-                        or ": invalid JSON:" in message
-                        or ": expected a JSON object." in message
+                    elif message.startswith("missing required contract artifact: ") or message.endswith(
+                        ": expected a regular file inside the scan directory."
                     ):
                         coverage_by_scan_id[scan["id"]] = None
                     else:

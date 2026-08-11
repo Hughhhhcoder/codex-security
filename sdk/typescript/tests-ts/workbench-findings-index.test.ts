@@ -3,9 +3,10 @@ import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const findingsIndexProbe = [
-  "import argparse, json, sqlite3, sys",
+  "import argparse, json, os, sqlite3, sys",
   "sys.path.insert(0, sys.argv[1])",
   "import workbench_native_indexes as indexes",
+  "from filesystem_identity import serialize_filesystem_identity",
   "settings = json.loads(sys.argv[2])",
   "connection = sqlite3.connect(':memory:')",
   "connection.row_factory = sqlite3.Row",
@@ -37,6 +38,15 @@ const findingsIndexProbe = [
   "    connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
   "    connection.execute(\"UPDATE scans SET target_device = -1, target_inode = -1 WHERE target_id = 'current-target'\")",
   "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
+  "if settings.get('ownershipTransition'):",
+  "    connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
+  "    connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
+  "    connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
+  "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
+  "    connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (sys.argv[1],))",
+  "    metadata = os.stat(sys.argv[1])",
+  "    connection.execute(\"UPDATE scans SET target_device = ?, target_inode = ? WHERE id = 'current-new'\", (serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
+  "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('previous-owner-identity', 'current-target', sys.argv[1], 'complete', 'sealed', '2026-01-15', '2026-01-15', '.', '/private/tmp/previous-owner', -1, -1))",
   "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'current-old-finding', 'current-old', 'high', '2026-01-01', 'Resolved current finding', 'Older issue'),",
   "    ('current-new-occurrence', 'current-new-finding', 'current-new', 'critical', '2026-02-01', 'Current CLI finding', 'Latest issue'),",
@@ -65,6 +75,8 @@ const findingsIndexProbe = [
   "    if scan['id'] == 'stale-new':",
   "        if settings.get('coverageFailure') == 'tampered':",
   "            raise SystemExit('The sealed scan manifest changed after completion.')",
+  "        if settings.get('coverageFailure') == 'sealedArtifact':",
+  "            raise SystemExit('coverage.json: sealed artifact changed or is missing')",
   "        if settings.get('coverageFailure') == 'pruned':",
   "            raise SystemExit('coverage.json: expected a regular file inside the scan directory.')",
   "        raise SystemExit('Scan directory must be an existing canonical non-symlink directory.')",
@@ -79,7 +91,11 @@ const findingsIndexProbe = [
   "    result = indexes.list_repositories(connection, read_coverage=coverage)",
   "else:",
   "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
-  "print(json.dumps({'findings': result.get('findings', []), 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'locationQueryCount': len(location_queries)}))",
+  "scoped_scan_ids = []",
+  "if settings.get('ownershipTransition'):",
+  "    clauses, values, _, _ = indexes.scan_history.repository_scan_scope(connection, sys.argv[1])",
+  "    scoped_scan_ids = [row['id'] for row in connection.execute('SELECT scans.id FROM scans WHERE ' + ' AND '.join(clauses), values)]",
+  "print(json.dumps({'findings': result.get('findings', []), 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'locationQueryCount': len(location_queries), 'scopedScanIds': scoped_scan_ids}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -89,9 +105,10 @@ function runFindingsIndex(
     targetPath?: string;
     targetPaths?: string[];
     query?: string;
-    coverageFailure?: "tampered" | "noncanonical" | "pruned";
+    coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
+    ownershipTransition?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
   } = {},
@@ -127,6 +144,7 @@ function probeFindingsIndex(
     coverageFailure?: "pruned";
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
+    ownershipTransition?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
   } = {},
@@ -140,6 +158,7 @@ function probeFindingsIndex(
   repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
   locationQueryCount: number;
+  scopedScanIds: string[];
 } {
   const result = runFindingsIndex(targetId, settings);
   expect(new TextDecoder().decode(result.stderr)).toBe("");
@@ -212,6 +231,29 @@ describe("workbench findings index", () => {
     );
   });
 
+  test("drops ambiguous legacy history after checkout ownership changes", () => {
+    const result = probeFindingsIndex("current-target", {
+      ownershipTransition: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+    ]);
+    expect(result.scopedScanIds).toContain("current-new");
+    expect(result.scopedScanIds).not.toContain("current-old");
+    expect(
+      probeFindingsIndex(null, {
+        ownershipTransition: true,
+        repositories: true,
+      }).repositories,
+    ).toContainEqual(
+      expect.objectContaining({
+        targetId: "current-target",
+        openFindingsCount: 1,
+      }),
+    );
+  });
+
   test("keeps active findings when a later scan artifact was pruned", () => {
     const result = probeFindingsIndex("stale-target", {
       coverageFailure: "pruned",
@@ -222,6 +264,16 @@ describe("workbench findings index", () => {
     ]);
     expect(result.coverageReads).toEqual(["stale-new"]);
   });
+
+  test.each(["tampered", "sealedArtifact"] as const)(
+    "rejects %s sealed scan artifacts",
+    (coverageFailure) => {
+      const result = runFindingsIndex("stale-target", { coverageFailure });
+
+      expect(result.exitCode).not.toBe(0);
+      expect(new TextDecoder().decode(result.stderr)).toContain("changed");
+    },
+  );
 
   test("indexes every targetless scan even without a saved target", () => {
     const result = probeFindingsIndex(null, {

@@ -203,6 +203,28 @@ def _verified_target_metadata(
     return metadata, recorded is not None
 
 
+def _has_ownership_transition(
+    connection: sqlite3.Connection, target_id: str, metadata: os.stat_result
+) -> bool:
+    return (
+        connection.execute(
+            """
+            SELECT 1
+            FROM scans
+            WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
+                AND (target_device != ? OR target_inode != ?)
+            LIMIT 1
+            """,
+            (
+                target_id,
+                serialize_filesystem_identity(metadata.st_dev),
+                serialize_filesystem_identity(metadata.st_ino),
+            ),
+        ).fetchone()
+        is not None
+    )
+
+
 def repository_scan_scope(
     connection: sqlite3.Connection, repository: str | Path
 ) -> tuple[list[str], list[Any], list[str], list[str]]:
@@ -397,10 +419,14 @@ def repository_scan_scope(
         for target_id, (metadata, recorded) in verified_targets.items():
             if metadata is None or not recorded:
                 continue
+            legacy_history = (
+                "OR (scans.target_inode IS NULL AND scans.target_device IS NULL) "
+                if not _has_ownership_transition(connection, target_id, metadata)
+                else ""
+            )
             clauses.append(
                 "(scans.target_id IS NOT ? "
-                "OR (scans.target_inode IS NULL AND scans.target_device IS NULL) "
-                "OR (scans.target_inode = ? AND scans.target_device = ?))"
+                f"{legacy_history}OR (scans.target_inode = ? AND scans.target_device = ?))"
             )
             values.extend(
                 (
