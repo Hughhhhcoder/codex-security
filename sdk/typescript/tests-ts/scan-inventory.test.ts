@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  link as hardlink,
   mkdir,
   mkdtemp,
   readdir,
@@ -1315,6 +1316,36 @@ describe("security scan file inventory", () => {
     await writeFile(join(gitdir, "commondir"), `${aliased}\n`);
 
     expect(await inventory(linked)).toContain("./visible.ts");
+  });
+
+  test("rejects worktree backpointers hard-linked through equivalent sibling names", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const source = await repository();
+    const hidden = join(checkout, "ß");
+    const visible = join(checkout, "ss");
+    await writeFile(join(source, "secret.ts"), "tracked\n");
+    execFileSync("git", ["add", "secret.ts"], { cwd: source });
+    commit(source);
+    execFileSync("git", ["worktree", "add", "--detach", hidden, "HEAD"], {
+      cwd: source,
+      stdio: "ignore",
+    });
+    try {
+      await mkdir(visible);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
+    await writeFile(join(checkout, ".ignore"), "ß/\n");
+    await writeFile(join(visible, ".ignore"), "secret.ts\n");
+    await writeFile(join(visible, "secret.ts"), "private\n");
+    await hardlink(join(hidden, ".git"), join(visible, ".git"));
+
+    await expect(inventory(checkout)).rejects.toThrow(
+      "Git metadata directory does not own selected worktree",
+    );
   });
 
   test("inventories genuine Git submodules with internal metadata", async () => {

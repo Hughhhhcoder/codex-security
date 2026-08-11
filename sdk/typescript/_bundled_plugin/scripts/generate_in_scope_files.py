@@ -140,7 +140,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     def same_filesystem_path(first: Path, second: Path) -> bool:
         return tuple(unicodedata.normalize("NFC", part).casefold() for part in first.parts) == tuple(
             unicodedata.normalize("NFC", part).casefold() for part in second.parts
-        ) and directory_identity(first) == directory_identity(second)
+        ) and directory_identity(first) == directory_identity(second) and directory_identity(
+            first.parent
+        ) == directory_identity(second.parent)
 
     def nonsymbolic_directory(path: Path) -> bool:
         try:
