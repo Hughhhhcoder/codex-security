@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -660,6 +661,65 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "rejects split-index backing files that leave the checkout",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      await writeFile(join(checkout, "tracked.ts"), "tracked\n");
+      execFileSync("git", ["add", "tracked.ts"], { cwd: checkout });
+      execFileSync("git", ["update-index", "--split-index"], {
+        cwd: checkout,
+      });
+      const gitdir = join(checkout, ".git");
+      const shared = (await readdir(gitdir)).find((name) =>
+        name.startsWith("sharedindex."),
+      );
+      if (shared === undefined) throw new Error("Expected a split Git index.");
+
+      expect(await inventory(checkout)).toContain("./tracked.ts");
+      const original = join(gitdir, shared);
+      const external = join(dirname(checkout), shared);
+      await writeFile(external, await readFile(original));
+      await rm(original);
+      await symlink(external, original);
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects non-regular Git metadata before invoking Git",
+    async () => {
+      if (Bun.which("rg") === null || Bun.which("mkfifo") === null) return;
+
+      const checkout = await repository();
+      const config = join(checkout, ".git", "config");
+      await rm(config);
+      execFileSync("mkfifo", [config]);
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "non-regular Git metadata files are not supported",
+      );
+    },
+  );
+
+  test("requires the Git info metadata path to be a directory", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const info = join(checkout, ".git", "info");
+    await rm(info, { recursive: true });
+    await writeFile(info, "not a directory\n");
+
+    await expect(inventory(checkout)).rejects.toThrow(
+      "non-directory Git metadata paths are not supported",
+    );
+  });
+
   test
     .skipIf(process.platform === "win32")
     .each(["index", "config", "info/exclude"])(
@@ -696,6 +756,36 @@ describe("security scan file inventory", () => {
     });
 
     expect(await inventory(linked)).toContain("./visible.ts");
+  });
+
+  test("does not inspect a differently cased checkout outside an explicit scope", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const selected = join(checkout, "NESTED");
+    const unselected = join(checkout, "nested");
+    await mkdir(selected);
+    try {
+      await mkdir(unselected);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
+    for (const nested of [selected, unselected]) {
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await writeFile(join(nested, "tracked.ts"), "tracked\n");
+      execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
+    }
+    const trace = join(dirname(checkout), "git-trace.log");
+
+    expect(
+      await inventory(checkout, "NESTED", {
+        ...process.env,
+        GIT_TRACE: trace,
+        GIT_TRACE_SETUP: "1",
+      }),
+    ).toEqual(["NESTED/tracked.ts"]);
+    expect(await readFile(trace, "utf8")).not.toContain(unselected);
   });
 
   test.skipIf(process.platform !== "win32")(

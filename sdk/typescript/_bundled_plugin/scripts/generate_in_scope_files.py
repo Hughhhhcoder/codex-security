@@ -148,7 +148,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     def has_git_marker(directory: Path) -> bool:
         marker = directory / ".git"
 
-        def inspect_metadata(path: Path) -> os.stat_result | None:
+        def inspect_metadata(
+            path: Path, *, directory: bool | None = None
+        ) -> os.stat_result | None:
             try:
                 metadata = path.stat(follow_symlinks=False)
             except FileNotFoundError:
@@ -157,6 +159,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
             if symbolic_metadata(metadata):
                 raise InventoryError("symbolic Git metadata paths are not supported")
+            if directory is True and not stat.S_ISDIR(metadata.st_mode):
+                raise InventoryError("non-directory Git metadata paths are not supported")
+            if directory is False and not stat.S_ISREG(metadata.st_mode):
+                raise InventoryError("non-regular Git metadata files are not supported")
             return metadata
 
         try:
@@ -180,15 +186,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if not gitdir.is_absolute():
                 gitdir = directory / gitdir
             for current in reversed((gitdir, *gitdir.parents)):
-                if inspect_metadata(current) is None:
+                if inspect_metadata(current, directory=True) is None:
                     break
         else:
             return False
 
         roots = [gitdir]
         common_marker = gitdir / "commondir"
-        common_metadata = inspect_metadata(common_marker)
-        if common_metadata is not None and stat.S_ISREG(common_metadata.st_mode):
+        common_metadata = inspect_metadata(common_marker, directory=False)
+        if common_metadata is not None:
             try:
                 common = Path(os.fsdecode(common_marker.read_bytes().rstrip(b"\r\n")))
             except (OSError, ValueError) as error:
@@ -196,7 +202,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if not common.is_absolute():
                 common = gitdir / common
             for current in reversed((common, *common.parents)):
-                if inspect_metadata(current) is None:
+                if inspect_metadata(current, directory=True) is None:
                     break
             roots.append(common)
         for root in roots:
@@ -208,7 +214,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 "info",
                 "info/exclude",
             ):
-                inspect_metadata(root / relative)
+                inspect_metadata(root / relative, directory=relative == "info")
+            try:
+                shared_indexes = (
+                    entry for entry in root.iterdir() if entry.name.startswith("sharedindex.")
+                )
+                for shared_index in shared_indexes:
+                    inspect_metadata(shared_index, directory=False)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise InventoryError(f"could not inspect Git metadata: {directory}") from error
         return True
 
     discovered_roots: dict[tuple[int, int], Path] = {}
@@ -778,12 +794,22 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     )
 
         def visible_nested_root(root: Path) -> bool:
-            return (
-                selected == repository
-                or selected == root
-                or selected.is_relative_to(root)
-                or root.is_relative_to(selected)
+            selected_parts = selected.relative_to(repository).parts
+            root_parts = root.relative_to(repository).parts
+            shared_depth = min(len(selected_parts), len(root_parts))
+            if selected_parts[:shared_depth] != root_parts[:shared_depth]:
+                return False
+            selected_ancestor = (
+                selected
+                if len(selected_parts) == shared_depth
+                else selected.parents[len(selected_parts) - shared_depth - 1]
             )
+            root_ancestor = (
+                root
+                if len(root_parts) == shared_depth
+                else root.parents[len(root_parts) - shared_depth - 1]
+            )
+            return directory_identity(selected_ancestor) == directory_identity(root_ancestor)
 
         nested_roots = {
             identity: root
