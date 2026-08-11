@@ -1467,14 +1467,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 and exact_descendant(nested, owner)
                 and os.fsencode(nested.relative_to(owner).as_posix()) in indexed_paths
             )
-        tracked_gitlink_identities = {
-            (directory_identity(owner), directory_identity(nested))
-            for owner, nested in tracked_gitlinks
-        }
-
-        def tracked_variants(
-            root_identity: tuple[int, int], root: Path, relative: bytes
-        ) -> Iterator[Path]:
+        def tracked_variants(root: Path, relative: bytes) -> Iterator[Path]:
             components = PurePosixPath(os.fsdecode(relative)).parts
             if not components or any(part in (".", "..") for part in components):
                 return
@@ -1544,9 +1537,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         if index + 1 < len(components):
                             if not stat.S_ISDIR(metadata.st_mode):
                                 continue
-                            owner_identity = (metadata.st_dev, metadata.st_ino)
-                            if (root_identity, owner_identity) in tracked_gitlink_identities:
-                                continue
                             matches.extend(descend(candidate, index + 1))
                         elif stat.S_ISREG(metadata.st_mode):
                             matches.append(candidate)
@@ -1570,11 +1560,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     continue
                 yield candidate
 
-        for root_identity, (root, tracked_paths) in cached_by_root.items():
+        for root, tracked_paths in cached_by_root.values():
             candidates = [
                 candidate
                 for relative in tracked_paths
-                for candidate in tracked_variants(root_identity, root, relative)
+                for candidate in tracked_variants(root, relative)
             ]
             outer_visible = (
                 visible_to_outer_ignores(root, candidates)

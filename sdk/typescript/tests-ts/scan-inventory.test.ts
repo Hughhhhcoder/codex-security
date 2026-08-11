@@ -421,9 +421,14 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./nested/.env");
   });
 
-  test.each([".", "nested"])(
-    "retains outer tracked source inside an embedded checkout for %s",
-    async (scope) => {
+  test.each([
+    ["embedded", "."],
+    ["embedded", "nested"],
+    ["conflicted Gitlink", "."],
+    ["conflicted Gitlink", "nested"],
+  ])(
+    "retains outer tracked source inside %s checkout for %s",
+    async (staging, scope) => {
       if (Bun.which("rg") === null) return;
 
       const checkout = await repository();
@@ -441,6 +446,26 @@ describe("security scan file inventory", () => {
         "outer.ts\ninner.ts\nprivate.ts\n",
       );
       execFileSync("git", ["add", "inner.ts"], { cwd: nested });
+      if (staging === "conflicted Gitlink") {
+        commit(nested);
+        const gitlink = execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: nested,
+          encoding: "utf8",
+        }).trim();
+        const outer = execFileSync("git", ["rev-parse", ":nested/outer.ts"], {
+          cwd: checkout,
+          encoding: "utf8",
+        }).trim();
+        execFileSync("git", ["update-index", "--index-info"], {
+          cwd: checkout,
+          input: [
+            `0 ${"0".repeat(40)}\tnested/outer.ts`,
+            `160000 ${gitlink} 1\tnested`,
+            `100644 ${outer} 2\tnested/outer.ts`,
+            "",
+          ].join("\n"),
+        });
+      }
 
       const prefix = scope === "." ? "./nested" : "nested";
       const rows = await inventory(checkout, scope);
