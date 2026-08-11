@@ -1054,6 +1054,60 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32").each([
+    ["primary", "pack"],
+    ["primary", "ab"],
+    ["alternate", "pack"],
+    ["alternate", "ab"],
+  ])("rejects symbolic %s Git object files in %s", async (owner, kind) => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const external = join(dirname(checkout), "external-object");
+    await writeFile(external, "external\n");
+    const objects =
+      owner === "primary"
+        ? join(checkout, ".git", "objects")
+        : join(checkout, ".git", "extra-objects");
+    if (owner === "alternate") {
+      await mkdir(join(objects, "info"), { recursive: true });
+      await mkdir(join(objects, "pack"));
+      await writeFile(
+        join(checkout, ".git", "objects", "info", "alternates"),
+        `${objects}\n`,
+      );
+    }
+    const directory = join(objects, kind);
+    if (kind !== "pack") await mkdir(directory);
+    const member = kind === "pack" ? "pack-external.pack" : "0".repeat(38);
+    await symlink(external, join(directory, member));
+
+    await expect(inventory(checkout)).rejects.toThrow(
+      "symbolic Git metadata paths are not supported",
+    );
+  });
+
+  test.skipIf(process.platform === "win32").each(["PACK", "AB"])(
+    "ignores unrelated uppercase Git object-store name %s",
+    async (name) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const external = await repository();
+      const objects = join(checkout, ".git", "objects");
+      if (name === "AB") await mkdir(join(objects, "ab"));
+      try {
+        await symlink(join(external, ".git", "objects"), join(objects, name));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+        throw error;
+      }
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      expect(await inventory(checkout)).toContain("./visible.ts");
+    },
+  );
+
   test.skipIf(process.platform === "win32")(
     "preserves carriage returns in Git object-alternate paths",
     async () => {
@@ -1188,6 +1242,38 @@ describe("security scan file inventory", () => {
           PATH: `${wrappers}:${process.env["PATH"] ?? ""}`,
         }),
       ).rejects.toThrow("out-of-scope Git inventory paths are not supported");
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "disables lazy Git object fetching during inventory",
+    async () => {
+      const git = Bun.which("git");
+      if (Bun.which("rg") === null || git === null) return;
+
+      const checkout = await repository();
+      const wrappers = join(dirname(checkout), "bin");
+      const trace = join(dirname(checkout), "lazy-fetch.log");
+      await mkdir(wrappers);
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+      const wrapper = join(wrappers, "git");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh\nprintf '%s\\n' "$GIT_NO_LAZY_FETCH" >> ${JSON.stringify(trace)}\nexec ${JSON.stringify(git)} "$@"\n`,
+      );
+      await chmod(wrapper, 0o755);
+
+      expect(
+        await inventory(checkout, ".", {
+          ...process.env,
+          GIT_NO_LAZY_FETCH: "0",
+          PATH: `${wrappers}:${process.env["PATH"] ?? ""}`,
+        }),
+      ).toContain("./visible.ts");
+      expect((await readFile(trace, "utf8")).trim().split("\n")).toSatisfy(
+        (values: string[]) =>
+          values.length > 0 && values.every((value) => value === "1"),
+      );
     },
   );
 
@@ -1471,10 +1557,11 @@ describe("security scan file inventory", () => {
       encoding: "utf8",
     }).trim();
     const config = join(gitdir, "config");
-    await writeFile(
-      config,
-      `${await readFile(config, "utf8")}\n[feature]\n\tenabled\n`,
+    const configured = (await readFile(config, "utf8")).replace(
+      /^([ \t]*worktree[ \t]*=[ \t]*)(.+)$/m,
+      '$1"$2"',
     );
+    await writeFile(config, `${configured}\n[feature]\n\tenabled\n`);
 
     expect(await inventory(checkout)).toContain("./nested/visible.ts");
   });

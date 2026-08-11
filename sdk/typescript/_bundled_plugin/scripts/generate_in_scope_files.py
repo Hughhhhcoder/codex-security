@@ -178,10 +178,23 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             try:
                 entries = objects.iterdir()
                 for entry in entries:
-                    if entry.name.casefold() in ("info", "pack") or re.fullmatch(
-                        r"[0-9a-fA-F]{2}", entry.name
+                    canonical = entry.name.casefold()
+                    if canonical not in ("info", "pack") and not re.fullmatch(
+                        r"[0-9a-f]{2}", canonical
                     ):
-                        inspect_metadata(entry, directory=True)
+                        continue
+                    if entry.name != canonical:
+                        try:
+                            actual = entry.stat(follow_symlinks=False)
+                            expected = (objects / canonical).stat(follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                            continue
+                    inspect_metadata(entry, directory=True)
+                    if canonical != "info":
+                        for member in entry.iterdir():
+                            inspect_metadata(member, directory=False)
             except OSError as error:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
 
@@ -240,6 +253,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     raise InventoryError(f"could not inspect Git metadata: {directory}") from error
                 if configured_worktree is None:
                     raise InventoryError("Git metadata directory does not own selected worktree")
+                if configured_worktree.startswith('"'):
+                    if not configured_worktree.endswith('"'):
+                        raise InventoryError("invalid Git worktree path")
+                    try:
+                        configured_worktree = os.fsdecode(
+                            codecs.escape_decode(os.fsencode(configured_worktree[1:-1]))[0]
+                        )
+                    except (ValueError, UnicodeError) as error:
+                        raise InventoryError("invalid Git worktree path") from error
                 target = Path(configured_worktree)
                 if not target.is_absolute():
                     target = gitdir / target
@@ -742,6 +764,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     ):
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
+    environment["GIT_NO_LAZY_FETCH"] = "1"
     environment["LC_ALL"] = "C"
     git = [
         "git",
