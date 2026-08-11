@@ -142,6 +142,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             return False
         return stat.S_ISDIR(metadata.st_mode) and not symbolic_metadata(metadata)
 
+    gitdir_owners: dict[tuple[int, int], tuple[int, int]] = {}
+
     def has_git_marker(directory: Path) -> bool:
         marker = directory / ".git"
 
@@ -227,6 +229,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError("Git metadata directory does not own selected worktree")
         else:
             return False
+
+        identity = directory_identity(gitdir)
+        owner = directory_identity(directory)
+        if identity in gitdir_owners and gitdir_owners[identity] != owner:
+            raise InventoryError("Git metadata directory does not own selected worktree")
+        gitdir_owners[identity] = owner
 
         roots = [gitdir]
         common_marker = gitdir / "commondir"

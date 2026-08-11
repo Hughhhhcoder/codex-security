@@ -904,22 +904,34 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test("rejects an internal gitfile that borrows another checkout's index", async () => {
-    if (Bun.which("rg") === null) return;
+  test.each(["missing", "conflicting"])(
+    "rejects an internal gitfile with %s checkout ownership",
+    async (ownership) => {
+      if (Bun.which("rg") === null) return;
 
-    const checkout = await repository();
-    const nested = join(checkout, "nested");
-    await mkdir(nested);
-    await writeFile(join(checkout, "secret.ts"), "tracked\n");
-    execFileSync("git", ["add", "secret.ts"], { cwd: checkout });
-    await writeFile(join(nested, ".ignore"), "secret.ts\n");
-    await writeFile(join(nested, "secret.ts"), "private\n");
-    await writeFile(join(nested, ".git"), "gitdir: ../.git\n");
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      await writeFile(join(checkout, "secret.ts"), "tracked\n");
+      execFileSync("git", ["add", "secret.ts"], { cwd: checkout });
+      await writeFile(join(nested, ".ignore"), "secret.ts\n");
+      await writeFile(join(nested, "secret.ts"), "private\n");
+      await writeFile(join(nested, ".git"), "gitdir: ../.git\n");
+      if (ownership === "conflicting") {
+        execFileSync(
+          "git",
+          ["config", "--local", "core.worktree", "../nested"],
+          {
+            cwd: checkout,
+          },
+        );
+      }
 
-    await expect(inventory(checkout)).rejects.toThrow(
-      "Git metadata directory does not own selected worktree",
-    );
-  });
+      await expect(inventory(checkout)).rejects.toThrow(
+        "Git metadata directory does not own selected worktree",
+      );
+    },
+  );
 
   test("rejects unrelated external Git common directories", async () => {
     if (Bun.which("rg") === null) return;
