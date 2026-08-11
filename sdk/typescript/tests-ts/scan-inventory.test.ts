@@ -1203,6 +1203,10 @@ describe("security scan file inventory", () => {
     "hash-comment-override",
     "semicolon-comment-override",
     "indented-override",
+    "inline-section-override",
+    "inline-carriage-override",
+    "chained-section-override",
+    "inline-extension-disabled",
     "carriage-return-override",
     "carriage-return-section",
     "carriage-return-section-comment",
@@ -1277,6 +1281,9 @@ describe("security scan file inventory", () => {
         ownership.startsWith("disabled") ||
         ownership.endsWith("comment-override") ||
         ownership === "indented-override" ||
+        ownership === "inline-section-override" ||
+        ownership === "inline-carriage-override" ||
+        ownership === "chained-section-override" ||
         ownership.startsWith("carriage-return") ||
         ownership === "default-inheritance" ||
         ownership === "unquoted-escape" ||
@@ -1338,6 +1345,25 @@ describe("security scan file inventory", () => {
             /^([ \t]*worktree[ \t]*=.*)$/im,
             `$1 # selected owner\n\t\tworktree = ${external}`,
           ),
+        );
+      } else if (
+        ownership === "inline-section-override" ||
+        ownership === "inline-carriage-override" ||
+        ownership === "chained-section-override"
+      ) {
+        const header =
+          ownership === "chained-section-override"
+            ? "[feature][unused.value][core]"
+            : "[core]";
+        const whitespace = ownership === "inline-carriage-override" ? "\r" : "";
+        await writeFile(
+          config,
+          `${await readFile(config, "utf8")}\n${header}${whitespace}worktree = ${external}\n`,
+        );
+      } else if (ownership === "inline-extension-disabled") {
+        await writeFile(
+          config,
+          `${await readFile(config, "utf8")}\n[extensions]worktreeConfig = false\n`,
         );
       } else if (ownership === "carriage-return-override") {
         await writeFile(
@@ -1418,6 +1444,9 @@ describe("security scan file inventory", () => {
         ownership === "mixed-case-external" ||
         ownership.endsWith("comment-override") ||
         ownership === "indented-override" ||
+        ownership === "inline-section-override" ||
+        ownership === "inline-carriage-override" ||
+        ownership === "chained-section-override" ||
         ownership.startsWith("carriage-return") ||
         ownership === "default-inheritance" ||
         ownership === "unquoted-escape" ||
@@ -2208,6 +2237,11 @@ describe("security scan file inventory", () => {
     ["include", "with BOM"],
     ["include", "with leading carriage return"],
     ["include", "with carriage return after header"],
+    ["include", "with same-line path"],
+    ["include", "with same-line carriage path"],
+    ["include", "with chained section headers"],
+    ['includeIf "gitdir:**"', "with same-line path"],
+    ['includeIf "gitdir:**"', "with chained section headers"],
     ['includeIf "gitdir:**"', "with carriage return before condition"],
     [
       'includeIf "gitdir:**"',
@@ -2235,9 +2269,20 @@ describe("security scan file inventory", () => {
               ? "\r"
               : " ";
       const configuredSection = section.replace(" ", whitespace);
+      const headers =
+        bom === "with chained section headers"
+          ? `[feature][unused.value][${configuredSection}]`
+          : `[${configuredSection}]`;
+      const assignment =
+        bom === "with same-line carriage path"
+          ? "\rpath"
+          : bom === "with same-line path" ||
+              bom === "with chained section headers"
+            ? "path"
+            : "\n\tpath";
       await writeFile(
         config,
-        `${bom === "with BOM" ? "\ufeff" : ""}${bom === "with leading carriage return" ? "\r" : ""}[${configuredSection}]${bom === "with carriage return after header" ? "\r# included" : ""}\n\tpath = ${external}\n${await readFile(config, "utf8")}`,
+        `${bom === "with BOM" ? "\ufeff" : ""}${bom === "with leading carriage return" ? "\r" : ""}${headers}${bom === "with carriage return after header" ? "\r# included" : ""}${assignment} = ${external}\n${await readFile(config, "utf8")}`,
       );
 
       await expect(inventory(checkout)).rejects.toThrow(

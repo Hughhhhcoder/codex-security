@@ -459,21 +459,26 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         line = raw.lstrip(" \t\r").rstrip("\r")
                         if not line or line.startswith(("#", ";")):
                             continue
-                        if line.startswith("["):
+                        while line.startswith("["):
                             match = re.match(
-                                r'\[[ \t]*(core|extensions|include|includeif)'
-                                r'(?:[ \t\r]+("(?:[^"\\]|\\.)*"))?[ \t]*\]'
-                                r'(?=[ \t\r]*(?:[#;]|$))',
+                                r'\[[ \t]*([a-z][a-z0-9-]*)'
+                                r'(?:([.][^\]\r\n]*)|[ \t\r]+("(?:[^"\\]|\\.)*"))?'
+                                r'[ \t]*\]',
                                 line,
                                 re.IGNORECASE,
                             )
                             section = None
-                            if match is not None:
-                                name = match.group(1).casefold()
-                                if (match.group(2) is not None) == (name == "includeif"):
-                                    section = name
-                            continue
-                        if section is None:
+                            if match is None:
+                                break
+                            name = match.group(1).casefold()
+                            if (
+                                name in ("core", "extensions", "include", "includeif")
+                                and match.group(2) is None
+                                and (match.group(3) is not None) == (name == "includeif")
+                            ):
+                                section = name
+                            line = line[match.end() :].lstrip(" \t\r")
+                        if section is None or not line or line.startswith(("#", ";")):
                             continue
                         assignment = re.match(
                             r"([a-z][a-z0-9-]*)(?:([ \t]*=)[ \t\r]*(.*))?",
