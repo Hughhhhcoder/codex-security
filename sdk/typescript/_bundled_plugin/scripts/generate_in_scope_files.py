@@ -437,7 +437,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if value is None:
                 return True
             normalized = os.fsdecode(decode_config_value(value)[0]).strip(" \t\r").casefold()
-            return normalized not in ("", "false", "no", "off", "0")
+            return normalized not in ("", "false", "no", "off") and re.fullmatch(
+                r"[+-]?(?:0+|0x0+)[kmg]?", normalized
+            ) is None
 
         options: dict[tuple[str, str], str | None] = {}
         config_path = roots[-1] / "config"
