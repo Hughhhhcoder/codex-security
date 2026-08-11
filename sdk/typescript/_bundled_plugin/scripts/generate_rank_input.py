@@ -38,7 +38,7 @@ from pathlib import Path
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rank_preview import DEFAULT_PREVIEW_BYTES, TEXT_CODE_EXTENSIONS, preview_for
-from workbench_target import git_directory_snapshot_paths
+from workbench_target import git_command, git_directory_snapshot_paths
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -603,21 +603,16 @@ def bind_repo_scopes(args: argparse.Namespace) -> None:
 
 
 def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, str]]:
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo),
-            "diff",
-            "--name-status",
-            "-z",
-            "--diff-filter=ACMRD",
-            *diff_args,
-        ],
-        check=True,
-        capture_output=True,
+    result = git_command(
+        repo,
+        "diff",
+        "--name-status",
+        "-z",
+        "--diff-filter=ACMRD",
+        *diff_args,
         text=True,
     )
+    result.check_returncode()
     fields = result.stdout.split("\0")
     if fields and not fields[-1]:
         fields.pop()
