@@ -404,6 +404,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             normalized(os.fsencode(candidate.relative_to(repository).as_posix()))
             for candidate in candidates
         }
+        if directories_only and any(b"\n" in path or b"\r" in path for path in requested):
+            raise InventoryError("line separators are not supported in inventory paths")
         directories: list[Path] = []
         current = root.parent
         while True:

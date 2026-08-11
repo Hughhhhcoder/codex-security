@@ -494,6 +494,27 @@ describe("security scan file inventory", () => {
     );
   });
 
+  test.skipIf(process.platform === "win32")(
+    "rejects line-separated snapshot directory names before parsing ignore diagnostics",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const nested = join(checkout, "victim", "nested");
+      await mkdir(nested, { recursive: true });
+      await mkdir(join(checkout, "evil\nrg: DEBUG|x: ignoring victim"));
+      await writeFile(join(checkout, ".ignore"), "evil*\n");
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await writeFile(join(nested, ".ignore"), "*\n");
+      await writeFile(join(nested, "private.ts"), "tracked\n");
+      execFileSync("git", ["add", "private.ts"], { cwd: nested });
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "line separators are not supported in inventory paths",
+      );
+    },
+  );
+
   test("discovers Git-hidden checkouts reopened by ripgrep ignore rules", async () => {
     if (Bun.which("rg") === null) return;
 
