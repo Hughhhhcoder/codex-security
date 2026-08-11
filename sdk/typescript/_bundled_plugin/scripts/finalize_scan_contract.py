@@ -656,7 +656,12 @@ def _validate_date_time(value: str, context: str) -> None:
         raise ContractError(f"{context}: expected an RFC 3339 timestamp")
 
 
-def _validate_target(target: dict[str, Any]) -> None:
+def _validate_target(
+    target: dict[str, Any],
+    *,
+    coverage_mode: str | None = None,
+    allow_legacy_snapshot: bool = False,
+) -> None:
     kind = _require_str(target, "kind", "scan.target")
     if kind not in TARGET_KINDS:
         raise ContractError(f"scan.target.kind: unsupported target kind: {kind}")
@@ -672,8 +677,13 @@ def _validate_target(target: dict[str, Any]) -> None:
     elif kind == "git_worktree":
         _require_str(target, "snapshotDigest", "scan.target")
     elif kind == "git_diff":
-        _require_str(target, "baseRevision", "scan.target")
-        _require_str(target, "headRevision", "scan.target")
+        if allow_legacy_snapshot and "snapshotDigest" in target:
+            _require_str(target, "snapshotDigest", "scan.target")
+        else:
+            _require_str(target, "baseRevision", "scan.target")
+            _require_str(target, "headRevision", "scan.target")
+        if coverage_mode == "working_tree":
+            _require_str(target, "snapshotDigest", "scan.target")
     elif kind == "directory_snapshot":
         _require_str(target, "snapshotDigest", "scan.target")
 
@@ -1239,6 +1249,9 @@ def _validate_completion_binding(
     for key, expected in completion_binding["target"].items():
         if target.get(key) != expected:
             raise ContractError(f"scan.target.{key}: must match the workbench target")
+    for key in TARGET_COORDINATE_FIELDS:
+        if key in target and key not in completion_binding["target"]:
+            raise ContractError(f"scan.target.{key}: must not be present without workbench binding")
     scope = _require_dict(scan, "scope", "manifest.scan")
     for key, expected in completion_binding["scope"].items():
         if scope.get(key) != expected:
@@ -1382,7 +1395,7 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     _require_safe_json_value(coverage, "coverage.json")
 
 
-def _validate_manifest(manifest: dict[str, Any]) -> None:
+def _validate_manifest(manifest: dict[str, Any], coverage_mode: str | None = None) -> None:
     if manifest.get("documentType") != "codex-security.scan-manifest":
         raise ContractError("manifest.documentType: expected codex-security.scan-manifest")
     if manifest.get("schemaVersion") != SCHEMA_VERSION:
@@ -1395,7 +1408,11 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     producer = _require_dict(scan, "producer", "manifest.scan")
     _require_str(producer, "name", "manifest.scan.producer")
     _require_str(producer, "version", "manifest.scan.producer")
-    _validate_target(_require_dict(scan, "target", "manifest.scan"))
+    _validate_target(
+        _require_dict(scan, "target", "manifest.scan"),
+        coverage_mode=coverage_mode,
+        allow_legacy_snapshot=True,
+    )
     scope = _require_dict(scan, "scope", "manifest.scan")
     for field in ("includePaths", "excludePaths"):
         values = _require_list(scope, field, "manifest.scan.scope")
@@ -1518,7 +1535,9 @@ def _validate_schema_node(value: Any, schema: dict[str, Any], context: str) -> N
             try:
                 _validate_schema_node(value, condition, context)
             except ContractError:
-                pass
+                else_schema = schema.get("else")
+                if isinstance(else_schema, dict):
+                    _validate_schema_node(value, else_schema, context)
             else:
                 then_schema = schema.get("then")
                 if isinstance(then_schema, dict):
@@ -2074,7 +2093,7 @@ def _read_sealed_scan(
             scan["coverageRef"]: coverage_bytes,
         },
     )
-    _validate_manifest(manifest)
+    _validate_manifest(manifest, coverage.get("mode"))
     _validate_findings(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
     _validate_sealed_coverage_receipts(scan, coverage)
@@ -2375,7 +2394,11 @@ def _prepare_scan_finalization(
         },
     )
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
-    _validate_target(_require_dict(scan, "target", "manifest.scan"))
+    _validate_target(
+        _require_dict(scan, "target", "manifest.scan"),
+        coverage_mode=coverage.get("mode"),
+        allow_legacy_snapshot=was_sealed,
+    )
     _validate_completion_binding(manifest, findings, coverage, completion_binding)
     if was_sealed:
         _validate_findings(manifest, findings)
@@ -2397,7 +2420,7 @@ def _prepare_scan_finalization(
     _require_hardening_portfolio_file(scan_dir, scan)
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
-        _validate_manifest(manifest)
+        _validate_manifest(manifest, coverage.get("mode"))
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
         validate_against_schema(findings, schema_dir / "findings.schema.json")
         validate_against_schema(coverage, schema_dir / "coverage.schema.json")
@@ -2426,7 +2449,7 @@ def _prepare_scan_finalization(
         ],
     ]
     _validate_sealed_coverage_receipts(scan, coverage)
-    _validate_manifest(manifest)
+    _validate_manifest(manifest, coverage.get("mode"))
     validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")

@@ -150,10 +150,17 @@
                 }
               },
               "then": {
-                "required": [
-                  "baseRevision",
-                  "headRevision"
-                ]
+                "if": {
+                  "required": [
+                    "snapshotDigest"
+                  ]
+                },
+                "else": {
+                  "required": [
+                    "baseRevision",
+                    "headRevision"
+                  ]
+                }
               }
             }
           ]

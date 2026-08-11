@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -963,6 +964,141 @@ describe("canonical scan contract", () => {
     expect(committed).not.toHaveProperty("snapshotDigest");
     expect(workingTree?.["snapshotDigest"]).toMatch(
       /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
+    );
+  });
+
+  test("reopens legacy sealed diffs with a snapshot digest and no revision pair", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const manifest = await readJson(manifestPath);
+    const coverage = await readJson(coveragePath);
+    manifest["scan"]["target"]["kind"] = "git_diff";
+    delete manifest["scan"]["target"]["revision"];
+    coverage["mode"] = "branch_diff";
+    await writeJson(manifestPath, manifest);
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).resolves.toBeDefined();
+
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) throw new Error("A Python interpreter is required.");
+    const result = spawnSync(
+      python,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+        "--scan-dir",
+        await realpath(scanDir),
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+  });
+
+  test("rejects working-tree diffs without a reviewed-content snapshot digest", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const manifest = await readJson(manifestPath);
+    const coverage = await readJson(coveragePath);
+    const target = manifest["scan"]["target"];
+    target["kind"] = "git_diff";
+    target["baseRevision"] = "base-revision";
+    target["headRevision"] = "head-revision";
+    delete target["snapshotDigest"];
+    coverage["mode"] = "working_tree";
+    await writeJson(manifestPath, manifest);
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+
+    await expect(
+      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow("must include a snapshot digest");
+
+    delete manifest["scan"]["sealedAt"];
+    delete manifest["scan"]["artifacts"];
+    await writeJson(manifestPath, manifest);
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) throw new Error("A Python interpreter is required.");
+    const result = spawnSync(
+      python,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+        "--scan-dir",
+        await realpath(scanDir),
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("snapshotDigest");
+  });
+
+  test("rejects fabricated snapshot coordinates in a sealed workbench diff", async () => {
+    const scanDir = await copyExample();
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const coveragePath = join(scanDir, "coverage.json");
+    const manifest = await readJson(manifestPath);
+    const coverage = await readJson(coveragePath);
+    const target = manifest["scan"]["target"];
+    target["kind"] = "git_diff";
+    target["baseRevision"] = "base-revision";
+    target["headRevision"] = "head-revision";
+    delete target["revision"];
+    coverage["mode"] = "branch_diff";
+    await writeJson(manifestPath, manifest);
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) throw new Error("A Python interpreter is required.");
+    const program = [
+      "import json, sys",
+      "from pathlib import Path",
+      "sys.path.insert(0, sys.argv[1])",
+      "import finalize_scan_contract as finalizer",
+      "scan_dir = Path(sys.argv[2])",
+      "scan = json.loads((scan_dir / 'scan-manifest.json').read_text())['scan']",
+      "coverage = json.loads((scan_dir / 'coverage.json').read_text())",
+      "target = scan['target']",
+      "coordinates = {key: target[key] for key in ('targetId', 'displayName', 'baseRevision', 'headRevision')}",
+      "binding = {'scanId': scan['id'], 'startedAt': scan['startedAt'], 'completedAt': scan['completedAt'], 'producer': scan['producer'], 'target': coordinates, 'allowedTargetKinds': ['git_diff'], 'scope': scan['scope'], 'coverageMode': coverage['mode']}",
+      "try:",
+      "    finalizer.finalize_scan(scan_dir, expected_coverage_mode=coverage['mode'], completion_binding=binding)",
+      "except finalizer.ContractError as error:",
+      "    print(str(error))",
+      "else:",
+      "    raise SystemExit('accepted an unbound sealed snapshot digest')",
+    ].join("\n");
+    const result = spawnSync(
+      python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        program,
+        join(PLUGIN_ROOT, "scripts"),
+        await realpath(scanDir),
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain(
+      "snapshotDigest: must not be present without workbench binding",
     );
   });
 
