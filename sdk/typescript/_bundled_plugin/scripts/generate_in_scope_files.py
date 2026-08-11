@@ -175,15 +175,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError("non-regular Git metadata files are not supported")
             return metadata
 
-        def inspect_object_store(objects: Path) -> None:
-            def aliases_canonical_path(path: Path, canonical: str) -> bool:
-                try:
-                    actual = path.stat(follow_symlinks=False)
-                    expected = (path.parent / canonical).stat(follow_symlinks=False)
-                except FileNotFoundError:
-                    return False
-                return (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
+        def aliases_canonical_path(path: Path, canonical: str) -> bool:
+            try:
+                actual = path.stat(follow_symlinks=False)
+                expected = (path.parent / canonical).stat(follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            return (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
 
+        def inspect_object_store(objects: Path) -> None:
             try:
                 identity = directory_identity(objects)
                 if identity in validated_object_stores:
@@ -453,10 +453,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     elif GIT_CONFIG_INCLUDE.search(contents.removeprefix(b"\xef\xbb\xbf")):
                         raise InventoryError("Git config includes are not supported")
             try:
-                shared_indexes = (
-                    entry for entry in root.iterdir() if entry.name.startswith("sharedindex.")
-                )
-                for shared_index in shared_indexes:
+                for shared_index in root.iterdir():
+                    canonical = shared_index.name.casefold()
+                    if not canonical.startswith("sharedindex."):
+                        continue
+                    if shared_index.name != canonical and not aliases_canonical_path(
+                        shared_index, canonical
+                    ):
+                        continue
                     inspect_metadata(shared_index, directory=False)
             except FileNotFoundError:
                 continue

@@ -1411,9 +1411,9 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test.skipIf(process.platform === "win32")(
-    "rejects split-index backing files that leave the checkout",
-    async () => {
+  test.skipIf(process.platform === "win32").each(["lowercase", "uppercase"])(
+    "rejects %s split-index backing files that leave the checkout",
+    async (casing) => {
       if (Bun.which("rg") === null) return;
 
       const checkout = await repository();
@@ -1433,7 +1433,18 @@ describe("security scan file inventory", () => {
       const external = join(dirname(checkout), shared);
       await writeFile(external, await readFile(original));
       await rm(original);
-      await symlink(external, original);
+      const replacement =
+        casing === "uppercase" ? join(gitdir, shared.toUpperCase()) : original;
+      await symlink(external, replacement);
+      if (
+        casing === "uppercase" &&
+        !(await realpath(original).then(
+          () => true,
+          () => false,
+        ))
+      ) {
+        return;
+      }
 
       await expect(inventory(checkout)).rejects.toThrow(
         "symbolic Git metadata paths are not supported",
