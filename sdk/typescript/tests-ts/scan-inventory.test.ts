@@ -233,6 +233,10 @@ describe("security scan file inventory", () => {
     const rows = await inventory(checkout);
     expect(rows).toContain("./nested/visible.ts");
     expect(rows).not.toContain("./nested/private.ts");
+
+    const scoped = await inventory(checkout, "nested");
+    expect(scoped).toContain("nested/visible.ts");
+    expect(scoped).not.toContain("nested/private.ts");
   });
 
   test("applies configured excludes from every enclosing Git checkout", async () => {
@@ -246,6 +250,46 @@ describe("security scan file inventory", () => {
     execFileSync("git", ["init", "-q"], { cwd: nested });
     await Promise.all([
       writeFile(join(middle, ".git", "info", "exclude"), "nested/private.ts\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+      writeFile(join(nested, "visible.ts"), "visible\n"),
+    ]);
+    execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
+
+    const rows = await inventory(checkout);
+    expect(rows).toContain("./middle/nested/visible.ts");
+    expect(rows).not.toContain("./middle/nested/private.ts");
+  });
+
+  test("preserves intermediate ignores beneath an ancestor Git link", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const middle = join(checkout, "middle");
+    const nested = join(middle, "nested");
+    await mkdir(nested, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: middle });
+    await writeFile(join(middle, "visible.ts"), "visible\n");
+    execFileSync("git", ["add", "visible.ts"], { cwd: middle });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Inventory Test",
+        "-c",
+        "user.email=inventory@example.test",
+        "commit",
+        "-qm",
+        "Track intermediate source",
+      ],
+      { cwd: middle },
+    );
+    execFileSync("git", ["add", "middle"], {
+      cwd: checkout,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(middle, ".gitignore"), "nested/private.ts\n"),
       writeFile(join(nested, "private.ts"), "private\n"),
       writeFile(join(nested, "visible.ts"), "visible\n"),
     ]);
@@ -272,6 +316,14 @@ describe("security scan file inventory", () => {
       "./container/nested/tracked.ts",
     );
 
+    await writeFile(
+      join(checkout, "container", ".git"),
+      "malformed nested Git marker\n",
+    );
+    expect(await inventory(checkout)).toContain(
+      "./container/nested/tracked.ts",
+    );
+
     await writeFile(join(checkout, ".ignore"), "scan-source\ncontainer/\n");
     expect(await inventory(checkout)).not.toContain(
       "./container/nested/tracked.ts",
@@ -282,6 +334,38 @@ describe("security scan file inventory", () => {
       "./container/nested/tracked.ts",
     );
   });
+
+  test("keeps tracked files when an ignored snapshot checkout is explicitly selected", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository(false);
+    const nested = join(checkout, "ignored");
+    await mkdir(nested);
+    await writeFile(join(checkout, ".gitignore"), "ignored/\n");
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(nested, "public.ts"), "tracked\n"),
+      writeFile(join(nested, "private.ts"), "ignored\n"),
+    ]);
+    execFileSync("git", ["add", "public.ts"], { cwd: nested });
+
+    expect(await inventory(checkout, "ignored")).toEqual(["ignored/public.ts"]);
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "does not traverse external Windows directory junctions",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const external = join(dirname(checkout), "outside");
+      await mkdir(join(external, ".ignore"), { recursive: true });
+      await symlink(external, join(checkout, "junction"), "junction");
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      expect(await inventory(checkout)).toEqual(["./visible.ts"]);
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "inventories an explicit file without listing its parent directory",

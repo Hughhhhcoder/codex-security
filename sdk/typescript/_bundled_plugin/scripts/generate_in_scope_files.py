@@ -319,7 +319,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         candidates: list[Path],
         *,
         directories_only: bool = False,
-        include_gitignore: bool = True,
+        exempt_gitignores: tuple[tuple[Path, Path], ...] = (),
     ) -> set[bytes]:
         requested = {
             normalized(os.fsencode(candidate.relative_to(repository).as_posix()))
@@ -336,7 +336,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             directory / name
             for directory in directories
             for name in IGNORE_FILE_NAMES
-            if include_gitignore or name != ".gitignore"
+            if name != ".gitignore"
+            or not any(
+                directory.is_relative_to(owner)
+                and gitlink.is_relative_to(directory)
+                and directory != gitlink
+                for owner, gitlink in exempt_gitignores
+            )
             if (directory / name).is_file()
         ]
         configured_excludes: dict[Path, bytes] = {}
@@ -383,9 +389,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(ignore.read_bytes())
                 for directory, contents in configured_excludes.items():
-                    exclude = probe / directory.relative_to(repository) / ".git" / "info" / "exclude"
+                    exclude = probe / directory.relative_to(repository) / ".gitignore"
                     exclude.parent.mkdir(parents=True, exist_ok=True)
-                    exclude.write_bytes(contents)
+                    existing = exclude.read_bytes() if exclude.exists() else b""
+                    separator = b"" if not contents or contents.endswith(b"\n") else b"\n"
+                    exclude.write_bytes(contents + separator + existing)
                 for relative in batch:
                     destination = probe / os.fsdecode(relative)
                     if directories_only:
@@ -517,17 +525,31 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 continue
             inspected_directories.add(identity)
             reject_symbolic_ignore(directory)
-            children = [
-                entry
-                for entry in directory.iterdir()
-                if not entry.is_symlink()
-                and entry.is_dir()
-                and not git_metadata_path(directory, entry.name)
-            ]
+            children = []
+            for entry in directory.iterdir():
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if (
+                    symbolic_metadata(metadata)
+                    or not stat.S_ISDIR(metadata.st_mode)
+                    or git_metadata_path(directory, entry.name)
+                ):
+                    continue
+                children.append(entry)
+            valid_roots = set()
             for entry in children:
                 if (entry / ".git").exists():
-                    discovered_roots[directory_identity(entry)] = entry
-            ordinary = [entry for entry in children if not (entry / ".git").exists()]
+                    candidate = run_git(["rev-parse", "--show-toplevel"], directory=entry)
+                    if candidate.returncode == 0:
+                        try:
+                            if resolve_git_root(candidate.stdout) == entry:
+                                discovered_roots[directory_identity(entry)] = entry
+                                valid_roots.add(entry)
+                        except (OSError, ValueError):
+                            pass
+            ordinary = [entry for entry in children if entry not in valid_roots]
             if ordinary:
                 visible = visible_to_outer_ignores(
                     ordinary[0], ordinary, directories_only=True
@@ -569,8 +591,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         repository,
                         [relative for relative in result.stdout.split(b"\0") if relative],
                     )
-
-        outer_tracked_paths = set(listed_paths(0))
 
         def visible_nested_root(root: Path) -> bool:
             return (
@@ -763,6 +783,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             os.fsencode(part) for part in selected.relative_to(repository).parts
         )
         selected_is_directory = selected.is_dir()
+        tracked_gitlinks = []
+        for owner, tracked_paths in cached_by_root.values():
+            indexed_paths = set(tracked_paths)
+            tracked_gitlinks.extend(
+                (owner, nested)
+                for nested in inspected_roots.values()
+                if nested != owner
+                and nested.is_relative_to(owner)
+                and os.fsencode(nested.relative_to(owner).as_posix()) in indexed_paths
+            )
 
         def tracked_variants(
             root_identity: tuple[int, int], root: Path, relative: bytes
@@ -854,27 +884,30 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             ]
             outer_visible = (
                 visible_to_outer_ignores(root, candidates)
-                if root != repository
-                and not (
-                    selected != repository
-                    and (selected == root or selected.is_relative_to(root))
-                )
+                if root != repository and selected_is_directory
                 else None
             )
-            gitlink_candidates = [
-                candidate
-                for candidate in candidates
-                if any(
-                    (relative := os.fsencode(candidate.relative_to(repository).as_posix())) == tracked
-                    or relative.startswith(tracked + b"/")
-                    for tracked in outer_tracked_paths
+            gitlink_groups: dict[tuple[tuple[Path, Path], ...], list[Path]] = {}
+            if outer_visible is not None:
+                for candidate in candidates:
+                    exemptions = tuple(
+                        (owner, gitlink)
+                        for owner, gitlink in tracked_gitlinks
+                        if candidate.is_relative_to(gitlink)
+                    )
+                    if selected != repository and (
+                        selected == root or selected.is_relative_to(root)
+                    ):
+                        exemptions += ((repository, selected),)
+                    if exemptions:
+                        gitlink_groups.setdefault(exemptions, []).append(candidate)
+            gitlink_visible = {
+                relative
+                for exemptions, linked_candidates in gitlink_groups.items()
+                for relative in visible_to_outer_ignores(
+                    root, linked_candidates, exempt_gitignores=exemptions
                 )
-            ]
-            gitlink_visible = (
-                visible_to_outer_ignores(root, gitlink_candidates, include_gitignore=False)
-                if outer_visible is not None and gitlink_candidates
-                else set()
-            )
+            }
             for candidate in candidates:
                 relative = os.fsencode(candidate.relative_to(repository).as_posix())
                 if (
