@@ -165,10 +165,22 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             return False
         return stat.S_ISDIR(metadata.st_mode) and not symbolic_metadata(metadata)
 
+    def has_git_marker(directory: Path) -> bool:
+        try:
+            metadata = (directory / ".git").stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+        if symbolic_metadata(metadata):
+            raise InventoryError("symbolic Git metadata paths are not supported")
+        return stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)
+
     discovered_roots: dict[tuple[int, int], Path] = {}
     metadata_aliases: set[tuple[str, ...]] = set()
     for ancestor in ancestors:
         reject_symbolic_ignore(ancestor)
+        has_git_marker(ancestor)
 
     command = [
         "rg",
@@ -277,7 +289,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             current = current.parent
     for directory in sorted(visible_directories):
         reject_symbolic_ignore(directory, allow_ignored=True)
-        if directory != repository and (directory / ".git").exists():
+        if directory != repository and has_git_marker(directory):
             discovered_roots[directory_identity(directory)] = directory
         if not selected.is_dir():
             continue
@@ -287,7 +299,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             elif (
                 entry.name != ".git"
                 and nonsymbolic_directory(entry)
-                and (entry / ".git").exists()
+                and has_git_marker(entry)
             ):
                 discovered_roots[directory_identity(entry)] = entry
     if metadata_aliases:
@@ -355,7 +367,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         ]
         configured_excludes: dict[Path, bytes] = {}
         for directory in directories:
-            if not (directory / ".git").exists():
+            if not has_git_marker(directory):
                 continue
             location = run_git(
                 ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
@@ -394,7 +406,32 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 temporary_root = Path(temporary_directory)
                 probe = temporary_root / "inventory"
                 probe.mkdir()
-                external_ignores: list[Path] = []
+                external_ignores: list[tuple[int, int, int, Path]] = []
+
+                def collides_with_candidates(relative: tuple[str, ...]) -> bool:
+                    for candidate in batch:
+                        pairs = tuple(
+                            zip(PurePosixPath(os.fsdecode(candidate)).parts, relative)
+                        )
+                        if all(
+                            actual.casefold() == synthetic.casefold()
+                            for actual, synthetic in pairs
+                        ) and any(actual != synthetic for actual, synthetic in pairs):
+                            return True
+                    return False
+
+                isolate_ignores = any(
+                    collides_with_candidates(
+                        (*ignore.parent.relative_to(repository).parts, ignore.name)
+                    )
+                    for ignore in ignore_files
+                ) or any(
+                    collides_with_candidates(
+                        (*directory.relative_to(repository).parts, name)
+                    )
+                    for directory in configured_excludes
+                    for name in (".gitignore", ".ignore")
+                )
 
                 def install_ignore(
                     directory: Path,
@@ -404,20 +441,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     prepend: bool = False,
                 ) -> None:
                     relative = (*directory.relative_to(repository).parts, name)
-
-                    def collides_with(candidate: bytes) -> bool:
-                        pairs = tuple(
-                            zip(PurePosixPath(os.fsdecode(candidate)).parts, relative)
-                        )
-                        return all(
-                            actual.casefold() == synthetic.casefold()
-                            for actual, synthetic in pairs
-                        ) and any(actual != synthetic for actual, synthetic in pairs)
-
-                    collides = any(collides_with(candidate) for candidate in batch)
-                    if collides:
+                    if isolate_ignores:
                         if directory != repository:
-                            prefix = os.fsencode(directory.relative_to(repository).as_posix())
+                            prefix = os.fsencode(
+                                "/".join(
+                                    re.escape(part)
+                                    for part in directory.relative_to(repository).parts
+                                )
+                            )
                             rebased = []
                             for line in contents.splitlines():
                                 if not line or line.startswith(b"#"):
@@ -437,9 +468,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     + b"\n"
                                 )
                             contents = b"".join(rebased)
-                        destination = temporary_root / f"ignore-{len(external_ignores)}"
+                        position = len(external_ignores)
+                        destination = temporary_root / f"ignore-{position}"
                         destination.write_bytes(contents)
-                        external_ignores.append(destination)
+                        priority = -1 if prepend else IGNORE_FILE_NAMES.index(name)
+                        depth = len(directory.relative_to(repository).parts)
+                        external_ignores.append((priority, depth, position, destination))
                         return
 
                     destination = probe.joinpath(*relative)
@@ -491,7 +525,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         *command,
                         *(
                             argument
-                            for ignore in external_ignores
+                            for _, _, _, ignore in sorted(external_ignores)
                             for argument in ("--ignore-file", str(ignore))
                         ),
                         *(["--debug"] if directories_only else []),
@@ -588,7 +622,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
     worktree = (
         run_git(["rev-parse", "--show-toplevel"])
-        if (repository / ".git").exists()
+        if has_git_marker(repository)
         else None
     )
     if worktree is not None and worktree.returncode:
@@ -616,15 +650,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if not valid_worktree:
             worktree = None
 
-    ripgrep_overrides = any(
-        PurePosixPath(os.fsdecode(row.removesuffix(b"\n"))).name in (".ignore", ".rgignore")
-        for row in rows
-    ) or any(
-        (ancestor / name).is_file()
-        for ancestor in ancestors
-        for name in (".ignore", ".rgignore")
-    )
-    if selected.is_dir() and (worktree is None or ripgrep_overrides):
+    if selected.is_dir():
         pending = [selected]
         inspected_directories: set[tuple[int, int]] = set()
         while pending:
@@ -641,7 +667,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             ]
             valid_roots: set[tuple[int, int]] = set()
             for entry in children:
-                if (entry / ".git").exists():
+                if has_git_marker(entry):
                     candidate = run_git(["rev-parse", "--show-toplevel"], directory=entry)
                     if candidate.returncode == 0:
                         try:
@@ -709,7 +735,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         }
         current = selected if selected.is_dir() else selected.parent
         while current != repository:
-            if (current / ".git").exists():
+            if has_git_marker(current):
                 nested_roots[directory_identity(current)] = current
             current = current.parent
         for index in range(len(listed)):
@@ -717,7 +743,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 candidate = repository / os.fsdecode(relative)
                 current = candidate if nonsymbolic_directory(candidate) else candidate.parent
                 while current != repository:
-                    if nonsymbolic_directory(current) and (current / ".git").exists():
+                    if nonsymbolic_directory(current) and has_git_marker(current):
                         try:
                             discovered = current.resolve(strict=True)
                             discovered.relative_to(repository)
@@ -792,7 +818,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     candidate = nested / os.fsdecode(relative)
                     if not nonsymbolic_directory(candidate):
                         continue
-                    if not (candidate / ".git").exists():
+                    if not has_git_marker(candidate):
                         continue
                     try:
                         discovered = candidate.resolve(strict=True)

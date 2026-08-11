@@ -415,11 +415,41 @@ describe("security scan file inventory", () => {
     );
   });
 
+  test("discovers checkout overrides that hide their own ignore files", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const container = join(checkout, "container");
+    const nested = join(container, "mid", "nested");
+    await mkdir(nested, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(checkout, ".gitignore"), "container/mid/\n"),
+      writeFile(
+        join(container, ".ignore"),
+        "*\n!mid/\n!mid/nested/\n!mid/nested/**\n",
+      ),
+      writeFile(join(nested, ".ignore"), "*\n"),
+      writeFile(join(nested, "tracked.ts"), "export {};\n"),
+    ]);
+    execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
+
+    expect(await inventory(checkout)).toContain(
+      "./container/mid/nested/tracked.ts",
+    );
+  });
+
   test("keeps ignore scaffolding separate from case-distinct checkouts", async () => {
     if (Bun.which("rg") === null) return;
 
     const checkout = await repository();
-    await writeFile(join(checkout, ".ignore"), ".IGNORE/private.ts\n");
+    await Promise.all([
+      writeFile(join(checkout, ".gitignore"), ".IGNORE/tracked.ts\n"),
+      writeFile(
+        join(checkout, ".ignore"),
+        "!.IGNORE/tracked.ts\n.IGNORE/private.ts\n",
+      ),
+    ]);
     const nested = join(checkout, ".IGNORE");
     try {
       await mkdir(nested);
@@ -439,6 +469,33 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./.IGNORE/private.ts");
   });
 
+  test("preserves rgignore precedence for case-distinct checkout paths", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    await Promise.all([
+      writeFile(join(checkout, ".ignore"), "!.RGIGNORE/private.ts\n"),
+      writeFile(join(checkout, ".rgignore"), ".RGIGNORE/private.ts\n"),
+    ]);
+    const nested = join(checkout, ".RGIGNORE");
+    try {
+      await mkdir(nested);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(nested, "tracked.ts"), "visible\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+    ]);
+    execFileSync("git", ["add", "tracked.ts", "private.ts"], { cwd: nested });
+
+    const rows = await inventory(checkout);
+    expect(rows).toContain("./.RGIGNORE/tracked.ts");
+    expect(rows).not.toContain("./.RGIGNORE/private.ts");
+  });
+
   test("keeps tracked files when an ignored snapshot checkout is explicitly selected", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -454,6 +511,23 @@ describe("security scan file inventory", () => {
     execFileSync("git", ["add", "public.ts"], { cwd: nested });
 
     expect(await inventory(checkout, "ignored")).toEqual(["ignored/public.ts"]);
+  });
+
+  test("rejects symbolic Git metadata before reading another checkout", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository(false);
+    const external = await repository();
+    await symlink(
+      join(external, ".git"),
+      join(checkout, ".git"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+    await expect(inventory(checkout)).rejects.toThrow(
+      "symbolic Git metadata paths are not supported",
+    );
   });
 
   test.skipIf(process.platform !== "win32")(
