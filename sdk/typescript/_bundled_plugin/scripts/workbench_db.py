@@ -296,8 +296,21 @@ def immutable_diff_content_digest(target: Path, kind: str, base: str, head: str)
     replacements = git_command(target, "replace", "--list", "--format=long", text=True)
     if replacements.returncode:
         raise SystemExit("The selected diff's Git object replacements could not be inspected.")
+    replacement_mode = git_command(
+        target,
+        "config",
+        "--type=bool",
+        "--default=true",
+        "--get",
+        "core.useReplaceRefs",
+        text=True,
+    )
+    if replacement_mode.returncode:
+        raise SystemExit("The selected diff's Git replacement settings could not be inspected.")
     return "codex-security-snapshot/v1:sha256:" + hashlib.sha256(
-        "\0".join((kind, base, head, *trees, replacements.stdout)).encode("utf-8")
+        "\0".join(
+            (kind, base, head, *trees, replacements.stdout, replacement_mode.stdout.strip())
+        ).encode("utf-8")
     ).hexdigest()
 
 

@@ -924,7 +924,7 @@ describe("canonical scan contract", () => {
       "results = {}",
       "for kind in ('commit', 'range'):",
       "    target = workbench.require_diff_target(repository, kind, base, head, None)",
-      "    expected = 'codex-security-snapshot/v1:sha256:' + hashlib.sha256(chr(0).join((kind, base, head, *trees, '')).encode()).hexdigest()",
+      "    expected = 'codex-security-snapshot/v1:sha256:' + hashlib.sha256(chr(0).join((kind, base, head, *trees, '', 'true')).encode()).hexdigest()",
       "    assert target['contentDigest'] == expected",
       "    values = ('scan', 'target', str(repository), 'diff', head, None, kind, base, head, expected, '2026-01-01T00:00:00Z', '.', None)",
       "    scan = connection.execute('SELECT ? AS id, ? AS target_id, ? AS target_path, ? AS mode, ? AS target_revision, ? AS target_snapshot_digest, ? AS diff_target_kind, ? AS diff_base_revision, ? AS diff_head_revision, ? AS diff_content_digest, ? AS started_at, ? AS scope, ? AS recipe_json', values).fetchone()",
@@ -977,6 +977,10 @@ describe("canonical scan contract", () => {
       "    tree_replaced = workbench.require_diff_target(repository, 'range', base, head, None)",
       "    assert tree_replaced['contentDigest'] != results['range']",
       "    results['tree_replacement'] = tree_replaced['contentDigest']",
+      "    git('config', 'core.useReplaceRefs', 'false')",
+      "    disabled = workbench.require_diff_target(repository, 'range', base, head, None)",
+      "    assert disabled['contentDigest'] != tree_replaced['contentDigest']",
+      "    results['replacements_disabled'] = disabled['contentDigest']",
       "print(json.dumps(results))",
     ].join("\n");
     const result = spawnSync(
