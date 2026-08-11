@@ -162,23 +162,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     metadata_aliases: set[tuple[str, ...]] = set()
     for ancestor in ancestors:
         reject_symbolic_ignore(ancestor)
-    if selected.is_dir():
-        for directory, children, files in os.walk(selected, followlinks=False):
-            directory_path = Path(directory)
-            if directory_path != repository and (directory_path / ".git").exists():
-                discovered_roots[directory_identity(directory_path)] = directory_path
-            for name in (*children, *files):
-                if name != ".git" and git_metadata_path(directory_path, name):
-                    metadata_aliases.add(
-                        (directory_path / name).relative_to(repository).parts
-                    )
-            children[:] = [
-                name
-                for name in children
-                if not git_metadata_path(directory_path, name)
-                and not symbolic_metadata((directory_path / name).stat(follow_symlinks=False))
-            ]
-            reject_symbolic_ignore(directory_path, allow_ignored=True)
 
     command = [
         "rg",
@@ -279,6 +262,28 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         return path.replace(b"\\", b"/") if os.name == "nt" else path
 
     rows = ripgrep_inventory(repository, scope)
+    visible_directories = set(ancestors)
+    for row in rows:
+        current = (repository / os.fsdecode(row.removesuffix(b"\n"))).parent
+        while current != repository:
+            visible_directories.add(current)
+            current = current.parent
+    for directory in sorted(visible_directories):
+        reject_symbolic_ignore(directory, allow_ignored=True)
+        if directory != repository and (directory / ".git").exists():
+            discovered_roots[directory_identity(directory)] = directory
+        for entry in directory.iterdir():
+            if entry.name != ".git" and git_metadata_path(directory, entry.name):
+                metadata_aliases.add(entry.relative_to(repository).parts)
+    if metadata_aliases:
+        rows = {
+            row
+            for row in rows
+            if not any(
+                Path(os.fsdecode(row.removesuffix(b"\n"))).parts[: len(alias)] == alias
+                for alias in metadata_aliases
+            )
+        }
     if selected.is_dir() and scope not in (".", "./") and not ripgrep_inventory(
         repository, scope, directory_guard=True
     ):
@@ -442,18 +447,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         for index in range(len(listed)):
             for relative in listed_paths(index):
                 candidate = repository / os.fsdecode(relative)
-                if candidate.is_symlink() or not candidate.is_dir():
-                    continue
-                if not (candidate / ".git").exists():
-                    continue
-                try:
-                    discovered = candidate.resolve(strict=True)
-                    discovered.relative_to(repository)
-                except (OSError, ValueError):
-                    continue
-                if index != 0 and not visible_nested_root(discovered):
-                    continue
-                nested_roots[directory_identity(discovered)] = discovered
+                current = candidate if candidate.is_dir() else candidate.parent
+                while current != repository:
+                    if not current.is_symlink() and (current / ".git").exists():
+                        try:
+                            discovered = current.resolve(strict=True)
+                            discovered.relative_to(repository)
+                        except (OSError, ValueError):
+                            break
+                        if index == 0 or visible_nested_root(discovered):
+                            nested_roots[directory_identity(discovered)] = discovered
+                    current = current.parent
 
         pending_roots = sorted(nested_roots.values())
         inspected_roots: dict[tuple[int, int], Path] = {}

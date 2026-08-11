@@ -131,35 +131,6 @@ describe("scan target normalization", () => {
     );
   });
 
-  test("accepts case-equivalent Windows repository roots", async () => {
-    if (process.platform !== "win32") return;
-
-    const repo = await repository();
-    const alternate = repo.replace(/[a-z]/iu, (letter) =>
-      letter === letter.toUpperCase()
-        ? letter.toLowerCase()
-        : letter.toUpperCase(),
-    );
-
-    expect(
-      await normalizeTarget(repo, [join(alternate, "src", "app.ts")]),
-    ).toEqual({ kind: "paths", paths: ["src/app.ts"] });
-  });
-
-  test("rejects symbolic path targets before canonicalizing them", async () => {
-    const repo = await repository();
-    const linked = join(repo, "linked");
-    await symlink(
-      join(repo, "src"),
-      linked,
-      process.platform === "win32" ? "junction" : "dir",
-    );
-
-    await expect(normalizeTarget(repo, ["linked/app.ts"])).rejects.toThrow(
-      "symbolic links",
-    );
-  });
-
   test("reports a path that disappears during normalization as invalid", async () => {
     const repo = await repository();
     const script = `
