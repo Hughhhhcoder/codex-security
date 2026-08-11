@@ -186,9 +186,24 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             gitdir = Path(os.fsdecode(contents.removeprefix(b"gitdir: ").rstrip(b"\r\n")))
             if not gitdir.is_absolute():
                 gitdir = directory / gitdir
+            gitdir = Path(os.path.abspath(gitdir))
             for current in reversed((gitdir, *gitdir.parents)):
                 if inspect_metadata(current, directory=True) is None:
                     break
+            try:
+                gitdir.relative_to(repository)
+            except ValueError:
+                backpointer = gitdir / "gitdir"
+                if inspect_metadata(backpointer, directory=False) is None:
+                    raise InventoryError("Git metadata directory does not own selected worktree")
+                try:
+                    target = Path(os.fsdecode(backpointer.read_bytes().rstrip(b"\r\n")))
+                except (OSError, ValueError) as error:
+                    raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+                if not target.is_absolute():
+                    target = gitdir / target
+                if Path(os.path.abspath(target)).parts != marker.parts:
+                    raise InventoryError("Git metadata directory does not own selected worktree")
         else:
             return False
 

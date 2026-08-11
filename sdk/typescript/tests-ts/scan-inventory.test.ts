@@ -780,6 +780,34 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each(["missing", "mismatched"])(
+    "rejects an external gitdir with a %s worktree backpointer",
+    async (ownership) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const external = await repository();
+      await writeFile(join(external, "secret.ts"), "tracked\n");
+      execFileSync("git", ["add", "secret.ts"], { cwd: external });
+      await writeFile(join(checkout, ".gitignore"), "secret.ts\n");
+      await writeFile(join(checkout, "secret.ts"), "private\n");
+      await writeFile(
+        join(checkout, ".git"),
+        `gitdir: ${join(external, ".git")}\n`,
+      );
+      if (ownership === "mismatched") {
+        await writeFile(
+          join(external, ".git", "gitdir"),
+          `${join(external, ".git")}\n`,
+        );
+      }
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "Git metadata directory does not own selected worktree",
+      );
+    },
+  );
+
   test("binds Git discovery to the selected checkout despite external core.worktree", async () => {
     if (Bun.which("rg") === null) return;
 
