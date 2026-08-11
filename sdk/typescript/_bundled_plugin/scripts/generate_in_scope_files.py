@@ -425,7 +425,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 else:
                     decoded.append(character)
                     normalized.append(
-                        ord(" ") if character == ord("\t") and not quoted else character
+                        ord(" ")
+                        if character in (ord("\t"), ord("\r")) and not quoted
+                        else character
                     )
             if quoted or escaped:
                 raise InventoryError("invalid Git worktree path")

@@ -1434,6 +1434,53 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test
+    .skipIf(process.platform === "win32")
+    .each(["symbolic", "missing", "quoted"])(
+    "validates %s carriage-return Git worktree normalization",
+    async (ownership) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      const metadata = join(checkout, ".git", "modules", "nested");
+      const original = join(checkout, ".git", "owned\rmetadata");
+      const normalized = join(checkout, ".git", "owned metadata");
+      const external = join(dirname(checkout), "external-worktree");
+      await mkdir(dirname(metadata), { recursive: true });
+      await mkdir(original);
+      await mkdir(external);
+      if (ownership !== "missing") await symlink(external, normalized);
+      execFileSync(
+        "git",
+        ["init", "-q", "--separate-git-dir", metadata, nested],
+        { cwd: checkout },
+      );
+      execFileSync("git", ["-C", nested, "config", "core.worktree", nested]);
+      await writeFile(join(nested, "visible.ts"), "tracked\n");
+      execFileSync("git", ["-C", nested, "add", "visible.ts"]);
+      const config = join(metadata, "config");
+      const configured = `${original}/../../nested`;
+      await writeFile(
+        config,
+        (await readFile(config, "utf8")).replace(
+          /^([ \t]*worktree[ \t]*=).*$/im,
+          `$1 ${ownership === "quoted" ? `"${configured}"` : configured}`,
+        ),
+      );
+
+      if (ownership === "quoted") {
+        expect(await inventory(checkout)).toContain("./nested/visible.ts");
+      } else {
+        await expect(inventory(checkout)).rejects.toThrow(
+          ownership === "symbolic"
+            ? "symbolic Git metadata paths are not supported"
+            : "Git metadata directory does not own selected worktree",
+        );
+      }
+    },
+  );
+
   test("rejects unrelated external Git common directories", async () => {
     if (Bun.which("rg") === null) return;
 
