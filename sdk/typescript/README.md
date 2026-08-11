@@ -505,7 +505,10 @@ Results remain under `--output-dir`; rerun the same command to resume.
 `npx @openai/codex-security scans list` lists scans for the current repository. Pass a
 repository path to inspect another checkout, `--scan-root DIR` to list scans
 whose artifacts are under a particular root. `scans show SCAN_ID` includes the
-scan configuration, results, coverage, and artifact locations. Add
+scan configuration, results, coverage, and artifact locations. It also shows
+the Python interpreter and validation tools available on the scan's `PATH`, plus
+recorded scan limitations and deferred work. Tool availability does not
+guarantee access to services or sandboxed resources. Add
 `--show-linked-findings` to include finding links from previous scans.
 
 Every scan history command accepts a full scan ID or a unique prefix of at

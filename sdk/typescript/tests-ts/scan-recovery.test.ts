@@ -9,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runWorkbench } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -303,6 +303,105 @@ describe("malformed scan artifact recovery", () => {
         /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/,
       ),
     });
+  });
+
+  test("keeps the Python and tools observed when each scan was registered", async () => {
+    const fixture = await startDraftScan();
+    const running = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    const available = {
+      python: fixture.python,
+      availableTools: expect.arrayContaining(["node"]),
+    };
+    expect(running["scan"]).toMatchObject({
+      validationEnvironment: available,
+    });
+    expect(running["recipe"]).toMatchObject({
+      validationEnvironment: available,
+    });
+
+    const emptyPath = join(dirname(fixture.scanDir), "empty-path");
+    const restrictedScanDir = join(dirname(fixture.scanDir), "restricted-scan");
+    await mkdir(emptyPath);
+    await mkdir(restrictedScanDir, { mode: 0o700 });
+    const restricted = await runWorkbench(
+      {
+        python: fixture.python,
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: emptyPath,
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+      [
+        "register-cli-scan",
+        "--repository",
+        fixture.repository,
+        "--scan-dir",
+        restrictedScanDir,
+        "--recipe-json",
+        JSON.stringify({
+          config: {},
+          mode: "standard",
+          repository: fixture.repository,
+          target: { kind: "repository", paths: [] },
+        }),
+      ],
+    );
+    const historical = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      String(restricted["scanId"]),
+    ]);
+
+    expect(historical["scan"]).toMatchObject({
+      validationEnvironment: {
+        python: fixture.python,
+        availableTools: [],
+      },
+    });
+  });
+
+  test("shows recorded limitations and deferred work without changing the saved recipe", async () => {
+    const fixture = await startDraftScan();
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const manifest = await readJson<{
+      scan: { scope: { limitations?: string[] } };
+    }>(manifestPath);
+    manifest.scan.scope.limitations = ["Docker daemon is unavailable."];
+    await writeJson(manifestPath, manifest);
+
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    coverage.completeness = "partial";
+    coverage.deferred = [
+      { id: "docker", reason: "Docker daemon is unavailable." },
+      { id: "database", reason: "The PostgreSQL test service is not running." },
+    ];
+    await writeJson(coveragePath, coverage);
+    await completeScan(fixture);
+
+    const context = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect(context["scan"]).toMatchObject({
+      validationEnvironment: {
+        python: fixture.python,
+        availableTools: expect.arrayContaining(["node"]),
+        blockers: [
+          "Docker daemon is unavailable.",
+          "The PostgreSQL test service is not running.",
+        ],
+      },
+    });
+    expect(
+      (context["recipe"] as Record<string, unknown>)["validationEnvironment"],
+    ).not.toHaveProperty("blockers");
   });
 
   test("returns authoritative clean, dirty, and nested Git target contracts", async () => {

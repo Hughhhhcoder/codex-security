@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import re
+import shutil
 import sqlite3
 import sys
 import uuid
@@ -21,6 +22,47 @@ def require_uuid(value: str, label: str) -> str:
         return str(uuid.UUID(value))
     except ValueError as exc:
         raise SystemExit(f"{label} must be a UUID.") from exc
+
+
+def validation_environment() -> dict[str, Any]:
+    tools = (
+        "python",
+        "python3",
+        "pip",
+        "uv",
+        "poetry",
+        "pytest",
+        "node",
+        "npm",
+        "npx",
+        "pnpm",
+        "yarn",
+        "bun",
+        "java",
+        "javac",
+        "mvn",
+        "gradle",
+        "go",
+        "cargo",
+        "rustc",
+        "ruby",
+        "bundle",
+        "php",
+        "composer",
+        "dotnet",
+        "gcc",
+        "clang",
+        "make",
+        "cmake",
+        "gdb",
+        "lldb",
+        "valgrind",
+        "docker",
+    )
+    return {
+        "python": sys.executable,
+        "availableTools": [tool for tool in tools if shutil.which(tool) is not None],
+    }
 
 
 def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:

@@ -254,6 +254,24 @@ export function renderScanHistory(
           .join(`  ${accent("·")}  `)}`,
       );
     }
+    const validation = result["validationEnvironment"] as
+      | JsonObject
+      | undefined;
+    if (validation) {
+      lines.push(
+        `  ${strong("VALIDATION PYTHON")}  ${clean(validation["python"])}`,
+      );
+      const tools = validation["availableTools"] as string[];
+      wrap(
+        tools.length > 0 ? tools.map(clean).join(", ") : "none",
+        19,
+        `  ${strong("AVAILABLE TOOLS")}  `,
+      );
+      for (const blocker of (validation["blockers"] as string[] | undefined) ??
+        []) {
+        wrap(blocker, 15, `  ${paint("LIMITATION", 33)}  `);
+      }
+    }
     const coverage = (result["progress"] as JsonObject)["coverage"] as
       | JsonObject
       | undefined;

@@ -273,6 +273,31 @@ describe("scan history renderer", () => {
     expect(output).not.toContain("ERROR");
   });
 
+  test("shows observed validation tools and recorded blockers", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          scanId: "12345678-abcd-4567-abcd-1234567890ab",
+          targetPath: "/demo/juice-shop",
+          mode: "standard",
+          progress: { status: "complete" },
+          findings: [],
+          validationEnvironment: {
+            python: "/managed/python",
+            availableTools: ["node", "npm", "pytest"],
+            blockers: ["Docker daemon is unavailable."],
+          },
+        },
+        "show",
+      ),
+    );
+
+    expect(output).toContain("VALIDATION PYTHON  /managed/python");
+    expect(output).toContain("AVAILABLE TOOLS  node, npm, pytest");
+    expect(output).toContain("LIMITATION  Docker daemon is unavailable.");
+    expect(output).not.toContain("USED TOOLS");
+  });
+
   test("renders match-all results from the original workbench data", () => {
     const output = stripVTControlCharacters(
       renderScanHistory(
