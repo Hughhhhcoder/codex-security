@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
@@ -166,15 +167,35 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         return stat.S_ISDIR(metadata.st_mode) and not symbolic_metadata(metadata)
 
     def has_git_marker(directory: Path) -> bool:
+        marker = directory / ".git"
         try:
-            metadata = (directory / ".git").stat(follow_symlinks=False)
+            metadata = marker.stat(follow_symlinks=False)
         except FileNotFoundError:
             return False
         except OSError as error:
             raise InventoryError(f"could not inspect Git metadata: {directory}") from error
         if symbolic_metadata(metadata):
             raise InventoryError("symbolic Git metadata paths are not supported")
-        return stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)
+        if not stat.S_ISREG(metadata.st_mode):
+            return stat.S_ISDIR(metadata.st_mode)
+        try:
+            contents = marker.read_bytes()
+        except OSError as error:
+            raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+        if contents.startswith(b"gitdir: "):
+            gitdir = Path(os.fsdecode(contents.removeprefix(b"gitdir: ").rstrip(b"\r\n")))
+            if not gitdir.is_absolute():
+                gitdir = directory / gitdir
+            for current in reversed((gitdir, *gitdir.parents)):
+                try:
+                    component = current.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    break
+                except (OSError, ValueError) as error:
+                    raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+                if symbolic_metadata(component):
+                    raise InventoryError("symbolic Git metadata paths are not supported")
+        return True
 
     discovered_roots: dict[tuple[int, int], Path] = {}
     metadata_aliases: set[tuple[str, ...]] = set()
@@ -386,10 +407,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             return requested
 
         batches: list[tuple[dict[str, str], set[bytes]]] = []
+
+        def probe_name_key(value: str) -> str:
+            return unicodedata.normalize("NFC", value).casefold()
+
         for relative in requested:
             parts = PurePosixPath(os.fsdecode(relative)).parts
             prefixes = {
-                "/".join(parts[: index + 1]).casefold(): "/".join(parts[: index + 1])
+                probe_name_key("/".join(parts[: index + 1])): "/".join(parts[: index + 1])
                 for index in range(len(parts))
             }
             for names, batch in batches:
@@ -414,7 +439,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             zip(PurePosixPath(os.fsdecode(candidate)).parts, relative)
                         )
                         if all(
-                            actual.casefold() == synthetic.casefold()
+                            probe_name_key(actual) == probe_name_key(synthetic)
                             for actual, synthetic in pairs
                         ) and any(actual != synthetic for actual, synthetic in pairs):
                             return True
@@ -505,14 +530,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 contents += os.fsencode(f"!/{admitted}/\n")
                     install_ignore(ignore.parent, ignore.name, contents)
                 for directory, contents in configured_excludes.items():
-                    protects_exemption = preserve_gitignore_descendants and any(
-                        directory.is_relative_to(owner)
-                        and selected_root.is_relative_to(directory)
-                        and directory != selected_root
-                        for owner, selected_root in exempt_gitignores
-                    )
-                    ignore_name = ".ignore" if protects_exemption else ".gitignore"
-                    install_ignore(directory, ignore_name, contents, prepend=True)
+                    install_ignore(directory, ".gitignore", contents, prepend=True)
                 for relative in batch:
                     destination = probe / os.fsdecode(relative)
                     if directories_only:

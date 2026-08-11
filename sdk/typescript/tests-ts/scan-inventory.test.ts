@@ -37,6 +37,22 @@ async function repository(initializeGit = true): Promise<string> {
   return checkout;
 }
 
+function commit(checkout: string): void {
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Inventory Test",
+      "-c",
+      "user.email=inventory@example.test",
+      "commit",
+      "-qm",
+      "Track source",
+    ],
+    { cwd: checkout },
+  );
+}
+
 async function inventory(checkout: string, scope = "."): Promise<string[]> {
   if (python === null) throw new Error("A Python interpreter is required.");
   const output = join(dirname(checkout), "inventory.txt");
@@ -221,19 +237,7 @@ describe("security scan file inventory", () => {
         writeFile(join(nested, "visible.ts"), "visible\n"),
       ]);
       execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
-      execFileSync(
-        "git",
-        [
-          "-c",
-          "user.name=Inventory Test",
-          "-c",
-          "user.email=inventory@example.test",
-          "commit",
-          "-qm",
-          "Track nested source",
-        ],
-        { cwd: nested },
-      );
+      commit(nested);
       execFileSync("git", ["add", "--force", "nested"], {
         cwd: checkout,
         stdio: "ignore",
@@ -246,6 +250,17 @@ describe("security scan file inventory", () => {
       const scoped = await inventory(checkout, "nested");
       expect(scoped).toContain("nested/visible.ts");
       expect(scoped).not.toContain("nested/private.ts");
+
+      if (outerIgnore === ".git/info/exclude") {
+        await writeFile(
+          join(checkout, ".gitignore"),
+          "nested/\n!nested/private.ts\n",
+        );
+        expect(await inventory(checkout)).toContain("./nested/private.ts");
+        expect(await inventory(checkout, "nested")).toContain(
+          "nested/private.ts",
+        );
+      }
     },
   );
 
@@ -280,19 +295,7 @@ describe("security scan file inventory", () => {
     execFileSync("git", ["init", "-q"], { cwd: middle });
     await writeFile(join(middle, "visible.ts"), "visible\n");
     execFileSync("git", ["add", "visible.ts"], { cwd: middle });
-    execFileSync(
-      "git",
-      [
-        "-c",
-        "user.name=Inventory Test",
-        "-c",
-        "user.email=inventory@example.test",
-        "commit",
-        "-qm",
-        "Track intermediate source",
-      ],
-      { cwd: middle },
-    );
+    commit(middle);
     execFileSync("git", ["add", "middle"], {
       cwd: checkout,
       stdio: "ignore",
@@ -496,6 +499,40 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./.RGIGNORE/private.ts");
   });
 
+  test("preserves canonically equivalent tracked directory spellings", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "nested");
+    const composed = join(nested, "caf\u00e9");
+    const decomposed = join(nested, "cafe\u0301");
+    await mkdir(composed, { recursive: true });
+    try {
+      await mkdir(decomposed);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(checkout, ".gitignore"), "nested/private.ts\n"),
+      writeFile(join(nested, ".ignore"), "*\n"),
+      writeFile(join(composed, "first.ts"), "first\n"),
+      writeFile(join(decomposed, "second.ts"), "second\n"),
+    ]);
+    execFileSync(
+      "git",
+      ["add", "--force", "caf\u00e9/first.ts", "cafe\u0301/second.ts"],
+      {
+        cwd: nested,
+      },
+    );
+
+    const rows = await inventory(checkout);
+    expect(rows).toContain("./nested/caf\u00e9/first.ts");
+    expect(rows).toContain("./nested/cafe\u0301/second.ts");
+  });
+
   test("keeps tracked files when an ignored snapshot checkout is explicitly selected", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -513,21 +550,47 @@ describe("security scan file inventory", () => {
     expect(await inventory(checkout, "ignored")).toEqual(["ignored/public.ts"]);
   });
 
-  test("rejects symbolic Git metadata before reading another checkout", async () => {
+  test.each(["marker", "gitfile"])(
+    "rejects symbolic Git metadata through a %s",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const external = await repository();
+      const metadata =
+        kind === "marker"
+          ? join(checkout, ".git")
+          : join(dirname(checkout), "linked-metadata");
+      await symlink(
+        join(external, ".git"),
+        metadata,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      if (kind === "gitfile") {
+        await writeFile(join(checkout, ".git"), `gitdir: ${metadata}\n`);
+      }
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
+  test("inventories linked worktrees with regular Git metadata", async () => {
     if (Bun.which("rg") === null) return;
 
-    const checkout = await repository(false);
-    const external = await repository();
-    await symlink(
-      join(external, ".git"),
-      join(checkout, ".git"),
-      process.platform === "win32" ? "junction" : "dir",
-    );
+    const checkout = await repository();
     await writeFile(join(checkout, "visible.ts"), "visible\n");
+    execFileSync("git", ["add", "visible.ts"], { cwd: checkout });
+    commit(checkout);
+    const linked = join(dirname(checkout), "linked-worktree");
+    execFileSync("git", ["worktree", "add", "--detach", linked, "HEAD"], {
+      cwd: checkout,
+      stdio: "ignore",
+    });
 
-    await expect(inventory(checkout)).rejects.toThrow(
-      "symbolic Git metadata paths are not supported",
-    );
+    expect(await inventory(linked)).toContain("./visible.ts");
   });
 
   test.skipIf(process.platform !== "win32")(
