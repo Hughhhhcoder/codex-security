@@ -1126,15 +1126,20 @@ describe("security scan file inventory", () => {
     "disabled-comment",
     "disabled-empty",
     "disabled-quoted",
+    "disabled-carriage",
     "disabled-symlink",
     "hash-comment-override",
     "semicolon-comment-override",
     "indented-override",
+    "carriage-return-override",
+    "carriage-return-section",
     "default-inheritance",
     "unquoted-escape",
     "literal-tab",
     "literal-tab-missing",
     "quoted-tab-owned",
+    "vertical-tab-owned",
+    "form-feed-owned",
     "case-alias",
     "short-alias",
     "short-worktree",
@@ -1151,7 +1156,10 @@ describe("security scan file inventory", () => {
         return;
       const tabOwnership =
         ownership.startsWith("literal-tab") || ownership === "quoted-tab-owned";
-      if (tabOwnership && process.platform === "win32") return;
+      const controlOwnership =
+        ownership === "vertical-tab-owned" || ownership === "form-feed-owned";
+      if ((tabOwnership || controlOwnership) && process.platform === "win32")
+        return;
       if (
         ownership.startsWith("short-") &&
         (process.platform !== "win32" || python === null)
@@ -1165,7 +1173,11 @@ describe("security scan file inventory", () => {
           ? "nested\\towner"
           : tabOwnership
             ? "nested\towner"
-            : "nested",
+            : ownership === "vertical-tab-owned"
+              ? "nested\vowner"
+              : ownership === "form-feed-owned"
+                ? "nested\fowner"
+                : "nested",
       );
       const metadata = join(checkout, ".git", "modules", "nested");
       const external =
@@ -1192,9 +1204,11 @@ describe("security scan file inventory", () => {
         ownership.startsWith("disabled") ||
         ownership.endsWith("comment-override") ||
         ownership === "indented-override" ||
+        ownership.startsWith("carriage-return") ||
         ownership === "default-inheritance" ||
         ownership === "unquoted-escape" ||
-        tabOwnership
+        tabOwnership ||
+        controlOwnership
           ? "false"
           : "true",
       ]);
@@ -1219,7 +1233,8 @@ describe("security scan file inventory", () => {
       } else if (
         ownership === "disabled-comment" ||
         ownership === "disabled-empty" ||
-        ownership === "disabled-quoted"
+        ownership === "disabled-quoted" ||
+        ownership === "disabled-carriage"
       ) {
         await writeFile(
           config,
@@ -1229,7 +1244,9 @@ describe("security scan file inventory", () => {
               ? "$1false # disabled"
               : ownership === "disabled-quoted"
                 ? '$1f"al"se'
-                : "$1",
+                : ownership === "disabled-carriage"
+                  ? "$1\rfalse"
+                  : "$1",
           ),
         );
       } else if (ownership.endsWith("comment-override")) {
@@ -1249,6 +1266,19 @@ describe("security scan file inventory", () => {
             `$1 # selected owner\n\t\tworktree = ${external}`,
           ),
         );
+      } else if (ownership === "carriage-return-override") {
+        await writeFile(
+          config,
+          (await readFile(config, "utf8")).replace(
+            /^([ \t]*worktree[ \t]*=.*)$/im,
+            `$1\n\rworktree = ${external}`,
+          ),
+        );
+      } else if (ownership === "carriage-return-section") {
+        await writeFile(
+          config,
+          `${await readFile(config, "utf8")}\n\r[core]\n\tworktree = ${external}\n`,
+        );
       } else if (ownership === "default-inheritance") {
         const withoutOwner = (await readFile(config, "utf8")).replace(
           /^[ \t]*worktree[ \t]*=.*\n/im,
@@ -1258,7 +1288,11 @@ describe("security scan file inventory", () => {
           config,
           `${withoutOwner}\n[DEFAULT]\n\tworktree = ${nested}\n`,
         );
-      } else if (ownership === "unquoted-escape" || tabOwnership) {
+      } else if (
+        ownership === "unquoted-escape" ||
+        tabOwnership ||
+        controlOwnership
+      ) {
         await writeFile(
           config,
           (await readFile(config, "utf8")).replace(
@@ -1277,7 +1311,10 @@ describe("security scan file inventory", () => {
         const unused = join(dirname(checkout), "unused.config");
         await writeFile(unused, override);
         await symlink(unused, join(metadata, "config.worktree"));
-      } else if (ownership === "disabled-quoted") {
+      } else if (
+        ownership === "disabled-quoted" ||
+        ownership === "disabled-carriage"
+      ) {
         await mkdir(join(metadata, "config.worktree"));
       } else {
         await writeFile(join(metadata, "config.worktree"), override);
@@ -1301,6 +1338,7 @@ describe("security scan file inventory", () => {
         ownership === "mixed-case-external" ||
         ownership.endsWith("comment-override") ||
         ownership === "indented-override" ||
+        ownership.startsWith("carriage-return") ||
         ownership === "default-inheritance" ||
         ownership === "unquoted-escape" ||
         ownership.startsWith("literal-tab")
@@ -2022,6 +2060,7 @@ describe("security scan file inventory", () => {
     ["include", "without BOM"],
     ['includeIf "gitdir:**"', "without BOM"],
     ["include", "with BOM"],
+    ["include", "with leading carriage return"],
   ])(
     "rejects repository-directed %s config %s before invoking Git",
     async (section, bom) => {
@@ -2033,7 +2072,7 @@ describe("security scan file inventory", () => {
       const config = join(checkout, ".git", "config");
       await writeFile(
         config,
-        `${bom === "with BOM" ? "\ufeff" : ""}[${section}]\n\tpath = ${external}\n${await readFile(config, "utf8")}`,
+        `${bom === "with BOM" ? "\ufeff" : ""}${bom === "with leading carriage return" ? "\r" : ""}[${section}]\n\tpath = ${external}\n${await readFile(config, "utf8")}`,
       );
 
       await expect(inventory(checkout)).rejects.toThrow(

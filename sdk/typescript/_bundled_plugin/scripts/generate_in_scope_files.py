@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
 IGNORE_FILE_NAMES = (".gitignore", ".ignore", ".rgignore")
-GIT_CONFIG_INCLUDE = re.compile(rb"(?im)^[ \t]*\[[ \t]*include(?:if)?(?=[ \t\]])")
+GIT_CONFIG_INCLUDE = re.compile(rb"(?im)^[ \t\r]*\[[ \t]*include(?:if)?(?=[ \t\]])")
 
 
 class InventoryError(ValueError):
@@ -366,8 +366,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 elif character == '"':
                     quoted = not quoted
                 elif character in "#;" and not quoted:
-                    return value[:index].rstrip()
-            return value.rstrip()
+                    return value[:index].rstrip(" \t\r")
+            return value.rstrip(" \t\r")
 
         def join_config_lines(contents: bytes) -> bytes:
             joined = bytearray()
@@ -437,7 +437,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         normalized = (
                             "true"
                             if extension is None
-                            else os.fsdecode(decode_config_value(extension)[0]).strip().casefold()
+                            else os.fsdecode(decode_config_value(extension)[0]).strip(" \t\r").casefold()
                         )
                         worktree_config_enabled = normalized not in ("", "false", "no", "off", "0")
                         if not worktree_config_enabled:
@@ -448,7 +448,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     contents = join_config_lines(contents)
                     section = None
                     for raw in os.fsdecode(contents).split("\n"):
-                        line = raw.lstrip(" \t").rstrip("\r")
+                        line = raw.lstrip(" \t\r").rstrip("\r")
                         if not line or line.startswith(("#", ";")):
                             continue
                         if line.startswith("["):
@@ -462,7 +462,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         if section is None:
                             continue
                         assignment = re.match(
-                            r"([a-z][a-z0-9-]*)(?:([ \t]*=)[ \t]*(.*))?",
+                            r"([a-z][a-z0-9-]*)(?:([ \t]*=)[ \t\r]*(.*))?",
                             line,
                             re.IGNORECASE,
                         )
