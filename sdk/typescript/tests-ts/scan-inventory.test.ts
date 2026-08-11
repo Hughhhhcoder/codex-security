@@ -1064,6 +1064,80 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.skipIf(process.platform !== "win32").each([
+    ["gitdir", "network"],
+    ["gitdir", "device"],
+    ["backpointer", "network"],
+    ["commondir", "network"],
+    ["worktree", "network"],
+    ["alternates", "network"],
+  ])(
+    "rejects %s %s metadata before accessing its Windows anchor",
+    async (kind, prefix) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(kind !== "gitdir");
+      const remote = `${
+        prefix === "device" ? "\\\\?\\UNC" : "\\"
+      }\\codex-security.invalid\\share\\one\\two\\three\\four\\five\\six\\seven\\eight`;
+      let selected = checkout;
+      if (kind === "gitdir") {
+        await writeFile(join(checkout, ".git"), `gitdir: ${remote}\n`);
+      } else if (kind === "alternates") {
+        await writeFile(
+          join(checkout, ".git", "objects", "info", "alternates"),
+          `${remote}\n`,
+        );
+      } else {
+        await writeFile(join(checkout, "tracked.ts"), "tracked\n");
+        execFileSync("git", ["add", "tracked.ts"], { cwd: checkout });
+        commit(checkout);
+        selected = join(dirname(checkout), "linked-worktree");
+        execFileSync("git", ["worktree", "add", "--detach", selected, "HEAD"], {
+          cwd: checkout,
+          stdio: "ignore",
+        });
+        const gitdir = (await readFile(join(selected, ".git"), "utf8"))
+          .replace(/^gitdir: /, "")
+          .trim();
+        if (kind === "backpointer") {
+          await writeFile(join(gitdir, "gitdir"), `${remote}\n`);
+        } else if (kind === "commondir") {
+          await writeFile(join(gitdir, "commondir"), `${remote}\n`);
+        } else {
+          execFileSync("git", ["config", "extensions.worktreeConfig", "true"], {
+            cwd: selected,
+          });
+          await writeFile(
+            join(gitdir, "config.worktree"),
+            `[core]\n\tworktree = ${JSON.stringify(remote)}\n`,
+          );
+        }
+      }
+      const instrumentation = join(dirname(checkout), "instrumentation");
+      await mkdir(instrumentation);
+      await writeFile(
+        join(instrumentation, "sitecustomize.py"),
+        [
+          "from pathlib import Path",
+          "original = Path.stat",
+          "def guarded(self, *args, **kwargs):",
+          "    if self.anchor.startswith(chr(92) * 2) and 'codex-security.invalid' in str(self).casefold():",
+          "        raise RuntimeError('attempted network metadata access')",
+          "    return original(self, *args, **kwargs)",
+          "Path.stat = guarded",
+        ].join("\n"),
+      );
+
+      await expect(
+        inventory(selected, ".", {
+          ...process.env,
+          PYTHONPATH: instrumentation,
+        }),
+      ).rejects.toThrow("network Git metadata paths are not supported");
+    },
+  );
+
   test.each(["missing", "mismatched"])(
     "rejects an external gitdir with a %s worktree backpointer",
     async (ownership) => {
@@ -1133,6 +1207,7 @@ describe("security scan file inventory", () => {
     "indented-override",
     "carriage-return-override",
     "carriage-return-section",
+    "carriage-return-section-comment",
     "default-inheritance",
     "unquoted-escape",
     "literal-tab",
@@ -1274,10 +1349,17 @@ describe("security scan file inventory", () => {
             `$1\n\rworktree = ${external}`,
           ),
         );
-      } else if (ownership === "carriage-return-section") {
+      } else if (
+        ownership === "carriage-return-section" ||
+        ownership === "carriage-return-section-comment"
+      ) {
         await writeFile(
           config,
-          `${await readFile(config, "utf8")}\n\r[core]\n\tworktree = ${external}\n`,
+          `${await readFile(config, "utf8")}\n${
+            ownership === "carriage-return-section"
+              ? "\r[core]"
+              : "[core]\r# selected owner"
+          }\n\tworktree = ${external}\n`,
         );
       } else if (ownership === "default-inheritance") {
         const withoutOwner = (await readFile(config, "utf8")).replace(
@@ -1819,6 +1901,25 @@ describe("security scan file inventory", () => {
     expect(await inventory(checkout)).toContain("./visible.ts");
   });
 
+  test.each(["quoted", "unquoted"])(
+    "allows %s CRLF-terminated repository-owned Git object alternates",
+    async (format) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const objects = join(checkout, ".git", "extra objects");
+      await mkdir(join(objects, "info"), { recursive: true });
+      await mkdir(join(objects, "pack"));
+      await writeFile(
+        join(checkout, ".git", "objects", "info", "alternates"),
+        `${format === "quoted" ? JSON.stringify(objects) : objects}\r\n`,
+      );
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      expect(await inventory(checkout)).toContain("./visible.ts");
+    },
+  );
+
   test("allows safe parent traversal to repository-owned Git object alternates", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -2061,6 +2162,7 @@ describe("security scan file inventory", () => {
     ['includeIf "gitdir:**"', "without BOM"],
     ["include", "with BOM"],
     ["include", "with leading carriage return"],
+    ["include", "with carriage return after header"],
   ])(
     "rejects repository-directed %s config %s before invoking Git",
     async (section, bom) => {
@@ -2072,7 +2174,7 @@ describe("security scan file inventory", () => {
       const config = join(checkout, ".git", "config");
       await writeFile(
         config,
-        `${bom === "with BOM" ? "\ufeff" : ""}${bom === "with leading carriage return" ? "\r" : ""}[${section}]\n\tpath = ${external}\n${await readFile(config, "utf8")}`,
+        `${bom === "with BOM" ? "\ufeff" : ""}${bom === "with leading carriage return" ? "\r" : ""}[${section}]${bom === "with carriage return after header" ? "\r# included" : ""}\n\tpath = ${external}\n${await readFile(config, "utf8")}`,
       );
 
       await expect(inventory(checkout)).rejects.toThrow(
@@ -2080,6 +2182,25 @@ describe("security scan file inventory", () => {
       );
     },
   );
+
+  test.each([
+    ["include", "foo = bar"],
+    ["include", "# path = ignored"],
+    ['includeIf "gitdir:**"', "foo = bar"],
+    ['include "inactive"', "path = ignored"],
+  ])("allows inert [%s] Git config sections", async (section, assignment) => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const config = join(checkout, ".git", "config");
+    await writeFile(
+      config,
+      `[${section}]\n\t${assignment}\n${await readFile(config, "utf8")}`,
+    );
+    await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+    expect(await inventory(checkout)).toContain("./visible.ts");
+  });
 
   test
     .skipIf(process.platform === "win32")

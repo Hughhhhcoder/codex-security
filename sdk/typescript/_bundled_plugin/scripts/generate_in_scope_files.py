@@ -17,7 +17,6 @@ from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
 IGNORE_FILE_NAMES = (".gitignore", ".ignore", ".rgignore")
-GIT_CONFIG_INCLUDE = re.compile(rb"(?im)^[ \t\r]*\[[ \t]*include(?:if)?(?=[ \t\]])")
 
 
 class InventoryError(ValueError):
@@ -175,6 +174,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         def inspect_metadata(
             path: Path, *, directory: bool | None = None
         ) -> os.stat_result | None:
+            if (
+                os.name == "nt"
+                and path.anchor.startswith("\\\\")
+                and os.path.normcase(path.anchor) != os.path.normcase(repository.anchor)
+            ):
+                raise InventoryError("network Git metadata paths are not supported")
             try:
                 metadata = path.stat(follow_symlinks=False)
             except FileNotFoundError:
@@ -429,6 +434,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         options: dict[tuple[str, str], str | None] = {}
         config_path = roots[-1] / "config"
         worktree_config_enabled = False
+        config_includes = False
         if inspect_metadata(config_path, directory=False) is not None:
             try:
                 for candidate in (config_path, gitdir / "config.worktree"):
@@ -453,11 +459,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             continue
                         if line.startswith("["):
                             match = re.match(
-                                r"\[[ \t]*(core|extensions)[ \t]*\](?=[ \t]*(?:[#;]|$))",
+                                r'\[[ \t]*(core|extensions|include|includeif)'
+                                r'(?:[ \t]+("(?:[^"\\]|\\.)*"))?[ \t]*\]'
+                                r'(?=[ \t\r]*(?:[#;]|$))',
                                 line,
                                 re.IGNORECASE,
                             )
-                            section = None if match is None else match.group(1).casefold()
+                            section = None
+                            if match is not None:
+                                name = match.group(1).casefold()
+                                if (match.group(2) is not None) == (name == "includeif"):
+                                    section = name
                             continue
                         if section is None:
                             continue
@@ -473,6 +485,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             if remainder and not remainder.startswith(("#", ";")):
                                 continue
                         key = assignment.group(1).casefold()
+                        if section in ("include", "includeif") and key == "path":
+                            config_includes = True
                         if (section, key) in (
                             ("core", "worktree"),
                             ("extensions", "worktreeconfig"),
@@ -484,6 +498,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             )
             except (OSError, UnicodeError, ValueError) as error:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+        if config_includes:
+            raise InventoryError("Git config includes are not supported")
 
         configured_worktree = options.get(("core", "worktree"))
         if gitfile:
@@ -573,23 +589,30 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         raise InventoryError(
                             f"could not inspect Git metadata: {directory}"
                         ) from error
-                if metadata is not None and relative in (
-                    "config",
-                    "config.worktree",
-                    "objects/info/alternates",
-                ):
+                if metadata is not None and relative == "objects/info/alternates":
                     try:
                         contents = path.read_bytes()
                     except OSError as error:
                         raise InventoryError(f"could not inspect Git metadata: {directory}") from error
-                    if relative == "objects/info/alternates":
-                        pending = [(root / "objects", contents)]
-                        inspected = {directory_identity(root / "objects")}
-                        while pending:
-                            object_root, records = pending.pop()
-                            for line in records.split(b"\n"):
-                                if not line:
-                                    continue
+                    pending = [(root / "objects", contents)]
+                    inspected = {directory_identity(root / "objects")}
+                    while pending:
+                        object_root, records = pending.pop()
+                        lines = records.split(b"\n")
+                        for index, record in enumerate(lines):
+                            terminated = index + 1 < len(lines)
+                            if not record or (terminated and record == b"\r"):
+                                continue
+                            if record.startswith(b'"'):
+                                variants = (record.removesuffix(b"\r"),)
+                            elif terminated and record.endswith(b"\r"):
+                                variants = (record.removesuffix(b"\r"),)
+                                if os.name != "nt":
+                                    variants += (record,)
+                            else:
+                                variants = (record,)
+                            validated = False
+                            for line in variants:
                                 if line.startswith(b'"'):
                                     if not line.endswith(b'"'):
                                         raise InventoryError("invalid Git object alternate paths")
@@ -613,11 +636,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     if len(alternate.parts) < len(candidate.parts):
                                         continue
                                     candidate_anchor = Path(*alternate.parts[: len(candidate.parts)])
-                                    try:
-                                        metadata = candidate_anchor.stat(follow_symlinks=False)
-                                    except FileNotFoundError:
+                                    metadata = inspect_metadata(candidate_anchor, directory=True)
+                                    if metadata is None:
                                         continue
-                                    if symbolic_metadata(metadata) or (
+                                    if (
                                         metadata.st_dev,
                                         metadata.st_ino,
                                     ) != directory_identity(candidate):
@@ -642,31 +664,33 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                         continue
                                     current /= component
                                     if inspect_metadata(current, directory=True) is None:
-                                        raise InventoryError(
-                                            "missing Git object alternates are not supported"
-                                        )
+                                        break
                                     depth += 1
-                                alternate = current
-                                identity = directory_identity(alternate)
-                                if identity in inspected:
-                                    continue
-                                inspected.add(identity)
-                                inspect_object_store(alternate)
-                                info = alternate / "info"
-                                if inspect_metadata(info, directory=True) is None:
-                                    continue
-                                nested_alternates = info / "alternates"
-                                if inspect_metadata(nested_alternates, directory=False) is None:
-                                    continue
-                                try:
-                                    records = nested_alternates.read_bytes()
-                                except OSError as error:
-                                    raise InventoryError(
-                                        f"could not inspect Git metadata: {directory}"
-                                    ) from error
-                                pending.append((alternate, records))
-                    elif GIT_CONFIG_INCLUDE.search(contents.removeprefix(b"\xef\xbb\xbf")):
-                        raise InventoryError("Git config includes are not supported")
+                                else:
+                                    validated = True
+                                    alternate = current
+                                    identity = directory_identity(alternate)
+                                    if identity in inspected:
+                                        continue
+                                    inspected.add(identity)
+                                    inspect_object_store(alternate)
+                                    info = alternate / "info"
+                                    if inspect_metadata(info, directory=True) is None:
+                                        continue
+                                    nested_alternates = info / "alternates"
+                                    if inspect_metadata(nested_alternates, directory=False) is None:
+                                        continue
+                                    try:
+                                        records = nested_alternates.read_bytes()
+                                    except OSError as error:
+                                        raise InventoryError(
+                                            f"could not inspect Git metadata: {directory}"
+                                        ) from error
+                                    pending.append((alternate, records))
+                            if not validated:
+                                raise InventoryError(
+                                    "missing Git object alternates are not supported"
+                                )
             if root != gitdir:
                 continue
             try:
