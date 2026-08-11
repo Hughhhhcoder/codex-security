@@ -4,6 +4,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -342,6 +343,48 @@ describe("security scan file inventory", () => {
         scope === "." ? "./.GIT/source.py" : ".GIT/source.py",
       );
     }
+  });
+
+  test("keeps tracked files after a case-only working-tree rename", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-case-renamed-inventory-")),
+    );
+    temporaryDirectories.push(root);
+    const repository = join(root, "repository");
+    const output = join(root, "in-scope-files.txt");
+    await mkdir(repository);
+    execFileSync("git", ["init", "-q"], { cwd: repository });
+    execFileSync("git", ["config", "core.ignoreCase", "true"], {
+      cwd: repository,
+    });
+    await writeFile(join(repository, "tracked.py"), "print('tracked')\n");
+    execFileSync("git", ["add", "--", "tracked.py"], { cwd: repository });
+    await rename(
+      join(repository, "tracked.py"),
+      join(repository, "TRACKED.py"),
+    );
+
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    if (python === null) throw new Error("A Python interpreter is required.");
+    execFileSync(
+      python,
+      [
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+        "--repo",
+        repository,
+        "--scope",
+        ".",
+        "--out",
+        output,
+      ],
+      { cwd: repository, stdio: "pipe" },
+    );
+
+    expect((await readFile(output, "utf8")).trim()).toBe("./TRACKED.py");
   });
 
   test.each([false, true])(

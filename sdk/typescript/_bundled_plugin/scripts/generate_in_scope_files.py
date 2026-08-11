@@ -30,7 +30,7 @@ def symbolic_metadata(metadata: os.stat_result) -> bool:
 def git_metadata_path(parent: Path, name: str) -> bool:
     if name == ".git":
         return True
-    if name.casefold() != ".git":
+    if name.casefold().rstrip(". ") != ".git":
         return False
     try:
         return (parent / name).samefile(parent / ".git")
@@ -132,7 +132,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         return metadata.st_dev, metadata.st_ino
 
     discovered_roots: dict[tuple[int, int], Path] = {}
-    case_insensitive_metadata = False
+    metadata_aliases: set[tuple[str, ...]] = set()
     for ancestor in ancestors:
         reject_symbolic_ignore(ancestor)
     if selected.is_dir():
@@ -140,10 +140,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             directory_path = Path(directory)
             if directory_path != repository and (directory_path / ".git").exists():
                 discovered_roots[directory_identity(directory_path)] = directory_path
-            case_insensitive_metadata = case_insensitive_metadata or any(
-                name != ".git" and git_metadata_path(directory_path, name)
-                for name in (*children, *files)
-            )
+            for name in (*children, *files):
+                if name != ".git" and git_metadata_path(directory_path, name):
+                    metadata_aliases.add(
+                        (directory_path / name).relative_to(repository).parts
+                    )
             children[:] = [
                 name
                 for name in children
@@ -152,7 +153,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             ]
             reject_symbolic_ignore(directory_path)
 
-    metadata_glob = "--iglob" if case_insensitive_metadata else "--glob"
     command = [
         "rg",
         "--no-config",
@@ -161,9 +161,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--no-require-git",
         "--no-ignore-parent",
         "--no-ignore-global",
-        metadata_glob,
+        "--glob",
         "!.git",
-        metadata_glob,
+        "--glob",
         "!.git/**",
     ]
 
@@ -204,7 +204,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if directory_guard:
                 return {b""} if result.returncode == 0 else set()
             inventory.seek(0)
-            return set(inventory)
+            if not metadata_aliases:
+                return set(inventory)
+            rows = set()
+            directory_parts = directory.relative_to(repository).parts
+            for row in inventory:
+                parts = (
+                    *directory_parts,
+                    *Path(os.fsdecode(row.removesuffix(b"\n"))).parts,
+                )
+                if not any(parts[: len(alias)] == alias for alias in metadata_aliases):
+                    rows.add(row)
+            return rows
 
     def normalized(path: bytes) -> bytes:
         return path.replace(b"\\", b"/") if os.name == "nt" else path
@@ -429,6 +440,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for index in range(len(listed))
             for relative in listed_paths(index)
         }
+        visible_by_case: dict[str, list[bytes]] = {}
+        for row in rows:
+            visible = normalized(row.removesuffix(b"\n"))
+            visible_by_case.setdefault(os.fsdecode(visible).casefold(), []).append(visible)
+        for relative in listed_paths(0):
+            matches = visible_by_case.get(
+                os.fsdecode(normalized(prefix + relative)).casefold(), []
+            )
+            if len(matches) == 1:
+                allowed.add(matches[0])
         inspected_prefixes = tuple(
             normalized(prefix + os.fsencode(root.relative_to(repository).as_posix()) + b"/")
             for root in inspected_roots.values()
@@ -491,6 +512,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if current != repository:
                     continue
                 candidate.resolve(strict=True).relative_to(repository)
+                if any(
+                    visible in recorded
+                    and candidate.samefile(repository / os.fsdecode(visible))
+                    for visible in visible_by_case.get(
+                        os.fsdecode(normalized(prefix + relative)).casefold(), []
+                    )
+                ):
+                    continue
             except (OSError, ValueError):
                 continue
             relative_path = prefix + relative
