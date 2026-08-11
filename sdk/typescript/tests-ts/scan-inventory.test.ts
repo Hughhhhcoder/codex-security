@@ -2408,20 +2408,33 @@ describe("security scan file inventory", () => {
 
   test.each([
     "shared-index",
+    "shared-index-v4",
+    "shared-index-sha256",
     "multi-pack-index",
     "pack-index-suffix",
     "incremental-index-directory",
     "incremental-index-chain",
     "incremental-index-bitmap",
   ])("rejects Windows-compatible %s metadata aliases", async (kind) => {
-    const checkout = await repository();
+    const sha256 = kind === "shared-index-sha256";
+    const checkout = await repository(!sha256);
+    if (sha256) {
+      execFileSync("git", ["init", "-q", "--object-format=sha256"], {
+        cwd: checkout,
+      });
+    }
     const gitdir = join(checkout, ".git");
     let directory = join(gitdir, "objects", "pack");
     let canonical = "multi-pack-index";
 
-    if (kind === "shared-index") {
+    if (kind.startsWith("shared-index")) {
       await writeFile(join(checkout, "tracked.ts"), "tracked\n");
       execFileSync("git", ["add", "tracked.ts"], { cwd: checkout });
+      if (kind === "shared-index-v4") {
+        execFileSync("git", ["update-index", "--index-version=4"], {
+          cwd: checkout,
+        });
+      }
       execFileSync("git", ["update-index", "--split-index"], {
         cwd: checkout,
       });
@@ -2477,6 +2490,63 @@ describe("security scan file inventory", () => {
         PYTHONPATH: instrumentation,
       }),
     ).rejects.toThrow("symbolic Git metadata paths are not supported");
+  });
+
+  test.each([
+    ["missing", "symbolic"],
+    ["normal", "symbolic"],
+    ["normal", "fifo"],
+    ["normal", "directory"],
+    ["split", "symbolic"],
+    ["split-v4", "symbolic"],
+    ["split-sha256", "symbolic"],
+  ])("ignores stale %s split-index %s metadata", async (mode, kind) => {
+    if (
+      Bun.which("rg") === null ||
+      process.platform === "win32" ||
+      (kind === "fifo" && Bun.which("mkfifo") === null)
+    ) {
+      return;
+    }
+
+    const sha256 = mode === "split-sha256";
+    const checkout = await repository(!sha256);
+    if (sha256) {
+      execFileSync("git", ["init", "-q", "--object-format=sha256"], {
+        cwd: checkout,
+      });
+    }
+    await writeFile(join(checkout, "tracked.ts"), "tracked\n");
+    if (mode !== "missing") {
+      execFileSync("git", ["add", "tracked.ts"], { cwd: checkout });
+    }
+    if (mode.startsWith("split")) {
+      if (mode === "split-v4") {
+        execFileSync("git", ["update-index", "--index-version=4"], {
+          cwd: checkout,
+        });
+      }
+      execFileSync("git", ["update-index", "--split-index"], {
+        cwd: checkout,
+      });
+    }
+
+    const stale = join(
+      checkout,
+      ".git",
+      `sharedindex.${"f".repeat(sha256 ? 64 : 40)}`,
+    );
+    if (kind === "directory") {
+      await mkdir(stale);
+    } else if (kind === "fifo") {
+      execFileSync("mkfifo", [stale]);
+    } else {
+      const external = join(dirname(checkout), "unused-shared-index");
+      await writeFile(external, "inactive\n");
+      await symlink(external, stale);
+    }
+
+    expect(await inventory(checkout)).toContain("./tracked.ts");
   });
 
   test.skipIf(process.platform === "win32").each(["lowercase", "uppercase"])(

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import io
+import mmap
 import os
 import re
 import stat
@@ -32,6 +33,52 @@ def symbolic_metadata(metadata: os.stat_result) -> bool:
 
 def filesystem_name_key(value: str) -> str:
     return unicodedata.normalize("NFC", value).upper().casefold()
+
+
+def split_index_backing(index: Path, hash_size: int) -> str | None:
+    with index.open("rb") as handle:
+        if os.fstat(handle.fileno()).st_size == 0:
+            return None
+        with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as contents:
+            if len(contents) < 12 + hash_size or contents[:4] != b"DIRC":
+                return None
+            version = int.from_bytes(contents[4:8], "big")
+            if version not in (2, 3, 4):
+                return None
+            count = int.from_bytes(contents[8:12], "big")
+            position = 12
+            limit = len(contents) - hash_size
+            for _ in range(count):
+                entry = position
+                position += 40 + hash_size
+                if position + 2 > limit:
+                    return None
+                flags = int.from_bytes(contents[position : position + 2], "big")
+                position += 2 + (2 if flags & 0x4000 else 0)
+                if version == 4:
+                    while position < limit:
+                        byte = contents[position]
+                        position += 1
+                        if not byte & 0x80:
+                            break
+                    else:
+                        return None
+                end = contents.find(b"\0", position, limit)
+                if end < 0:
+                    return None
+                position = end + 1 if version == 4 else entry + ((end - entry + 8) & ~7)
+            while position + 8 <= limit:
+                signature = contents[position : position + 4]
+                length = int.from_bytes(contents[position + 4 : position + 8], "big")
+                position += 8
+                if position + length > limit:
+                    return None
+                if signature == b"link":
+                    if length < hash_size:
+                        return None
+                    return contents[position : position + hash_size].hex()
+                position += length
+    return None
 
 
 def git_metadata_path(parent: Path, name: str) -> bool:
@@ -514,6 +561,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         if (section, key) in (
                             ("core", "worktree"),
                             ("core", "sparsecheckout"),
+                            ("extensions", "objectformat"),
                             ("extensions", "worktreeconfig"),
                         ):
                             options[(section, key)] = (
@@ -710,17 +758,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if root != gitdir:
                 continue
             try:
-                for shared_index in root.iterdir():
-                    canonical = filesystem_name_key(shared_index.name)
-                    if not re.fullmatch(
-                        r"sharedindex\.(?:[0-9a-f]{40}|[0-9a-f]{64})", canonical
-                    ):
-                        continue
-                    if shared_index.name != canonical and not aliases_canonical_path(
-                        shared_index, canonical
-                    ):
-                        continue
-                    inspect_metadata(shared_index, directory=False)
+                configured_format = options.get(("extensions", "objectformat"), "sha1")
+                object_format = (
+                    "sha1"
+                    if configured_format is None
+                    else os.fsdecode(decode_config_value(configured_format)[0]).strip(" \t\r").casefold()
+                )
+                backing = split_index_backing(root / "index", 32 if object_format == "sha256" else 20)
+                if backing is not None:
+                    inspect_metadata(root / f"sharedindex.{backing}", directory=False)
             except FileNotFoundError:
                 continue
             except OSError as error:
