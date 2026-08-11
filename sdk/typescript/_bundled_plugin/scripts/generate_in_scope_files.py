@@ -314,7 +314,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if normalized(row.removesuffix(b"\n")).removeprefix(b"./") in visible
         }
 
-    def visible_to_outer_ignores(root: Path, candidates: list[Path]) -> set[bytes]:
+    def visible_to_outer_ignores(
+        root: Path,
+        candidates: list[Path],
+        *,
+        directories_only: bool = False,
+        include_gitignore: bool = True,
+    ) -> set[bytes]:
         requested = {
             normalized(os.fsencode(candidate.relative_to(repository).as_posix()))
             for candidate in candidates
@@ -330,12 +336,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             directory / name
             for directory in directories
             for name in IGNORE_FILE_NAMES
+            if include_gitignore or name != ".gitignore"
             if (directory / name).is_file()
         ]
-        repository_exclude: bytes | None = None
-        if (repository / ".git").exists():
+        configured_excludes: dict[Path, bytes] = {}
+        for directory in directories:
+            if not (directory / ".git").exists():
+                continue
             location = run_git(
-                ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]
+                ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+                directory=directory,
             )
             if location.returncode == 0:
                 exclude = Path(os.fsdecode(location.stdout.rstrip(b"\r\n")))
@@ -345,20 +355,24 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         line.strip() and not line.lstrip().startswith(b"#")
                         for line in contents.splitlines()
                     ):
-                        repository_exclude = contents
-        if not ignore_files and repository_exclude is None:
+                        configured_excludes[directory] = contents
+        if not ignore_files and not configured_excludes:
             return requested
 
-        batches: list[tuple[set[str], set[bytes]]] = []
+        batches: list[tuple[dict[str, str], set[bytes]]] = []
         for relative in requested:
-            folded = os.fsdecode(relative).casefold()
+            parts = PurePosixPath(os.fsdecode(relative)).parts
+            prefixes = {
+                "/".join(parts[: index + 1]).casefold(): "/".join(parts[: index + 1])
+                for index in range(len(parts))
+            }
             for names, batch in batches:
-                if folded not in names:
-                    names.add(folded)
+                if all(names.get(folded, spelling) == spelling for folded, spelling in prefixes.items()):
+                    names.update(prefixes)
                     batch.add(relative)
                     break
             else:
-                batches.append(({folded}, {relative}))
+                batches.append((prefixes, {relative}))
 
         visible: set[bytes] = set()
         for _, batch in batches:
@@ -368,16 +382,19 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     destination = probe / ignore.relative_to(repository)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(ignore.read_bytes())
-                if repository_exclude is not None:
-                    exclude = probe / ".git" / "info" / "exclude"
-                    exclude.parent.mkdir(parents=True)
-                    exclude.write_bytes(repository_exclude)
+                for directory, contents in configured_excludes.items():
+                    exclude = probe / directory.relative_to(repository) / ".git" / "info" / "exclude"
+                    exclude.parent.mkdir(parents=True, exist_ok=True)
+                    exclude.write_bytes(contents)
                 for relative in batch:
                     destination = probe / os.fsdecode(relative)
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.touch()
+                    if directories_only:
+                        destination.mkdir(parents=True, exist_ok=True)
+                    else:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.touch()
                 result = subprocess.run(
-                    [*command, "--", "."],
+                    [*command, *(["--debug"] if directories_only else []), "--", "."],
                     cwd=probe,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -386,30 +403,27 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if result.returncode not in (0, 1):
                     detail = result.stderr.decode("utf-8", errors="replace").strip()
                     raise InventoryError(f"could not evaluate outer ignore rules: {detail}")
-                visible.update(
-                    normalized(relative).removeprefix(b"./")
-                    for relative in result.stdout.split(b"\0")
-                    if normalized(relative).removeprefix(b"./") in batch
-                )
+                if directories_only:
+                    ignored = {
+                        normalized(match.group(1)).removeprefix(b"./")
+                        for line in result.stderr.splitlines()
+                        if (match := re.search(rb": ignoring (.+): Ignore\(", line)) is not None
+                    }
+                    visible.update(
+                        relative
+                        for relative in batch
+                        if not any(
+                            relative == excluded or relative.startswith(excluded + b"/")
+                            for excluded in ignored
+                        )
+                    )
+                else:
+                    visible.update(
+                        normalized(relative).removeprefix(b"./")
+                        for relative in result.stdout.split(b"\0")
+                        if normalized(relative).removeprefix(b"./") in batch
+                    )
         return visible
-
-    if not (repository / ".git").exists() and selected.is_dir():
-        pending = [selected]
-        inspected_directories: set[tuple[int, int]] = set()
-        while pending:
-            directory = pending.pop()
-            identity = directory_identity(directory)
-            if identity in inspected_directories:
-                continue
-            inspected_directories.add(identity)
-            reject_symbolic_ignore(directory)
-            for entry in directory.iterdir():
-                if entry.is_symlink() or not entry.is_dir() or git_metadata_path(directory, entry.name):
-                    continue
-                if (entry / ".git").exists():
-                    discovered_roots[directory_identity(entry)] = entry
-                elif visible_to_outer_ignores(entry, [entry / "scan-source"]):
-                    pending.append(entry)
 
     environment = os.environ.copy()
     for name in (
@@ -492,6 +506,37 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             raise InventoryError(f"could not resolve Git worktree root: {error}") from error
         if worktree_root != repository:
             worktree = None
+
+    if worktree is None and selected.is_dir():
+        pending = [selected]
+        inspected_directories: set[tuple[int, int]] = set()
+        while pending:
+            directory = pending.pop()
+            identity = directory_identity(directory)
+            if identity in inspected_directories:
+                continue
+            inspected_directories.add(identity)
+            reject_symbolic_ignore(directory)
+            children = [
+                entry
+                for entry in directory.iterdir()
+                if not entry.is_symlink()
+                and entry.is_dir()
+                and not git_metadata_path(directory, entry.name)
+            ]
+            for entry in children:
+                if (entry / ".git").exists():
+                    discovered_roots[directory_identity(entry)] = entry
+            ordinary = [entry for entry in children if not (entry / ".git").exists()]
+            if ordinary:
+                visible = visible_to_outer_ignores(
+                    ordinary[0], ordinary, directories_only=True
+                )
+                pending.extend(
+                    entry
+                    for entry in ordinary
+                    if normalized(os.fsencode(entry.relative_to(repository).as_posix())) in visible
+                )
 
     if worktree is not None or discovered_roots:
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
@@ -816,15 +861,26 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 )
                 else None
             )
+            gitlink_candidates = [
+                candidate
+                for candidate in candidates
+                if any(
+                    (relative := os.fsencode(candidate.relative_to(repository).as_posix())) == tracked
+                    or relative.startswith(tracked + b"/")
+                    for tracked in outer_tracked_paths
+                )
+            ]
+            gitlink_visible = (
+                visible_to_outer_ignores(root, gitlink_candidates, include_gitignore=False)
+                if outer_visible is not None and gitlink_candidates
+                else set()
+            )
             for candidate in candidates:
                 relative = os.fsencode(candidate.relative_to(repository).as_posix())
                 if (
                     outer_visible is not None
                     and normalized(relative) not in outer_visible
-                    and not any(
-                        relative == tracked or relative.startswith(tracked + b"/")
-                        for tracked in outer_tracked_paths
-                    )
+                    and normalized(relative) not in gitlink_visible
                 ):
                     continue
                 relative_path = prefix + relative

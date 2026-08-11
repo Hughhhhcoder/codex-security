@@ -198,17 +198,86 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test("applies file exclusions beneath tracked Git checkouts", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "nested");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(checkout, ".gitignore"), "nested/\n"),
+      writeFile(join(checkout, ".ignore"), "nested/private.ts\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+      writeFile(join(nested, "visible.ts"), "visible\n"),
+    ]);
+    execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Inventory Test",
+        "-c",
+        "user.email=inventory@example.test",
+        "commit",
+        "-qm",
+        "Track nested source",
+      ],
+      { cwd: nested },
+    );
+    execFileSync("git", ["add", "--force", "nested"], {
+      cwd: checkout,
+      stdio: "ignore",
+    });
+
+    const rows = await inventory(checkout);
+    expect(rows).toContain("./nested/visible.ts");
+    expect(rows).not.toContain("./nested/private.ts");
+  });
+
+  test("applies configured excludes from every enclosing Git checkout", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const middle = join(checkout, "middle");
+    const nested = join(middle, "nested");
+    await mkdir(nested, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: middle });
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(middle, ".git", "info", "exclude"), "nested/private.ts\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+      writeFile(join(nested, "visible.ts"), "visible\n"),
+    ]);
+    execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
+
+    const rows = await inventory(checkout);
+    expect(rows).toContain("./middle/nested/visible.ts");
+    expect(rows).not.toContain("./middle/nested/private.ts");
+  });
+
   test("discovers self-hidden checkouts through visible snapshot directories", async () => {
     if (Bun.which("rg") === null) return;
 
     const checkout = await repository(false);
     const nested = join(checkout, "container", "nested");
     await mkdir(nested, { recursive: true });
+    await writeFile(join(checkout, ".ignore"), "scan-source\n");
     execFileSync("git", ["init", "-q"], { cwd: nested });
     await writeFile(join(nested, ".ignore"), "*\n");
     await writeFile(join(nested, "tracked.ts"), "export {};\n");
     execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
 
+    expect(await inventory(checkout)).toContain(
+      "./container/nested/tracked.ts",
+    );
+
+    await writeFile(join(checkout, ".ignore"), "scan-source\ncontainer/\n");
+    expect(await inventory(checkout)).not.toContain(
+      "./container/nested/tracked.ts",
+    );
+    await writeFile(join(checkout, ".ignore"), "scan-source\n");
+    await writeFile(join(checkout, ".git"), "malformed snapshot marker\n");
     expect(await inventory(checkout)).toContain(
       "./container/nested/tracked.ts",
     );
