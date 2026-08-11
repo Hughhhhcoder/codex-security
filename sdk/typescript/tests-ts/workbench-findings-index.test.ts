@@ -45,10 +45,11 @@ const findingsIndexProbe = [
   "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
   "    connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (sys.argv[1],))",
   "    metadata = os.stat(sys.argv[1])",
-  "    connection.execute(\"UPDATE scans SET target_device = ?, target_inode = ? WHERE id = 'current-new'\", (serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
   "    if settings.get('ownershipReuse'):",
-  "        connection.execute(\"UPDATE scans SET target_device = ?, target_inode = ? WHERE id = 'current-old'\", (serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
+  "        connection.execute(\"UPDATE scans SET target_device = ?, target_inode = ?, started_at = '2027-01-01' WHERE id = 'current-old'\", (serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
   "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('previous-owner-identity', 'current-target', sys.argv[1], 'complete', 'sealed', '2026-01-15', '2026-01-15', '.', '/private/tmp/previous-owner', -1, -1))",
+  "    connection.execute(\"DELETE FROM scans WHERE id = 'current-new'\")",
+  "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('current-new', 'current-target', sys.argv[1], 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/current-new', serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
   "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'current-old-finding', 'current-old', 'high', '2026-01-01', 'Resolved current finding', 'Older issue'),",
   "    ('current-new-occurrence', 'current-new-finding', 'current-new', 'critical', '2026-02-01', 'Current CLI finding', 'Latest issue'),",
@@ -268,7 +269,7 @@ describe("workbench findings index", () => {
     );
   });
 
-  test("rejects recycled filesystem identities from earlier ownership epochs", () => {
+  test("rejects recycled filesystem identities after the system clock moves backward", () => {
     const result = probeFindingsIndex("current-target", {
       ownershipReuse: true,
     });

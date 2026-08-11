@@ -160,7 +160,7 @@ def _requested_repository(
         SELECT target_path, target_device, target_inode, target_revision
         FROM scans
         WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
-        ORDER BY started_at DESC, id DESC
+        ORDER BY rowid DESC
         LIMIT 1
         """,
         (target_id,),
@@ -224,14 +224,14 @@ def _verified_target_metadata(
 
 def _ownership_epoch_start(
     connection: sqlite3.Connection, target_id: str, metadata: os.stat_result
-) -> tuple[str, str] | None:
+) -> int | None:
     previous_owner = connection.execute(
         """
-        SELECT started_at, id
+        SELECT rowid AS ownership_sequence
         FROM scans
         WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
             AND (target_device != ? OR target_inode != ?)
-        ORDER BY started_at DESC, id DESC
+        ORDER BY rowid DESC
         LIMIT 1
         """,
         (
@@ -240,11 +240,7 @@ def _ownership_epoch_start(
             serialize_filesystem_identity(metadata.st_ino),
         ),
     ).fetchone()
-    return (
-        (previous_owner["started_at"], previous_owner["id"])
-        if previous_owner is not None
-        else None
-    )
+    return previous_owner["ownership_sequence"] if previous_owner is not None else None
 
 
 def repository_scan_scope(
@@ -475,8 +471,8 @@ def repository_scan_scope(
                 )
             )
             if epoch_start is not None:
-                clauses.append("(scans.target_id IS NOT ? OR (scans.started_at, scans.id) > (?, ?))")
-                values.extend((target_id, *epoch_start))
+                clauses.append("(scans.target_id IS NOT ? OR scans.rowid > ?)")
+                values.extend((target_id, epoch_start))
     return clauses, values, related_target_ids, repository_paths
 
 
@@ -630,7 +626,7 @@ def list_unmatched_scan_pairs(
     except OSError:
         metadata = None
     verified_targets: dict[str, tuple[os.stat_result | None, bool] | None] = {}
-    ownership_epochs: dict[str, tuple[str, str] | None] = {}
+    ownership_epochs: dict[str, int | None] = {}
 
     def belongs_to_current_owner(scan: sqlite3.Row) -> bool:
         target_id = scan["target_id"]
@@ -659,12 +655,13 @@ def list_unmatched_scan_pairs(
             scan["target_device"], target_metadata[0].st_dev
         ) and stored_filesystem_identity_matches(
             scan["target_inode"], target_metadata[0].st_ino
-        ) and (epoch_start is None or (scan["started_at"], scan["id"]) > epoch_start)
+        ) and (epoch_start is None or scan["ownership_sequence"] > epoch_start)
 
     selected = [
         scan
         for scan in connection.execute(
-            "SELECT scans.*, targets.current_path AS current_target_path "
+            "SELECT scans.*, scans.rowid AS ownership_sequence, "
+            "targets.current_path AS current_target_path "
             "FROM scans LEFT JOIN security_targets AS targets ON targets.id = scans.target_id "
             "WHERE scans.status = 'complete' ORDER BY scans.started_at, scans.id"
         )
@@ -743,8 +740,13 @@ def _same_registered_repository(
             except OSError:
                 return False
             epoch_start = _ownership_epoch_start(connection, scan["target_id"], metadata)
-            if epoch_start is not None and (scan["started_at"], scan["id"]) <= epoch_start:
-                return False
+            if epoch_start is not None:
+                sequence = connection.execute(
+                    "SELECT rowid AS ownership_sequence FROM scans WHERE id = ?",
+                    (scan["id"],),
+                ).fetchone()
+                if sequence is None or sequence["ownership_sequence"] <= epoch_start:
+                    return False
         paths.append(target["current_path"])
     return _same_repository(
         before,

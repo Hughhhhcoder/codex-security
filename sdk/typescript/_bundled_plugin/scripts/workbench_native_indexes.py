@@ -146,7 +146,7 @@ def _active_findings(
             "WHERE ownership_scan.target_id = scans.target_id "
             "AND ownership_scan.target_device IS NOT NULL "
             "AND ownership_scan.target_inode IS NOT NULL "
-            "ORDER BY ownership_scan.started_at DESC, ownership_scan.id DESC LIMIT 1"
+            "ORDER BY ownership_scan.rowid DESC LIMIT 1"
         )
         current_owner_only += (
             " AND (scans.target_id IS NULL "
@@ -187,10 +187,8 @@ def _active_findings(
             )
             target_values.extend(transitioned_targets)
         for target_id, epoch_start in ownership_epochs:
-            current_owner_only += (
-                " AND (scans.target_id IS NOT ? OR (scans.started_at, scans.id) > (?, ?))"
-            )
-            target_values.extend((target_id, *epoch_start))
+            current_owner_only += " AND (scans.target_id IS NOT ? OR scans.rowid > ?)"
+            target_values.extend((target_id, epoch_start))
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""
