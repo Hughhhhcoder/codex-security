@@ -30,10 +30,14 @@ def symbolic_metadata(metadata: os.stat_result) -> bool:
     )
 
 
+def filesystem_name_key(value: str) -> str:
+    return unicodedata.normalize("NFC", value).upper().casefold()
+
+
 def git_metadata_path(parent: Path, name: str) -> bool:
     if name == ".git":
         return True
-    if name.upper().casefold().rstrip(". ") != ".git":
+    if filesystem_name_key(name).rstrip(". ") != ".git":
         return False
     try:
         candidate = (parent / name).stat(follow_symlinks=False)
@@ -235,7 +239,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     return
                 entries = objects.iterdir()
                 for entry in entries:
-                    canonical = entry.name.casefold()
+                    canonical = filesystem_name_key(entry.name)
                     if canonical not in ("info", "pack") and not re.fullmatch(
                         r"[0-9a-f]{2}", canonical
                     ):
@@ -245,7 +249,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     inspect_metadata(entry, directory=True)
                     if canonical != "info":
                         for member in entry.iterdir():
-                            member_canonical = member.name.casefold()
+                            member_canonical = filesystem_name_key(member.name)
                             if canonical == "pack":
                                 if member_canonical == "multi-pack-index.d":
                                     if member.name != member_canonical and not aliases_canonical_path(
@@ -254,7 +258,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                         continue
                                     inspect_metadata(member, directory=True)
                                     for layer in member.iterdir():
-                                        layer_canonical = layer.name.casefold()
+                                        layer_canonical = filesystem_name_key(layer.name)
                                         if layer_canonical != "multi-pack-index-chain" and not re.fullmatch(
                                             r"multi-pack-index-[0-9a-f]{40}(?:[0-9a-f]{24})?\.(?:midx|bitmap|rev)",
                                             layer_canonical,
@@ -274,7 +278,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     continue
                                 else:
                                     stem, _, suffix = member.name.rpartition(".")
-                                    expected = f"{stem}.{suffix.casefold()}"
+                                    expected = f"{stem}.{filesystem_name_key(suffix)}"
                             else:
                                 if not re.fullmatch(
                                     r"(?:[0-9a-f]{38}|[0-9a-f]{62})", member_canonical
@@ -718,7 +722,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 continue
             try:
                 for shared_index in root.iterdir():
-                    canonical = shared_index.name.casefold()
+                    canonical = filesystem_name_key(shared_index.name)
                     if not re.fullmatch(
                         r"sharedindex\.(?:[0-9a-f]{40}|[0-9a-f]{64})", canonical
                     ):
@@ -886,13 +890,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         batches: list[tuple[dict[str, str], set[bytes]]] = []
 
-        def probe_name_key(value: str) -> str:
-            return unicodedata.normalize("NFC", value).casefold()
-
         for relative in requested:
             parts = PurePosixPath(os.fsdecode(relative)).parts
             prefixes = {
-                probe_name_key("/".join(parts[: index + 1])): "/".join(parts[: index + 1])
+                filesystem_name_key("/".join(parts[: index + 1])): "/".join(parts[: index + 1])
                 for index in range(len(parts))
             }
             for names, batch in batches:
@@ -917,7 +918,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             zip(PurePosixPath(os.fsdecode(candidate)).parts, relative)
                         )
                         if all(
-                            probe_name_key(actual) == probe_name_key(synthetic)
+                            filesystem_name_key(actual) == filesystem_name_key(synthetic)
                             for actual, synthetic in pairs
                         ) and any(actual != synthetic for actual, synthetic in pairs):
                             return True
@@ -1447,7 +1448,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
 
         def indexed_name_key(value: str) -> bytes:
-            return os.fsencode(unicodedata.normalize("NFC", value).upper().casefold())
+            return os.fsencode(filesystem_name_key(value))
 
         selected_parts = tuple(
             os.fsencode(part) for part in selected.relative_to(repository).parts

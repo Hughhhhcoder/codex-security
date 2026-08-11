@@ -2284,6 +2284,79 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each([
+    "shared-index",
+    "multi-pack-index",
+    "pack-index-suffix",
+    "incremental-index-directory",
+    "incremental-index-chain",
+    "incremental-index-bitmap",
+  ])("rejects Windows-compatible %s metadata aliases", async (kind) => {
+    const checkout = await repository();
+    const gitdir = join(checkout, ".git");
+    let directory = join(gitdir, "objects", "pack");
+    let canonical = "multi-pack-index";
+
+    if (kind === "shared-index") {
+      await writeFile(join(checkout, "tracked.ts"), "tracked\n");
+      execFileSync("git", ["add", "tracked.ts"], { cwd: checkout });
+      execFileSync("git", ["update-index", "--split-index"], {
+        cwd: checkout,
+      });
+      const shared = (await readdir(gitdir)).find((name) =>
+        name.startsWith("sharedindex."),
+      );
+      if (shared === undefined) throw new Error("Expected a split Git index.");
+      directory = gitdir;
+      canonical = shared;
+      await rm(join(directory, canonical));
+    } else if (kind === "pack-index-suffix") {
+      canonical = `pack-${"a".repeat(40)}.idx`;
+    } else if (kind === "incremental-index-directory") {
+      canonical = "multi-pack-index.d";
+    } else if (kind.startsWith("incremental-index-")) {
+      directory = join(directory, "multi-pack-index.d");
+      await mkdir(directory);
+      canonical =
+        kind === "incremental-index-chain"
+          ? "multi-pack-index-chain"
+          : `multi-pack-index-${"a".repeat(40)}.bitmap`;
+    }
+
+    const alias = canonical.replace("i", "\u0131");
+    const external = join(dirname(checkout), "external-metadata");
+    await mkdir(external);
+    await symlink(
+      external,
+      join(directory, alias),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    const instrumentation = join(dirname(checkout), "instrumentation");
+    await mkdir(instrumentation);
+    await writeFile(
+      join(instrumentation, "sitecustomize.py"),
+      [
+        "from pathlib import Path",
+        `canonical = Path(${JSON.stringify(join(directory, canonical))})`,
+        `alias = Path(${JSON.stringify(join(directory, alias))})`,
+        "original = Path.stat",
+        "def guarded(self, *args, **kwargs):",
+        "    if self == canonical and kwargs.get('follow_symlinks') is False:",
+        "        return original(alias, *args, **kwargs)",
+        "    return original(self, *args, **kwargs)",
+        "Path.stat = guarded",
+      ].join("\n"),
+    );
+
+    await expect(
+      inventory(checkout, ".", {
+        ...process.env,
+        PYTHONPATH: instrumentation,
+      }),
+    ).rejects.toThrow("symbolic Git metadata paths are not supported");
+  });
+
   test.skipIf(process.platform === "win32").each(["lowercase", "uppercase"])(
     "rejects %s split-index backing files that leave the checkout",
     async (casing) => {
