@@ -346,7 +346,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 position += 1
             return bytes(joined)
 
-        config = configparser.ConfigParser(interpolation=None, strict=False, allow_no_value=True)
+        config = configparser.ConfigParser(
+            interpolation=None, strict=False, allow_no_value=True, default_section="\0"
+        )
         config_path = roots[-1] / "config"
         worktree_config_enabled = False
         if inspect_metadata(config_path, directory=False) is not None:
@@ -379,15 +381,25 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if not backpointer_owned:
                     raise InventoryError("Git metadata directory does not own selected worktree")
             else:
-                if configured_worktree.startswith('"'):
-                    if not configured_worktree.endswith('"'):
-                        raise InventoryError("invalid Git worktree path")
-                    try:
-                        configured_worktree = os.fsdecode(
-                            codecs.escape_decode(os.fsencode(configured_worktree[1:-1]))[0]
-                        )
-                    except (ValueError, UnicodeError) as error:
-                        raise InventoryError("invalid Git worktree path") from error
+                decoded = bytearray()
+                quoted = False
+                escaped = False
+                for character in os.fsencode(configured_worktree):
+                    if escaped:
+                        replacements = {ord("n"): ord("\n"), ord("t"): ord("\t"), ord("b"): ord("\b")}
+                        if character not in (*replacements, ord('"'), ord("\\")):
+                            raise InventoryError("invalid Git worktree path")
+                        decoded.append(replacements.get(character, character))
+                        escaped = False
+                    elif character == ord("\\"):
+                        escaped = True
+                    elif character == ord('"'):
+                        quoted = not quoted
+                    else:
+                        decoded.append(character)
+                if quoted or escaped:
+                    raise InventoryError("invalid Git worktree path")
+                configured_worktree = os.fsdecode(bytes(decoded))
                 target = Path(configured_worktree)
                 if not target.is_absolute():
                     target = gitdir / target
@@ -481,7 +493,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     (
                                         candidate
                                         for candidate in (repository, *roots)
-                                        if alternate.parts[: len(candidate.parts)] == candidate.parts
+                                        if alternate.is_relative_to(candidate)
                                     ),
                                     None,
                                 )

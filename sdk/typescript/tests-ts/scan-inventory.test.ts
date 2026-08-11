@@ -986,6 +986,8 @@ describe("security scan file inventory", () => {
     "disabled-symlink",
     "hash-comment-override",
     "semicolon-comment-override",
+    "default-inheritance",
+    "unquoted-escape",
     "owned",
     "external",
     "mixed-case-external",
@@ -995,11 +997,19 @@ describe("security scan file inventory", () => {
       if (Bun.which("rg") === null) return;
       if (ownership === "disabled-symlink" && process.platform === "win32")
         return;
+      if (ownership === "unquoted-escape" && process.platform === "win32")
+        return;
 
       const checkout = await repository();
-      const nested = join(checkout, "nested");
+      const nested = join(
+        checkout,
+        ownership === "unquoted-escape" ? "nested\\towner" : "nested",
+      );
       const metadata = join(checkout, ".git", "modules", "nested");
-      const external = join(dirname(checkout), "external-worktree");
+      const external =
+        ownership === "unquoted-escape"
+          ? join(checkout, "nested\towner")
+          : join(dirname(checkout), "external-worktree");
       await mkdir(dirname(metadata), { recursive: true });
       await mkdir(external);
       execFileSync(
@@ -1016,7 +1026,9 @@ describe("security scan file inventory", () => {
         "config",
         "extensions.worktreeConfig",
         ownership.startsWith("disabled") ||
-        ownership.endsWith("comment-override")
+        ownership.endsWith("comment-override") ||
+        ownership === "default-inheritance" ||
+        ownership === "unquoted-escape"
           ? "false"
           : "true",
       ]);
@@ -1052,6 +1064,23 @@ describe("security scan file inventory", () => {
             `$1\n\t${comment} owner comment \\\n\tworktree = ${external}`,
           ),
         );
+      } else if (ownership === "default-inheritance") {
+        const withoutOwner = (await readFile(config, "utf8")).replace(
+          /^[ \t]*worktree[ \t]*=.*\n/im,
+          "",
+        );
+        await writeFile(
+          config,
+          `${withoutOwner}\n[DEFAULT]\n\tworktree = ${nested}\n`,
+        );
+      } else if (ownership === "unquoted-escape") {
+        await writeFile(
+          config,
+          (await readFile(config, "utf8")).replace(
+            /^([ \t]*worktree[ \t]*=).*$/im,
+            `$1 ${nested}`,
+          ),
+        );
       }
       const override = `[${ownership === "mixed-case-external" ? "Core" : "core"}]\n\tworktree = ${effective}\n`;
       if (ownership === "disabled-symlink") {
@@ -1065,7 +1094,9 @@ describe("security scan file inventory", () => {
       if (
         ownership === "external" ||
         ownership === "mixed-case-external" ||
-        ownership.endsWith("comment-override")
+        ownership.endsWith("comment-override") ||
+        ownership === "default-inheritance" ||
+        ownership === "unquoted-escape"
       ) {
         await expect(inventory(checkout)).rejects.toThrow(
           "Git metadata directory does not own selected worktree",
@@ -1398,6 +1429,25 @@ describe("security scan file inventory", () => {
 
     expect(await inventory(checkout)).toContain("./visible.ts");
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "allows case-equivalent contained Git object alternate paths",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const objects = join(checkout, ".git", "extra-objects");
+      await mkdir(join(objects, "info"), { recursive: true });
+      await mkdir(join(objects, "pack"));
+      await writeFile(
+        join(checkout, ".git", "objects", "info", "alternates"),
+        `${objects.toUpperCase()}\n`,
+      );
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      expect(await inventory(checkout)).toContain("./visible.ts");
+    },
+  );
 
   test("allows repository-owned transitive Git object alternates", async () => {
     if (Bun.which("rg") === null) return;
