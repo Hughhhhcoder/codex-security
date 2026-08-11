@@ -8,6 +8,7 @@ import sqlite3
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -77,12 +78,11 @@ def _same_repository(
     after_git_dir = after_git_directory or git_output(
         after_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
-    if (
-        before_git_dir is None
-        or after_git_dir is None
-        or Path(before_git_dir).resolve() != Path(after_git_dir).resolve()
-    ):
+    if before_git_dir is None or after_git_dir is None:
         return False
+    if Path(before_git_dir).resolve() != Path(after_git_dir).resolve():
+        before_origin = _repository_origin(before_target)
+        return before_origin is not None and before_origin == _repository_origin(after_target)
     before_worktree = git_output(before_target, "rev-parse", "--show-toplevel")
     after_worktree = git_output(after_target, "rev-parse", "--show-toplevel")
     registered_worktrees = git_output(before_target, "worktree", "list", "--porcelain", "-z")
@@ -105,6 +105,33 @@ def _same_repository(
         and after_target.resolve().is_relative_to(after_worktree_path)
         and {before_worktree_path, after_worktree_path} <= registered_paths
     )
+
+
+def _repository_origin(target: Path) -> tuple[str, str] | None:
+    remote = git_output(target, "remote", "get-url", "origin")
+    if remote is None:
+        return None
+    if "://" in remote:
+        try:
+            parsed = urlsplit(remote)
+            port = parsed.port
+        except ValueError:
+            return None
+        if parsed.scheme not in {"https", "ssh"} or parsed.hostname is None:
+            return None
+        if parsed.query or parsed.fragment:
+            return None
+        host = parsed.hostname
+        if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
+            host = f"{host}:{port}"
+        path = parsed.path
+    else:
+        authority, separator, path = remote.partition(":")
+        if not separator or "?" in path or "#" in path:
+            return None
+        host = authority.rsplit("@", 1)[-1]
+    path = path.strip("/").removesuffix(".git")
+    return (host.lower(), path) if host and path else None
 
 
 def _requested_repository(
@@ -312,16 +339,22 @@ def repository_scan_scope(
                         continue
                     related_target_ids.append(target["target_id"])
                     verified_targets[target["target_id"]] = target_metadata
-        verified_checkout = (
-            requested_target_id
-            if repository == checkout_boundary
-            else registered_parent["target_id"]
-            if registered_parent is not None
-            and checkout_boundary is not None
-            and repository_paths[-1] == str(checkout_boundary)
+        checkout_target = (
+            connection.execute(
+                "SELECT id FROM security_targets WHERE current_path = ?",
+                (str(checkout_boundary),),
+            ).fetchone()
+            if checkout_boundary is not None
             else None
         )
-        if verified_checkout and checkout_boundary is not None:
+        checkout_metadata = (
+            _verified_target_metadata(connection, checkout_target["id"], checkout_boundary)
+            if checkout_target is not None and checkout_boundary is not None
+            else None
+        )
+        if checkout_metadata is not None and checkout_target is not None:
+            related_target_ids.append(checkout_target["id"])
+            verified_targets[checkout_target["id"]] = checkout_metadata
             registered_worktrees = git_output(
                 checkout_boundary, "worktree", "list", "--porcelain", "-z"
             )

@@ -155,6 +155,18 @@ def _active_findings(
             f"AND scans.target_inode IS (SELECT ownership_scan.target_inode {latest_identity})"
             "))"
         )
+        replaced_targets = [
+            target["id"]
+            for target in connection.execute("SELECT id, current_path FROM security_targets")
+            if (checkout := Path(target["current_path"])).exists()
+            and scan_history._verified_target_metadata(connection, target["id"], checkout) is None
+        ]
+        if replaced_targets:
+            placeholders = ", ".join("?" for _ in replaced_targets)
+            current_owner_only += (
+                f" AND (scans.target_id IS NULL OR scans.target_id NOT IN ({placeholders}))"
+            )
+            target_values.extend(replaced_targets)
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""

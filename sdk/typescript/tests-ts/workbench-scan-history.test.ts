@@ -97,7 +97,7 @@ test("compares registered scan history after its checkout moves", () => {
   expect(JSON.parse(result.stdout)).toBe(true);
 });
 
-test("includes linked worktrees from a registered checkout subdirectory", () => {
+test("includes linked worktrees and recognizes separately verified clones", () => {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   if (python === null) throw new Error("A Python interpreter is required.");
 
@@ -109,22 +109,28 @@ test("includes linked worktrees from a registered checkout subdirectory", () => 
     "with tempfile.TemporaryDirectory() as temporary:",
     "    root = pathlib.Path(temporary).resolve() / 'repository'",
     "    linked = pathlib.Path(temporary).resolve() / 'linked-worktree'",
+    "    clone = pathlib.Path(temporary).resolve() / 'repository-clone'",
     "    subprocess.run(['git', 'init', '-q', '-b', 'main', str(root)], check=True)",
     "    (root / 'source.py').write_text('print(1)\\n')",
     "    subprocess.run(['git', '-C', str(root), 'add', 'source.py'], check=True)",
     "    subprocess.run(['git', '-C', str(root), '-c', 'user.name=Inventory Test', '-c', 'user.email=inventory@example.test', 'commit', '-qm', 'initial'], check=True)",
     "    subprocess.run(['git', '-C', str(root), 'worktree', 'add', '-q', '-b', 'linked', str(linked)], check=True)",
+    "    subprocess.run(['git', '-C', str(root), 'remote', 'add', 'origin', 'https://github.com/example/project.git'], check=True)",
+    "    subprocess.run(['git', 'clone', '-q', str(root), str(clone)], check=True)",
+    "    subprocess.run(['git', '-C', str(clone), 'remote', 'set-url', 'origin', 'git@github.com:example/project.git'], check=True)",
     "    nested = root / 'src'",
     "    nested.mkdir()",
     "    connection = sqlite3.connect(':memory:')",
     "    connection.row_factory = sqlite3.Row",
     "    connection.executescript('CREATE TABLE security_targets (id TEXT, current_path TEXT); CREATE TABLE scans (id TEXT, target_id TEXT, target_path TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT, started_at TEXT);')",
-    "    for target_id, target in [('main', root), ('linked', linked)]:",
+    "    for target_id, target in [('main', root), ('linked', linked), ('clone', clone)]:",
     "        metadata = target.stat()",
     "        connection.execute('INSERT INTO security_targets VALUES (?, ?)', (target_id, str(target)))",
     "        connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?)', (target_id, target_id, str(target), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), 'revision', '2026-01-01'))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?)', ('local-legacy', None, str(nested), None, None, 'revision', '2026-01-02'))",
     "    _, _, target_ids, _ = history.repository_scan_scope(connection, nested)",
-    "    print(json.dumps(sorted(target_ids)))",
+    "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (target_id,)).fetchone() for target_id in ('main', 'clone')]",
+    "    print(json.dumps({'targets': sorted(target_ids), 'clone': history._same_repository(*scans, require_ownership=True)}))",
   ].join("\n");
 
   const result = spawnSync(
@@ -135,5 +141,8 @@ test("includes linked worktrees from a registered checkout subdirectory", () => 
 
   expect(result.status).toBe(0);
   expect(result.stderr).toBe("");
-  expect(JSON.parse(result.stdout)).toEqual(["linked", "main"]);
+  expect(JSON.parse(result.stdout)).toEqual({
+    targets: ["linked", "main"],
+    clone: true,
+  });
 });

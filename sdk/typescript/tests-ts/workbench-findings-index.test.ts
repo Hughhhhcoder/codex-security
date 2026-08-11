@@ -31,6 +31,12 @@ const findingsIndexProbe = [
   "    connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
   "    connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
   "    connection.execute(\"UPDATE scans SET target_device = 7, target_inode = 9 WHERE id = 'current-new'\")",
+  "if settings.get('replacedCheckout'):",
+  "    connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
+  "    connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
+  "    connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
+  "    connection.execute(\"UPDATE scans SET target_device = -1, target_inode = -1 WHERE target_id = 'current-target'\")",
+  "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
   "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'current-old-finding', 'current-old', 'high', '2026-01-01', 'Resolved current finding', 'Older issue'),",
   "    ('current-new-occurrence', 'current-new-finding', 'current-new', 'critical', '2026-02-01', 'Current CLI finding', 'Latest issue'),",
@@ -86,6 +92,7 @@ function runFindingsIndex(
     coverageFailure?: "tampered" | "noncanonical" | "pruned";
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
+    replacedCheckout?: boolean;
     repositories?: boolean;
   } = {},
 ) {
@@ -120,6 +127,7 @@ function probeFindingsIndex(
     coverageFailure?: "pruned";
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
+    replacedCheckout?: boolean;
     repositories?: boolean;
   } = {},
 ): {
@@ -177,6 +185,29 @@ describe("workbench findings index", () => {
       expect.objectContaining({
         targetId: "current-target",
         openFindingsCount: 1,
+      }),
+    );
+  });
+
+  test("excludes replaced checkout owners from findings and repository counts", () => {
+    expect(
+      probeFindingsIndex("current-target", { replacedCheckout: true }).findings,
+    ).toEqual([]);
+    expect(
+      probeFindingsIndex(null, { replacedCheckout: true }).findings,
+    ).not.toContainEqual(
+      expect.objectContaining({ targetId: "current-target" }),
+    );
+
+    expect(
+      probeFindingsIndex(null, {
+        replacedCheckout: true,
+        repositories: true,
+      }).repositories,
+    ).toContainEqual(
+      expect.objectContaining({
+        targetId: "current-target",
+        openFindingsCount: 0,
       }),
     );
   });

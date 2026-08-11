@@ -588,19 +588,6 @@ export function renderScanHistory(
         `  ${strong("VIEW LATEST")}  codex-security scans show ${scanPrefix}`,
         `  ${strong("FINDINGS")}     codex-security findings list${scanQualifiedFindings ? ` --scan ${scanPrefix}` : ""}`,
       );
-      const previous = completed
-        .slice(1)
-        .find(
-          (scan) =>
-            scan["targetPath"] === latest["targetPath"] ||
-            (typeof scan["targetId"] === "string" &&
-              scan["targetId"] === latest["targetId"]),
-        );
-      if (previous !== undefined) {
-        lines.push(
-          `  ${strong("COMPARE")}      codex-security scans compare ${clean(previous["scanId"]).slice(0, 8)} ${clean(latest["scanId"]).slice(0, 8)}`,
-        );
-      }
     }
   } else if (command === "show") {
     const status = clean((result["progress"] as JsonObject)["status"]);
