@@ -99,11 +99,7 @@ async function inventory(
     ],
     { cwd: checkout, env, stdio: "pipe" },
   );
-  return (await readFile(output, "utf8"))
-    .trimEnd()
-    .split("\n")
-    .filter(Boolean)
-    .map((path) => path.replaceAll("\\", "/"));
+  return (await readFile(output, "utf8")).trimEnd().split("\n").filter(Boolean);
 }
 
 describe("security scan file inventory", () => {
