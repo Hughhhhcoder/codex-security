@@ -584,15 +584,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 alternate = Path(os.fsdecode(line))
                                 if not alternate.is_absolute():
                                     alternate = object_root / alternate
-                                alternate = Path(os.path.abspath(alternate))
                                 owner = None
                                 anchor = alternate
                                 for candidate in (repository, *roots):
                                     if len(alternate.parts) < len(candidate.parts):
                                         continue
-                                    candidate_anchor = alternate
-                                    for _ in range(len(alternate.parts) - len(candidate.parts)):
-                                        candidate_anchor = candidate_anchor.parent
+                                    candidate_anchor = Path(*alternate.parts[: len(candidate.parts)])
                                     try:
                                         metadata = candidate_anchor.stat(follow_symlinks=False)
                                     except FileNotFoundError:
@@ -610,12 +607,23 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                         "external Git object alternates are not supported"
                                     )
                                 current = anchor
+                                depth = 0
                                 for component in alternate.parts[len(anchor.parts) :]:
+                                    if component == "..":
+                                        if depth == 0:
+                                            raise InventoryError(
+                                                "external Git object alternates are not supported"
+                                            )
+                                        current = current.parent
+                                        depth -= 1
+                                        continue
                                     current /= component
                                     if inspect_metadata(current, directory=True) is None:
                                         raise InventoryError(
                                             "missing Git object alternates are not supported"
                                         )
+                                    depth += 1
+                                alternate = current
                                 identity = directory_identity(alternate)
                                 if identity in inspected:
                                     continue
@@ -1365,15 +1373,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     root,
                     [relative for relative in tracked.stdout.split(b"\0") if relative],
                 )
-        case_insensitive_roots: dict[tuple[int, int], bool] = {}
-        for identity, (root, _) in cached_by_root.items():
-            setting = run_git(["config", "--bool", "core.ignoreCase"], directory=root)
-            if setting.returncode not in (0, 1):
-                detail = setting.stderr.decode("utf-8", errors="replace").strip()
-                raise InventoryError(
-                    f"git config exited with status {setting.returncode}: {detail}"
-                )
-            case_insensitive_roots[identity] = setting.stdout.strip().lower() == b"true"
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
         directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
 
@@ -1435,12 +1434,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     return
                 indexed_name = os.fsdecode(indexed)
                 requested_name = os.fsdecode(requested)
-                if unicodedata.normalize("NFC", indexed_name) != unicodedata.normalize(
-                    "NFC", requested_name
-                ) and (
-                    not case_insensitive_roots[root_identity]
-                    or indexed_name_key(indexed_name) != indexed_name_key(requested_name)
-                ):
+                if indexed_name_key(indexed_name) != indexed_name_key(requested_name):
                     return
 
             def descend(parent: Path, index: int) -> list[Path]:
@@ -1469,11 +1463,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     candidate
                     for candidate in variants
                     if candidate.name != component
-                    and (
-                        case_insensitive_roots[root_identity]
-                        or unicodedata.normalize("NFC", candidate.name)
-                        == unicodedata.normalize("NFC", component)
-                    )
                 ]
                 for group in (exact, alternatives):
                     matches: list[Path] = []

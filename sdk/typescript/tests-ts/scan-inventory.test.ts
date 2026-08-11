@@ -362,16 +362,17 @@ describe("security scan file inventory", () => {
         (await inventory(checkout)).includes(`./${replacement}/private.ts`),
       ).toBe(expected);
 
-      if (indexed === "caf\u00e9") {
-        execFileSync("git", ["config", "core.ignoreCase", "false"], {
-          cwd: checkout,
-        });
-        expect(
-          (await inventory(checkout, replacement)).includes(
-            `${replacement}/private.ts`,
-          ),
-        ).toBe(expected);
-      }
+      execFileSync("git", ["config", "core.ignoreCase", "false"], {
+        cwd: checkout,
+      });
+      expect(
+        (await inventory(checkout)).includes(`./${replacement}/private.ts`),
+      ).toBe(expected);
+      expect(
+        (await inventory(checkout, replacement)).includes(
+          `${replacement}/private.ts`,
+        ),
+      ).toBe(expected);
     },
   );
 
@@ -1604,6 +1605,45 @@ describe("security scan file inventory", () => {
     await expect(readFile(trace, "utf8")).rejects.toThrow();
   });
 
+  test.skipIf(process.platform === "win32").each(["primary", "transitive"])(
+    "rejects symbolic %s Git object-alternate hops before parent traversal",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const outside = join(dirname(checkout), "outside");
+      const external = join(outside, "store");
+      const decoy = join(checkout, ".git", "store");
+      const hop = join(checkout, ".git", "hop");
+      await mkdir(join(outside, "hop-target"), { recursive: true });
+      for (const objects of [external, decoy]) {
+        await mkdir(join(objects, "info"), { recursive: true });
+        await mkdir(join(objects, "pack"));
+      }
+      await symlink(join(outside, "hop-target"), hop);
+      const alternate = `${hop}/../store`;
+      if (kind === "primary") {
+        await writeFile(
+          join(checkout, ".git", "objects", "info", "alternates"),
+          `${alternate}\n`,
+        );
+      } else {
+        const first = join(checkout, ".git", "first-objects");
+        await mkdir(join(first, "info"), { recursive: true });
+        await mkdir(join(first, "pack"));
+        await writeFile(
+          join(checkout, ".git", "objects", "info", "alternates"),
+          `${first}\n`,
+        );
+        await writeFile(join(first, "info", "alternates"), `${alternate}\n`);
+      }
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
   test.each(["\\x61", "\\400"])(
     "rejects quoted Git object alternates with unsupported escape %s",
     async (escape) => {
@@ -1654,6 +1694,22 @@ describe("security scan file inventory", () => {
     await writeFile(
       join(checkout, ".git", "objects", "info", "alternates"),
       `${JSON.stringify(objects).replace("extra objects", "extra\\040objects")}\n`,
+    );
+    await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+    expect(await inventory(checkout)).toContain("./visible.ts");
+  });
+
+  test("allows safe parent traversal to repository-owned Git object alternates", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const objects = join(checkout, ".git", "extra-objects");
+    await mkdir(join(objects, "info"), { recursive: true });
+    await mkdir(join(objects, "pack"));
+    await writeFile(
+      join(checkout, ".git", "objects", "info", "alternates"),
+      "../extra-objects\n",
     );
     await writeFile(join(checkout, "visible.ts"), "visible\n");
 
