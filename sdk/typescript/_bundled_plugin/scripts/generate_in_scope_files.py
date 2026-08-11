@@ -564,6 +564,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             ("extensions", "objectformat"),
                             ("extensions", "worktreeconfig"),
                         ):
+                            if (section, key) == ("extensions", "objectformat") and candidate != config_path:
+                                continue
                             options[(section, key)] = (
                                 None
                                 if assignment.group(2) is None

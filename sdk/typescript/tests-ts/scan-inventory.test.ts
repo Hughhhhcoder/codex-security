@@ -2410,13 +2410,15 @@ describe("security scan file inventory", () => {
     "shared-index",
     "shared-index-v4",
     "shared-index-sha256",
+    "shared-index-worktree-sha256",
+    "shared-index-sha256-worktree-sha1",
     "multi-pack-index",
     "pack-index-suffix",
     "incremental-index-directory",
     "incremental-index-chain",
     "incremental-index-bitmap",
   ])("rejects Windows-compatible %s metadata aliases", async (kind) => {
-    const sha256 = kind === "shared-index-sha256";
+    const sha256 = kind.startsWith("shared-index-sha256");
     const checkout = await repository(!sha256);
     if (sha256) {
       execFileSync("git", ["init", "-q", "--object-format=sha256"], {
@@ -2438,6 +2440,15 @@ describe("security scan file inventory", () => {
       execFileSync("git", ["update-index", "--split-index"], {
         cwd: checkout,
       });
+      if (kind.includes("-worktree-")) {
+        execFileSync("git", ["config", "extensions.worktreeConfig", "true"], {
+          cwd: checkout,
+        });
+        await writeFile(
+          join(gitdir, "config.worktree"),
+          `[extensions]\n\tobjectFormat = ${sha256 ? "sha1" : "sha256"}\n`,
+        );
+      }
       const shared = (await readdir(gitdir)).find((name) =>
         name.startsWith("sharedindex."),
       );
