@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import io
 import os
 import re
@@ -192,10 +193,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 for _ in range(len(gitdir.parts) - len(repository_parts)):
                     ancestor = ancestor.parent
                 internally_owned = directory_identity(ancestor) == directory_identity(repository)
-            if not internally_owned:
-                backpointer = gitdir / "gitdir"
-                if inspect_metadata(backpointer, directory=False) is None:
-                    raise InventoryError("Git metadata directory does not own selected worktree")
+            backpointer = gitdir / "gitdir"
+            if inspect_metadata(backpointer, directory=False) is not None:
                 try:
                     target = Path(os.fsdecode(backpointer.read_bytes().rstrip(b"\r\n")))
                 except (OSError, ValueError) as error:
@@ -204,6 +203,28 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     target = gitdir / target
                 if Path(os.path.abspath(target)).parts != marker.parts:
                     raise InventoryError("Git metadata directory does not own selected worktree")
+            elif internally_owned:
+                config_path = gitdir / "config"
+                if inspect_metadata(config_path, directory=False) is None:
+                    raise InventoryError("Git metadata directory does not own selected worktree")
+                config = configparser.ConfigParser(interpolation=None, strict=False)
+                try:
+                    config.read_string(config_path.read_text(encoding="utf-8-sig"))
+                    configured_worktree = config.get("core", "worktree", fallback=None)
+                except (OSError, UnicodeError, configparser.Error) as error:
+                    raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+                if configured_worktree is None:
+                    raise InventoryError("Git metadata directory does not own selected worktree")
+                target = Path(configured_worktree)
+                if not target.is_absolute():
+                    target = gitdir / target
+                target = Path(os.path.abspath(target))
+                if target.parts != directory.parts or directory_identity(target) != directory_identity(
+                    directory
+                ):
+                    raise InventoryError("Git metadata directory does not own selected worktree")
+            else:
+                raise InventoryError("Git metadata directory does not own selected worktree")
         else:
             return False
 

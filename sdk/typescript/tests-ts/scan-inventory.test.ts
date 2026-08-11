@@ -904,6 +904,23 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test("rejects an internal gitfile that borrows another checkout's index", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "nested");
+    await mkdir(nested);
+    await writeFile(join(checkout, "secret.ts"), "tracked\n");
+    execFileSync("git", ["add", "secret.ts"], { cwd: checkout });
+    await writeFile(join(nested, ".ignore"), "secret.ts\n");
+    await writeFile(join(nested, "secret.ts"), "private\n");
+    await writeFile(join(nested, ".git"), "gitdir: ../.git\n");
+
+    await expect(inventory(checkout)).rejects.toThrow(
+      "Git metadata directory does not own selected worktree",
+    );
+  });
+
   test("rejects unrelated external Git common directories", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -1258,6 +1275,31 @@ describe("security scan file inventory", () => {
     await writeFile(join(gitdir, "commondir"), `${aliased}\n`);
 
     expect(await inventory(linked)).toContain("./visible.ts");
+  });
+
+  test("inventories genuine Git submodules with internal metadata", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const source = await repository();
+    await writeFile(join(source, "visible.ts"), "tracked\n");
+    execFileSync("git", ["add", "visible.ts"], { cwd: source });
+    commit(source);
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        source,
+        "nested",
+      ],
+      { cwd: checkout },
+    );
+
+    expect(await inventory(checkout)).toContain("./nested/visible.ts");
   });
 
   test("does not inspect a differently cased checkout outside an explicit scope", async () => {
