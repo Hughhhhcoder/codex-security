@@ -1074,8 +1074,6 @@ describe("security scan file inventory", () => {
   ])(
     "rejects %s %s metadata before accessing its Windows anchor",
     async (kind, prefix) => {
-      if (Bun.which("rg") === null) return;
-
       const checkout = await repository(kind !== "gitdir");
       const remote = `${
         prefix === "device" ? "\\\\?\\UNC" : "\\"
@@ -2163,6 +2161,15 @@ describe("security scan file inventory", () => {
     ["include", "with BOM"],
     ["include", "with leading carriage return"],
     ["include", "with carriage return after header"],
+    ['includeIf "gitdir:**"', "with carriage return before condition"],
+    [
+      'includeIf "gitdir:**"',
+      "with carriage return after condition whitespace",
+    ],
+    [
+      'includeIf "gitdir:**"',
+      "with carriage return replacing condition whitespace",
+    ],
   ])(
     "rejects repository-directed %s config %s before invoking Git",
     async (section, bom) => {
@@ -2172,9 +2179,18 @@ describe("security scan file inventory", () => {
       const external = join(dirname(checkout), "external.config");
       await writeFile(external, "[core]\n\tignoreCase = true\n");
       const config = join(checkout, ".git", "config");
+      const whitespace =
+        bom === "with carriage return before condition"
+          ? "\r "
+          : bom === "with carriage return after condition whitespace"
+            ? " \r"
+            : bom === "with carriage return replacing condition whitespace"
+              ? "\r"
+              : " ";
+      const configuredSection = section.replace(" ", whitespace);
       await writeFile(
         config,
-        `${bom === "with BOM" ? "\ufeff" : ""}${bom === "with leading carriage return" ? "\r" : ""}[${section}]${bom === "with carriage return after header" ? "\r# included" : ""}\n\tpath = ${external}\n${await readFile(config, "utf8")}`,
+        `${bom === "with BOM" ? "\ufeff" : ""}${bom === "with leading carriage return" ? "\r" : ""}[${configuredSection}]${bom === "with carriage return after header" ? "\r# included" : ""}\n\tpath = ${external}\n${await readFile(config, "utf8")}`,
       );
 
       await expect(inventory(checkout)).rejects.toThrow(

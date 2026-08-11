@@ -460,7 +460,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         if line.startswith("["):
                             match = re.match(
                                 r'\[[ \t]*(core|extensions|include|includeif)'
-                                r'(?:[ \t]+("(?:[^"\\]|\\.)*"))?[ \t]*\]'
+                                r'(?:[ \t\r]+("(?:[^"\\]|\\.)*"))?[ \t]*\]'
                                 r'(?=[ \t\r]*(?:[#;]|$))',
                                 line,
                                 re.IGNORECASE,
