@@ -170,11 +170,13 @@ describe("security scan file inventory", () => {
     execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
 
     expect(await inventory(checkout)).toContain("./nested/tracked.ts");
+    await writeFile(join(checkout, ".ignore"), ".*\n");
+    expect(await inventory(checkout)).toContain("./nested/tracked.ts");
     await writeFile(join(checkout, ".ignore"), "nested/\n");
     expect(await inventory(checkout)).not.toContain("./nested/tracked.ts");
   });
 
-  test.each([".ignore", ".rgignore"])(
+  test.each([".ignore", ".rgignore", ".git/info/exclude"])(
     "does not recover nested tracked files excluded by outer %s rules",
     async (ignore) => {
       if (Bun.which("rg") === null) return;
@@ -195,6 +197,22 @@ describe("security scan file inventory", () => {
       expect(rows).not.toContain("./nested/private.ts");
     },
   );
+
+  test("discovers self-hidden checkouts through visible snapshot directories", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository(false);
+    const nested = join(checkout, "container", "nested");
+    await mkdir(nested, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await writeFile(join(nested, ".ignore"), "*\n");
+    await writeFile(join(nested, "tracked.ts"), "export {};\n");
+    execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
+
+    expect(await inventory(checkout)).toContain(
+      "./container/nested/tracked.ts",
+    );
+  });
 
   test.skipIf(process.platform === "win32")(
     "inventories an explicit file without listing its parent directory",

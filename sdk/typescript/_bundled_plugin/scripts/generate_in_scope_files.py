@@ -332,34 +332,84 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for name in IGNORE_FILE_NAMES
             if (directory / name).is_file()
         ]
-        if not ignore_files:
+        repository_exclude: bytes | None = None
+        if (repository / ".git").exists():
+            location = run_git(
+                ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]
+            )
+            if location.returncode == 0:
+                exclude = Path(os.fsdecode(location.stdout.rstrip(b"\r\n")))
+                if exclude.is_file():
+                    contents = exclude.read_bytes()
+                    if any(
+                        line.strip() and not line.lstrip().startswith(b"#")
+                        for line in contents.splitlines()
+                    ):
+                        repository_exclude = contents
+        if not ignore_files and repository_exclude is None:
             return requested
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            probe = Path(temporary_directory)
-            for ignore in ignore_files:
-                destination = probe / ignore.relative_to(repository)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(ignore.read_bytes())
-            for relative in requested:
-                destination = probe / os.fsdecode(relative)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.touch()
-            result = subprocess.run(
-                [*command, "--", "."],
-                cwd=probe,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            if result.returncode not in (0, 1):
-                detail = result.stderr.decode("utf-8", errors="replace").strip()
-                raise InventoryError(f"could not evaluate outer ignore rules: {detail}")
-            return {
-                normalized(relative).removeprefix(b"./")
-                for relative in result.stdout.split(b"\0")
-                if normalized(relative).removeprefix(b"./") in requested
-            }
+        batches: list[tuple[set[str], set[bytes]]] = []
+        for relative in requested:
+            folded = os.fsdecode(relative).casefold()
+            for names, batch in batches:
+                if folded not in names:
+                    names.add(folded)
+                    batch.add(relative)
+                    break
+            else:
+                batches.append(({folded}, {relative}))
+
+        visible: set[bytes] = set()
+        for _, batch in batches:
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                probe = Path(temporary_directory)
+                for ignore in ignore_files:
+                    destination = probe / ignore.relative_to(repository)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(ignore.read_bytes())
+                if repository_exclude is not None:
+                    exclude = probe / ".git" / "info" / "exclude"
+                    exclude.parent.mkdir(parents=True)
+                    exclude.write_bytes(repository_exclude)
+                for relative in batch:
+                    destination = probe / os.fsdecode(relative)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.touch()
+                result = subprocess.run(
+                    [*command, "--", "."],
+                    cwd=probe,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if result.returncode not in (0, 1):
+                    detail = result.stderr.decode("utf-8", errors="replace").strip()
+                    raise InventoryError(f"could not evaluate outer ignore rules: {detail}")
+                visible.update(
+                    normalized(relative).removeprefix(b"./")
+                    for relative in result.stdout.split(b"\0")
+                    if normalized(relative).removeprefix(b"./") in batch
+                )
+        return visible
+
+    if not (repository / ".git").exists() and selected.is_dir():
+        pending = [selected]
+        inspected_directories: set[tuple[int, int]] = set()
+        while pending:
+            directory = pending.pop()
+            identity = directory_identity(directory)
+            if identity in inspected_directories:
+                continue
+            inspected_directories.add(identity)
+            reject_symbolic_ignore(directory)
+            for entry in directory.iterdir():
+                if entry.is_symlink() or not entry.is_dir() or git_metadata_path(directory, entry.name):
+                    continue
+                if (entry / ".git").exists():
+                    discovered_roots[directory_identity(entry)] = entry
+                elif visible_to_outer_ignores(entry, [entry / "scan-source"]):
+                    pending.append(entry)
 
     environment = os.environ.copy()
     for name in (
@@ -475,23 +525,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         [relative for relative in result.stdout.split(b"\0") if relative],
                     )
 
-        visible_paths = {
-            normalized(row.removesuffix(b"\n")).removeprefix(b"./") for row in rows
-        }
         outer_tracked_paths = set(listed_paths(0))
 
         def visible_nested_root(root: Path) -> bool:
-            relative = os.fsencode(root.relative_to(repository).as_posix())
-            if selected != repository and (selected == root or selected.is_relative_to(root)):
-                return True
-            if any(
-                path == relative or path.startswith(relative + b"/")
-                for paths in (visible_paths, outer_tracked_paths)
-                for path in paths
-            ):
-                return True
-            marker = root / ".codex-security-inventory-probe"
-            return bool(visible_to_outer_ignores(root, [marker]))
+            return (
+                selected == repository
+                or selected == root
+                or selected.is_relative_to(root)
+                or root.is_relative_to(selected)
+            )
 
         nested_roots = {
             identity: root
