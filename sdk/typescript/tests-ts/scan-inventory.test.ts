@@ -2713,7 +2713,6 @@ describe("security scan file inventory", () => {
       "packed-refs",
       "refs",
       "refs/heads",
-      "refs/replace",
     ])("rejects a symbolic Git metadata %s", async (relative) => {
     if (Bun.which("rg") === null) return;
 
@@ -2741,22 +2740,34 @@ describe("security scan file inventory", () => {
     );
   });
 
-  test.skipIf(process.platform === "win32")(
-    "rejects symbolic Git object replacement refs",
-    async () => {
-      if (Bun.which("rg") === null) return;
+  test.each(["file", "symbolic", "fifo", "reference"])(
+    "ignores inactive Git replacement %s metadata",
+    async (kind) => {
+      if (
+        Bun.which("rg") === null ||
+        (kind !== "file" && process.platform === "win32") ||
+        (kind === "fifo" && Bun.which("mkfifo") === null)
+      ) {
+        return;
+      }
 
       const checkout = await repository();
       const replacement = join(checkout, ".git", "refs", "replace");
       const external = join(dirname(checkout), "external-replacement");
-      await mkdir(replacement);
       await writeFile(external, `${"0".repeat(40)}\n`);
-      await symlink(external, join(replacement, "a".repeat(40)));
+      if (kind === "file") {
+        await writeFile(replacement, "inactive\n");
+      } else if (kind === "symbolic") {
+        await symlink(external, replacement);
+      } else if (kind === "fifo") {
+        execFileSync("mkfifo", [replacement]);
+      } else {
+        await mkdir(replacement);
+        await symlink(external, join(replacement, "a".repeat(40)));
+      }
       await writeFile(join(checkout, "visible.ts"), "visible\n");
 
-      await expect(inventory(checkout)).rejects.toThrow(
-        "symbolic Git metadata paths are not supported",
-      );
+      expect(await inventory(checkout)).toContain("./visible.ts");
     },
   );
 
