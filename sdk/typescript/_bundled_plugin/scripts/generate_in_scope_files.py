@@ -538,8 +538,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 )
                             )
                             rebased = []
-                            for line in contents.removeprefix(b"\xef\xbb\xbf").split(b"\n"):
-                                line = line.removesuffix(b"\r")
+                            lines = contents.removeprefix(b"\xef\xbb\xbf").split(b"\n")
+                            for index, line in enumerate(lines):
+                                terminated = index < len(lines) - 1
+                                if terminated:
+                                    line = line.removesuffix(b"\r")
                                 if not line or line.startswith(b"#"):
                                     continue
                                 negated = line.startswith(b"!")
@@ -556,7 +559,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     + prefix
                                     + b"/"
                                     + pattern
-                                    + b"\n"
+                                    + (b"\n" if terminated else b"")
                                 )
                             contents = b"".join(rebased)
                         position = len(external_ignores)

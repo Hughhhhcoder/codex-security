@@ -743,6 +743,7 @@ describe("security scan file inventory", () => {
     ["slash-only", "/\n"],
     ["whitespace-only", "   \n"],
     ["embedded-carriage-return", ".IGNORE/tracked.ts\rignored\n"],
+    ["unterminated-carriage-return", ".IGNORE/tracked.ts\r"],
   ])(
     "keeps %s ignores inert when isolating nested checkout names",
     async (_description, contents) => {
