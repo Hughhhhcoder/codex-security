@@ -340,7 +340,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     if worktree is not None or discovered_roots:
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
         listed: list[list[bytes]] = [[], []]
-        cached_by_root: dict[Path, list[bytes]] = {}
+        cached_by_root: dict[tuple[int, int], tuple[Path, list[bytes]]] = {}
 
         def listed_paths(index: int) -> Iterator[bytes]:
             for chunk in listed[index]:
@@ -359,9 +359,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     raise InventoryError(message)
                 listed[index].append(result.stdout)
                 if index == 0:
-                    cached_by_root[repository] = [
-                        relative for relative in result.stdout.split(b"\0") if relative
-                    ]
+                    cached_by_root[directory_identity(repository)] = (
+                        repository,
+                        [relative for relative in result.stdout.split(b"\0") if relative],
+                    )
 
         nested_roots = discovered_roots.copy()
         current = selected if selected.is_dir() else selected.parent
@@ -438,9 +439,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     )
                 )
                 if index == 0:
-                    cached_by_root[nested] = [
-                        relative for relative in result.stdout.split(b"\0") if relative
-                    ]
+                    cached_by_root[nested_identity] = (
+                        nested,
+                        [relative for relative in result.stdout.split(b"\0") if relative],
+                    )
                 for relative in result.stdout.split(b"\0"):
                     if not relative:
                         continue
@@ -463,25 +465,26 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for relative in listed_paths(index)
         }
         if scope not in (".", "./"):
-            for root in cached_by_root:
+            for identity, (root, _) in list(cached_by_root.items()):
                 tracked = run_git(["ls-files", "--cached", "-z"], directory=root)
                 if tracked.returncode:
                     detail = tracked.stderr.decode("utf-8", errors="replace").strip()
                     raise InventoryError(
                         f"git ls-files exited with status {tracked.returncode}: {detail}"
                     )
-                cached_by_root[root] = [
-                    relative for relative in tracked.stdout.split(b"\0") if relative
-                ]
-        case_insensitive_roots: dict[Path, bool] = {}
-        for root in cached_by_root:
+                cached_by_root[identity] = (
+                    root,
+                    [relative for relative in tracked.stdout.split(b"\0") if relative],
+                )
+        case_insensitive_roots: dict[tuple[int, int], bool] = {}
+        for identity, (root, _) in cached_by_root.items():
             setting = run_git(["config", "--bool", "core.ignoreCase"], directory=root)
             if setting.returncode not in (0, 1):
                 detail = setting.stderr.decode("utf-8", errors="replace").strip()
                 raise InventoryError(
                     f"git config exited with status {setting.returncode}: {detail}"
                 )
-            case_insensitive_roots[root] = setting.stdout.strip().lower() == b"true"
+            case_insensitive_roots[identity] = setting.stdout.strip().lower() == b"true"
         inspected_prefixes = tuple(
             normalized(prefix + os.fsencode(root.relative_to(repository).as_posix()) + b"/")
             for root in inspected_roots.values()
@@ -529,37 +532,61 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 or any(path.startswith(worktree) for worktree in nested_worktrees)
             }
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
-        directory_entries: dict[Path, dict[bytes, list[Path]]] = {}
+        directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
+        selected_parts = tuple(
+            os.fsencode(part) for part in selected.relative_to(repository).parts
+        )
+        selected_is_directory = selected.is_dir()
 
-        def tracked_variants(root: Path, relative: bytes) -> Iterator[Path]:
+        def tracked_variants(
+            root_identity: tuple[int, int], root: Path, relative: bytes
+        ) -> Iterator[Path]:
             components = PurePosixPath(os.fsdecode(relative)).parts
             if not components or any(part in (".", "..") for part in components):
                 return
-            candidates = [root]
-            for index, component in enumerate(components):
-                matches: list[Path] = []
-                for parent in candidates:
-                    if parent not in directory_entries:
-                        grouped: dict[bytes, list[Path]] = {}
-                        try:
-                            with os.scandir(parent) as entries:
-                                for entry in entries:
-                                    if not git_metadata_path(parent, entry.name):
-                                        grouped.setdefault(
-                                            os.fsencode(entry.name).lower(), []
-                                        ).append(parent / entry.name)
-                        except OSError:
-                            continue
-                        directory_entries[parent] = grouped
-                    variants = directory_entries[parent].get(
-                        os.fsencode(component).lower(), []
-                    )
-                    exact = [candidate for candidate in variants if candidate.name == component]
-                    if exact:
-                        variants = exact
-                    elif not case_insensitive_roots[root]:
-                        continue
-                    for candidate in variants:
+            root_parts = tuple(os.fsencode(part) for part in root.relative_to(repository).parts)
+            indexed_parts = root_parts + tuple(os.fsencode(part) for part in components)
+            if (not selected_is_directory and len(indexed_parts) != len(selected_parts)) or (
+                selected_is_directory and len(indexed_parts) <= len(selected_parts)
+            ):
+                return
+            for index, requested in enumerate(selected_parts):
+                indexed = indexed_parts[index]
+                if index < len(root_parts) or not case_insensitive_roots[root_identity]:
+                    if indexed != requested:
+                        return
+                elif indexed.lower() != requested.lower():
+                    return
+
+            def descend(parent: Path, index: int) -> list[Path]:
+                try:
+                    parent_identity = directory_identity(parent)
+                except OSError:
+                    return []
+                if parent_identity not in directory_entries:
+                    grouped: dict[bytes, list[Path]] = {}
+                    try:
+                        with os.scandir(parent) as entries:
+                            for entry in entries:
+                                if not git_metadata_path(parent, entry.name):
+                                    grouped.setdefault(
+                                        os.fsencode(entry.name).lower(), []
+                                    ).append(parent / entry.name)
+                    except OSError:
+                        return []
+                    directory_entries[parent_identity] = grouped
+                component = components[index]
+                variants = directory_entries[parent_identity].get(
+                    os.fsencode(component).lower(), []
+                )
+                exact = [candidate for candidate in variants if candidate.name == component]
+                alternatives = [candidate for candidate in variants if candidate.name != component]
+                groups = [exact]
+                if case_insensitive_roots[root_identity]:
+                    groups.append(alternatives)
+                for group in groups:
+                    matches: list[Path] = []
+                    for candidate in group:
                         try:
                             metadata = candidate.stat(follow_symlinks=False)
                         except OSError:
@@ -569,28 +596,35 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         if index + 1 < len(components):
                             if not stat.S_ISDIR(metadata.st_mode):
                                 continue
-                            owner = inspected_roots.get((metadata.st_dev, metadata.st_ino))
-                            if owner is not None and owner != root:
+                            owner_identity = (metadata.st_dev, metadata.st_ino)
+                            if owner_identity in inspected_roots and owner_identity != root_identity:
                                 continue
-                        elif not stat.S_ISREG(metadata.st_mode):
-                            continue
-                        matches.append(candidate)
-                candidates = matches
-            for candidate in candidates:
+                            matches.extend(descend(candidate, index + 1))
+                        elif stat.S_ISREG(metadata.st_mode):
+                            matches.append(candidate)
+                    if matches:
+                        return matches
+                return []
+
+            for candidate in descend(root, 0):
                 try:
                     resolved = candidate.resolve(strict=True)
                     resolved.relative_to(repository)
-                    if selected.is_dir():
-                        resolved.relative_to(selected)
-                    elif resolved != selected:
-                        continue
                 except (OSError, ValueError):
+                    continue
+                candidate_parts = tuple(
+                    os.fsencode(part) for part in candidate.relative_to(repository).parts
+                )
+                if selected_is_directory:
+                    if candidate_parts[: len(selected_parts)] != selected_parts:
+                        continue
+                elif candidate_parts != selected_parts:
                     continue
                 yield candidate
 
-        for root, tracked_paths in cached_by_root.items():
+        for root_identity, (root, tracked_paths) in cached_by_root.items():
             for relative in tracked_paths:
-                for candidate in tracked_variants(root, relative):
+                for candidate in tracked_variants(root_identity, root, relative):
                     relative_path = prefix + os.fsencode(
                         candidate.relative_to(repository).as_posix()
                     )

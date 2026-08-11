@@ -373,6 +373,11 @@ describe("security scan file inventory", () => {
       join(repository, "TRACKED.py"),
     );
     await rename(join(repository, "nested"), join(repository, "NESTED"));
+    try {
+      await mkdir(join(repository, "nested"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
 
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
