@@ -1191,6 +1191,44 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each([".GIT", ".GIT."])(
+    "rejects symbolic %s metadata before resolving its filesystem alias",
+    async (alias) => {
+      const checkout = await repository();
+      const nested = join(checkout, "visible");
+      const external = join(dirname(checkout), "external-metadata");
+      await mkdir(nested);
+      await mkdir(external);
+      await symlink(
+        external,
+        join(nested, alias),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      const instrumentation = join(dirname(checkout), "instrumentation");
+      await mkdir(instrumentation);
+      await writeFile(
+        join(instrumentation, "sitecustomize.py"),
+        [
+          "from pathlib import Path",
+          "original = Path.samefile",
+          "def guarded(self, other):",
+          "    if self.parent.name == 'visible' and self.name.casefold().rstrip('. ') == '.git':",
+          "        raise RuntimeError('followed symbolic Git metadata alias')",
+          "    return original(self, other)",
+          "Path.samefile = guarded",
+        ].join("\n"),
+      );
+
+      await expect(
+        inventory(checkout, ".", {
+          ...process.env,
+          PYTHONPATH: instrumentation,
+        }),
+      ).rejects.toThrow("symbolic Git metadata paths are not supported");
+    },
+  );
+
   test.each(["missing", "mismatched"])(
     "rejects an external gitdir with a %s worktree backpointer",
     async (ownership) => {

@@ -36,7 +36,13 @@ def git_metadata_path(parent: Path, name: str) -> bool:
     if name.casefold().rstrip(". ") != ".git":
         return False
     try:
-        return (parent / name).samefile(parent / ".git")
+        candidate = (parent / name).stat(follow_symlinks=False)
+        if symbolic_metadata(candidate):
+            raise InventoryError("symbolic Git metadata paths are not supported")
+        metadata = (parent / ".git").stat(follow_symlinks=False)
+        if symbolic_metadata(metadata):
+            raise InventoryError("symbolic Git metadata paths are not supported")
+        return (candidate.st_dev, candidate.st_ino) == (metadata.st_dev, metadata.st_ino)
     except OSError:
         return False
 
