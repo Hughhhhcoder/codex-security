@@ -90,7 +90,6 @@ import {
   type ScanComparisonInput,
 } from "./scan-comparison.js";
 import {
-  checkoutScans,
   renderScanHistory,
   type HistoryCommand,
 } from "./scan-history-renderer.js";
@@ -1038,7 +1037,7 @@ export async function main(
           const latest = await history(
             ["list-scans", "--repository", repository],
             ({ scans }) => {
-              const scan = checkoutScans(scans as JsonObject[], repository)
+              const scan = (scans as JsonObject[])
                 .filter(
                   (entry) =>
                     (entry["progress"] as JsonObject | undefined)?.[

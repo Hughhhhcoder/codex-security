@@ -1,4 +1,4 @@
-import { basename, isAbsolute, join, relative, sep } from "node:path";
+import { basename, join, relative } from "node:path";
 import type { JsonObject } from "./config.js";
 
 export type HistoryCommand =
@@ -55,71 +55,6 @@ function findingSeverity(finding: JsonObject): string {
   return clean(
     typeof severity === "string" ? severity : (severity as JsonObject)["level"],
   ).toUpperCase();
-}
-
-export function checkoutScans(
-  scans: readonly JsonObject[],
-  directory: string,
-): JsonObject[] {
-  const scanPath = (scan: JsonObject): string | undefined => {
-    const current = scan["currentTargetPath"];
-    const recorded = scan["targetPath"];
-    return typeof current === "string"
-      ? current
-      : typeof recorded === "string"
-        ? recorded
-        : undefined;
-  };
-  let containingPath: string | undefined;
-  const descendants = new Set<string>();
-  for (const scan of scans) {
-    const targetPath = scanPath(scan);
-    if (targetPath === undefined) continue;
-    const checkoutRelative = relative(targetPath, directory);
-    const targetRelative = relative(directory, targetPath);
-    const outsideTarget =
-      checkoutRelative === ".." ||
-      checkoutRelative.startsWith(`..${sep}`) ||
-      isAbsolute(checkoutRelative);
-    const outsideDirectory =
-      targetRelative === ".." ||
-      targetRelative.startsWith(`..${sep}`) ||
-      isAbsolute(targetRelative);
-    if (!outsideTarget) {
-      if (
-        containingPath === undefined ||
-        targetPath.length > containingPath.length
-      ) {
-        containingPath = targetPath;
-      }
-    } else if (!outsideDirectory) {
-      descendants.add(targetPath);
-    }
-  }
-  const selected = scans.filter((scan) => {
-    const targetPath = scanPath(scan);
-    return (
-      targetPath !== undefined &&
-      (containingPath === undefined
-        ? descendants.has(targetPath)
-        : targetPath === containingPath)
-    );
-  });
-  const selectedTargetIds = new Set(
-    selected
-      .map((scan) => scan["targetId"])
-      .filter((targetId): targetId is string => typeof targetId === "string"),
-  );
-  const selectedScans = new Set(selected);
-  if (selectedScans.size === 0) {
-    return scans.filter((scan) => scan["relatedCheckout"] === true);
-  }
-  return scans.filter(
-    (scan) =>
-      selectedScans.has(scan) ||
-      (typeof scan["targetId"] === "string" &&
-        selectedTargetIds.has(scan["targetId"])),
-  );
 }
 
 export function renderScanHistory(
@@ -592,11 +527,7 @@ export function renderScanHistory(
           "",
       ),
     );
-    const scopedScans =
-      options.repository === undefined
-        ? scans
-        : checkoutScans(scans, options.repository);
-    const completed = scopedScans
+    const completed = scans
       .filter(
         (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
       )
