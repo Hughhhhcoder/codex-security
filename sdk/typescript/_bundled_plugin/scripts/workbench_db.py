@@ -307,9 +307,22 @@ def immutable_diff_content_digest(target: Path, kind: str, base: str, head: str)
     )
     if replacement_mode.returncode:
         raise SystemExit("The selected diff's Git replacement settings could not be inspected.")
+    replacement_override = (
+        "unset"
+        if "GIT_NO_REPLACE_OBJECTS" not in os.environ
+        else f"set:{os.environ['GIT_NO_REPLACE_OBJECTS']}"
+    )
     return "codex-security-snapshot/v1:sha256:" + hashlib.sha256(
         "\0".join(
-            (kind, base, head, *trees, replacements.stdout, replacement_mode.stdout.strip())
+            (
+                kind,
+                base,
+                head,
+                *trees,
+                replacements.stdout,
+                replacement_mode.stdout.strip(),
+                replacement_override,
+            )
         ).encode("utf-8")
     ).hexdigest()
 
@@ -530,6 +543,22 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
+def require_immutable_diff_snapshot(scan: sqlite3.Row) -> None:
+    if (
+        scan["mode"] == "diff"
+        and scan["diff_target_kind"] in {"commit", "range"}
+        and scan["diff_content_digest"]
+        and immutable_diff_content_digest(
+            Path(scan["target_path"]),
+            scan["diff_target_kind"],
+            scan["diff_base_revision"],
+            scan["diff_head_revision"],
+        )
+        != scan["diff_content_digest"]
+    ):
+        raise SystemExit("The selected Git diff snapshot changed before scan completion.")
+
+
 def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[str, Any]:
     contract = scan_contract(scan)
     target_contract = contract["target"]
@@ -547,16 +576,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
         if scan["diff_content_digest"]:
-            if scan["diff_target_kind"] in {"commit", "range"} and (
-                immutable_diff_content_digest(
-                    Path(scan["target_path"]),
-                    scan["diff_target_kind"],
-                    scan["diff_base_revision"],
-                    scan["diff_head_revision"],
-                )
-                != scan["diff_content_digest"]
-            ):
-                raise SystemExit("The selected Git diff snapshot changed before scan completion.")
+            require_immutable_diff_snapshot(scan)
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":
@@ -1339,6 +1359,7 @@ def complete_scan_locked(
             """,
             (finding_count, len(artifacts), len(artifacts), timestamp, scan["id"]),
         )
+        require_immutable_diff_snapshot(scan)
         updated = connection.execute(
             """
             UPDATE scans
