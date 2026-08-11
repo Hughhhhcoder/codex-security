@@ -105,7 +105,7 @@ def list_global_findings(
 
 def _active_findings(
     connection: sqlite3.Connection,
-    read_coverage: Callable[[sqlite3.Row], dict[str, Any]] | None,
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
     *,
     target_ids: set[str] | None = None,
     target_paths: set[str] | None = None,
@@ -244,9 +244,6 @@ def _active_findings(
         [*target_values, *([query] if query else [])],
     )
     for row in rows:
-        if read_coverage is None:
-            yield row
-            continue
         resolved = False
         for scan in completed_scans_by_target.get(row["indexed_target_id"], ()):
             if (scan["started_at"], scan["id"]) <= (
@@ -300,6 +297,8 @@ def _active_findings(
 def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
+    *,
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     scans = scan_history.list_scans(connection)["scans"]
     scans_by_id = {scan["scanId"]: scan for scan in scans}
@@ -316,7 +315,7 @@ def list_repositories(
 
     open_findings_by_target = Counter(
         row["target_id"]
-        for row in _active_findings(connection, None)
+        for row in _active_findings(connection, read_coverage)
         if row["status"] == "open"
     )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}

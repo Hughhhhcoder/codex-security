@@ -312,13 +312,24 @@ def repository_scan_scope(
                         continue
                     related_target_ids.append(target["target_id"])
                     verified_targets[target["target_id"]] = target_metadata
-        if requested_target_id and repository == checkout_boundary:
-            registered_worktrees = git_output(repository, "worktree", "list", "--porcelain", "-z")
+        verified_checkout = (
+            requested_target_id
+            if repository == checkout_boundary
+            else registered_parent["target_id"]
+            if registered_parent is not None
+            and checkout_boundary is not None
+            and repository_paths[-1] == str(checkout_boundary)
+            else None
+        )
+        if verified_checkout and checkout_boundary is not None:
+            registered_worktrees = git_output(
+                checkout_boundary, "worktree", "list", "--porcelain", "-z"
+            )
             for record in (registered_worktrees or "").split("\0"):
                 if not record.startswith("worktree "):
                     continue
                 worktree = Path(record.removeprefix("worktree ")).resolve()
-                if worktree == repository:
+                if worktree == checkout_boundary:
                     continue
                 related = connection.execute(
                     "SELECT id FROM security_targets WHERE current_path = ?",

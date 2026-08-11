@@ -10,13 +10,13 @@ const findingsIndexProbe = [
   "connection = sqlite3.connect(':memory:')",
   "connection.row_factory = sqlite3.Row",
   "connection.executescript('''",
-  "CREATE TABLE security_targets (id TEXT PRIMARY KEY, current_path TEXT NOT NULL);",
+  "CREATE TABLE security_targets (id TEXT PRIMARY KEY, current_path TEXT NOT NULL, display_name TEXT NOT NULL);",
   "CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, seal_manifest_digest TEXT, started_at TEXT, updated_at TEXT, scope TEXT, scan_dir TEXT);",
   "CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, severity TEXT, created_at TEXT, title TEXT, summary TEXT);",
   "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, updated_at TEXT);",
   "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
   "''')",
-  "connection.executemany('INSERT INTO security_targets VALUES (?, ?)', [('current-target', '/current/repository'), ('stale-target', '/stale/repository')])",
+  "connection.executemany('INSERT INTO security_targets VALUES (?, ?, ?)', [('current-target', '/current/repository', 'current'), ('stale-target', '/stale/repository', 'stale')])",
   "stale_directory = sys.argv[1] if settings.get('coverageFailure') in ('noncanonical', 'pruned') else '/private/tmp/codex-security-findings-index-missing-stale'",
   "connection.executemany('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old', 'current-target', '/current/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/current-old'),",
@@ -68,8 +68,12 @@ const findingsIndexProbe = [
   "location_queries = []",
   "connection.set_trace_callback(lambda statement: location_queries.append(statement) if 'finding_locations' in statement else None)",
   "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), offset=0, limit=20)",
-  "result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
-  "print(json.dumps({'findings': result['findings'], 'coverageReads': coverage_reads, 'locationQueryCount': len(location_queries)}))",
+  "if settings.get('repositories'):",
+  "    indexes.scan_history.list_scans = lambda connection: {'scans': [{'scanId': row['id'], 'targetId': row['target_id']} for row in connection.execute('SELECT id, target_id FROM scans')]}",
+  "    result = indexes.list_repositories(connection, read_coverage=coverage)",
+  "else:",
+  "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
+  "print(json.dumps({'findings': result.get('findings', []), 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'locationQueryCount': len(location_queries)}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -82,6 +86,7 @@ function runFindingsIndex(
     coverageFailure?: "tampered" | "noncanonical" | "pruned";
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
+    repositories?: boolean;
   } = {},
 ) {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -115,6 +120,7 @@ function probeFindingsIndex(
     coverageFailure?: "pruned";
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
+    repositories?: boolean;
   } = {},
 ): {
   findings: Array<{
@@ -123,6 +129,7 @@ function probeFindingsIndex(
     targetId: string | null;
     targetPath: string;
   }>;
+  repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
   locationQueryCount: number;
 } {
@@ -160,6 +167,17 @@ describe("workbench findings index", () => {
     ]);
     expect(result.findings).not.toContainEqual(
       expect.objectContaining({ occurrenceId: "reused-legacy-occurrence" }),
+    );
+  });
+
+  test("counts only active findings when listing repositories", () => {
+    const result = probeFindingsIndex(null, { repositories: true });
+
+    expect(result.repositories).toContainEqual(
+      expect.objectContaining({
+        targetId: "current-target",
+        openFindingsCount: 1,
+      }),
     );
   });
 

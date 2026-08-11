@@ -96,3 +96,44 @@ test("compares registered scan history after its checkout moves", () => {
   expect(result.stderr).toBe("");
   expect(JSON.parse(result.stdout)).toBe(true);
 });
+
+test("includes linked worktrees from a registered checkout subdirectory", () => {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  if (python === null) throw new Error("A Python interpreter is required.");
+
+  const probe = [
+    "import json, os, pathlib, sqlite3, subprocess, sys, tempfile",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_history as history",
+    "from filesystem_identity import serialize_filesystem_identity",
+    "with tempfile.TemporaryDirectory() as temporary:",
+    "    root = pathlib.Path(temporary).resolve() / 'repository'",
+    "    linked = pathlib.Path(temporary).resolve() / 'linked-worktree'",
+    "    subprocess.run(['git', 'init', '-q', '-b', 'main', str(root)], check=True)",
+    "    (root / 'source.py').write_text('print(1)\\n')",
+    "    subprocess.run(['git', '-C', str(root), 'add', 'source.py'], check=True)",
+    "    subprocess.run(['git', '-C', str(root), '-c', 'user.name=Inventory Test', '-c', 'user.email=inventory@example.test', 'commit', '-qm', 'initial'], check=True)",
+    "    subprocess.run(['git', '-C', str(root), 'worktree', 'add', '-q', '-b', 'linked', str(linked)], check=True)",
+    "    nested = root / 'src'",
+    "    nested.mkdir()",
+    "    connection = sqlite3.connect(':memory:')",
+    "    connection.row_factory = sqlite3.Row",
+    "    connection.executescript('CREATE TABLE security_targets (id TEXT, current_path TEXT); CREATE TABLE scans (id TEXT, target_id TEXT, target_path TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT, started_at TEXT);')",
+    "    for target_id, target in [('main', root), ('linked', linked)]:",
+    "        metadata = target.stat()",
+    "        connection.execute('INSERT INTO security_targets VALUES (?, ?)', (target_id, str(target)))",
+    "        connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?)', (target_id, target_id, str(target), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), 'revision', '2026-01-01'))",
+    "    _, _, target_ids, _ = history.repository_scan_scope(connection, nested)",
+    "    print(json.dumps(sorted(target_ids)))",
+  ].join("\n");
+
+  const result = spawnSync(
+    python,
+    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
+    { encoding: "utf8" },
+  );
+
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(JSON.parse(result.stdout)).toEqual(["linked", "main"]);
+});

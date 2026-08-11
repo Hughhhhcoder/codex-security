@@ -3462,7 +3462,9 @@ def main() -> None:
                 connection, args, read_coverage=coverage_for_comparison
             )
         elif args.command == "list-repositories":
-            result = native_indexes.list_repositories(connection, args)
+            result = native_indexes.list_repositories(
+                connection, args, read_coverage=coverage_for_comparison
+            )
         elif args.command == "list-findings":
             result = list_findings(connection, args)
         elif args.command in {"update-progress", "update-scan-context"}:
