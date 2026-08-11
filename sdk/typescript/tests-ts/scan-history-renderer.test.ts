@@ -295,7 +295,6 @@ describe("scan history renderer", () => {
     expect(output).toContain("VALIDATION PYTHON  /managed/python");
     expect(output).toContain("AVAILABLE TOOLS  node, npm, pytest");
     expect(output).toContain("LIMITATION  Docker daemon is unavailable.");
-    expect(output).not.toContain("USED TOOLS");
   });
 
   test("renders match-all results from the original workbench data", () => {

@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import sys
@@ -128,7 +129,6 @@ from workbench_validation import (
     require_uuid,
     sqlite_busy,
     user_text,
-    validation_environment,
 )
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
@@ -1327,7 +1327,18 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
 
     recipe = parse_scan_recipe(args.recipe_json, repository)
-    recipe["validationEnvironment"] = validation_environment()
+    recipe["validationEnvironment"] = {
+        "python": sys.executable,
+        "availableTools": [
+            tool
+            for tool in (
+                "python python3 pip uv poetry pytest node npm npx pnpm yarn bun "
+                "java javac mvn gradle go cargo rustc ruby bundle php composer "
+                "dotnet gcc clang make cmake gdb lldb valgrind docker"
+            ).split()
+            if shutil.which(tool)
+        ],
+    }
     requested_target = recipe["target"]
     paths = requested_target["paths"]
     scope = paths[0] if len(paths) == 1 else "."
@@ -2798,15 +2809,11 @@ def scan_validation_environment(
     if scan["recipe_json"] is None:
         return None
     environment = json.loads(scan["recipe_json"]).get("validationEnvironment")
-    if environment is None:
-        return None
-    manifest_path = artifacts.get("manifest")
-    coverage_path = artifacts.get("coverage")
-    if manifest_path is None or coverage_path is None:
+    if environment is None or not {"manifest", "coverage"}.issubset(artifacts):
         return environment
     try:
-        scope = read_json_object(Path(manifest_path))["scan"]["scope"]
-        coverage = read_json_object(Path(coverage_path))
+        scope = read_json_object(Path(artifacts["manifest"]))["scan"]["scope"]
+        coverage = read_json_object(Path(artifacts["coverage"]))
     except (KeyError, SystemExit):
         return environment
     blockers = list(
@@ -2814,7 +2821,7 @@ def scan_validation_environment(
             [*scope.get("limitations", []), *(item["reason"] for item in coverage["deferred"])]
         )
     )
-    return {**environment, **({"blockers": blockers} if blockers else {})}
+    return {**environment, "blockers": blockers} if blockers else environment
 
 
 def remediation_availability(scan: sqlite3.Row) -> tuple[bool, str | None]:

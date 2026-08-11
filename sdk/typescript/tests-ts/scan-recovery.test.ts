@@ -327,16 +327,14 @@ describe("malformed scan artifact recovery", () => {
       validationEnvironment: available,
     });
 
-    const emptyPath = join(dirname(fixture.scanDir), "empty-path");
     const restrictedScanDir = join(dirname(fixture.scanDir), "restricted-scan");
-    await mkdir(emptyPath);
     await mkdir(restrictedScanDir, { mode: 0o700 });
     const restricted = await runWorkbench(
       {
         python: fixture.python,
         pluginRoot: PLUGIN_ROOT,
         environment: {
-          PATH: emptyPath,
+          PATH: "",
           CODEX_SECURITY_STATE_DIR: fixture.stateDir,
         },
       },

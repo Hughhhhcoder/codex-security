@@ -263,7 +263,7 @@ export function renderScanHistory(
       );
       const tools = validation["availableTools"] as string[];
       wrap(
-        tools.length > 0 ? tools.map(clean).join(", ") : "none",
+        tools.map(clean).join(", ") || "none",
         19,
         `  ${strong("AVAILABLE TOOLS")}  `,
       );
