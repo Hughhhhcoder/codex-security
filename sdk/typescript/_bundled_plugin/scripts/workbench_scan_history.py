@@ -81,6 +81,14 @@ def _same_repository(
     if before_git_dir is None or after_git_dir is None:
         return False
     if Path(before_git_dir).resolve() != Path(after_git_dir).resolve():
+        if not before_target_id or not after_target_id:
+            return False
+        if not all(
+            field in scan.keys() and scan[field] is not None
+            for scan in (before, after)
+            for field in ("target_device", "target_inode")
+        ):
+            return False
         before_origin = _repository_origin(before_target)
         return before_origin is not None and before_origin == _repository_origin(after_target)
     before_worktree = git_output(before_target, "rev-parse", "--show-toplevel")
@@ -168,7 +176,18 @@ def _requested_repository(
         and stored_filesystem_identity_matches(recorded["target_device"], metadata.st_dev)
         and stored_filesystem_identity_matches(recorded["target_inode"], metadata.st_ino)
     ):
-        return requested, None
+        return (
+            connection.execute(
+                "SELECT ? AS target_id, ? AS target_path, ? AS target_device, ? AS target_inode",
+                (
+                    target_id,
+                    str(repository),
+                    recorded["target_device"],
+                    recorded["target_inode"],
+                ),
+            ).fetchone(),
+            None,
+        )
     return (
         connection.execute(
             "SELECT '' AS target_id, ? AS target_path", (str(repository),)
@@ -348,16 +367,32 @@ def repository_scan_scope(
                 for target in connection.execute(
                     "SELECT id AS target_id, current_path AS target_path FROM security_targets"
                 ):
-                    if target["target_id"] == requested_target_id or not _same_repository(
-                        target,
-                        requested_repository,
-                        after_git_directory=requested_git_directory,
-                    ):
+                    if target["target_id"] == requested_target_id:
                         continue
                     target_metadata = _verified_target_metadata(
                         connection, target["target_id"], Path(target["target_path"])
                     )
                     if target_metadata is None:
+                        continue
+                    metadata, recorded = target_metadata
+                    verified_target = connection.execute(
+                        "SELECT ? AS target_id, ? AS target_path, ? AS target_device, ? AS target_inode",
+                        (
+                            target["target_id"],
+                            target["target_path"],
+                            serialize_filesystem_identity(metadata.st_dev)
+                            if metadata is not None and recorded
+                            else None,
+                            serialize_filesystem_identity(metadata.st_ino)
+                            if metadata is not None and recorded
+                            else None,
+                        ),
+                    ).fetchone()
+                    if not _same_repository(
+                        verified_target,
+                        requested_repository,
+                        after_git_directory=requested_git_directory,
+                    ):
                         continue
                     related_target_ids.append(target["target_id"])
                     verified_targets[target["target_id"]] = target_metadata

@@ -110,6 +110,7 @@ test("includes linked worktrees and recognizes separately verified clones", () =
     "    root = pathlib.Path(temporary).resolve() / 'repository'",
     "    linked = pathlib.Path(temporary).resolve() / 'linked-worktree'",
     "    clone = pathlib.Path(temporary).resolve() / 'repository-clone'",
+    "    unregistered = pathlib.Path(temporary).resolve() / 'unregistered-clone'",
     "    subprocess.run(['git', 'init', '-q', '-b', 'main', str(root)], check=True)",
     "    (root / 'source.py').write_text('print(1)\\n')",
     "    subprocess.run(['git', '-C', str(root), 'add', 'source.py'], check=True)",
@@ -118,6 +119,8 @@ test("includes linked worktrees and recognizes separately verified clones", () =
     "    subprocess.run(['git', '-C', str(root), 'remote', 'add', 'origin', 'https://github.com/example/project.git'], check=True)",
     "    subprocess.run(['git', 'clone', '-q', str(root), str(clone)], check=True)",
     "    subprocess.run(['git', '-C', str(clone), 'remote', 'set-url', 'origin', 'git@github.com:example/project.git'], check=True)",
+    "    subprocess.run(['git', 'clone', '-q', str(root), str(unregistered)], check=True)",
+    "    subprocess.run(['git', '-C', str(unregistered), 'remote', 'set-url', 'origin', 'git@github.com:example/project.git'], check=True)",
     "    nested = root / 'src'",
     "    nested.mkdir()",
     "    connection = sqlite3.connect(':memory:')",
@@ -130,7 +133,9 @@ test("includes linked worktrees and recognizes separately verified clones", () =
     "    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?)', ('local-legacy', None, str(nested), None, None, 'revision', '2026-01-02'))",
     "    _, _, target_ids, _ = history.repository_scan_scope(connection, nested)",
     "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (target_id,)).fetchone() for target_id in ('main', 'clone')]",
-    "    print(json.dumps({'targets': sorted(target_ids), 'clone': history._same_repository(*scans, require_ownership=True)}))",
+    "    untrusted = connection.execute(\"SELECT '' AS target_id, ? AS target_path\", (str(unregistered),)).fetchone()",
+    "    _, _, unregistered_targets, _ = history.repository_scan_scope(connection, unregistered)",
+    "    print(json.dumps({'targets': sorted(target_ids), 'clone': history._same_repository(*scans, require_ownership=True), 'untrusted': history._same_repository(scans[0], untrusted), 'unregistered': unregistered_targets}))",
   ].join("\n");
 
   const result = spawnSync(
@@ -144,5 +149,7 @@ test("includes linked worktrees and recognizes separately verified clones", () =
   expect(JSON.parse(result.stdout)).toEqual({
     targets: ["linked", "main"],
     clone: true,
+    untrusted: false,
+    unregistered: [],
   });
 });
