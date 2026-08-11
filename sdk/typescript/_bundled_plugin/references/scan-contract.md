@@ -42,6 +42,8 @@ A dirty checkout has `allowedKinds: ["git_worktree"]`: copy `requiredSnapshotDig
 | `git_diff` | `baseRevision` and `headRevision`; add `snapshotDigest` for a working-tree diff |
 | `directory_snapshot` | `snapshotDigest` |
 
+Previously sealed schema-1.0 `git_diff` artifacts may contain only `snapshotDigest`. Accept that legacy shape when reopening an existing scan, but do not create it for a new immutable diff.
+
 `targetId` identifies the stable repository or workspace. Prefer a digest of a sanitized canonical absolute remote URL when one exists. Otherwise use a digest of a stable local workspace identity. Never persist remote URL credentials, query parameters, fragments, or tokens.
 
 For dirty worktrees and working-tree diffs, calculate `snapshotDigest` from a deterministic representation of the reviewed content, including staged changes and reviewed untracked files where applicable. For committed or revision-range diffs, copy the workbench-authoritative immutable `baseRevision` and `headRevision`; do not invent a `snapshotDigest` when the workbench does not provide one. For directory snapshots, hash a sorted relative-path and file-hash inventory of the reviewed scope. Encode snapshot digests as `codex-security-snapshot/v1:sha256:<64 lowercase hex characters>`.

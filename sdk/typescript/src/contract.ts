@@ -500,6 +500,11 @@ function validateExpectation(
           "Diff scan head revision does not match the request.",
         );
       }
+      if (requested.kind === "refs" && target.snapshotDigest !== undefined) {
+        throw new ContractValidationError(
+          "Immutable diff manifest target must not include an unbound snapshot digest.",
+        );
+      }
     } else if (target.kind === "git_diff") {
       throw new ContractValidationError(
         "Repository scan manifest target must not be git_diff.",

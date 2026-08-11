@@ -921,6 +921,22 @@ describe("canonical scan contract", () => {
       }),
     ).resolves.toBeDefined();
 
+    target["snapshotDigest"] =
+      `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
+    await writeJson(manifestPath, manifest);
+    await reseal(scanDir);
+    await expect(
+      loadContract(scanDir, {
+        pluginRoot: PLUGIN_ROOT,
+        expectation: expectation({
+          kind: "refs",
+          paths: [],
+          base: "base-revision",
+          head: "head-revision",
+        }),
+      }),
+    ).rejects.toThrow("must not include an unbound snapshot digest");
+
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     if (python === null) throw new Error("A Python interpreter is required.");
@@ -1023,12 +1039,25 @@ describe("canonical scan contract", () => {
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).rejects.toThrow("must include a snapshot digest");
 
-    delete manifest["scan"]["sealedAt"];
-    delete manifest["scan"]["artifacts"];
-    await writeJson(manifestPath, manifest);
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
     if (python === null) throw new Error("A Python interpreter is required.");
+    for (const [script, args] of [
+      ["validate_scan_contract.py", ["--scan-dir", await realpath(scanDir)]],
+      ["validate_tracking_source.py", [await realpath(scanDir)]],
+    ] as const) {
+      const validated = spawnSync(
+        python,
+        ["-I", "-B", join(PLUGIN_ROOT, "scripts", script), ...args],
+        { encoding: "utf8" },
+      );
+      expect(validated.status).not.toBe(0);
+      expect(validated.stderr).toContain("snapshotDigest");
+    }
+
+    delete manifest["scan"]["sealedAt"];
+    delete manifest["scan"]["artifacts"];
+    await writeJson(manifestPath, manifest);
     const result = spawnSync(
       python,
       [
