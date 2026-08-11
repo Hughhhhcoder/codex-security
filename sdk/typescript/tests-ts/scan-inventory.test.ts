@@ -136,9 +136,10 @@ describe("security scan file inventory", () => {
   test.each([
     ["SS", "ss", true],
     ["ss", "\u00df", false],
+    ["caf\u00e9", "cafe\u0301", true],
   ])(
-    "matches indexed %s against replacement %s using Git case semantics",
-    async (indexed, replacement, expected) => {
+    "matches indexed %s against replacement %s using filesystem identity",
+    async (indexed, replacement, allowAlias) => {
       if (Bun.which("rg") === null) return;
 
       const checkout = await repository();
@@ -155,6 +156,14 @@ describe("security scan file inventory", () => {
         "replacement\n",
       );
       await writeFile(join(checkout, ".gitignore"), `${replacement}/\n`);
+      const expected =
+        allowAlias &&
+        (await realpath(join(checkout, indexed, "private.ts")).then(
+          async (path) =>
+            path ===
+            (await realpath(join(checkout, replacement, "private.ts"))),
+          () => false,
+        ));
 
       expect(
         (await inventory(checkout)).includes(`./${replacement}/private.ts`),

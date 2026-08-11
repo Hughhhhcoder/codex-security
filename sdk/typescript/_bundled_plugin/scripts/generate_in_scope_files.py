@@ -927,6 +927,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             }
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
         directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
+
+        def indexed_name_key(value: str) -> bytes:
+            return os.fsencode(unicodedata.normalize("NFC", value)).lower()
+
         selected_parts = tuple(
             os.fsencode(part) for part in selected.relative_to(repository).parts
         )
@@ -979,7 +983,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if index < len(root_parts) or not case_insensitive_roots[root_identity]:
                     if indexed != requested:
                         return
-                elif indexed.lower() != requested.lower():
+                elif indexed_name_key(os.fsdecode(indexed)) != indexed_name_key(
+                    os.fsdecode(requested)
+                ):
                     return
 
             def descend(parent: Path, index: int) -> list[Path]:
@@ -993,7 +999,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         with os.scandir(parent) as entries:
                             for entry in entries:
                                 if not git_metadata_path(parent, entry.name):
-                                    grouped.setdefault(os.fsencode(entry.name).lower(), []).append(
+                                    grouped.setdefault(indexed_name_key(entry.name), []).append(
                                         parent / entry.name
                                     )
                     except OSError:
@@ -1001,14 +1007,20 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     directory_entries[parent_identity] = grouped
                 component = components[index]
                 variants = directory_entries[parent_identity].get(
-                    os.fsencode(component).lower(), []
+                    indexed_name_key(component), []
                 )
                 exact = [candidate for candidate in variants if candidate.name == component]
-                alternatives = [candidate for candidate in variants if candidate.name != component]
-                groups = [exact]
-                if case_insensitive_roots[root_identity]:
-                    groups.append(alternatives)
-                for group in groups:
+                alternatives = [
+                    candidate
+                    for candidate in variants
+                    if candidate.name != component
+                    and (
+                        case_insensitive_roots[root_identity]
+                        or unicodedata.normalize("NFC", candidate.name)
+                        == unicodedata.normalize("NFC", component)
+                    )
+                ]
+                for group in (exact, alternatives):
                     matches: list[Path] = []
                     for candidate in group:
                         try:
@@ -1017,6 +1029,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             continue
                         if symbolic_metadata(metadata):
                             continue
+                        if candidate.name != component:
+                            try:
+                                expected = (parent / component).stat(follow_symlinks=False)
+                            except OSError:
+                                continue
+                            if symbolic_metadata(expected) or (
+                                metadata.st_dev,
+                                metadata.st_ino,
+                            ) != (expected.st_dev, expected.st_ino):
+                                continue
                         if index + 1 < len(components):
                             if not stat.S_ISDIR(metadata.st_mode):
                                 continue
