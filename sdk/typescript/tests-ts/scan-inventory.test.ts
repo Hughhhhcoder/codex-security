@@ -7,6 +7,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -215,6 +216,7 @@ describe("security scan file inventory", () => {
 
   test.each([
     ["SS", "ss", true],
+    ["Ä", "ä", true],
     ["ss", "\u00df", false],
     ["caf\u00e9", "cafe\u0301", true],
   ])(
@@ -980,6 +982,28 @@ describe("security scan file inventory", () => {
     await expect(readFile(trace, "utf8")).rejects.toThrow();
   });
 
+  test("rejects differently cased sibling Git object alternates", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const sibling = join(dirname(checkout), "REPOSITORY");
+    try {
+      await mkdir(sibling);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
+    execFileSync("git", ["init", "-q"], { cwd: sibling });
+    await writeFile(
+      join(checkout, ".git", "objects", "info", "alternates"),
+      `${join(sibling, ".git", "objects")}\n`,
+    );
+
+    await expect(inventory(checkout)).rejects.toThrow(
+      "external Git object alternates are not supported",
+    );
+  });
+
   test("allows repository-owned Git object alternates", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -1025,34 +1049,42 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test("rejects symbolic ancestors in Git-listed paths before reading external metadata", async () => {
-    if (Bun.which("rg") === null) return;
+  test.each(["selected", "nested"])(
+    "rejects symbolic ancestors in %s Git-listed paths before reading external metadata",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
 
-    const checkout = await repository();
-    const link = join(checkout, "link");
-    await mkdir(link);
-    await writeFile(join(link, "nested"), "tracked\n");
-    execFileSync("git", ["add", "link/nested"], { cwd: checkout });
+      const checkout = await repository();
+      const owner = kind === "selected" ? checkout : join(checkout, "nested");
+      if (kind === "nested") {
+        await mkdir(owner);
+        execFileSync("git", ["init", "-q"], { cwd: owner });
+      }
+      const link = join(owner, "link");
+      await mkdir(link);
+      await writeFile(join(link, "nested"), "tracked\n");
+      execFileSync("git", ["add", "link/nested"], { cwd: owner });
 
-    const external = await repository();
-    const nested = join(external, "nested");
-    await mkdir(nested);
-    execFileSync("git", ["init", "-q"], { cwd: nested });
-    await writeFile(
-      join(nested, ".git", "config"),
-      "[include]\n\tpath = outside\n",
-    );
-    await rm(link, { recursive: true });
-    await symlink(
-      external,
-      link,
-      process.platform === "win32" ? "junction" : "dir",
-    );
+      const external = await repository();
+      const nested = join(external, "nested");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await writeFile(
+        join(nested, ".git", "config"),
+        "[include]\n\tpath = outside\n",
+      );
+      await rm(link, { recursive: true });
+      await symlink(
+        external,
+        link,
+        process.platform === "win32" ? "junction" : "dir",
+      );
 
-    await expect(inventory(checkout)).rejects.toThrow(
-      "symbolic Git inventory paths are not supported",
-    );
-  });
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git inventory paths are not supported",
+      );
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "rejects drive-relative Git index entries before probing another drive",
@@ -1346,6 +1378,45 @@ describe("security scan file inventory", () => {
       await expect(inventory(checkout)).rejects.toThrow(
         "symbolic ignore files are not supported",
       );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "excludes case-equivalent Git metadata before running ripgrep",
+    async () => {
+      const ripgrep = Bun.which("rg");
+      if (ripgrep === null) return;
+
+      const checkout = await repository();
+      const metadata = join(checkout, ".GIT");
+      await rename(join(checkout, ".git"), metadata);
+      const equivalent = await realpath(join(checkout, ".git")).then(
+        async (resolved) => resolved === (await realpath(metadata)),
+        () => false,
+      );
+      if (!equivalent) return;
+
+      const external = join(dirname(checkout), "external.ignore");
+      const trace = join(dirname(checkout), "ripgrep-output");
+      const wrappers = join(dirname(checkout), "bin");
+      await mkdir(wrappers);
+      await writeFile(external, "# external ignore rules\n");
+      await symlink(external, join(metadata, ".ignore"));
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+      const wrapper = join(wrappers, "rg");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh\nif [ "$PWD" = ${JSON.stringify(checkout)} ]; then\n ${JSON.stringify(ripgrep)} "$@" > ${JSON.stringify(trace)}\n status=$?\n cat ${JSON.stringify(trace)}\n exit "$status"\nfi\nexec ${JSON.stringify(ripgrep)} "$@"\n`,
+      );
+      await chmod(wrapper, 0o755);
+
+      expect(
+        await inventory(checkout, ".", {
+          ...process.env,
+          PATH: `${wrappers}:${process.env["PATH"] ?? ""}`,
+        }),
+      ).toEqual(["./visible.ts"]);
+      expect((await readFile(trace)).toString()).not.toContain(".GIT/");
     },
   );
 

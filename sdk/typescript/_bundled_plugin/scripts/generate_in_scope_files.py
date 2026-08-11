@@ -279,11 +279,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 (
                                     candidate
                                     for candidate in (repository, *roots)
-                                    if alternate.is_relative_to(candidate)
+                                    if alternate.parts[: len(candidate.parts)] == candidate.parts
                                 ),
                                 None,
                             )
-                            if owner is None:
+                            anchor = alternate
+                            if owner is not None:
+                                for _ in range(len(alternate.parts) - len(owner.parts)):
+                                    anchor = anchor.parent
+                            if owner is None or directory_identity(anchor) != directory_identity(owner):
                                 raise InventoryError(
                                     "external Git object alternates are not supported"
                                 )
@@ -747,6 +751,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 inspected_directories.add(identity)
                 reject_symbolic_ignore(directory)
                 entries = list(directory.iterdir())
+                metadata_aliases.update(
+                    entry.relative_to(repository).parts
+                    for entry in entries
+                    if entry.name != ".git" and git_metadata_path(directory, entry.name)
+                )
                 children = [
                     entry
                     for entry in entries
@@ -804,20 +813,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         reject_symbolic_ignore(directory)
         if directory != repository and has_git_marker(directory):
             discovered_roots[directory_identity(directory)] = directory
-        if not selected.is_dir():
-            continue
-        for entry in directory.iterdir():
-            if entry.name != ".git" and git_metadata_path(directory, entry.name):
-                metadata_aliases.add(entry.relative_to(repository).parts)
-    if metadata_aliases:
-        rows = {
-            row
-            for row in rows
-            if not any(
-                Path(os.fsdecode(row.removesuffix(b"\n"))).parts[: len(alias)] == alias
-                for alias in metadata_aliases
-            )
-        }
     if selected.is_dir() and scope not in (".", "./") and not ripgrep_inventory(
         repository, scope, directory_guard=True
     ):
@@ -843,18 +838,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         listed: list[list[bytes]] = [[], []]
         cached_by_root: dict[tuple[int, int], tuple[Path, list[bytes]]] = {}
 
-        def validated_git_path(relative: bytes) -> bytes:
+        def validated_git_path(relative: bytes, root: Path = repository) -> bytes:
             portable = normalized(relative)
             components = portable.removesuffix(b"/").split(b"/")
             path = Path(os.fsdecode(portable))
             if (
                 path.is_absolute()
                 or path.drive
-                or not (repository / path).is_relative_to(repository)
+                or not (root / path).is_relative_to(root)
                 or any(component in (b"", b".", b"..") for component in components)
             ):
                 raise InventoryError("out-of-scope Git inventory paths are not supported")
-            current = repository
+            current = root
             for component in path.parts[:-1]:
                 current /= component
                 try:
@@ -1002,7 +997,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 for relative in result.stdout.split(b"\0"):
                     if not relative:
                         continue
-                    validated_git_path(relative)
+                    validated_git_path(relative, nested)
                     candidate = nested / os.fsdecode(relative)
                     if not nonsymbolic_directory(candidate):
                         continue
@@ -1041,7 +1036,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
 
         def indexed_name_key(value: str) -> bytes:
-            return os.fsencode(unicodedata.normalize("NFC", value)).lower()
+            return os.fsencode(unicodedata.normalize("NFC", value).lower())
 
         selected_parts = tuple(
             os.fsencode(part) for part in selected.relative_to(repository).parts
