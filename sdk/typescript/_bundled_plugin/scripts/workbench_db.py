@@ -282,9 +282,22 @@ def resolve_git_commit(target: Path, revision: str, label: str) -> str:
     return resolved
 
 
-def immutable_diff_content_digest(kind: str, base: str, head: str) -> str:
+def immutable_diff_content_digest(target: Path, kind: str, base: str, head: str) -> str:
+    trees = []
+    for revision in (base, head):
+        tree = (
+            revision
+            if revision == EMPTY_GIT_TREE
+            else git_output(target, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{tree}}")
+        )
+        if tree is None:
+            raise SystemExit(f"The selected diff tree is not available in the local checkout: {revision}")
+        trees.append(tree)
+    replacements = git_command(target, "replace", "--list", "--format=long", text=True)
+    if replacements.returncode:
+        raise SystemExit("The selected diff's Git object replacements could not be inspected.")
     return "codex-security-snapshot/v1:sha256:" + hashlib.sha256(
-        "\0".join((kind, base, head)).encode("utf-8")
+        "\0".join((kind, base, head, *trees, replacements.stdout)).encode("utf-8")
     ).hexdigest()
 
 
@@ -350,7 +363,7 @@ def require_diff_target(
         if base == head:
             raise SystemExit("Base and head revisions must identify different commits.")
 
-    digest = immutable_diff_content_digest(kind, base, head)
+    digest = immutable_diff_content_digest(target, kind, base, head)
     if content_digest and content_digest != digest:
         raise SystemExit("The selected diff snapshot does not match its immutable Git revisions.")
     return {
@@ -521,6 +534,16 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
         if scan["diff_content_digest"]:
+            if scan["diff_target_kind"] in {"commit", "range"} and (
+                immutable_diff_content_digest(
+                    Path(scan["target_path"]),
+                    scan["diff_target_kind"],
+                    scan["diff_base_revision"],
+                    scan["diff_head_revision"],
+                )
+                != scan["diff_content_digest"]
+            ):
+                raise SystemExit("The selected Git diff snapshot changed before scan completion.")
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":
@@ -1358,7 +1381,9 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
         else:
-            diff_target["contentDigest"] = immutable_diff_content_digest("range", base, head)
+            diff_target["contentDigest"] = immutable_diff_content_digest(
+                repository, "range", base, head
+            )
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
