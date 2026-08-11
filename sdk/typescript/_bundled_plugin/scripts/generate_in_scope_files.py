@@ -665,14 +665,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 for candidate in (repository, *roots):
                                     if len(alternate.parts) < len(candidate.parts):
                                         continue
-                                    candidate_anchor = Path(*alternate.parts[: len(candidate.parts)])
-                                    metadata = inspect_metadata(candidate_anchor, directory=True)
-                                    if metadata is None:
+                                    candidate_anchor = inspect_metadata_path(
+                                        Path(*alternate.parts[: len(candidate.parts)]),
+                                        directory_path=True,
+                                    )
+                                    if candidate_anchor is None:
                                         continue
-                                    if (
-                                        metadata.st_dev,
-                                        metadata.st_ino,
-                                    ) != directory_identity(candidate):
+                                    if directory_identity(candidate_anchor) != directory_identity(candidate):
                                         continue
                                     owner = candidate
                                     anchor = candidate_anchor

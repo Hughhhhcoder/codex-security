@@ -2031,6 +2031,72 @@ describe("security scan file inventory", () => {
     await expect(readFile(trace, "utf8")).rejects.toThrow();
   });
 
+  test.each(["primary", "transitive"])(
+    "rejects symbolic %s Git alternate prefixes before probing ownership",
+    async (kind) => {
+      const parent = await repository(false);
+      const checkout = join(parent, "selected", "nested");
+      await mkdir(checkout, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: checkout });
+      const outside = join(dirname(parent), "outside");
+      await mkdir(join(outside, "target"), { recursive: true });
+      const hop = join(parent, "hop");
+      await symlink(
+        outside,
+        hop,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const separator = process.platform === "win32" ? "\\" : "/";
+      const alternate = [
+        join(hop, "target"),
+        "..",
+        "selected",
+        "nested",
+        ".git",
+        "extra-objects",
+      ].join(separator);
+      const alternates = join(
+        checkout,
+        ".git",
+        "objects",
+        "info",
+        "alternates",
+      );
+      if (kind === "primary") {
+        await writeFile(alternates, `${alternate}\n`);
+      } else {
+        const first = join(checkout, ".git", "first-objects");
+        await mkdir(join(first, "info"), { recursive: true });
+        await mkdir(join(first, "pack"));
+        await writeFile(alternates, `${first}\n`);
+        await writeFile(join(first, "info", "alternates"), `${alternate}\n`);
+      }
+
+      const instrumentation = join(dirname(parent), "instrumentation");
+      await mkdir(instrumentation);
+      await writeFile(
+        join(instrumentation, "sitecustomize.py"),
+        [
+          "from pathlib import Path",
+          `unsafe = Path(${JSON.stringify(join(hop, "target"))})`,
+          "original = Path.stat",
+          "def guarded(self, *args, **kwargs):",
+          "    if self == unsafe:",
+          "        raise RuntimeError('probed unvalidated Git alternate prefix')",
+          "    return original(self, *args, **kwargs)",
+          "Path.stat = guarded",
+        ].join("\n"),
+      );
+
+      await expect(
+        inventory(checkout, ".", {
+          ...process.env,
+          PYTHONPATH: instrumentation,
+        }),
+      ).rejects.toThrow("symbolic Git metadata paths are not supported");
+    },
+  );
+
   test.skipIf(process.platform === "win32").each(["primary", "transitive"])(
     "rejects symbolic %s Git object-alternate hops before parent traversal",
     async (kind) => {
