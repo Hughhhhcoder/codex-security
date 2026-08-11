@@ -232,9 +232,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             raise InventoryError(f"could not inspect Git metadata: {directory}") from error
         if symbolic_metadata(metadata):
             raise InventoryError("symbolic Git metadata paths are not supported")
+        gitfile = stat.S_ISREG(metadata.st_mode)
+        backpointer_owned = False
         if stat.S_ISDIR(metadata.st_mode):
             gitdir = marker
-        elif stat.S_ISREG(metadata.st_mode):
+        elif gitfile:
             try:
                 contents = marker.read_bytes()
             except OSError as error:
@@ -257,6 +259,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 internally_owned = directory_identity(ancestor) == directory_identity(repository)
             backpointer = gitdir / "gitdir"
             if inspect_metadata(backpointer, directory=False) is not None:
+                backpointer_owned = True
                 try:
                     target = Path(os.fsdecode(backpointer.read_bytes().rstrip(b"\r\n")))
                 except (OSError, ValueError) as error:
@@ -265,61 +268,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     target = gitdir / target
                 if not same_filesystem_path(Path(os.path.abspath(target)), marker):
                     raise InventoryError("Git metadata directory does not own selected worktree")
-            elif internally_owned:
-                config_path = gitdir / "config"
-                if inspect_metadata(config_path, directory=False) is None:
-                    raise InventoryError("Git metadata directory does not own selected worktree")
-                config = configparser.ConfigParser(
-                    interpolation=None, strict=False, allow_no_value=True
-                )
-                try:
-                    for candidate in (config_path, gitdir / "config.worktree"):
-                        if candidate != config_path:
-                            extension = config.get(
-                                "extensions", "worktreeconfig", fallback="false"
-                            )
-                            if extension is not None and not config.getboolean(
-                                "extensions", "worktreeconfig", fallback=False
-                            ):
-                                continue
-                            if inspect_metadata(candidate, directory=False) is None:
-                                continue
-                        contents = candidate.read_bytes().removeprefix(codecs.BOM_UTF8)
-                        contents = re.sub(rb"\\\r?\n", b"", contents)
-                        config.read_string(os.fsdecode(contents))
-                    configured_worktree = config.get("core", "worktree", fallback=None)
-                except (OSError, UnicodeError, ValueError, configparser.Error) as error:
-                    raise InventoryError(f"could not inspect Git metadata: {directory}") from error
-                if configured_worktree is None:
-                    raise InventoryError("Git metadata directory does not own selected worktree")
-                quoted = False
-                escaped = False
-                for index, character in enumerate(configured_worktree):
-                    if escaped:
-                        escaped = False
-                    elif character == "\\":
-                        escaped = True
-                    elif character == '"':
-                        quoted = not quoted
-                    elif character in "#;" and not quoted:
-                        configured_worktree = configured_worktree[:index].rstrip()
-                        break
-                if configured_worktree.startswith('"'):
-                    if not configured_worktree.endswith('"'):
-                        raise InventoryError("invalid Git worktree path")
-                    try:
-                        configured_worktree = os.fsdecode(
-                            codecs.escape_decode(os.fsencode(configured_worktree[1:-1]))[0]
-                        )
-                    except (ValueError, UnicodeError) as error:
-                        raise InventoryError("invalid Git worktree path") from error
-                target = Path(configured_worktree)
-                if not target.is_absolute():
-                    target = gitdir / target
-                target = Path(os.path.abspath(target))
-                if not same_filesystem_path(target, directory):
-                    raise InventoryError("Git metadata directory does not own selected worktree")
-            else:
+            elif not internally_owned:
                 raise InventoryError("Git metadata directory does not own selected worktree")
         else:
             return False
@@ -350,6 +299,71 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if inspect_metadata(current, directory=True) is None:
                     break
             roots.append(common)
+
+        def config_value(value: str | None) -> str | None:
+            if value is None:
+                return None
+            quoted = False
+            escaped = False
+            for index, character in enumerate(value):
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    quoted = not quoted
+                elif character in "#;" and not quoted:
+                    return value[:index].rstrip()
+            return value.rstrip()
+
+        config = configparser.ConfigParser(interpolation=None, strict=False, allow_no_value=True)
+        config_path = roots[-1] / "config"
+        worktree_config_enabled = False
+        if inspect_metadata(config_path, directory=False) is not None:
+            try:
+                for candidate in (config_path, gitdir / "config.worktree"):
+                    if candidate != config_path:
+                        extension = config_value(
+                            config.get("extensions", "worktreeconfig", fallback="false")
+                        )
+                        normalized = "true" if extension is None else extension.strip().strip('"').casefold()
+                        worktree_config_enabled = normalized not in ("", "false", "no", "off", "0")
+                        if not worktree_config_enabled:
+                            continue
+                        if inspect_metadata(candidate, directory=False) is None:
+                            continue
+                    contents = candidate.read_bytes().removeprefix(codecs.BOM_UTF8)
+                    contents = re.sub(rb"\\\r?\n", b"", contents)
+                    contents = re.sub(
+                        rb"(?im)^([ \t]*\[[ \t]*)(core|extensions)(?=[ \t]*\])",
+                        lambda section: section.group(1) + section.group(2).lower(),
+                        contents,
+                    )
+                    config.read_string(os.fsdecode(contents))
+            except (OSError, UnicodeError, ValueError, configparser.Error) as error:
+                raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+
+        configured_worktree = config_value(config.get("core", "worktree", fallback=None))
+        if gitfile:
+            if configured_worktree is None:
+                if not backpointer_owned:
+                    raise InventoryError("Git metadata directory does not own selected worktree")
+            else:
+                if configured_worktree.startswith('"'):
+                    if not configured_worktree.endswith('"'):
+                        raise InventoryError("invalid Git worktree path")
+                    try:
+                        configured_worktree = os.fsdecode(
+                            codecs.escape_decode(os.fsencode(configured_worktree[1:-1]))[0]
+                        )
+                    except (ValueError, UnicodeError) as error:
+                        raise InventoryError("invalid Git worktree path") from error
+                target = Path(configured_worktree)
+                if not target.is_absolute():
+                    target = gitdir / target
+                if not same_filesystem_path(Path(os.path.abspath(target)), directory):
+                    raise InventoryError("Git metadata directory does not own selected worktree")
+
         for root in roots:
             for relative in (
                 "HEAD",
@@ -368,6 +382,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 "objects/info",
                 "objects/info/alternates",
             ):
+                if relative == "config.worktree" and (
+                    not worktree_config_enabled or root != gitdir
+                ):
+                    continue
                 path = root / relative
                 metadata = inspect_metadata(
                     path,

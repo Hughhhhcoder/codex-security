@@ -979,10 +979,20 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test.each(["disabled", "owned", "external"])(
+  test.each([
+    "disabled",
+    "disabled-comment",
+    "disabled-empty",
+    "disabled-symlink",
+    "owned",
+    "external",
+    "mixed-case-external",
+  ])(
     "honors %s worktree-specific Git ownership configuration",
     async (ownership) => {
       if (Bun.which("rg") === null) return;
+      if (ownership === "disabled-symlink" && process.platform === "win32")
+        return;
 
       const checkout = await repository();
       const nested = join(checkout, "nested");
@@ -1003,17 +1013,42 @@ describe("security scan file inventory", () => {
         nested,
         "config",
         "extensions.worktreeConfig",
-        ownership === "disabled" ? "false" : "true",
+        ownership.startsWith("disabled") ? "false" : "true",
       ]);
       await writeFile(join(nested, "visible.ts"), "tracked\n");
       execFileSync("git", ["-C", nested, "add", "visible.ts"]);
       const effective = ownership === "owned" ? nested : external;
-      await writeFile(
-        join(metadata, "config.worktree"),
-        `[core]\n\tworktree = ${effective}\n`,
-      );
+      const config = join(metadata, "config");
+      if (ownership === "mixed-case-external") {
+        await writeFile(
+          config,
+          (await readFile(config, "utf8")).replace(
+            /^\[extensions\]$/im,
+            "[Extensions]",
+          ),
+        );
+      } else if (
+        ownership === "disabled-comment" ||
+        ownership === "disabled-empty"
+      ) {
+        await writeFile(
+          config,
+          (await readFile(config, "utf8")).replace(
+            /^([ \t]*worktreeConfig[ \t]*=[ \t]*)false$/im,
+            ownership === "disabled-comment" ? "$1false # disabled" : "$1",
+          ),
+        );
+      }
+      const override = `[${ownership === "mixed-case-external" ? "Core" : "core"}]\n\tworktree = ${effective}\n`;
+      if (ownership === "disabled-symlink") {
+        const unused = join(dirname(checkout), "unused.config");
+        await writeFile(unused, override);
+        await symlink(unused, join(metadata, "config.worktree"));
+      } else {
+        await writeFile(join(metadata, "config.worktree"), override);
+      }
 
-      if (ownership === "external") {
+      if (ownership === "external" || ownership === "mixed-case-external") {
         await expect(inventory(checkout)).rejects.toThrow(
           "Git metadata directory does not own selected worktree",
         );
@@ -1686,6 +1721,49 @@ describe("security scan file inventory", () => {
 
     expect(await inventory(linked)).toContain("./visible.ts");
   });
+
+  test.each(["owned", "external"])(
+    "honors %s worktree-specific ownership for linked Git worktrees",
+    async (ownership) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      await writeFile(join(checkout, "visible.ts"), "tracked\n");
+      execFileSync("git", ["add", "visible.ts"], { cwd: checkout });
+      commit(checkout);
+      const linked = join(dirname(checkout), "linked-worktree");
+      const external = join(dirname(checkout), "external-worktree");
+      await mkdir(external);
+      execFileSync("git", ["worktree", "add", "--detach", linked, "HEAD"], {
+        cwd: checkout,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["config", "extensions.worktreeConfig", "true"], {
+        cwd: checkout,
+      });
+      const metadata = execFileSync(
+        "git",
+        ["rev-parse", "--absolute-git-dir"],
+        {
+          cwd: linked,
+          encoding: "utf8",
+        },
+      ).trim();
+      const effective = ownership === "owned" ? linked : external;
+      await writeFile(
+        join(metadata, "config.worktree"),
+        `[Core]\n\tworktree = ${effective}\n`,
+      );
+
+      if (ownership === "external") {
+        await expect(inventory(linked)).rejects.toThrow(
+          "Git metadata directory does not own selected worktree",
+        );
+      } else {
+        expect(await inventory(linked)).toContain("./visible.ts");
+      }
+    },
+  );
 
   test("rejects worktree backpointers hard-linked through equivalent sibling names", async () => {
     if (Bun.which("rg") === null) return;
