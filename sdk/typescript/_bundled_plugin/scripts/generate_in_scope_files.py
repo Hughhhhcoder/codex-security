@@ -273,11 +273,22 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     interpolation=None, strict=False, allow_no_value=True
                 )
                 try:
-                    contents = config_path.read_bytes().removeprefix(codecs.BOM_UTF8)
-                    contents = re.sub(rb"\\\r?\n", b"", contents)
-                    config.read_string(os.fsdecode(contents))
+                    for candidate in (config_path, gitdir / "config.worktree"):
+                        if candidate != config_path:
+                            extension = config.get(
+                                "extensions", "worktreeconfig", fallback="false"
+                            )
+                            if extension is not None and not config.getboolean(
+                                "extensions", "worktreeconfig", fallback=False
+                            ):
+                                continue
+                            if inspect_metadata(candidate, directory=False) is None:
+                                continue
+                        contents = candidate.read_bytes().removeprefix(codecs.BOM_UTF8)
+                        contents = re.sub(rb"\\\r?\n", b"", contents)
+                        config.read_string(os.fsdecode(contents))
                     configured_worktree = config.get("core", "worktree", fallback=None)
-                except (OSError, UnicodeError, configparser.Error) as error:
+                except (OSError, UnicodeError, ValueError, configparser.Error) as error:
                     raise InventoryError(f"could not inspect Git metadata: {directory}") from error
                 if configured_worktree is None:
                     raise InventoryError("Git metadata directory does not own selected worktree")

@@ -979,6 +979,50 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each(["disabled", "owned", "external"])(
+    "honors %s worktree-specific Git ownership configuration",
+    async (ownership) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      const metadata = join(checkout, ".git", "modules", "nested");
+      const external = join(dirname(checkout), "external-worktree");
+      await mkdir(dirname(metadata), { recursive: true });
+      await mkdir(external);
+      execFileSync(
+        "git",
+        ["init", "-q", "--separate-git-dir", metadata, nested],
+        {
+          cwd: checkout,
+        },
+      );
+      execFileSync("git", ["-C", nested, "config", "core.worktree", nested]);
+      execFileSync("git", [
+        "-C",
+        nested,
+        "config",
+        "extensions.worktreeConfig",
+        ownership === "disabled" ? "false" : "true",
+      ]);
+      await writeFile(join(nested, "visible.ts"), "tracked\n");
+      execFileSync("git", ["-C", nested, "add", "visible.ts"]);
+      const effective = ownership === "owned" ? nested : external;
+      await writeFile(
+        join(metadata, "config.worktree"),
+        `[core]\n\tworktree = ${effective}\n`,
+      );
+
+      if (ownership === "external") {
+        await expect(inventory(checkout)).rejects.toThrow(
+          "Git metadata directory does not own selected worktree",
+        );
+      } else {
+        expect(await inventory(checkout)).toContain("./nested/visible.ts");
+      }
+    },
+  );
+
   test("rejects unrelated external Git common directories", async () => {
     if (Bun.which("rg") === null) return;
 
