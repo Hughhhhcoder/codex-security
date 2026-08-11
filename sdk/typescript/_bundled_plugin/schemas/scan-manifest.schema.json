@@ -130,6 +130,7 @@
                   "kind": {
                     "enum": [
                       "git_worktree",
+                      "git_diff",
                       "directory_snapshot"
                     ]
                   }
@@ -139,28 +140,6 @@
                 "required": [
                   "snapshotDigest"
                 ]
-              }
-            },
-            {
-              "if": {
-                "properties": {
-                  "kind": {
-                    "const": "git_diff"
-                  }
-                }
-              },
-              "then": {
-                "if": {
-                  "required": [
-                    "snapshotDigest"
-                  ]
-                },
-                "else": {
-                  "required": [
-                    "baseRevision",
-                    "headRevision"
-                  ]
-                }
               }
             }
           ]

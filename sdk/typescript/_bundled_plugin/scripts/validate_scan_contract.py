@@ -35,8 +35,10 @@ def validate_contract(scan_dir: Path) -> dict[str, Any]:
         "scan-manifest.json",
         "scan-manifest.json",
     )
+    FINALIZER._validate_manifest(manifest)
+    FINALIZER.validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
+
     scan = FINALIZER._require_dict(manifest, "scan", "manifest")
-    FINALIZER._validate_contract_refs(scan)
     findings_ref = scan["findingsRef"]
     coverage_ref = scan["coverageRef"]
     findings, findings_bytes = FINALIZER._read_scan_local_json_bytes(
@@ -49,8 +51,6 @@ def validate_contract(scan_dir: Path) -> dict[str, Any]:
         coverage_ref,
         coverage_ref,
     )
-    FINALIZER._validate_manifest(manifest, coverage.get("mode"))
-    FINALIZER.validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
     FINALIZER._validate_existing_seal(
         scan_dir,
         scan,

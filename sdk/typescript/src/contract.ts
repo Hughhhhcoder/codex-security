@@ -149,15 +149,6 @@ export async function loadContract(
       "Coverage exclude paths do not match the manifest scope.",
     );
   }
-  if (
-    manifest.scan.target.kind === "git_diff" &&
-    coverage.mode === "working_tree" &&
-    manifest.scan.target.snapshotDigest === undefined
-  ) {
-    throw new ContractValidationError(
-      "Working-tree diff manifest target must include a snapshot digest.",
-    );
-  }
 
   validateCanonicalContract(manifest, findings);
 

@@ -337,12 +337,24 @@ def require_diff_target(
             )
             if supplied_base != parent:
                 raise SystemExit("Commit base revision must match the selected commit's parent.")
-        return {"kind": kind, "baseRevision": parent, "headRevision": head}
-    base = resolve_git_commit(target, base_revision or "", "Base revision")
-    head = resolve_git_commit(target, head_revision or "", "Head revision")
-    if base == head:
-        raise SystemExit("Base and head revisions must identify different commits.")
-    return {"kind": kind, "baseRevision": base, "headRevision": head}
+        base = parent
+    else:
+        base = resolve_git_commit(target, base_revision or "", "Base revision")
+        head = resolve_git_commit(target, head_revision or "", "Head revision")
+        if base == head:
+            raise SystemExit("Base and head revisions must identify different commits.")
+
+    digest = "codex-security-snapshot/v1:sha256:" + hashlib.sha256(
+        "\0".join((kind, base, head)).encode("utf-8")
+    ).hexdigest()
+    if content_digest and content_digest != digest:
+        raise SystemExit("The selected diff snapshot does not match its immutable Git revisions.")
+    return {
+        "kind": kind,
+        "baseRevision": base,
+        "headRevision": head,
+        "contentDigest": digest,
+    }
 
 
 def inspect_setup_values(
@@ -504,7 +516,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
+        if scan["diff_content_digest"]:
             target["snapshotDigest"] = scan["diff_content_digest"]
     else:
         if scan["target_revision"] != "unversioned":
@@ -573,12 +585,10 @@ def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None
                 "scan-manifest.json target headRevision must match the workbench diff target."
             )
         if (
-            scan["diff_target_kind"] == "working_tree"
-            and target.get("snapshotDigest") != scan["diff_content_digest"]
-        ):
+            scan["diff_target_kind"] == "working_tree" or scan["diff_content_digest"] is not None
+        ) and target.get("snapshotDigest") != scan["diff_content_digest"]:
             raise SystemExit(
-                "scan-manifest.json target snapshotDigest must match the selected "
-                "working-tree contents."
+                "scan-manifest.json target snapshotDigest must match the selected diff snapshot."
             )
     scope = manifest_scan.get("scope")
     if not isinstance(scope, dict):
