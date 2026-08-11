@@ -684,6 +684,8 @@ def _validate_target(
             _require_str(target, "headRevision", "scan.target")
         if coverage_mode == "working_tree":
             _require_str(target, "snapshotDigest", "scan.target")
+        elif coverage_mode is not None and "snapshotDigest" in target and not allow_legacy_snapshot:
+            raise ContractError("scan.target.snapshotDigest: immutable diffs must not invent a digest")
     elif kind == "directory_snapshot":
         _require_str(target, "snapshotDigest", "scan.target")
 

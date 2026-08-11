@@ -935,7 +935,7 @@ describe("canonical scan contract", () => {
           head: "head-revision",
         }),
       }),
-    ).rejects.toThrow("must not include an unbound snapshot digest");
+    ).resolves.toBeDefined();
 
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -955,6 +955,12 @@ describe("canonical scan contract", () => {
       "    finalizer._validate_target(target)",
       "    finalizer._validate_schema_node(target, schema, 'scan.target')",
       "    result.append(target)",
+      "try:",
+      "    finalizer._validate_target(result[1], coverage_mode='branch_diff')",
+      "except finalizer.ContractError:",
+      "    pass",
+      "else:",
+      "    raise SystemExit('accepted an invented snapshot digest for a new immutable diff')",
       "for missing in ('baseRevision', 'headRevision'):",
       "    target = {**result[0]}",
       "    target.pop(missing)",
