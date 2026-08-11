@@ -199,11 +199,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     if canonical != "info":
                         for member in entry.iterdir():
                             if canonical == "pack":
-                                if member.name != "multi-pack-index" and not re.fullmatch(
-                                    r"(?:pack|multi-pack-index)-[0-9a-fA-F]{40}"
-                                    r"(?:[0-9a-fA-F]{24})?"
-                                    r"\.(?:pack|idx|rev|bitmap|keep|promisor|mtimes)",
-                                    member.name,
+                                if member.name != "multi-pack-index" and not member.name.endswith(
+                                    (".pack", ".idx", ".rev", ".bitmap", ".keep", ".promisor", ".mtimes")
                                 ):
                                     continue
                             elif not re.fullmatch(r"(?:[0-9a-f]{38}|[0-9a-f]{62})", member.name):

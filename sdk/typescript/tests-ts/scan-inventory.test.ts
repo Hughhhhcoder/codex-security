@@ -1088,9 +1088,13 @@ describe("security scan file inventory", () => {
   test.skipIf(process.platform === "win32").each([
     ["primary", "pack"],
     ["primary-uppercase", "pack"],
+    ["primary-arbitrary-pack", "pack"],
+    ["primary-arbitrary-index", "pack"],
     ["primary", "ab"],
     ["alternate", "pack"],
     ["alternate-uppercase", "pack"],
+    ["alternate-arbitrary-pack", "pack"],
+    ["alternate-arbitrary-index", "pack"],
     ["alternate", "ab"],
   ])("rejects symbolic %s Git object files in %s", async (owner, kind) => {
     if (Bun.which("rg") === null) return;
@@ -1112,8 +1116,11 @@ describe("security scan file inventory", () => {
     const directory = join(objects, kind);
     if (kind !== "pack") await mkdir(directory);
     const hex = owner.endsWith("uppercase") ? "A" : "0";
-    const member =
-      kind === "pack" ? `pack-${hex.repeat(40)}.pack` : hex.repeat(38);
+    const basename = owner.includes("arbitrary")
+      ? "arbitrary"
+      : `pack-${hex.repeat(40)}`;
+    const suffix = owner.endsWith("index") ? "idx" : "pack";
+    const member = kind === "pack" ? `${basename}.${suffix}` : hex.repeat(38);
     await symlink(external, join(directory, member));
 
     await expect(inventory(checkout)).rejects.toThrow(
