@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import re
 import stat
@@ -142,7 +143,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     stderr=subprocess.DEVNULL,
                     check=False,
                 )
-                if ignored.returncode == 0:
+                ripgrep_overrides = any(
+                    (repository / parent / ignore).is_file()
+                    for parent in directory.relative_to(repository).parents
+                    for ignore in (".ignore", ".rgignore")
+                )
+                if ignored.returncode == 0 and not ripgrep_overrides:
                     continue
             if symbolic_metadata(metadata):
                 raise InventoryError("symbolic ignore files are not supported")
@@ -241,7 +247,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 return {b""} if result.returncode == 0 else set()
             inventory.seek(0)
             rows = set()
-            for path in inventory.read().split(b"\0"):
+
+            def inventory_paths() -> Iterator[bytes]:
+                remainder = b""
+                while chunk := inventory.read(io.DEFAULT_BUFFER_SIZE):
+                    paths = chunk.split(b"\0")
+                    paths[0] = remainder + paths[0]
+                    remainder = paths.pop()
+                    yield from paths
+                if remainder:
+                    raise InventoryError("ripgrep returned an unterminated inventory path")
+
+            for path in inventory_paths():
                 if not path:
                     continue
                 if b"\n" in path or b"\r" in path:

@@ -693,6 +693,24 @@ describe("security scan file inventory", () => {
       "./nested/tracked.py",
     );
     if (process.platform !== "win32") {
+      await writeFile(join(repository, ".rgignore"), "!nested/\n");
+      expect(() =>
+        execFileSync(
+          python,
+          [
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+            "--repo",
+            repository,
+            "--scope",
+            ".",
+            "--out",
+            output,
+          ],
+          { cwd: repository, stdio: "pipe" },
+        ),
+      ).toThrow("symbolic ignore files are not supported");
+      await rm(join(repository, ".rgignore"));
       await rm(join(nested, ".ignore"));
     }
     execFileSync("git", ["add", "--force", "--", "nested"], {
