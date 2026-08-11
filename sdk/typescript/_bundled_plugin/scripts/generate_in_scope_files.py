@@ -344,21 +344,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 continue
             relative_alias = "/".join(re.escape(part) for part in alias[len(directory_parts) :])
             if relative_alias and "\n" not in relative_alias and "\r" not in relative_alias:
-                ignored_aliases.append(f"/{relative_alias}\n")
-        with tempfile.TemporaryDirectory() as temporary_directory, tempfile.TemporaryFile(
-            mode="w+b"
-        ) as inventory:
-            if ignored_aliases:
-                alias_file = Path(temporary_directory) / "git-metadata.ignore"
-                alias_file.write_bytes(b"".join(os.fsencode(alias) for alias in ignored_aliases))
-                arguments.extend(["--ignore-file", str(alias_file)])
-            if directory_guard:
-                relative_scope = requested_scope.removeprefix("./")
-                arguments.extend(
-                    ["--quiet", "--glob", f"/{re.escape(relative_scope)}/**", "--", "."]
-                )
-            else:
-                arguments.extend(["--", requested_scope])
+                ignored_aliases.append(relative_alias)
+        if directory_guard:
+            relative_scope = requested_scope.removeprefix("./")
+            arguments.extend(["--quiet", "--glob", f"/{re.escape(relative_scope)}/**"])
+        for alias in ignored_aliases:
+            arguments.extend(["--glob", f"!/{alias}", "--glob", f"!/{alias}/**"])
+        arguments.extend(["--", "." if directory_guard else requested_scope])
+        with tempfile.TemporaryFile(mode="w+b") as inventory:
             try:
                 result = subprocess.run(
                     arguments,

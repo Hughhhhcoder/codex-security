@@ -1403,6 +1403,7 @@ describe("security scan file inventory", () => {
       await mkdir(wrappers);
       await writeFile(external, "# external ignore rules\n");
       await symlink(external, join(metadata, ".ignore"));
+      await writeFile(join(checkout, ".rgignore"), "!.GIT/\n!.GIT/**\n");
       await writeFile(join(checkout, "visible.ts"), "visible\n");
       const wrapper = join(wrappers, "rg");
       await writeFile(
@@ -1416,7 +1417,7 @@ describe("security scan file inventory", () => {
           ...process.env,
           PATH: `${wrappers}:${process.env["PATH"] ?? ""}`,
         }),
-      ).toEqual(["./visible.ts"]);
+      ).toEqual(["./.rgignore", "./visible.ts"]);
       expect((await readFile(trace)).toString()).not.toContain(".GIT/");
     },
   );
