@@ -1497,6 +1497,32 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             parent_parts = parent.relative_to(repository).parts
             return candidate_parts[: len(parent_parts)] == parent_parts
 
+        def tracked_gitlink(owner: Path, nested: Path, indexed_paths: set[bytes]) -> bool:
+            relative = nested.relative_to(owner)
+            if os.fsencode(relative.as_posix()) in indexed_paths:
+                return True
+            for indexed in indexed_paths:
+                components = PurePosixPath(os.fsdecode(indexed)).parts
+                if len(components) != len(relative.parts):
+                    continue
+                parent = owner
+                for indexed_name, materialized in zip(components, relative.parts):
+                    if indexed_name != materialized:
+                        try:
+                            expected = (parent / indexed_name).stat(follow_symlinks=False)
+                            actual = (parent / materialized).stat(follow_symlinks=False)
+                        except OSError:
+                            break
+                        if symbolic_metadata(expected) or symbolic_metadata(actual) or (
+                            expected.st_dev,
+                            expected.st_ino,
+                        ) != (actual.st_dev, actual.st_ino):
+                            break
+                    parent /= materialized
+                else:
+                    return True
+            return False
+
         tracked_gitlinks = []
         for owner, _tracked_paths in cached_by_root.values():
             staged = run_git(["ls-files", "--sparse", "--stage", "-z"], directory=owner)
@@ -1519,7 +1545,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 for nested in inspected_roots.values()
                 if nested != owner
                 and exact_descendant(nested, owner)
-                and os.fsencode(nested.relative_to(owner).as_posix()) in indexed_paths
+                and tracked_gitlink(owner, nested, indexed_paths)
             )
         def tracked_variants(root: Path, relative: bytes) -> Iterator[Path]:
             components = PurePosixPath(os.fsdecode(relative)).parts
@@ -1566,10 +1592,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         return []
                     if symbolic_metadata(expected):
                         return []
+                    try:
+                        addressed = (parent / component).resolve(strict=True)
+                    except OSError:
+                        return []
                     variants = [
                         candidate
-                        for group in directory_entries[parent_identity].values()
-                        for candidate in group
+                        for candidate in directory_entries[parent_identity].get(
+                            indexed_name_key(addressed.name), []
+                        )
+                        if candidate.name == addressed.name
                     ]
                 selected_index = len(root_parts) + index
                 if selected_index < len(selected_parts):

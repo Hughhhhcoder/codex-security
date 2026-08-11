@@ -396,7 +396,7 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test.each([".", "LongDirectory", "LongDirectory/private.ts"])(
+  test.each([".", "LongDirectory", "LongDirectory/PrivateDocument.ts"])(
     "restores tracked 8.3 aliases for %s scans using no-follow identity",
     async (scope) => {
       if (Bun.which("rg") === null) return;
@@ -404,12 +404,18 @@ describe("security scan file inventory", () => {
       const checkout = await repository();
       const indexed = join(checkout, "LONGDI~1");
       const materialized = join(checkout, "LongDirectory");
+      const indexedLeaf = join(materialized, "PRIVAT~1.TS");
+      const addressed = join(materialized, "PrivateDocument.ts");
+      const unrelated = join(materialized, "ignored-hardlink.ts");
       await mkdir(indexed);
-      await writeFile(join(indexed, "private.ts"), "tracked\n");
-      execFileSync("git", ["add", "LONGDI~1/private.ts"], { cwd: checkout });
+      await writeFile(join(indexed, "PRIVAT~1.TS"), "tracked\n");
+      execFileSync("git", ["add", "LONGDI~1/PRIVAT~1.TS"], {
+        cwd: checkout,
+      });
       await rm(indexed, { recursive: true });
       await mkdir(materialized);
-      await writeFile(join(materialized, "private.ts"), "tracked\n");
+      await writeFile(addressed, "tracked\n");
+      await hardlink(addressed, unrelated);
       await writeFile(join(checkout, ".gitignore"), "LongDirectory/\n");
 
       const instrumentation = join(dirname(checkout), "instrumentation");
@@ -420,21 +426,34 @@ describe("security scan file inventory", () => {
           "from pathlib import Path",
           `indexed = Path(${JSON.stringify(indexed)})`,
           `materialized = Path(${JSON.stringify(materialized)})`,
+          `indexed_leaf = Path(${JSON.stringify(indexedLeaf)})`,
+          `addressed = Path(${JSON.stringify(addressed)})`,
           "original = Path.stat",
+          "original_resolve = Path.resolve",
           "def guarded(self, *args, **kwargs):",
           "    if self == indexed and kwargs.get('follow_symlinks') is False:",
           "        return original(materialized, *args, **kwargs)",
+          "    if self == indexed_leaf and kwargs.get('follow_symlinks') is False:",
+          "        return original(addressed, *args, **kwargs)",
           "    return original(self, *args, **kwargs)",
+          "def resolved(self, *args, **kwargs):",
+          "    if self == indexed:",
+          "        return original_resolve(materialized, *args, **kwargs)",
+          "    if self == indexed_leaf:",
+          "        return original_resolve(addressed, *args, **kwargs)",
+          "    return original_resolve(self, *args, **kwargs)",
           "Path.stat = guarded",
+          "Path.resolve = resolved",
         ].join("\n"),
       );
 
-      expect(
-        await inventory(checkout, scope, {
-          ...process.env,
-          PYTHONPATH: instrumentation,
-        }),
-      ).toContain(`${scope === "." ? "./" : ""}LongDirectory/private.ts`);
+      const rows = await inventory(checkout, scope, {
+        ...process.env,
+        PYTHONPATH: instrumentation,
+      });
+      const prefix = scope === "." ? "./" : "";
+      expect(rows).toContain(`${prefix}LongDirectory/PrivateDocument.ts`);
+      expect(rows).not.toContain(`${prefix}LongDirectory/ignored-hardlink.ts`);
     },
   );
 
@@ -682,14 +701,25 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./middle/nested/private.ts");
   });
 
-  test.each(["stage-0", "conflicted"])(
+  test.each(["stage-0", "conflicted", "short-alias", "conflicted-short-alias"])(
     "admits %s tracked Gitlinks through configured directory excludes",
     async (staging) => {
       if (Bun.which("rg") === null) return;
 
       const checkout = await repository();
-      const nested = join(checkout, "nested");
+      const short = staging.endsWith("short-alias");
+      const name = short ? "LongDirectory" : "nested";
+      const nested = join(checkout, name);
       await mkdir(nested);
+      const nativeAlias = short ? windowsShortPath(nested) : null;
+      if (short && process.platform === "win32" && nativeAlias === null) {
+        return;
+      }
+      const indexed = short
+        ? nativeAlias === null
+          ? "LONGDI~1"
+          : basename(nativeAlias)
+        : name;
       execFileSync("git", ["init", "-q"], { cwd: nested });
       await Promise.all([
         writeFile(join(nested, "visible.ts"), "visible\n"),
@@ -699,11 +729,11 @@ describe("security scan file inventory", () => {
         cwd: nested,
       });
       commit(nested);
-      execFileSync("git", ["add", "nested"], {
+      execFileSync("git", ["add", name], {
         cwd: checkout,
         stdio: "ignore",
       });
-      if (staging === "conflicted") {
+      if (short || staging === "conflicted") {
         const object = execFileSync("git", ["rev-parse", "HEAD"], {
           cwd: nested,
           encoding: "utf8",
@@ -711,20 +741,46 @@ describe("security scan file inventory", () => {
         execFileSync("git", ["update-index", "--index-info"], {
           cwd: checkout,
           input: [
-            `0 ${"0".repeat(40)}\tnested`,
-            ...[1, 2, 3].map((stage) => `160000 ${object} ${stage}\tnested`),
+            `0 ${"0".repeat(40)}\t${name}`,
+            ...(staging.startsWith("conflicted") ? [1, 2, 3] : [0]).map(
+              (stage) => `160000 ${object} ${stage}\t${indexed}`,
+            ),
             "",
           ].join("\n"),
         });
       }
+      if (short && nativeAlias === null) {
+        await symlink(nested, join(checkout, indexed));
+      }
       await writeFile(
         join(checkout, ".git", "info", "exclude"),
-        "nested/\nnested/private.ts\n",
+        `${name}/\n${name}/private.ts\n${indexed}/\n`,
       );
 
-      const rows = await inventory(checkout);
-      expect(rows).toContain("./nested/visible.ts");
-      expect(rows).not.toContain("./nested/private.ts");
+      let environment = process.env;
+      if (short) {
+        const instrumentation = join(dirname(checkout), "instrumentation");
+        await mkdir(instrumentation);
+        await writeFile(
+          join(instrumentation, "sitecustomize.py"),
+          [
+            "from pathlib import Path",
+            `indexed = Path(${JSON.stringify(join(checkout, indexed))})`,
+            `materialized = Path(${JSON.stringify(nested)})`,
+            "original = Path.stat",
+            "def guarded(self, *args, **kwargs):",
+            "    if self == indexed and kwargs.get('follow_symlinks') is False:",
+            "        return original(materialized, *args, **kwargs)",
+            "    return original(self, *args, **kwargs)",
+            "Path.stat = guarded",
+          ].join("\n"),
+        );
+        environment = { ...process.env, PYTHONPATH: instrumentation };
+      }
+
+      const rows = await inventory(checkout, ".", environment);
+      expect(rows).toContain(`./${name}/visible.ts`);
+      expect(rows).not.toContain(`./${name}/private.ts`);
     },
   );
 
