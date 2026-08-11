@@ -740,6 +740,65 @@ describe("diff rank input", () => {
     ]);
   });
 
+  test.each(["revisions", "local-patch"] as const)(
+    "preserves both sides of local-action type transitions (%s)",
+    async (mode) => {
+      const fixture = await createRepository();
+      const action = ".github/actions/local";
+      const actionPath = join(fixture.repository, action);
+      await writeRepositoryFile(
+        fixture.repository,
+        action,
+        "runs: previous action definition\n",
+      );
+      git(fixture.repository, "add", action);
+      git(fixture.repository, "commit", "-qm", "add local action file");
+      fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+      const pin = fixture.base;
+      git(fixture.repository, "rm", "--cached", "--quiet", "--", action);
+      await rm(actionPath);
+      await mkdir(actionPath);
+      git(
+        fixture.repository,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        `160000,${pin},${action}`,
+      );
+      if (mode === "revisions") {
+        git(fixture.repository, "commit", "-qm", "replace action with gitlink");
+      }
+
+      const [pinned] = await runDiffRankInput(fixture, mode);
+      expect(pinned?.preview).toContain("runs: previous action definition");
+      expect(pinned?.preview).toContain(`Git submodule commit ${pin}`);
+
+      if (mode === "local-patch") {
+        git(fixture.repository, "commit", "-qm", "replace action with gitlink");
+      }
+      fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+      git(fixture.repository, "rm", "--cached", "--quiet", "--", action);
+      await rm(actionPath, { recursive: true });
+      await writeRepositoryFile(
+        fixture.repository,
+        action,
+        "runs: replacement action definition\n",
+      );
+      git(fixture.repository, "add", action);
+      if (mode === "revisions") {
+        git(fixture.repository, "commit", "-qm", "replace gitlink with action");
+      }
+
+      const [replacement] = await runDiffRankInput(fixture, mode);
+      expect(replacement?.preview).toContain(
+        `Previous Git submodule commit ${pin}`,
+      );
+      expect(replacement?.preview).toContain(
+        "runs: replacement action definition",
+      );
+    },
+  );
+
   test("records every unresolved local-action submodule pin", async () => {
     const fixture = await createRepository();
     const action = ".github/actions/[local]";

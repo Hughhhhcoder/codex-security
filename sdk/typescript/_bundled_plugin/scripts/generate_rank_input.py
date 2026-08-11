@@ -625,6 +625,12 @@ def git_diff_entry(repo: Path, path: Path, mode: str, head: str) -> tuple[str, s
         if path.is_symlink() or (path.exists() and not path.is_dir()):
             raise SystemExit("Changed diff paths must not contain symbolic links: " + relative)
         if path.is_dir():
+            try:
+                resolve_scope(repo, str(path), expand_user=False, reject_symlinks=True)
+            except SystemExit as error:
+                raise SystemExit(
+                    "Changed diff paths must not contain symbolic links: " + relative
+                ) from error
             worktree = submodule_worktree_revision(repo, path)
             if worktree is not None and revision != worktree:
                 revision = f"{revision} (staged); {worktree} (worktree)"
@@ -1078,6 +1084,19 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             entry = git_diff_entry(repo, path, args.mode, args.head)
             if entry is not None and entry[0] == "160000":
                 preview = f"Git submodule commit {entry[1]}"
+                base_entry = git_diff_entry(repo, path, "revisions", args.base)
+                if base_entry is not None and base_entry[0].startswith("100"):
+                    previous, binary = git_blob_preview(
+                        repo, path, base_entry[1], args.preview_bytes
+                    )
+                    preview = fit_preview_lines(
+                        [
+                            f"Previous Git file (mode {base_entry[0]}):",
+                            "(binary content)" if binary else previous,
+                            preview,
+                        ],
+                        args.preview_bytes,
+                    )
             else:
                 if entry is not None and entry[0] == "120000":
                     raise SystemExit(
@@ -1095,6 +1114,11 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     repo, path, reject_hard_links=args.mode == "local-patch"
                 )
                 base_entry = git_diff_entry(repo, path, "revisions", args.base)
+                if base_entry is not None and base_entry[0] == "160000":
+                    preview = fit_preview_lines(
+                        [f"Previous Git submodule commit {base_entry[1]}", preview],
+                        args.preview_bytes,
+                    )
                 changes: list[str] = []
                 if (
                     base_entry is not None
