@@ -1001,7 +1001,6 @@ describe("security scan file inventory", () => {
         return;
       if (ownership === "unquoted-escape" && process.platform === "win32")
         return;
-      if (ownership === "case-alias" && process.platform !== "win32") return;
 
       const checkout = await repository();
       const nested = join(
@@ -1104,10 +1103,13 @@ describe("security scan file inventory", () => {
         await writeFile(join(metadata, "config.worktree"), override);
       }
       if (ownership === "case-alias") {
-        await writeFile(
-          join(nested, ".git"),
-          `gitdir: ${metadata.toUpperCase()}\n`,
+        const alias = metadata.toUpperCase();
+        const equivalent = await realpath(alias).then(
+          async (resolved) => resolved === (await realpath(metadata)),
+          () => false,
         );
+        if (!equivalent) return;
+        await writeFile(join(nested, ".git"), `gitdir: ${alias}\n`);
       }
 
       if (
@@ -1450,24 +1452,27 @@ describe("security scan file inventory", () => {
     expect(await inventory(checkout)).toContain("./visible.ts");
   });
 
-  test.skipIf(process.platform !== "win32")(
-    "allows case-equivalent contained Git object alternate paths",
-    async () => {
-      if (Bun.which("rg") === null) return;
+  test("allows case-equivalent contained Git object alternate paths", async () => {
+    if (Bun.which("rg") === null) return;
 
-      const checkout = await repository();
-      const objects = join(checkout, ".git", "extra-objects");
-      await mkdir(join(objects, "info"), { recursive: true });
-      await mkdir(join(objects, "pack"));
-      await writeFile(
-        join(checkout, ".git", "objects", "info", "alternates"),
-        `${objects.toUpperCase()}\n`,
-      );
-      await writeFile(join(checkout, "visible.ts"), "visible\n");
+    const checkout = await repository();
+    const objects = join(checkout, ".git", "extra-objects");
+    await mkdir(join(objects, "info"), { recursive: true });
+    await mkdir(join(objects, "pack"));
+    const alias = objects.toUpperCase();
+    const equivalent = await realpath(alias).then(
+      async (resolved) => resolved === (await realpath(objects)),
+      () => false,
+    );
+    if (!equivalent) return;
+    await writeFile(
+      join(checkout, ".git", "objects", "info", "alternates"),
+      `${alias}\n`,
+    );
+    await writeFile(join(checkout, "visible.ts"), "visible\n");
 
-      expect(await inventory(checkout)).toContain("./visible.ts");
-    },
-  );
+    expect(await inventory(checkout)).toContain("./visible.ts");
+  });
 
   test("allows repository-owned transitive Git object alternates", async () => {
     if (Bun.which("rg") === null) return;

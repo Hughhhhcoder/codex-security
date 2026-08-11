@@ -249,12 +249,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for current in reversed((gitdir, *gitdir.parents)):
                 if inspect_metadata(current, directory=True) is None:
                     break
-            internally_owned = gitdir.is_relative_to(repository)
+            internally_owned = len(gitdir.parts) >= len(repository.parts)
             if internally_owned:
                 ancestor = gitdir
                 for _ in range(len(gitdir.parts) - len(repository.parts)):
                     ancestor = ancestor.parent
-                internally_owned = directory_identity(ancestor) == directory_identity(repository)
+                internally_owned = same_filesystem_path(ancestor, repository)
             backpointer = gitdir / "gitdir"
             if inspect_metadata(backpointer, directory=False) is not None:
                 backpointer_owned = True
@@ -517,7 +517,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     (
                                         candidate
                                         for candidate in (repository, *roots)
-                                        if alternate.is_relative_to(candidate)
+                                        if len(alternate.parts) >= len(candidate.parts)
+                                        and all(
+                                            unicodedata.normalize("NFC", actual).casefold()
+                                            == unicodedata.normalize("NFC", expected).casefold()
+                                            for actual, expected in zip(
+                                                alternate.parts, candidate.parts
+                                            )
+                                        )
                                     ),
                                     None,
                                 )
@@ -530,7 +537,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                         "external Git object alternates are not supported"
                                     )
                                 current = owner
-                                for component in alternate.relative_to(owner).parts:
+                                for component in alternate.parts[len(owner.parts) :]:
                                     current /= component
                                     if inspect_metadata(current, directory=True) is None:
                                         raise InventoryError(
