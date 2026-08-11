@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -156,6 +157,64 @@ describe("security scan file inventory", () => {
     expect(rows).toContain("./nested/visible.ts");
     expect(rows).not.toContain("./nested/.env");
   });
+
+  test("recovers an embedded checkout hidden only by its own ignore file", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "nested");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await writeFile(join(nested, ".ignore"), "*\n");
+    await writeFile(join(nested, "tracked.ts"), "export {};\n");
+    execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
+
+    expect(await inventory(checkout)).toContain("./nested/tracked.ts");
+    await writeFile(join(checkout, ".ignore"), "nested/\n");
+    expect(await inventory(checkout)).not.toContain("./nested/tracked.ts");
+  });
+
+  test.each([".ignore", ".rgignore"])(
+    "does not recover nested tracked files excluded by outer %s rules",
+    async (ignore) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await writeFile(join(checkout, ignore), "nested/private.ts\n");
+      await writeFile(join(nested, "private.ts"), "private\n");
+      await writeFile(join(nested, "visible.ts"), "visible\n");
+      execFileSync("git", ["add", "private.ts", "visible.ts"], {
+        cwd: nested,
+      });
+
+      const rows = await inventory(checkout);
+      expect(rows).toContain("./nested/visible.ts");
+      expect(rows).not.toContain("./nested/private.ts");
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "inventories an explicit file without listing its parent directory",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const directory = join(checkout, "restricted");
+      await mkdir(directory);
+      await writeFile(join(directory, "source.ts"), "export {};\n");
+      await chmod(directory, 0o111);
+      try {
+        expect(await inventory(checkout, "restricted/source.ts")).toEqual([
+          "restricted/source.ts",
+        ]);
+      } finally {
+        await chmod(directory, 0o755);
+      }
+    },
+  );
 
   test("preserves supported in-repository symbolic path targets", async () => {
     const checkout = await repository();

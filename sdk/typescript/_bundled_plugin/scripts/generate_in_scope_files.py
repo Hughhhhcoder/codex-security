@@ -272,9 +272,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         reject_symbolic_ignore(directory, allow_ignored=True)
         if directory != repository and (directory / ".git").exists():
             discovered_roots[directory_identity(directory)] = directory
+        if not selected.is_dir():
+            continue
         for entry in directory.iterdir():
             if entry.name != ".git" and git_metadata_path(directory, entry.name):
                 metadata_aliases.add(entry.relative_to(repository).parts)
+            elif (
+                entry.name != ".git"
+                and not entry.is_symlink()
+                and entry.is_dir()
+                and (entry / ".git").exists()
+            ):
+                discovered_roots[directory_identity(entry)] = entry
     if metadata_aliases:
         rows = {
             row
@@ -304,6 +313,53 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for row in rows
             if normalized(row.removesuffix(b"\n")).removeprefix(b"./") in visible
         }
+
+    def visible_to_outer_ignores(root: Path, candidates: list[Path]) -> set[bytes]:
+        requested = {
+            normalized(os.fsencode(candidate.relative_to(repository).as_posix()))
+            for candidate in candidates
+        }
+        directories: list[Path] = []
+        current = root.parent
+        while True:
+            directories.append(current)
+            if current == repository:
+                break
+            current = current.parent
+        ignore_files = [
+            directory / name
+            for directory in directories
+            for name in IGNORE_FILE_NAMES
+            if (directory / name).is_file()
+        ]
+        if not ignore_files:
+            return requested
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            probe = Path(temporary_directory)
+            for ignore in ignore_files:
+                destination = probe / ignore.relative_to(repository)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(ignore.read_bytes())
+            for relative in requested:
+                destination = probe / os.fsdecode(relative)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.touch()
+            result = subprocess.run(
+                [*command, "--", "."],
+                cwd=probe,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if result.returncode not in (0, 1):
+                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                raise InventoryError(f"could not evaluate outer ignore rules: {detail}")
+            return {
+                normalized(relative).removeprefix(b"./")
+                for relative in result.stdout.split(b"\0")
+                if normalized(relative).removeprefix(b"./") in requested
+            }
 
     environment = os.environ.copy()
     for name in (
@@ -428,11 +484,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             relative = os.fsencode(root.relative_to(repository).as_posix())
             if selected != repository and (selected == root or selected.is_relative_to(root)):
                 return True
-            return any(
+            if any(
                 path == relative or path.startswith(relative + b"/")
                 for paths in (visible_paths, outer_tracked_paths)
                 for path in paths
-            )
+            ):
+                return True
+            marker = root / ".codex-security-inventory-probe"
+            return bool(visible_to_outer_ignores(root, [marker]))
 
         nested_roots = {
             identity: root
@@ -601,6 +660,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 for row in rows
                 if (path := normalized(row.removesuffix(b"\n"))) in allowed
                 or (
+                    selected.is_file()
+                    and path.removeprefix(b"./")
+                    == os.fsencode(selected.relative_to(repository).as_posix())
+                )
+                or (
                     worktree is None
                     and not any(path.startswith(root) for root in inspected_prefixes)
                 )
@@ -696,15 +760,36 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 yield candidate
 
         for root_identity, (root, tracked_paths) in cached_by_root.items():
-            for relative in tracked_paths:
-                for candidate in tracked_variants(root_identity, root, relative):
-                    relative_path = prefix + os.fsencode(
-                        candidate.relative_to(repository).as_posix()
+            candidates = [
+                candidate
+                for relative in tracked_paths
+                for candidate in tracked_variants(root_identity, root, relative)
+            ]
+            outer_visible = (
+                visible_to_outer_ignores(root, candidates)
+                if root != repository
+                and not (
+                    selected != repository
+                    and (selected == root or selected.is_relative_to(root))
+                )
+                else None
+            )
+            for candidate in candidates:
+                relative = os.fsencode(candidate.relative_to(repository).as_posix())
+                if (
+                    outer_visible is not None
+                    and normalized(relative) not in outer_visible
+                    and not any(
+                        relative == tracked or relative.startswith(tracked + b"/")
+                        for tracked in outer_tracked_paths
                     )
-                    key = normalized(relative_path)
-                    if key not in recorded:
-                        rows.add(relative_path + b"\n")
-                        recorded.add(key)
+                ):
+                    continue
+                relative_path = prefix + relative
+                key = normalized(relative_path)
+                if key not in recorded:
+                    rows.add(relative_path + b"\n")
+                    recorded.add(key)
 
     rows = sorted(rows)
 
