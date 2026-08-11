@@ -796,6 +796,20 @@ describe("diff rank input", () => {
       expect(replacement?.preview).toContain(
         "runs: replacement action definition",
       );
+
+      await writeRepositoryFile(
+        fixture.repository,
+        action,
+        Uint8Array.from([0, 1, 2]),
+      );
+      git(fixture.repository, "add", action);
+      if (mode === "revisions") {
+        git(fixture.repository, "commit", "-qm", "replace action with binary");
+      }
+
+      const [binary] = await runDiffRankInput(fixture, mode);
+      expect(binary?.preview).toContain(`Previous Git submodule commit ${pin}`);
+      expect(binary?.preview).toContain("(binary content)");
     },
   );
 

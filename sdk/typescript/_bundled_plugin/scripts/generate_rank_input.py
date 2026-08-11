@@ -1114,11 +1114,6 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     repo, path, reject_hard_links=args.mode == "local-patch"
                 )
                 base_entry = git_diff_entry(repo, path, "revisions", args.base)
-                if base_entry is not None and base_entry[0] == "160000":
-                    preview = fit_preview_lines(
-                        [f"Previous Git submodule commit {base_entry[1]}", preview],
-                        args.preview_bytes,
-                    )
                 changes: list[str] = []
                 if (
                     base_entry is not None
@@ -1137,9 +1132,18 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                         if index == 0 or mode != modes[index - 1]
                     ]
                 if is_binary:
-                    if len(changes) <= 1 and (entry is None or entry[0] != "100755"):
+                    if (
+                        len(changes) <= 1
+                        and (entry is None or entry[0] != "100755")
+                        and (base_entry is None or base_entry[0] != "160000")
+                    ):
                         continue
                     preview = "(binary content)"
+                if base_entry is not None and base_entry[0] == "160000":
+                    preview = fit_preview_lines(
+                        [f"Previous Git submodule commit {base_entry[1]}", preview],
+                        args.preview_bytes,
+                    )
                 if len(changes) > 1:
                     preview = fit_preview_lines(
                         [f"Git file mode: {' → '.join(changes)}", preview],
