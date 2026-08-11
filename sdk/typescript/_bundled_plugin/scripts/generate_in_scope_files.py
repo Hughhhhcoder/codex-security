@@ -1537,10 +1537,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     continue
                 if index < len(root_parts):
                     return
-                indexed_name = os.fsdecode(indexed)
-                requested_name = os.fsdecode(requested)
-                if indexed_name_key(indexed_name) != indexed_name_key(requested_name):
-                    return
 
             def descend(parent: Path, index: int) -> list[Path]:
                 try:
@@ -1563,6 +1559,22 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 variants = directory_entries[parent_identity].get(
                     indexed_name_key(component), []
                 )
+                if not variants:
+                    try:
+                        expected = (parent / component).stat(follow_symlinks=False)
+                    except OSError:
+                        return []
+                    if symbolic_metadata(expected):
+                        return []
+                    variants = [
+                        candidate
+                        for group in directory_entries[parent_identity].values()
+                        for candidate in group
+                    ]
+                selected_index = len(root_parts) + index
+                if selected_index < len(selected_parts):
+                    requested = os.fsdecode(selected_parts[selected_index])
+                    variants = [candidate for candidate in variants if candidate.name == requested]
                 exact = [candidate for candidate in variants if candidate.name == component]
                 alternatives = [
                     candidate

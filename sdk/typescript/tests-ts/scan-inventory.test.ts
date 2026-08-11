@@ -396,6 +396,48 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each([".", "LongDirectory", "LongDirectory/private.ts"])(
+    "restores tracked 8.3 aliases for %s scans using no-follow identity",
+    async (scope) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const indexed = join(checkout, "LONGDI~1");
+      const materialized = join(checkout, "LongDirectory");
+      await mkdir(indexed);
+      await writeFile(join(indexed, "private.ts"), "tracked\n");
+      execFileSync("git", ["add", "LONGDI~1/private.ts"], { cwd: checkout });
+      await rm(indexed, { recursive: true });
+      await mkdir(materialized);
+      await writeFile(join(materialized, "private.ts"), "tracked\n");
+      await writeFile(join(checkout, ".gitignore"), "LongDirectory/\n");
+
+      const instrumentation = join(dirname(checkout), "instrumentation");
+      await mkdir(instrumentation);
+      await writeFile(
+        join(instrumentation, "sitecustomize.py"),
+        [
+          "from pathlib import Path",
+          `indexed = Path(${JSON.stringify(indexed)})`,
+          `materialized = Path(${JSON.stringify(materialized)})`,
+          "original = Path.stat",
+          "def guarded(self, *args, **kwargs):",
+          "    if self == indexed and kwargs.get('follow_symlinks') is False:",
+          "        return original(materialized, *args, **kwargs)",
+          "    return original(self, *args, **kwargs)",
+          "Path.stat = guarded",
+        ].join("\n"),
+      );
+
+      expect(
+        await inventory(checkout, scope, {
+          ...process.env,
+          PYTHONPATH: instrumentation,
+        }),
+      ).toContain(`${scope === "." ? "./" : ""}LongDirectory/private.ts`);
+    },
+  );
+
   test("keeps an explicitly selected ignored file without widening its directory", async () => {
     if (Bun.which("rg") === null) return;
 
