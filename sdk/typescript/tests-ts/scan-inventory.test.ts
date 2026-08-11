@@ -1048,6 +1048,7 @@ describe("security scan file inventory", () => {
     "disabled",
     "disabled-comment",
     "disabled-empty",
+    "disabled-quoted",
     "disabled-symlink",
     "hash-comment-override",
     "semicolon-comment-override",
@@ -1138,13 +1139,18 @@ describe("security scan file inventory", () => {
         );
       } else if (
         ownership === "disabled-comment" ||
-        ownership === "disabled-empty"
+        ownership === "disabled-empty" ||
+        ownership === "disabled-quoted"
       ) {
         await writeFile(
           config,
           (await readFile(config, "utf8")).replace(
             /^([ \t]*worktreeConfig[ \t]*=[ \t]*)false$/im,
-            ownership === "disabled-comment" ? "$1false # disabled" : "$1",
+            ownership === "disabled-comment"
+              ? "$1false # disabled"
+              : ownership === "disabled-quoted"
+                ? '$1f"al"se'
+                : "$1",
           ),
         );
       } else if (ownership.endsWith("comment-override")) {
@@ -1189,6 +1195,8 @@ describe("security scan file inventory", () => {
         const unused = join(dirname(checkout), "unused.config");
         await writeFile(unused, override);
         await symlink(unused, join(metadata, "config.worktree"));
+      } else if (ownership === "disabled-quoted") {
+        await mkdir(join(metadata, "config.worktree"));
       } else {
         await writeFile(join(metadata, "config.worktree"), override);
       }
@@ -1331,6 +1339,109 @@ describe("security scan file inventory", () => {
       );
     },
   );
+
+  test.each(["primary", "alternate"])(
+    "rejects symbolic incremental %s Git multi-pack-index directories",
+    async (owner) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const external = await repository();
+      const objects =
+        owner === "primary"
+          ? join(checkout, ".git", "objects")
+          : join(checkout, ".git", "extra-objects");
+      if (owner === "alternate") {
+        await mkdir(join(objects, "info"), { recursive: true });
+        await mkdir(join(objects, "pack"));
+        await writeFile(
+          join(checkout, ".git", "objects", "info", "alternates"),
+          `${objects}\n`,
+        );
+      }
+      const target = join(
+        external,
+        ".git",
+        "objects",
+        "pack",
+        "multi-pack-index.d",
+      );
+      await mkdir(target);
+      await symlink(
+        target,
+        join(objects, "pack", "multi-pack-index.d"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
+  test
+    .skipIf(process.platform === "win32")
+    .each(["chain", "midx", "bitmap", "rev"])(
+    "rejects symbolic incremental Git multi-pack-index %s files",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const directory = join(
+        checkout,
+        ".git",
+        "objects",
+        "pack",
+        "multi-pack-index.d",
+      );
+      const target = join(dirname(checkout), "external-index");
+      await mkdir(directory);
+      await writeFile(target, "external\n");
+      const name =
+        kind === "chain"
+          ? "multi-pack-index-chain"
+          : `multi-pack-index-${"a".repeat(40)}.${kind}`;
+      await symlink(target, join(directory, name));
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
+  test("inventories genuine incremental Git multi-pack indexes", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    await writeFile(join(checkout, "visible.ts"), "tracked\n");
+    execFileSync("git", ["add", "visible.ts"], { cwd: checkout });
+    commit(checkout);
+    execFileSync("git", ["repack", "-ad"], { cwd: checkout, stdio: "ignore" });
+    try {
+      execFileSync("git", ["multi-pack-index", "write", "--incremental"], {
+        cwd: checkout,
+        stdio: "pipe",
+      });
+    } catch (error) {
+      const stderr = String(
+        (error as Error & { stderr?: Buffer }).stderr ?? "",
+      );
+      if (/unknown|unrecognized/i.test(stderr)) return;
+      throw error;
+    }
+    await mkdir(
+      join(
+        checkout,
+        ".git",
+        "objects",
+        "pack",
+        "multi-pack-index.d",
+        "unrelated-dir",
+      ),
+    );
+
+    expect(await inventory(checkout)).toContain("./visible.ts");
+  });
 
   test.skipIf(process.platform === "win32").each([
     ["primary", "pack"],
@@ -1549,27 +1660,34 @@ describe("security scan file inventory", () => {
     expect(await inventory(checkout)).toContain("./visible.ts");
   });
 
-  test("allows case-equivalent contained Git object alternate paths", async () => {
-    if (Bun.which("rg") === null) return;
+  test.each(["case-alias", "short-alias"])(
+    "allows %s repository-owned Git object alternate paths",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
 
-    const checkout = await repository();
-    const objects = join(checkout, ".git", "extra-objects");
-    await mkdir(join(objects, "info"), { recursive: true });
-    await mkdir(join(objects, "pack"));
-    const alias = objects.toUpperCase();
-    const equivalent = await realpath(alias).then(
-      async (resolved) => resolved === (await realpath(objects)),
-      () => false,
-    );
-    if (!equivalent) return;
-    await writeFile(
-      join(checkout, ".git", "objects", "info", "alternates"),
-      `${alias}\n`,
-    );
-    await writeFile(join(checkout, "visible.ts"), "visible\n");
+      const checkout = await repository();
+      const objects = join(checkout, ".git", "extra-objects");
+      await mkdir(join(objects, "info"), { recursive: true });
+      await mkdir(join(objects, "pack"));
+      const alias =
+        kind === "case-alias"
+          ? objects.toUpperCase()
+          : windowsShortPath(objects);
+      if (alias === null) return;
+      const equivalent = await realpath(alias).then(
+        async (resolved) => resolved === (await realpath(objects)),
+        () => false,
+      );
+      if (!equivalent) return;
+      await writeFile(
+        join(checkout, ".git", "objects", "info", "alternates"),
+        `${alias}\n`,
+      );
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
 
-    expect(await inventory(checkout)).toContain("./visible.ts");
-  });
+      expect(await inventory(checkout)).toContain("./visible.ts");
+    },
+  );
 
   test("allows repository-owned transitive Git object alternates", async () => {
     if (Bun.which("rg") === null) return;

@@ -215,6 +215,25 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         for member in entry.iterdir():
                             member_canonical = member.name.casefold()
                             if canonical == "pack":
+                                if member_canonical == "multi-pack-index.d":
+                                    if member.name != member_canonical and not aliases_canonical_path(
+                                        member, member_canonical
+                                    ):
+                                        continue
+                                    inspect_metadata(member, directory=True)
+                                    for layer in member.iterdir():
+                                        layer_canonical = layer.name.casefold()
+                                        if layer_canonical != "multi-pack-index-chain" and not re.fullmatch(
+                                            r"multi-pack-index-[0-9a-f]{40}(?:[0-9a-f]{24})?\.(?:midx|bitmap|rev)",
+                                            layer_canonical,
+                                        ):
+                                            continue
+                                        if layer.name != layer_canonical and not aliases_canonical_path(
+                                            layer, layer_canonical
+                                        ):
+                                            continue
+                                        inspect_metadata(layer, directory=False)
+                                    continue
                                 if member_canonical == "multi-pack-index":
                                     expected = member_canonical
                                 elif not member_canonical.endswith(
@@ -358,6 +377,33 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 position += 1
             return bytes(joined)
 
+        def decode_config_value(value: str) -> tuple[bytes, bytes]:
+            decoded = bytearray()
+            normalized = bytearray()
+            quoted = False
+            escaped = False
+            replacements = {ord("n"): ord("\n"), ord("t"): ord("\t"), ord("b"): ord("\b")}
+            for character in os.fsencode(value):
+                if escaped:
+                    if character not in (*replacements, ord('"'), ord("\\")):
+                        raise InventoryError("invalid Git worktree path")
+                    replacement = replacements.get(character, character)
+                    decoded.append(replacement)
+                    normalized.append(replacement)
+                    escaped = False
+                elif character == ord("\\"):
+                    escaped = True
+                elif character == ord('"'):
+                    quoted = not quoted
+                else:
+                    decoded.append(character)
+                    normalized.append(
+                        ord(" ") if character == ord("\t") and not quoted else character
+                    )
+            if quoted or escaped:
+                raise InventoryError("invalid Git worktree path")
+            return bytes(decoded), bytes(normalized)
+
         options: dict[tuple[str, str], str | None] = {}
         config_path = roots[-1] / "config"
         worktree_config_enabled = False
@@ -366,7 +412,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 for candidate in (config_path, gitdir / "config.worktree"):
                     if candidate != config_path:
                         extension = options.get(("extensions", "worktreeconfig"), "false")
-                        normalized = "true" if extension is None else extension.strip().strip('"').casefold()
+                        normalized = (
+                            "true"
+                            if extension is None
+                            else os.fsdecode(decode_config_value(extension)[0]).strip().casefold()
+                        )
                         worktree_config_enabled = normalized not in ("", "false", "no", "off", "0")
                         if not worktree_config_enabled:
                             continue
@@ -419,36 +469,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if not backpointer_owned:
                     raise InventoryError("Git metadata directory does not own selected worktree")
             else:
-                decoded = bytearray()
-                normalized = bytearray()
-                quoted = False
-                escaped = False
-                for character in os.fsencode(configured_worktree):
-                    if escaped:
-                        replacements = {ord("n"): ord("\n"), ord("t"): ord("\t"), ord("b"): ord("\b")}
-                        if character not in (*replacements, ord('"'), ord("\\")):
-                            raise InventoryError("invalid Git worktree path")
-                        replacement = replacements.get(character, character)
-                        decoded.append(replacement)
-                        normalized.append(replacement)
-                        escaped = False
-                    elif character == ord("\\"):
-                        escaped = True
-                    elif character == ord('"'):
-                        quoted = not quoted
-                    else:
-                        decoded.append(character)
-                        normalized.append(
-                            ord(" ") if character == ord("\t") and not quoted else character
-                        )
-                if quoted or escaped:
-                    raise InventoryError("invalid Git worktree path")
-                configured_worktree = os.fsdecode(bytes(decoded))
+                decoded, normalized = decode_config_value(configured_worktree)
+                configured_worktree = os.fsdecode(decoded)
                 target = Path(configured_worktree)
                 if not target.is_absolute():
                     target = gitdir / target
                 if decoded != normalized:
-                    normalized_target = Path(os.fsdecode(bytes(normalized)))
+                    normalized_target = Path(os.fsdecode(normalized))
                     if not normalized_target.is_absolute():
                         normalized_target = gitdir / normalized_target
                     try:
@@ -558,31 +585,32 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 if not alternate.is_absolute():
                                     alternate = object_root / alternate
                                 alternate = Path(os.path.abspath(alternate))
-                                owner = next(
-                                    (
-                                        candidate
-                                        for candidate in (repository, *roots)
-                                        if len(alternate.parts) >= len(candidate.parts)
-                                        and all(
-                                            unicodedata.normalize("NFC", actual).casefold()
-                                            == unicodedata.normalize("NFC", expected).casefold()
-                                            for actual, expected in zip(
-                                                alternate.parts, candidate.parts
-                                            )
-                                        )
-                                    ),
-                                    None,
-                                )
+                                owner = None
                                 anchor = alternate
-                                if owner is not None:
-                                    for _ in range(len(alternate.parts) - len(owner.parts)):
-                                        anchor = anchor.parent
-                                if owner is None or directory_identity(anchor) != directory_identity(owner):
+                                for candidate in (repository, *roots):
+                                    if len(alternate.parts) < len(candidate.parts):
+                                        continue
+                                    candidate_anchor = alternate
+                                    for _ in range(len(alternate.parts) - len(candidate.parts)):
+                                        candidate_anchor = candidate_anchor.parent
+                                    try:
+                                        metadata = candidate_anchor.stat(follow_symlinks=False)
+                                    except FileNotFoundError:
+                                        continue
+                                    if symbolic_metadata(metadata) or (
+                                        metadata.st_dev,
+                                        metadata.st_ino,
+                                    ) != directory_identity(candidate):
+                                        continue
+                                    owner = candidate
+                                    anchor = candidate_anchor
+                                    break
+                                if owner is None:
                                     raise InventoryError(
                                         "external Git object alternates are not supported"
                                     )
-                                current = owner
-                                for component in alternate.parts[len(owner.parts) :]:
+                                current = anchor
+                                for component in alternate.parts[len(anchor.parts) :]:
                                     current /= component
                                     if inspect_metadata(current, directory=True) is None:
                                         raise InventoryError(
