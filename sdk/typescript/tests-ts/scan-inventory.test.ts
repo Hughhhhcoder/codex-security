@@ -707,9 +707,13 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test.each(["include", 'includeIf "gitdir:**"'])(
-    "rejects repository-directed %s config before invoking Git",
-    async (section) => {
+  test.each([
+    ["include", "without BOM"],
+    ['includeIf "gitdir:**"', "without BOM"],
+    ["include", "with BOM"],
+  ])(
+    "rejects repository-directed %s config %s before invoking Git",
+    async (section, bom) => {
       if (Bun.which("rg") === null) return;
 
       const checkout = await repository();
@@ -718,7 +722,7 @@ describe("security scan file inventory", () => {
       const config = join(checkout, ".git", "config");
       await writeFile(
         config,
-        `${await readFile(config, "utf8")}[${section}]\n\tpath = ${external}\n`,
+        `${bom === "with BOM" ? "\ufeff" : ""}[${section}]\n\tpath = ${external}\n${await readFile(config, "utf8")}`,
       );
 
       await expect(inventory(checkout)).rejects.toThrow(

@@ -222,7 +222,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         contents = path.read_bytes()
                     except OSError as error:
                         raise InventoryError(f"could not inspect Git metadata: {directory}") from error
-                    if GIT_CONFIG_INCLUDE.search(contents):
+                    if GIT_CONFIG_INCLUDE.search(contents.removeprefix(b"\xef\xbb\xbf")):
                         raise InventoryError("Git config includes are not supported")
             try:
                 shared_indexes = (
