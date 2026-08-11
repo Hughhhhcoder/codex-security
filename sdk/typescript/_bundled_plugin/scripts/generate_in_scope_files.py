@@ -232,17 +232,30 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for relative in (
                 "HEAD",
                 "index",
+                "packed-refs",
+                "refs",
+                "refs/heads",
+                "refs/tags",
                 "config",
                 "config.worktree",
                 "info",
                 "info/exclude",
+                "info/sparse-checkout",
                 "objects",
                 "objects/info",
                 "objects/info/alternates",
             ):
                 path = root / relative
                 metadata = inspect_metadata(
-                    path, directory=relative in ("info", "objects", "objects/info")
+                    path,
+                    directory=relative in (
+                        "refs",
+                        "refs/heads",
+                        "refs/tags",
+                        "info",
+                        "objects",
+                        "objects/info",
+                    ),
                 )
                 if metadata is not None and relative in ("config", "config.worktree"):
                     try:
@@ -487,7 +500,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 )
                             )
                             rebased = []
-                            for line in contents.removeprefix(b"\xef\xbb\xbf").splitlines():
+                            for line in contents.removeprefix(b"\xef\xbb\xbf").split(b"\n"):
+                                line = line.removesuffix(b"\r")
                                 if not line or line.startswith(b"#"):
                                     continue
                                 negated = line.startswith(b"!")

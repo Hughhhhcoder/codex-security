@@ -711,6 +711,7 @@ describe("security scan file inventory", () => {
   test.each([
     ["slash-only", "/\n"],
     ["whitespace-only", "   \n"],
+    ["embedded-carriage-return", ".IGNORE/tracked.ts\rignored\n"],
   ])(
     "keeps %s ignores inert when isolating nested checkout names",
     async (_description, contents) => {
@@ -1016,15 +1017,17 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test.skipIf(process.platform === "win32")(
-    "rejects non-regular Git metadata before invoking Git",
-    async () => {
+  test
+    .skipIf(process.platform === "win32")
+    .each(["config", "info/sparse-checkout"])(
+    "rejects non-regular Git %s metadata before invoking Git",
+    async (relative) => {
       if (Bun.which("rg") === null || Bun.which("mkfifo") === null) return;
 
       const checkout = await repository();
-      const config = join(checkout, ".git", "config");
-      await rm(config);
-      execFileSync("mkfifo", [config]);
+      const metadata = join(checkout, ".git", relative);
+      await rm(metadata, { force: true });
+      execFileSync("mkfifo", [metadata]);
 
       await expect(inventory(checkout)).rejects.toThrow(
         "non-regular Git metadata files are not supported",
@@ -1047,25 +1050,35 @@ describe("security scan file inventory", () => {
 
   test
     .skipIf(process.platform === "win32")
-    .each(["index", "config", "info/exclude"])(
-    "rejects a symbolic Git metadata %s",
-    async (relative) => {
-      if (Bun.which("rg") === null) return;
+    .each([
+      "index",
+      "config",
+      "info/exclude",
+      "info/sparse-checkout",
+      "packed-refs",
+      "refs",
+      "refs/heads",
+    ])("rejects a symbolic Git metadata %s", async (relative) => {
+    if (Bun.which("rg") === null) return;
 
-      const checkout = await repository();
-      const external = await repository();
-      await writeFile(join(external, "source.ts"), "tracked\n");
-      execFileSync("git", ["add", "source.ts"], { cwd: external });
-      const metadata = join(checkout, ".git", relative);
-      await rm(metadata, { force: true });
-      await symlink(join(external, ".git", relative), metadata);
-      await writeFile(join(checkout, "visible.ts"), "visible\n");
+    const checkout = await repository();
+    const external = await repository();
+    await writeFile(join(external, "source.ts"), "tracked\n");
+    execFileSync("git", ["add", "source.ts"], { cwd: external });
+    const metadata = join(checkout, ".git", relative);
+    const directory = relative === "refs" || relative === "refs/heads";
+    const target = join(external, ".git", relative);
+    if (relative === "info/sparse-checkout" || relative === "packed-refs") {
+      await writeFile(target, "external\n");
+    }
+    await rm(metadata, { recursive: directory, force: true });
+    await symlink(target, metadata);
+    await writeFile(join(checkout, "visible.ts"), "visible\n");
 
-      await expect(inventory(checkout)).rejects.toThrow(
-        "symbolic Git metadata paths are not supported",
-      );
-    },
-  );
+    await expect(inventory(checkout)).rejects.toThrow(
+      "symbolic Git metadata paths are not supported",
+    );
+  });
 
   test("inventories linked worktrees with regular Git metadata", async () => {
     if (Bun.which("rg") === null) return;
