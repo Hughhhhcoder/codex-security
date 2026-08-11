@@ -186,6 +186,7 @@ describe("diff rank input", () => {
   test("inventories committed security-sensitive workflows, containers, and agent instructions", async () => {
     const fixture = await createRepository();
     const files: Record<string, string> = {
+      ".circleci/build/release.yml": "jobs:\n  release: {}\n",
       ".circleci/config.yml": "version: 2.1\njobs: {}\n",
       ".devcontainer/devcontainer.json":
         '{"postCreateCommand":"npm run setup"}\n',
@@ -198,11 +199,15 @@ describe("diff rank input", () => {
         "Review changes before running code.\n",
       ".github/dependabot.yml": "version: 2\nupdates: []\n",
       ".github/ISSUE_TEMPLATE/bug.yml": "name: Bug report\n",
+      ".github/instructions/security.instructions.md":
+        "Review authentication changes before execution.\n",
+      ".github/scripts/ci/check.py": "print('review CI checks')\n",
       ".github/scripts/security.py": "print('review first-party changes')\n",
       ".github/workflows/security.yml": "name: Security\non: pull_request\n",
       ".github/workflows/scripts/check.py": "print('check workflow')\n",
       ".env.example": "AUTH_PROVIDER=example\n",
       "AGENTS.md": "Require authorization before exposing credentials.\n",
+      "build/Dockerfile": "FROM scratch\n",
       "CLAUDE.md": "Keep repository credentials private.\n",
       CODEOWNERS: "* @repository-owners\n",
       "SECURITY.md": "Do not suppress authentication or credential findings.\n",
@@ -228,6 +233,7 @@ describe("diff rank input", () => {
       "services/api/app.Dockerfile": "FROM node:24-alpine\n",
       "src/app.ts": "export const value = 2;\n",
       "src/auth.cjs": "module.exports = { authenticated: true };\n",
+      "tests/Dockerfile": "FROM node:24-alpine\n",
       "vendor/Dockerfile": "FROM external-vendor\n",
       "vendor/dependency.py": "print('vendored dependency')\n",
     };
@@ -253,6 +259,7 @@ describe("diff rank input", () => {
 
     expect(rows.map((row) => row.path)).toEqual(
       [
+        ".circleci/build/release.yml",
         ".circleci/config.yml",
         ".devcontainer/devcontainer.json",
         ".dockerignore",
@@ -262,11 +269,14 @@ describe("diff rank input", () => {
         ".github/CODEOWNERS",
         ".github/copilot-instructions.md",
         ".github/dependabot.yml",
+        ".github/instructions/security.instructions.md",
+        ".github/scripts/ci/check.py",
         ".github/scripts/security.py",
         ".github/workflows/security.yml",
         ".github/workflows/scripts/check.py",
         ".env.example",
         "AGENTS.md",
+        "build/Dockerfile",
         "CLAUDE.md",
         "CODEOWNERS",
         "SECURITY.md",
@@ -287,6 +297,7 @@ describe("diff rank input", () => {
         "services/api/app.Dockerfile",
         "src/app.ts",
         "src/auth.cjs",
+        "tests/Dockerfile",
       ].sort(),
     );
     expect(rows.every((row) => row.area === "diff")).toBe(true);
@@ -856,6 +867,7 @@ describe("diff rank input", () => {
     );
     git(fixture.repository, "commit", "-qm", "pin local action");
     fixture.base = git(fixture.repository, "rev-parse", "HEAD");
+    git(fixture.repository, "config", "diff.ignoreSubmodules", "all");
     await writeRepositoryFile(submodule, "action.yml", "runs: updated\n");
     git(submodule, "add", "action.yml");
     git(submodule, "commit", "-qm", "update action");
@@ -1122,6 +1134,23 @@ describe("diff rank input", () => {
         preview: "print('rename')",
       },
     ]);
+  });
+
+  test("keeps staged source when its working-tree copy has been removed", async () => {
+    const fixture = await createRepository();
+    await writeRepositoryFile(
+      fixture.repository,
+      "src/app.ts",
+      "export const value = 2;\n",
+    );
+    git(fixture.repository, "add", "--", "src/app.ts");
+    await rm(join(fixture.repository, "src", "app.ts"));
+
+    const rows = await runDiffRankInput(fixture, "local-patch");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.path).toBe("src/app.ts");
+    expect(rows[0]?.preview).toContain("value = 2");
+    expect(rows[0]?.preview).toContain("(deleted)");
   });
 
   test("continues to exclude binary files and ignored dependency directories", async () => {

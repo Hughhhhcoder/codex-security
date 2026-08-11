@@ -141,6 +141,7 @@ SECURITY_RELEVANT_DIFF_FILENAMES = {
 
 SECURITY_RELEVANT_GITHUB_DIFF_DIRECTORIES = {
     "actions",
+    "instructions",
     "scripts",
     "workflows",
 }
@@ -351,7 +352,22 @@ def diff_path_is_included(path: Path) -> bool:
         return ".git" not in path.parts
     if diff_path_is_security_relevant(path):
         return not any(
-            part in EXCLUDED_DIRS and part not in {".github", ".circleci", ".devcontainer"}
+            part in EXCLUDED_DIRS
+            and part
+            not in {
+                ".github",
+                ".circleci",
+                ".devcontainer",
+                "build",
+                "build_config",
+                "build_configs",
+                "build-tools",
+                "build_tools",
+                "ci",
+                "test",
+                "tests",
+                "testing",
+            }
             for part in path.parts
         )
     return not path_is_excluded(path)
@@ -955,6 +971,7 @@ def run_git_changed_paths(repo: Path, diff_args: list[str]) -> list[tuple[Path, 
             "-C",
             str(repo),
             "diff",
+            "--ignore-submodules=none",
             "--name-status",
             "-z",
             "--diff-filter=ACMRDTU",
@@ -1086,7 +1103,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
                     and entry[0].startswith("100")
                 ):
                     modes = [base_entry[0], entry[0]]
-                    if track_worktree_filemode:
+                    if track_worktree_filemode and path.exists():
                         worktree_mode = "100755" if path.stat().st_mode & 0o111 else "100644"
                         if worktree_mode != modes[-1]:
                             modes.append(worktree_mode)
