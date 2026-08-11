@@ -899,7 +899,7 @@ describe("canonical scan contract", () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-diff-binding-"));
     temporaryDirectories.push(root);
     const probe = [
-      "import hashlib, json, sqlite3, subprocess, sys",
+      "import argparse, hashlib, json, os, sqlite3, subprocess, sys",
       "from pathlib import Path",
       "sys.path.insert(0, sys.argv[1])",
       "import workbench_db as workbench",
@@ -942,6 +942,19 @@ describe("canonical scan contract", () => {
       "assert results['commit'] != results['range']",
       "working = workbench.require_diff_target(repository, 'working_tree', head, head, None)",
       "assert working['contentDigest'] not in results.values()",
+      "scan_directory = Path(sys.argv[2]).resolve() / 'scan'",
+      "scan_directory.mkdir(mode=0o700)",
+      "os.environ['CODEX_SECURITY_STATE_DIR'] = str(Path(sys.argv[2]).resolve() / 'state')",
+      "recipe = {'config': {}, 'mode': 'standard', 'repository': str(repository), 'target': {'kind': 'refs', 'paths': [], 'base': base, 'head': head}}",
+      "arguments = argparse.Namespace(repository=str(repository), scan_dir=str(scan_directory), recipe_json=json.dumps(recipe), parent_scan_id=None, archive_existing=False, archived_scan_dir=None)",
+      "with workbench.connect() as registered_connection:",
+      "    registration = workbench.register_cli_scan(registered_connection, arguments)",
+      "    assert registration['contract']['diffTarget']['contentDigest'] == results['range']",
+      "    registered_scan = workbench.require_scan(registered_connection, registration['scanId'])",
+      "    assert registered_scan['diff_content_digest'] == results['range']",
+      "    binding = workbench.workbench_completion_binding(registered_scan, '2026-01-01T00:00:01Z')",
+      "    assert binding['target']['snapshotDigest'] == results['range']",
+      "    results['registration'] = binding['target']['snapshotDigest']",
       "print(json.dumps(results))",
     ].join("\n");
     const result = spawnSync(

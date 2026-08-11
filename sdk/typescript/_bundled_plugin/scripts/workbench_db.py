@@ -282,6 +282,12 @@ def resolve_git_commit(target: Path, revision: str, label: str) -> str:
     return resolved
 
 
+def immutable_diff_content_digest(kind: str, base: str, head: str) -> str:
+    return "codex-security-snapshot/v1:sha256:" + hashlib.sha256(
+        "\0".join((kind, base, head)).encode("utf-8")
+    ).hexdigest()
+
+
 def require_diff_target(
     target: Path,
     kind: str | None,
@@ -344,9 +350,7 @@ def require_diff_target(
         if base == head:
             raise SystemExit("Base and head revisions must identify different commits.")
 
-    digest = "codex-security-snapshot/v1:sha256:" + hashlib.sha256(
-        "\0".join((kind, base, head)).encode("utf-8")
-    ).hexdigest()
+    digest = immutable_diff_content_digest(kind, base, head)
     if content_digest and content_digest != digest:
         raise SystemExit("The selected diff snapshot does not match its immutable Git revisions.")
     return {
@@ -1353,6 +1357,8 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             if head != current_head:
                 raise SystemExit("Working-tree HEAD changed before the scan started.")
             diff_target["contentDigest"] = worktree_content_digest(repository)
+        else:
+            diff_target["contentDigest"] = immutable_diff_content_digest("range", base, head)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
     scope_file_count = (
