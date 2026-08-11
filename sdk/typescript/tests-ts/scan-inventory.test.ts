@@ -364,6 +364,7 @@ describe("security scan file inventory", () => {
       join(repository, "nested", "source.py"),
       "print('nested')\n",
     );
+    await writeFile(join(repository, ".ignore"), "source.py\n.ignore\n");
     execFileSync("git", ["add", "--", "tracked.py", "nested/source.py"], {
       cwd: repository,
     });

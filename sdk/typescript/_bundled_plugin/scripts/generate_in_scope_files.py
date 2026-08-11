@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 IGNORE_FILE_NAMES = (".gitignore", ".ignore", ".rgignore")
 
@@ -172,26 +172,31 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     ) -> set[bytes]:
         arguments = command.copy()
         directory_parts = directory.relative_to(repository).parts
+        ignored_aliases = []
         for alias in sorted(metadata_aliases):
             if alias[: len(directory_parts)] != directory_parts:
                 continue
             relative_alias = "/".join(re.escape(part) for part in alias[len(directory_parts) :])
-            if relative_alias:
-                arguments.extend(
-                    ["--glob", f"!/{relative_alias}", "--glob", f"!/{relative_alias}/**"]
-                )
+            if relative_alias and "\n" not in relative_alias and "\r" not in relative_alias:
+                ignored_aliases.append(f"/{relative_alias}\n")
         for name in IGNORE_FILE_NAMES:
             ignore = directory / name
             if ignore.is_file() and not ignore.is_symlink():
                 arguments.extend(["--ignore-file", str(ignore)])
-        if directory_guard:
-            relative_scope = requested_scope.removeprefix("./")
-            arguments.extend(
-                ["--quiet", "--glob", f"/{re.escape(relative_scope)}/**", "--", "."]
-            )
-        else:
-            arguments.extend(["--", requested_scope])
-        with tempfile.TemporaryFile(mode="w+b") as inventory:
+        with tempfile.TemporaryDirectory() as temporary_directory, tempfile.TemporaryFile(
+            mode="w+b"
+        ) as inventory:
+            if ignored_aliases:
+                alias_file = Path(temporary_directory) / "git-metadata.ignore"
+                alias_file.write_bytes(b"".join(os.fsencode(alias) for alias in ignored_aliases))
+                arguments.extend(["--ignore-file", str(alias_file)])
+            if directory_guard:
+                relative_scope = requested_scope.removeprefix("./")
+                arguments.extend(
+                    ["--quiet", "--glob", f"/{re.escape(relative_scope)}/**", "--", "."]
+                )
+            else:
+                arguments.extend(["--", requested_scope])
             try:
                 result = subprocess.run(
                     arguments,
@@ -335,6 +340,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     if worktree is not None or discovered_roots:
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
         listed: list[list[bytes]] = [[], []]
+        cached_by_root: dict[Path, list[bytes]] = {}
 
         def listed_paths(index: int) -> Iterator[bytes]:
             for chunk in listed[index]:
@@ -352,6 +358,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         message = f"{message}: {detail}"
                     raise InventoryError(message)
                 listed[index].append(result.stdout)
+                if index == 0:
+                    cached_by_root[repository] = [
+                        relative for relative in result.stdout.split(b"\0") if relative
+                    ]
 
         nested_roots = discovered_roots.copy()
         current = selected if selected.is_dir() else selected.parent
@@ -427,6 +437,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         if relative
                     )
                 )
+                if index == 0:
+                    cached_by_root[nested] = [
+                        relative for relative in result.stdout.split(b"\0") if relative
+                    ]
                 for relative in result.stdout.split(b"\0"):
                     if not relative:
                         continue
@@ -448,32 +462,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for index in range(len(listed))
             for relative in listed_paths(index)
         }
-        visible_by_case: dict[bytes, list[bytes]] = {}
-        for row in rows:
-            visible = normalized(row.removesuffix(b"\n"))
-            visible_by_case.setdefault(visible.lower(), []).append(visible)
-        tracked_candidates = list(listed_paths(0))
         if scope not in (".", "./"):
-            roots = ([] if worktree is None else [repository]) + list(inspected_roots.values())
-            for root in roots:
+            for root in cached_by_root:
                 tracked = run_git(["ls-files", "--cached", "-z"], directory=root)
                 if tracked.returncode:
                     detail = tracked.stderr.decode("utf-8", errors="replace").strip()
                     raise InventoryError(
                         f"git ls-files exited with status {tracked.returncode}: {detail}"
                     )
-                root_prefix = (
-                    b""
-                    if root == repository
-                    else os.fsencode(root.relative_to(repository).as_posix()) + b"/"
-                )
-                tracked_candidates.extend(
-                    root_prefix + relative
-                    for relative in tracked.stdout.split(b"\0")
-                    if relative
-                )
-        for relative in tracked_candidates:
-            allowed.update(visible_by_case.get(normalized(prefix + relative).lower(), []))
+                cached_by_root[root] = [
+                    relative for relative in tracked.stdout.split(b"\0") if relative
+                ]
         inspected_prefixes = tuple(
             normalized(prefix + os.fsencode(root.relative_to(repository).as_posix()) + b"/")
             for root in inspected_roots.values()
@@ -521,36 +520,69 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 or any(path.startswith(worktree) for worktree in nested_worktrees)
             }
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
+        directory_entries: dict[Path, dict[bytes, list[Path]]] = {}
 
-        for relative in listed_paths(0):
-            candidate = repository / os.fsdecode(relative)
-            if candidate.is_symlink() or not candidate.is_file():
-                continue
-            try:
-                current = candidate
-                while current != repository:
-                    metadata = current.stat(follow_symlinks=False)
-                    if symbolic_metadata(metadata):
-                        break
-                    current = current.parent
-                if current != repository:
+        def tracked_variants(root: Path, relative: bytes) -> Iterator[Path]:
+            components = PurePosixPath(os.fsdecode(relative)).parts
+            if not components or any(part in (".", "..") for part in components):
+                return
+            candidates = [root]
+            for index, component in enumerate(components):
+                matches: list[Path] = []
+                for parent in candidates:
+                    if parent not in directory_entries:
+                        grouped: dict[bytes, list[Path]] = {}
+                        try:
+                            with os.scandir(parent) as entries:
+                                for entry in entries:
+                                    if not git_metadata_path(parent, entry.name):
+                                        grouped.setdefault(
+                                            os.fsencode(entry.name).lower(), []
+                                        ).append(parent / entry.name)
+                        except OSError:
+                            continue
+                        directory_entries[parent] = grouped
+                    for candidate in directory_entries[parent].get(
+                        os.fsencode(component).lower(), []
+                    ):
+                        try:
+                            metadata = candidate.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if symbolic_metadata(metadata):
+                            continue
+                        if index + 1 < len(components):
+                            if not stat.S_ISDIR(metadata.st_mode):
+                                continue
+                            owner = inspected_roots.get((metadata.st_dev, metadata.st_ino))
+                            if owner is not None and owner != root:
+                                continue
+                        elif not stat.S_ISREG(metadata.st_mode):
+                            continue
+                        matches.append(candidate)
+                candidates = matches
+            for candidate in candidates:
+                try:
+                    resolved = candidate.resolve(strict=True)
+                    resolved.relative_to(repository)
+                    if selected.is_dir():
+                        resolved.relative_to(selected)
+                    elif resolved != selected:
+                        continue
+                except (OSError, ValueError):
                     continue
-                candidate.resolve(strict=True).relative_to(repository)
-                if any(
-                    visible in recorded
-                    and candidate.samefile(repository / os.fsdecode(visible))
-                    for visible in visible_by_case.get(
-                        normalized(prefix + relative).lower(), []
+                yield candidate
+
+        for root, tracked_paths in cached_by_root.items():
+            for relative in tracked_paths:
+                for candidate in tracked_variants(root, relative):
+                    relative_path = prefix + os.fsencode(
+                        candidate.relative_to(repository).as_posix()
                     )
-                ):
-                    continue
-            except (OSError, ValueError):
-                continue
-            relative_path = prefix + relative
-            key = normalized(relative_path)
-            if key not in recorded:
-                rows.add(relative_path + b"\n")
-                recorded.add(key)
+                    key = normalized(relative_path)
+                    if key not in recorded:
+                        rows.add(relative_path + b"\n")
+                        recorded.add(key)
 
     rows = sorted(rows)
 
