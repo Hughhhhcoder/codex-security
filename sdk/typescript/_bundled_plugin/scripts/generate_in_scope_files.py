@@ -302,37 +302,58 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     except OSError as error:
                         raise InventoryError(f"could not inspect Git metadata: {directory}") from error
                     if relative == "objects/info/alternates":
-                        for line in contents.split(b"\n"):
-                            line = line.removesuffix(b"\r")
-                            if not line:
-                                continue
-                            alternate = Path(os.fsdecode(line))
-                            if not alternate.is_absolute():
-                                alternate = root / "objects" / alternate
-                            alternate = Path(os.path.abspath(alternate))
-                            owner = next(
-                                (
-                                    candidate
-                                    for candidate in (repository, *roots)
-                                    if alternate.parts[: len(candidate.parts)] == candidate.parts
-                                ),
-                                None,
-                            )
-                            anchor = alternate
-                            if owner is not None:
-                                for _ in range(len(alternate.parts) - len(owner.parts)):
-                                    anchor = anchor.parent
-                            if owner is None or directory_identity(anchor) != directory_identity(owner):
-                                raise InventoryError(
-                                    "external Git object alternates are not supported"
+                        pending = [(root / "objects", contents)]
+                        inspected = {directory_identity(root / "objects")}
+                        while pending:
+                            object_root, records = pending.pop()
+                            for line in records.split(b"\n"):
+                                line = line.removesuffix(b"\r")
+                                if not line:
+                                    continue
+                                alternate = Path(os.fsdecode(line))
+                                if not alternate.is_absolute():
+                                    alternate = object_root / alternate
+                                alternate = Path(os.path.abspath(alternate))
+                                owner = next(
+                                    (
+                                        candidate
+                                        for candidate in (repository, *roots)
+                                        if alternate.parts[: len(candidate.parts)] == candidate.parts
+                                    ),
+                                    None,
                                 )
-                            current = owner
-                            for component in alternate.relative_to(owner).parts:
-                                current /= component
-                                if inspect_metadata(current, directory=True) is None:
+                                anchor = alternate
+                                if owner is not None:
+                                    for _ in range(len(alternate.parts) - len(owner.parts)):
+                                        anchor = anchor.parent
+                                if owner is None or directory_identity(anchor) != directory_identity(owner):
                                     raise InventoryError(
-                                        "missing Git object alternates are not supported"
+                                        "external Git object alternates are not supported"
                                     )
+                                current = owner
+                                for component in alternate.relative_to(owner).parts:
+                                    current /= component
+                                    if inspect_metadata(current, directory=True) is None:
+                                        raise InventoryError(
+                                            "missing Git object alternates are not supported"
+                                        )
+                                identity = directory_identity(alternate)
+                                if identity in inspected:
+                                    continue
+                                inspected.add(identity)
+                                info = alternate / "info"
+                                if inspect_metadata(info, directory=True) is None:
+                                    continue
+                                nested_alternates = info / "alternates"
+                                if inspect_metadata(nested_alternates, directory=False) is None:
+                                    continue
+                                try:
+                                    records = nested_alternates.read_bytes()
+                                except OSError as error:
+                                    raise InventoryError(
+                                        f"could not inspect Git metadata: {directory}"
+                                    ) from error
+                                pending.append((alternate, records))
                     elif GIT_CONFIG_INCLUDE.search(contents.removeprefix(b"\xef\xbb\xbf")):
                         raise InventoryError("Git config includes are not supported")
             try:

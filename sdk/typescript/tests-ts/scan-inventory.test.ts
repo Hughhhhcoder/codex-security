@@ -1027,6 +1027,30 @@ describe("security scan file inventory", () => {
     await expect(readFile(trace, "utf8")).rejects.toThrow();
   });
 
+  test("rejects external transitive Git object alternates before invoking Git", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const external = await repository();
+    const internal = join(checkout, ".git", "extra-objects");
+    const trace = join(dirname(checkout), "git-trace.log");
+    await mkdir(join(internal, "info"), { recursive: true });
+    await mkdir(join(internal, "pack"));
+    await writeFile(
+      join(checkout, ".git", "objects", "info", "alternates"),
+      `${internal}\n`,
+    );
+    await writeFile(
+      join(internal, "info", "alternates"),
+      `${join(external, ".git", "objects")}\n`,
+    );
+
+    await expect(
+      inventory(checkout, ".", { ...process.env, GIT_TRACE: trace }),
+    ).rejects.toThrow("external Git object alternates are not supported");
+    await expect(readFile(trace, "utf8")).rejects.toThrow();
+  });
+
   test("rejects differently cased sibling Git object alternates", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -1060,6 +1084,27 @@ describe("security scan file inventory", () => {
       join(checkout, ".git", "objects", "info", "alternates"),
       `${objects}\n`,
     );
+    await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+    expect(await inventory(checkout)).toContain("./visible.ts");
+  });
+
+  test("allows repository-owned transitive Git object alternates", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const first = join(checkout, ".git", "first-objects");
+    const second = join(checkout, ".git", "second-objects");
+    for (const objects of [first, second]) {
+      await mkdir(join(objects, "info"), { recursive: true });
+      await mkdir(join(objects, "pack"));
+    }
+    await writeFile(
+      join(checkout, ".git", "objects", "info", "alternates"),
+      `${first}\n`,
+    );
+    await writeFile(join(first, "info", "alternates"), `${second}\n`);
+    await writeFile(join(second, "info", "alternates"), `${first}\n`);
     await writeFile(join(checkout, "visible.ts"), "visible\n");
 
     expect(await inventory(checkout)).toContain("./visible.ts");
