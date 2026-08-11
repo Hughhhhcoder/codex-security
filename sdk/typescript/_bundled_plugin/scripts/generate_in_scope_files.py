@@ -316,6 +316,36 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     return value[:index].rstrip()
             return value.rstrip()
 
+        def join_config_lines(contents: bytes) -> bytes:
+            joined = bytearray()
+            quoted = False
+            comment = False
+            escaped = False
+            position = 0
+            while position < len(contents):
+                character = contents[position]
+                if character == ord("\n"):
+                    quoted = False
+                    comment = False
+                    escaped = False
+                elif not comment and not escaped and character == ord("\\"):
+                    if contents[position + 1 : position + 2] == b"\n":
+                        position += 2
+                        continue
+                    if contents[position + 1 : position + 3] == b"\r\n":
+                        position += 3
+                        continue
+                    escaped = True
+                elif escaped:
+                    escaped = False
+                elif not comment and character == ord('"'):
+                    quoted = not quoted
+                elif not quoted and character in (ord("#"), ord(";")):
+                    comment = True
+                joined.append(character)
+                position += 1
+            return bytes(joined)
+
         config = configparser.ConfigParser(interpolation=None, strict=False, allow_no_value=True)
         config_path = roots[-1] / "config"
         worktree_config_enabled = False
@@ -333,7 +363,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         if inspect_metadata(candidate, directory=False) is None:
                             continue
                     contents = candidate.read_bytes().removeprefix(codecs.BOM_UTF8)
-                    contents = re.sub(rb"\\\r?\n", b"", contents)
+                    contents = join_config_lines(contents)
                     contents = re.sub(
                         rb"(?im)^([ \t]*\[[ \t]*)(core|extensions)(?=[ \t]*\])",
                         lambda section: section.group(1) + section.group(2).lower(),

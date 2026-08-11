@@ -984,6 +984,8 @@ describe("security scan file inventory", () => {
     "disabled-comment",
     "disabled-empty",
     "disabled-symlink",
+    "hash-comment-override",
+    "semicolon-comment-override",
     "owned",
     "external",
     "mixed-case-external",
@@ -1013,7 +1015,10 @@ describe("security scan file inventory", () => {
         nested,
         "config",
         "extensions.worktreeConfig",
-        ownership.startsWith("disabled") ? "false" : "true",
+        ownership.startsWith("disabled") ||
+        ownership.endsWith("comment-override")
+          ? "false"
+          : "true",
       ]);
       await writeFile(join(nested, "visible.ts"), "tracked\n");
       execFileSync("git", ["-C", nested, "add", "visible.ts"]);
@@ -1038,6 +1043,15 @@ describe("security scan file inventory", () => {
             ownership === "disabled-comment" ? "$1false # disabled" : "$1",
           ),
         );
+      } else if (ownership.endsWith("comment-override")) {
+        const comment = ownership.startsWith("hash") ? "#" : ";";
+        await writeFile(
+          config,
+          (await readFile(config, "utf8")).replace(
+            /^([ \t]*worktree[ \t]*=.*)$/im,
+            `$1\n\t${comment} owner comment \\\n\tworktree = ${external}`,
+          ),
+        );
       }
       const override = `[${ownership === "mixed-case-external" ? "Core" : "core"}]\n\tworktree = ${effective}\n`;
       if (ownership === "disabled-symlink") {
@@ -1048,7 +1062,11 @@ describe("security scan file inventory", () => {
         await writeFile(join(metadata, "config.worktree"), override);
       }
 
-      if (ownership === "external" || ownership === "mixed-case-external") {
+      if (
+        ownership === "external" ||
+        ownership === "mixed-case-external" ||
+        ownership.endsWith("comment-override")
+      ) {
         await expect(inventory(checkout)).rejects.toThrow(
           "Git metadata directory does not own selected worktree",
         );
