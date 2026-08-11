@@ -1649,7 +1649,8 @@ describe("security scan file inventory", () => {
     const config = join(gitdir, "config");
     const configured = (await readFile(config, "utf8")).replace(
       /^([ \t]*worktree[ \t]*=[ \t]*)(.+)$/m,
-      '$1"$2" # valid Git comment',
+      (_match, prefix: string, value: string) =>
+        `${prefix}"${value.slice(0, -3)}\\\n${value.slice(-3)}" # valid Git comment`,
     );
     const suffix =
       process.platform === "win32"
