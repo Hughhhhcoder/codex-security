@@ -53,7 +53,11 @@ function commit(checkout: string): void {
   );
 }
 
-async function inventory(checkout: string, scope = "."): Promise<string[]> {
+async function inventory(
+  checkout: string,
+  scope = ".",
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string[]> {
   if (python === null) throw new Error("A Python interpreter is required.");
   const output = join(dirname(checkout), "inventory.txt");
   execFileSync(
@@ -68,7 +72,7 @@ async function inventory(checkout: string, scope = "."): Promise<string[]> {
       "--out",
       output,
     ],
-    { cwd: checkout, stdio: "pipe" },
+    { cwd: checkout, env, stdio: "pipe" },
   );
   return (await readFile(output, "utf8"))
     .trimEnd()
@@ -128,6 +132,35 @@ describe("security scan file inventory", () => {
       "./visible.ts",
     ]);
   });
+
+  test.each([
+    ["SS", "ss", true],
+    ["ss", "\u00df", false],
+  ])(
+    "matches indexed %s against replacement %s using Git case semantics",
+    async (indexed, replacement, expected) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      await mkdir(join(checkout, indexed));
+      await writeFile(join(checkout, indexed, "private.ts"), "tracked\n");
+      execFileSync("git", ["add", `${indexed}/private.ts`], { cwd: checkout });
+      execFileSync("git", ["config", "core.ignoreCase", "true"], {
+        cwd: checkout,
+      });
+      await rm(join(checkout, indexed), { recursive: true });
+      await mkdir(join(checkout, replacement));
+      await writeFile(
+        join(checkout, replacement, "private.ts"),
+        "replacement\n",
+      );
+      await writeFile(join(checkout, ".gitignore"), `${replacement}/\n`);
+
+      expect(
+        (await inventory(checkout)).includes(`./${replacement}/private.ts`),
+      ).toBe(expected);
+    },
+  );
 
   test("keeps an explicitly selected ignored file without widening its directory", async () => {
     if (Bun.which("rg") === null) return;
@@ -264,26 +297,32 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test("applies configured excludes from every enclosing Git checkout", async () => {
-    if (Bun.which("rg") === null) return;
+  test.each(["nested", " #nested"])(
+    "applies configured excludes from every enclosing checkout to %s",
+    async (directory) => {
+      if (Bun.which("rg") === null) return;
 
-    const checkout = await repository();
-    const middle = join(checkout, "middle");
-    const nested = join(middle, "nested");
-    await mkdir(nested, { recursive: true });
-    execFileSync("git", ["init", "-q"], { cwd: middle });
-    execFileSync("git", ["init", "-q"], { cwd: nested });
-    await Promise.all([
-      writeFile(join(middle, ".git", "info", "exclude"), "nested/private.ts\n"),
-      writeFile(join(nested, "private.ts"), "private\n"),
-      writeFile(join(nested, "visible.ts"), "visible\n"),
-    ]);
-    execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
+      const checkout = await repository();
+      const middle = join(checkout, "middle");
+      const nested = join(middle, directory);
+      await mkdir(nested, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: middle });
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(
+          join(middle, ".git", "info", "exclude"),
+          `${directory}/private.ts\n`,
+        ),
+        writeFile(join(nested, "private.ts"), "private\n"),
+        writeFile(join(nested, "visible.ts"), "visible\n"),
+      ]);
+      execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
 
-    const rows = await inventory(checkout);
-    expect(rows).toContain("./middle/nested/visible.ts");
-    expect(rows).not.toContain("./middle/nested/private.ts");
-  });
+      const rows = await inventory(checkout);
+      expect(rows).toContain(`./middle/${directory}/visible.ts`);
+      expect(rows).not.toContain(`./middle/${directory}/private.ts`);
+    },
+  );
 
   test("preserves intermediate ignores beneath an ancestor Git link", async () => {
     if (Bun.which("rg") === null) return;
@@ -665,4 +704,30 @@ describe("security scan file inventory", () => {
       "symbolic ignore files are not supported",
     );
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects snapshot ignore links without discovering a parent checkout",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const parent = await repository();
+      const snapshot = join(parent, "snapshot");
+      const visible = join(snapshot, "visible");
+      const external = join(dirname(parent), "external.ignore");
+      const trace = join(dirname(parent), "git-trace.log");
+      await mkdir(visible, { recursive: true });
+      await writeFile(external, "# ignore rules\n");
+      await writeFile(join(visible, "source.ts"), "visible\n");
+      await symlink(external, join(visible, ".ignore"));
+
+      await expect(
+        inventory(snapshot, ".", {
+          ...process.env,
+          GIT_DIR: join(parent, ".git"),
+          GIT_TRACE: trace,
+        }),
+      ).rejects.toThrow("symbolic ignore files are not supported");
+      await expect(readFile(trace, "utf8")).rejects.toThrow();
+    },
+  );
 });

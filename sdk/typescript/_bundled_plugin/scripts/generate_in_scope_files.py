@@ -117,6 +117,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             break
         current = current.parent
     ancestors.reverse()
+    deferred_ignore_checks: list[tuple[Path, os.stat_result]] = []
 
     def reject_symbolic_ignore(directory: Path, *, allow_ignored: bool = False) -> None:
         for name in IGNORE_FILE_NAMES:
@@ -127,30 +128,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if not symbolic_metadata(metadata) and stat.S_ISREG(metadata.st_mode):
                 continue
             if allow_ignored and directory != repository:
-                ignored = subprocess.run(
-                    [
-                        "git",
-                        "-c",
-                        "core.fsmonitor=false",
-                        "-C",
-                        str(repository),
-                        "check-ignore",
-                        "--quiet",
-                        "--no-index",
-                        "--",
-                        directory.relative_to(repository).as_posix(),
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-                ripgrep_overrides = any(
-                    (repository / parent / ignore).is_file()
-                    for parent in directory.relative_to(repository).parents
-                    for ignore in (".ignore", ".rgignore")
-                )
-                if ignored.returncode == 0 and not ripgrep_overrides:
-                    continue
+                deferred_ignore_checks.append((directory, metadata))
+                continue
             if symbolic_metadata(metadata):
                 raise InventoryError("symbolic ignore files are not supported")
             raise InventoryError("non-regular ignore files are not supported")
@@ -399,7 +378,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if exclude.is_file():
                     contents = exclude.read_bytes()
                     if any(
-                        line.strip() and not line.lstrip().startswith(b"#")
+                        line.strip() and not line.startswith(b"#")
                         for line in contents.splitlines()
                     ):
                         configured_excludes[directory] = contents
@@ -668,6 +647,29 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if not valid_worktree:
             worktree = None
 
+    for directory, metadata in deferred_ignore_checks:
+        if worktree is not None:
+            ignored = run_git(
+                [
+                    "check-ignore",
+                    "--quiet",
+                    "--no-index",
+                    "--",
+                    directory.relative_to(repository).as_posix(),
+                ],
+                literal=False,
+            )
+            ripgrep_overrides = any(
+                (repository / parent / ignore).is_file()
+                for parent in directory.relative_to(repository).parents
+                for ignore in (".ignore", ".rgignore")
+            )
+            if ignored.returncode == 0 and not ripgrep_overrides:
+                continue
+        if symbolic_metadata(metadata):
+            raise InventoryError("symbolic ignore files are not supported")
+        raise InventoryError("non-regular ignore files are not supported")
+
     if selected.is_dir():
         pending = [selected]
         inspected_directories: set[tuple[int, int]] = set()
@@ -924,7 +926,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 or any(path.startswith(worktree) for worktree in nested_worktrees)
             }
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
-        directory_entries: dict[tuple[int, int], dict[str, list[Path]]] = {}
+        directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
         selected_parts = tuple(
             os.fsencode(part) for part in selected.relative_to(repository).parts
         )
@@ -977,7 +979,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if index < len(root_parts) or not case_insensitive_roots[root_identity]:
                     if indexed != requested:
                         return
-                elif os.fsdecode(indexed).casefold() != os.fsdecode(requested).casefold():
+                elif indexed.lower() != requested.lower():
                     return
 
             def descend(parent: Path, index: int) -> list[Path]:
@@ -986,19 +988,21 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 except OSError:
                     return []
                 if parent_identity not in directory_entries:
-                    grouped: dict[str, list[Path]] = {}
+                    grouped: dict[bytes, list[Path]] = {}
                     try:
                         with os.scandir(parent) as entries:
                             for entry in entries:
                                 if not git_metadata_path(parent, entry.name):
-                                    grouped.setdefault(entry.name.casefold(), []).append(
+                                    grouped.setdefault(os.fsencode(entry.name).lower(), []).append(
                                         parent / entry.name
                                     )
                     except OSError:
                         return []
                     directory_entries[parent_identity] = grouped
                 component = components[index]
-                variants = directory_entries[parent_identity].get(component.casefold(), [])
+                variants = directory_entries[parent_identity].get(
+                    os.fsencode(component).lower(), []
+                )
                 exact = [candidate for candidate in variants if candidate.name == component]
                 alternatives = [candidate for candidate in variants if candidate.name != component]
                 groups = [exact]
