@@ -473,6 +473,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 cached_by_root[root] = [
                     relative for relative in tracked.stdout.split(b"\0") if relative
                 ]
+        case_insensitive_roots: dict[Path, bool] = {}
+        for root in cached_by_root:
+            setting = run_git(["config", "--bool", "core.ignoreCase"], directory=root)
+            if setting.returncode not in (0, 1):
+                detail = setting.stderr.decode("utf-8", errors="replace").strip()
+                raise InventoryError(
+                    f"git config exited with status {setting.returncode}: {detail}"
+                )
+            case_insensitive_roots[root] = setting.stdout.strip().lower() == b"true"
         inspected_prefixes = tuple(
             normalized(prefix + os.fsencode(root.relative_to(repository).as_posix()) + b"/")
             for root in inspected_roots.values()
@@ -542,9 +551,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         except OSError:
                             continue
                         directory_entries[parent] = grouped
-                    for candidate in directory_entries[parent].get(
+                    variants = directory_entries[parent].get(
                         os.fsencode(component).lower(), []
-                    ):
+                    )
+                    exact = [candidate for candidate in variants if candidate.name == component]
+                    if exact:
+                        variants = exact
+                    elif not case_insensitive_roots[root]:
+                        continue
+                    for candidate in variants:
                         try:
                             metadata = candidate.stat(follow_symlinks=False)
                         except OSError:
