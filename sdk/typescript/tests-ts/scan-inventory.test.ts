@@ -409,6 +409,35 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./middle/nested/private.ts");
   });
 
+  test("admits tracked Gitlinks through configured directory excludes", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "nested");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(nested, "visible.ts"), "visible\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+    ]);
+    execFileSync("git", ["add", "visible.ts", "private.ts"], {
+      cwd: nested,
+    });
+    commit(nested);
+    execFileSync("git", ["add", "nested"], {
+      cwd: checkout,
+      stdio: "ignore",
+    });
+    await writeFile(
+      join(checkout, ".git", "info", "exclude"),
+      "nested/\nnested/private.ts\n",
+    );
+
+    const rows = await inventory(checkout);
+    expect(rows).toContain("./nested/visible.ts");
+    expect(rows).not.toContain("./nested/private.ts");
+  });
+
   test.each([
     ["visible", "nested/private.ts\n"],
     ["ignored", "nested/\nnested/private.ts\n"],
@@ -750,6 +779,28 @@ describe("security scan file inventory", () => {
       );
     },
   );
+
+  test("binds Git discovery to the selected checkout despite external core.worktree", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const external = join(dirname(checkout), "external-worktree");
+    const trace = join(dirname(checkout), "git-trace.log");
+    await mkdir(external);
+    await writeFile(join(checkout, "visible.ts"), "visible\n");
+    execFileSync("git", ["config", "--local", "core.worktree", external], {
+      cwd: checkout,
+    });
+
+    expect(
+      await inventory(checkout, ".", {
+        ...process.env,
+        GIT_TRACE: trace,
+        GIT_TRACE_SETUP: "1",
+      }),
+    ).toEqual(["./visible.ts"]);
+    expect(await readFile(trace, "utf8")).not.toContain(external);
+  });
 
   test.skipIf(process.platform === "win32")(
     "rejects split-index backing files that leave the checkout",

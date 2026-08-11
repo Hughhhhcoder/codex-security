@@ -552,27 +552,31 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         contents += separator + existing
                     destination.write_bytes(contents)
 
+                def admit_gitlink_directories(directory: Path, contents: bytes) -> bytes:
+                    if not preserve_gitignore_descendants:
+                        return contents
+                    for owner, selected_root in exempt_gitignores:
+                        if not (
+                            directory.is_relative_to(owner)
+                            and selected_root.is_relative_to(directory)
+                            and directory != selected_root
+                        ):
+                            continue
+                        parts = selected_root.relative_to(directory).parts
+                        for index in range(len(parts)):
+                            if contents and not contents.endswith(b"\n"):
+                                contents += b"\n"
+                            admitted = "/".join(re.escape(part) for part in parts[: index + 1])
+                            contents += os.fsencode(f"!/{admitted}/\n")
+                    return contents
+
                 for ignore in ignore_files:
                     contents = ignore.read_bytes()
-                    if preserve_gitignore_descendants and ignore.name == ".gitignore":
-                        for owner, selected_root in exempt_gitignores:
-                            directory = ignore.parent
-                            if not (
-                                directory.is_relative_to(owner)
-                                and selected_root.is_relative_to(directory)
-                                and directory != selected_root
-                            ):
-                                continue
-                            parts = selected_root.relative_to(directory).parts
-                            for index in range(len(parts)):
-                                if contents and not contents.endswith(b"\n"):
-                                    contents += b"\n"
-                                admitted = "/".join(
-                                    re.escape(part) for part in parts[: index + 1]
-                                )
-                                contents += os.fsencode(f"!/{admitted}/\n")
+                    if ignore.name == ".gitignore":
+                        contents = admit_gitlink_directories(ignore.parent, contents)
                     install_ignore(ignore.parent, ignore.name, contents)
                 for directory, contents in configured_excludes.items():
+                    contents = admit_gitlink_directories(directory, contents)
                     install_ignore(directory, ".gitignore", contents, prepend=True)
                 for relative in batch:
                     destination = probe / os.fsdecode(relative)
@@ -659,7 +663,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             git_environment.pop("GIT_LITERAL_PATHSPECS", None)
         try:
             return subprocess.run(
-                [*command, *arguments],
+                [*command, f"--work-tree={directory}", *arguments],
                 cwd=directory,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
