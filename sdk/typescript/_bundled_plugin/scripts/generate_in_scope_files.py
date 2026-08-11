@@ -854,6 +854,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 or any(component in (b"", b".", b"..") for component in components)
             ):
                 raise InventoryError("out-of-scope Git inventory paths are not supported")
+            current = repository
+            for component in path.parts[:-1]:
+                current /= component
+                try:
+                    metadata = current.stat(follow_symlinks=False)
+                except OSError:
+                    break
+                if symbolic_metadata(metadata):
+                    raise InventoryError("symbolic Git inventory paths are not supported")
+                if not stat.S_ISDIR(metadata.st_mode):
+                    break
             return relative
 
         def listed_paths(index: int) -> Iterator[bytes]:

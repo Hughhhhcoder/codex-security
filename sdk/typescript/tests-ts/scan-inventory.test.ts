@@ -1025,6 +1025,35 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test("rejects symbolic ancestors in Git-listed paths before reading external metadata", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const link = join(checkout, "link");
+    await mkdir(link);
+    await writeFile(join(link, "nested"), "tracked\n");
+    execFileSync("git", ["add", "link/nested"], { cwd: checkout });
+
+    const external = await repository();
+    const nested = join(external, "nested");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await writeFile(
+      join(nested, ".git", "config"),
+      "[include]\n\tpath = outside\n",
+    );
+    await rm(link, { recursive: true });
+    await symlink(
+      external,
+      link,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await expect(inventory(checkout)).rejects.toThrow(
+      "symbolic Git inventory paths are not supported",
+    );
+  });
+
   test.skipIf(process.platform !== "win32")(
     "rejects drive-relative Git index entries before probing another drive",
     async () => {
