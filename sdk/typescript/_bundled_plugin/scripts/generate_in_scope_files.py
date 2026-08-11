@@ -65,10 +65,22 @@ def resolve_scope(repository: Path, value: str) -> str:
     except (OSError, ValueError) as error:
         raise InventoryError(f"--scope: path does not exist: {value}") from error
 
+    repository_metadata = repository.stat(follow_symlinks=False)
+    repository_identity = (repository_metadata.st_dev, repository_metadata.st_ino)
     try:
         relative = resolved.relative_to(repository)
     except ValueError as error:
-        raise InventoryError(f"--scope: path must remain inside --repo: {value}") from error
+        ancestor = resolved
+        while True:
+            metadata = ancestor.stat(follow_symlinks=False)
+            if (metadata.st_dev, metadata.st_ino) == repository_identity:
+                relative = Path(*resolved.parts[len(ancestor.parts) :])
+                break
+            if ancestor == ancestor.parent:
+                raise InventoryError(
+                    f"--scope: path must remain inside --repo: {value}"
+                ) from error
+            ancestor = ancestor.parent
     parent = repository
     for component in relative.parts:
         if git_metadata_path(parent, component):
@@ -76,11 +88,13 @@ def resolve_scope(repository: Path, value: str) -> str:
         parent /= component
 
     current = scope
-    while current != repository:
-        if current == current.parent:
-            raise InventoryError("--scope: symbolic links are not supported")
+    while True:
         metadata = current.stat(follow_symlinks=False)
         if symbolic_metadata(metadata):
+            raise InventoryError("--scope: symbolic links are not supported")
+        if (metadata.st_dev, metadata.st_ino) == repository_identity:
+            break
+        if current == current.parent:
             raise InventoryError("--scope: symbolic links are not supported")
         current = current.parent
 
@@ -440,7 +454,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     try:
                         normalized_metadata = normalized_target.stat(follow_symlinks=False)
                     except FileNotFoundError:
-                        pass
+                        raise InventoryError(
+                            "Git metadata directory does not own selected worktree"
+                        ) from None
                     else:
                         if symbolic_metadata(normalized_metadata) or (
                             normalized_metadata.st_dev,
@@ -470,12 +486,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 "objects/info",
                 "objects/info/alternates",
             ):
-                if relative == "config.worktree" and (
-                    not worktree_config_enabled or root != gitdir
+                effective_root = (
+                    gitdir
+                    if relative in ("HEAD", "index", "config.worktree", "info/sparse-checkout")
+                    else roots[-1]
+                )
+                if root != effective_root or (
+                    relative == "config.worktree" and not worktree_config_enabled
                 ):
                     continue
-                if root != roots[-1] and (relative == "objects" or relative.startswith("objects/")):
-                    continue
+                if relative == "info/sparse-checkout" and root != roots[-1]:
+                    inspect_metadata(root / "info", directory=True)
                 path = root / relative
                 metadata = inspect_metadata(
                     path,
@@ -587,6 +608,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 pending.append((alternate, records))
                     elif GIT_CONFIG_INCLUDE.search(contents.removeprefix(b"\xef\xbb\xbf")):
                         raise InventoryError("Git config includes are not supported")
+            if root != gitdir:
+                continue
             try:
                 for shared_index in root.iterdir():
                     canonical = shared_index.name.casefold()

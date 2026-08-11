@@ -57,6 +57,27 @@ function commit(checkout: string): void {
   );
 }
 
+function windowsShortPath(path: string): string | null {
+  if (process.platform !== "win32" || python === null) return null;
+  const alias = execFileSync(
+    python,
+    [
+      "-B",
+      "-c",
+      [
+        "import ctypes, sys",
+        "function = ctypes.windll.kernel32.GetShortPathNameW",
+        "size = function(sys.argv[1], None, 0)",
+        "buffer = ctypes.create_unicode_buffer(size) if size else None",
+        "print(buffer.value if buffer is not None and function(sys.argv[1], buffer, size) else '')",
+      ].join("\n"),
+      path,
+    ],
+    { encoding: "utf8" },
+  ).trim();
+  return alias && alias.toLowerCase() !== path.toLowerCase() ? alias : null;
+}
+
 async function inventory(
   checkout: string,
   scope = ".",
@@ -214,6 +235,50 @@ describe("security scan file inventory", () => {
       const rows = await inventory(checkout, "nested");
       expect(rows).toContain("nested/visible.ts");
       expect(rows).not.toContain("nested/private.ts");
+    },
+  );
+
+  test.each(["case-alias", "short-alias"])(
+    "accepts absolute directory scopes through a %s",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      await writeFile(join(nested, "visible.ts"), "visible\n");
+      const alias =
+        kind === "case-alias"
+          ? join(dirname(checkout), basename(checkout).toUpperCase())
+          : windowsShortPath(checkout);
+      if (alias === null) return;
+      const equivalent = await realpath(alias).then(
+        async (resolved) => resolved === (await realpath(checkout)),
+        () => false,
+      );
+      if (!equivalent) return;
+
+      expect(await inventory(checkout, join(alias, "nested"))).toContain(
+        "nested/visible.ts",
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "rejects symbolic absolute directory scopes",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      const alias = join(checkout, "alias");
+      await mkdir(nested);
+      await writeFile(join(nested, "visible.ts"), "visible\n");
+      await symlink(nested, alias);
+
+      await expect(inventory(checkout, alias)).rejects.toThrow(
+        "symbolic links are not supported",
+      );
     },
   );
 
@@ -990,7 +1055,8 @@ describe("security scan file inventory", () => {
     "default-inheritance",
     "unquoted-escape",
     "literal-tab",
-    "literal-tab-owned",
+    "literal-tab-missing",
+    "quoted-tab-owned",
     "case-alias",
     "short-alias",
     "owned",
@@ -1004,8 +1070,9 @@ describe("security scan file inventory", () => {
         return;
       if (ownership === "unquoted-escape" && process.platform === "win32")
         return;
-      if (ownership.startsWith("literal-tab") && process.platform === "win32")
-        return;
+      const tabOwnership =
+        ownership.startsWith("literal-tab") || ownership === "quoted-tab-owned";
+      if (tabOwnership && process.platform === "win32") return;
       if (
         ownership === "short-alias" &&
         (process.platform !== "win32" || python === null)
@@ -1017,7 +1084,7 @@ describe("security scan file inventory", () => {
         checkout,
         ownership === "unquoted-escape"
           ? "nested\\towner"
-          : ownership.startsWith("literal-tab")
+          : tabOwnership
             ? "nested\towner"
             : "nested",
       );
@@ -1048,7 +1115,7 @@ describe("security scan file inventory", () => {
         ownership === "indented-override" ||
         ownership === "default-inheritance" ||
         ownership === "unquoted-escape" ||
-        ownership.startsWith("literal-tab")
+        tabOwnership
           ? "false"
           : "true",
       ]);
@@ -1106,15 +1173,14 @@ describe("security scan file inventory", () => {
           config,
           `${withoutOwner}\n[DEFAULT]\n\tworktree = ${nested}\n`,
         );
-      } else if (
-        ownership === "unquoted-escape" ||
-        ownership.startsWith("literal-tab")
-      ) {
+      } else if (ownership === "unquoted-escape" || tabOwnership) {
         await writeFile(
           config,
           (await readFile(config, "utf8")).replace(
             /^([ \t]*worktree[ \t]*=).*$/im,
-            `$1 ${nested}`,
+            ownership === "quoted-tab-owned"
+              ? `$1 "${nested.replaceAll("\t", "\\t")}"`
+              : `$1 ${nested}`,
           ),
         );
       }
@@ -1130,28 +1196,8 @@ describe("security scan file inventory", () => {
         const alias =
           ownership === "case-alias"
             ? metadata.toUpperCase()
-            : execFileSync(
-                python!,
-                [
-                  "-B",
-                  "-c",
-                  [
-                    "import ctypes, sys",
-                    "function = ctypes.windll.kernel32.GetShortPathNameW",
-                    "size = function(sys.argv[1], None, 0)",
-                    "buffer = ctypes.create_unicode_buffer(size) if size else None",
-                    "print(buffer.value if buffer is not None and function(sys.argv[1], buffer, size) else '')",
-                  ].join("\n"),
-                  metadata,
-                ],
-                { encoding: "utf8" },
-              ).trim();
-        if (
-          !alias ||
-          (ownership === "short-alias" &&
-            alias.toLowerCase() === metadata.toLowerCase())
-        )
-          return;
+            : windowsShortPath(metadata);
+        if (alias === null) return;
         const equivalent = await realpath(alias).then(
           async (resolved) => resolved === (await realpath(metadata)),
           () => false,
@@ -1167,7 +1213,7 @@ describe("security scan file inventory", () => {
         ownership === "indented-override" ||
         ownership === "default-inheritance" ||
         ownership === "unquoted-escape" ||
-        ownership === "literal-tab"
+        ownership.startsWith("literal-tab")
       ) {
         await expect(inventory(checkout)).rejects.toThrow(
           "Git metadata directory does not own selected worktree",
@@ -1843,6 +1889,13 @@ describe("security scan file inventory", () => {
       .replace(/^gitdir: /, "")
       .trim();
     await writeFile(join(gitdir, "objects"), "inactive worktree metadata\n");
+    await mkdir(join(gitdir, "packed-refs"));
+    await writeFile(
+      join(gitdir, "refs", "heads"),
+      "inactive worktree references\n",
+    );
+    await writeFile(join(gitdir, "config"), "[include]\npath = inactive\n");
+    await mkdir(join(gitdir, "info", "exclude"), { recursive: true });
     expect(await inventory(linked)).toContain("./visible.ts");
 
     const alternateBackpointer = join(
