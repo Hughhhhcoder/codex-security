@@ -38,7 +38,7 @@ const findingsIndexProbe = [
   "    connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
   "    connection.execute(\"UPDATE scans SET target_device = -1, target_inode = -1 WHERE target_id = 'current-target'\")",
   "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
-  "if settings.get('ownershipTransition'):",
+  "if settings.get('ownershipTransition') or settings.get('ownershipReuse'):",
   "    connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
   "    connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
   "    connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
@@ -46,6 +46,8 @@ const findingsIndexProbe = [
   "    connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (sys.argv[1],))",
   "    metadata = os.stat(sys.argv[1])",
   "    connection.execute(\"UPDATE scans SET target_device = ?, target_inode = ? WHERE id = 'current-new'\", (serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
+  "    if settings.get('ownershipReuse'):",
+  "        connection.execute(\"UPDATE scans SET target_device = ?, target_inode = ? WHERE id = 'current-old'\", (serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
   "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('previous-owner-identity', 'current-target', sys.argv[1], 'complete', 'sealed', '2026-01-15', '2026-01-15', '.', '/private/tmp/previous-owner', -1, -1))",
   "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'current-old-finding', 'current-old', 'high', '2026-01-01', 'Resolved current finding', 'Older issue'),",
@@ -92,10 +94,18 @@ const findingsIndexProbe = [
   "else:",
   "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
   "scoped_scan_ids = []",
-  "if settings.get('ownershipTransition'):",
+  "matching_scan_count = None",
+  "old_owner_matches = None",
+  "if settings.get('ownershipTransition') or settings.get('ownershipReuse'):",
   "    clauses, values, _, _ = indexes.scan_history.repository_scan_scope(connection, sys.argv[1])",
   "    scoped_scan_ids = [row['id'] for row in connection.execute('SELECT scans.id FROM scans WHERE ' + ' AND '.join(clauses), values)]",
-  "print(json.dumps({'findings': result.get('findings', []), 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'locationQueryCount': len(location_queries), 'scopedScanIds': scoped_scan_ids}))",
+  "if settings.get('ownershipReuse'):",
+  "    connection.execute('CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT)')",
+  "    matching = indexes.scan_history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[1], force=False), backfill_finding_details=lambda _connection, _scan: None, read_coverage=coverage)",
+  "    matching_scan_count = matching['scanCount']",
+  "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
+  "    old_owner_matches = indexes.scan_history._same_registered_repository(connection, *scans)",
+  "print(json.dumps({'findings': result.get('findings', []), 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'locationQueryCount': len(location_queries), 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -108,6 +118,7 @@ function runFindingsIndex(
     coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
+    ownershipReuse?: boolean;
     ownershipTransition?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
@@ -144,6 +155,7 @@ function probeFindingsIndex(
     coverageFailure?: "pruned";
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
+    ownershipReuse?: boolean;
     ownershipTransition?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
@@ -158,6 +170,8 @@ function probeFindingsIndex(
   repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
   locationQueryCount: number;
+  matchingScanCount: number | null;
+  oldOwnerMatches: boolean | null;
   scopedScanIds: string[];
 } {
   const result = runFindingsIndex(targetId, settings);
@@ -252,6 +266,20 @@ describe("workbench findings index", () => {
         openFindingsCount: 1,
       }),
     );
+  });
+
+  test("rejects recycled filesystem identities from earlier ownership epochs", () => {
+    const result = probeFindingsIndex("current-target", {
+      ownershipReuse: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+    ]);
+    expect(result.scopedScanIds).toContain("current-new");
+    expect(result.scopedScanIds).not.toContain("current-old");
+    expect(result.matchingScanCount).toBe(1);
+    expect(result.oldOwnerMatches).toBe(false);
   });
 
   test("keeps active findings when a later scan artifact was pruned", () => {

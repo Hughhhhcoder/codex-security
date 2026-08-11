@@ -222,25 +222,28 @@ def _verified_target_metadata(
     return metadata, recorded is not None
 
 
-def _has_ownership_transition(
+def _ownership_epoch_start(
     connection: sqlite3.Connection, target_id: str, metadata: os.stat_result
-) -> bool:
+) -> tuple[str, str] | None:
+    previous_owner = connection.execute(
+        """
+        SELECT started_at, id
+        FROM scans
+        WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
+            AND (target_device != ? OR target_inode != ?)
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1
+        """,
+        (
+            target_id,
+            serialize_filesystem_identity(metadata.st_dev),
+            serialize_filesystem_identity(metadata.st_ino),
+        ),
+    ).fetchone()
     return (
-        connection.execute(
-            """
-            SELECT 1
-            FROM scans
-            WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
-                AND (target_device != ? OR target_inode != ?)
-            LIMIT 1
-            """,
-            (
-                target_id,
-                serialize_filesystem_identity(metadata.st_dev),
-                serialize_filesystem_identity(metadata.st_ino),
-            ),
-        ).fetchone()
-        is not None
+        (previous_owner["started_at"], previous_owner["id"])
+        if previous_owner is not None
+        else None
     )
 
 
@@ -454,9 +457,10 @@ def repository_scan_scope(
         for target_id, (metadata, recorded) in verified_targets.items():
             if metadata is None or not recorded:
                 continue
+            epoch_start = _ownership_epoch_start(connection, target_id, metadata)
             legacy_history = (
                 "OR (scans.target_inode IS NULL AND scans.target_device IS NULL) "
-                if not _has_ownership_transition(connection, target_id, metadata)
+                if epoch_start is None
                 else ""
             )
             clauses.append(
@@ -470,6 +474,9 @@ def repository_scan_scope(
                     serialize_filesystem_identity(metadata.st_dev),
                 )
             )
+            if epoch_start is not None:
+                clauses.append("(scans.target_id IS NOT ? OR (scans.started_at, scans.id) > (?, ?))")
+                values.extend((target_id, *epoch_start))
     return clauses, values, related_target_ids, repository_paths
 
 
@@ -623,6 +630,7 @@ def list_unmatched_scan_pairs(
     except OSError:
         metadata = None
     verified_targets: dict[str, tuple[os.stat_result | None, bool] | None] = {}
+    ownership_epochs: dict[str, tuple[str, str] | None] = {}
 
     def belongs_to_current_owner(scan: sqlite3.Row) -> bool:
         target_id = scan["target_id"]
@@ -642,11 +650,16 @@ def list_unmatched_scan_pairs(
         target_metadata = verified_targets[target_id]
         if target_metadata is None or target_metadata[0] is None or not target_metadata[1]:
             return False
+        if target_id not in ownership_epochs:
+            ownership_epochs[target_id] = _ownership_epoch_start(
+                connection, target_id, target_metadata[0]
+            )
+        epoch_start = ownership_epochs[target_id]
         return stored_filesystem_identity_matches(
             scan["target_device"], target_metadata[0].st_dev
         ) and stored_filesystem_identity_matches(
             scan["target_inode"], target_metadata[0].st_ino
-        )
+        ) and (epoch_start is None or (scan["started_at"], scan["id"]) > epoch_start)
 
     selected = [
         scan
@@ -724,6 +737,14 @@ def _same_registered_repository(
         ).fetchone()
         if target is None:
             return False
+        if "started_at" in scan.keys() and "id" in scan.keys():
+            try:
+                metadata = Path(target["current_path"]).stat()
+            except OSError:
+                return False
+            epoch_start = _ownership_epoch_start(connection, scan["target_id"], metadata)
+            if epoch_start is not None and (scan["started_at"], scan["id"]) <= epoch_start:
+                return False
         paths.append(target["current_path"])
     return _same_repository(
         before,

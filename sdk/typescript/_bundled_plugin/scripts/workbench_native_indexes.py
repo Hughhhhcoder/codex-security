@@ -157,6 +157,7 @@ def _active_findings(
         )
         replaced_targets = []
         transitioned_targets = []
+        ownership_epochs = []
         for target in connection.execute("SELECT id, current_path FROM security_targets"):
             checkout = Path(target["current_path"])
             if not checkout.exists():
@@ -164,10 +165,13 @@ def _active_findings(
             verified = scan_history._verified_target_metadata(connection, target["id"], checkout)
             if verified is None:
                 replaced_targets.append(target["id"])
-            elif verified[0] is not None and scan_history._has_ownership_transition(
-                connection, target["id"], verified[0]
-            ):
-                transitioned_targets.append(target["id"])
+            elif verified[0] is not None:
+                epoch_start = scan_history._ownership_epoch_start(
+                    connection, target["id"], verified[0]
+                )
+                if epoch_start is not None:
+                    transitioned_targets.append(target["id"])
+                    ownership_epochs.append((target["id"], epoch_start))
         if replaced_targets:
             placeholders = ", ".join("?" for _ in replaced_targets)
             current_owner_only += (
@@ -182,6 +186,11 @@ def _active_findings(
                 "OR scans.target_device IS NOT NULL OR scans.target_inode IS NOT NULL)"
             )
             target_values.extend(transitioned_targets)
+        for target_id, epoch_start in ownership_epochs:
+            current_owner_only += (
+                " AND (scans.target_id IS NOT ? OR (scans.started_at, scans.id) > (?, ?))"
+            )
+            target_values.extend((target_id, *epoch_start))
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""
