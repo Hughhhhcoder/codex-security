@@ -111,6 +111,22 @@ describe("security scan file inventory", () => {
     ]);
   });
 
+  test.each([".ignore", ".rgignore"])(
+    "keeps ordinary files re-included by higher-precedence %s rules",
+    async (override) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      await Promise.all([
+        writeFile(join(checkout, ".gitignore"), "source.ts\n"),
+        writeFile(join(checkout, override), "!source.ts\n"),
+        writeFile(join(checkout, "source.ts"), "visible\n"),
+      ]);
+
+      expect(await inventory(checkout)).toContain("./source.ts");
+    },
+  );
+
   test("applies snapshot ignores without inheriting unrelated parent rules", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -687,6 +703,26 @@ describe("security scan file inventory", () => {
 
       await expect(inventory(checkout)).rejects.toThrow(
         "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
+  test.each(["include", 'includeIf "gitdir:**"'])(
+    "rejects repository-directed %s config before invoking Git",
+    async (section) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const external = join(dirname(checkout), "external.config");
+      await writeFile(external, "[core]\n\tignoreCase = true\n");
+      const config = join(checkout, ".git", "config");
+      await writeFile(
+        config,
+        `${await readFile(config, "utf8")}[${section}]\n\tpath = ${external}\n`,
+      );
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "Git config includes are not supported",
       );
     },
   );

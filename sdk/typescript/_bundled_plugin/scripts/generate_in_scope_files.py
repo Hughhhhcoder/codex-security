@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
 IGNORE_FILE_NAMES = (".gitignore", ".ignore", ".rgignore")
+GIT_CONFIG_INCLUDE = re.compile(rb"(?im)^[ \t]*\[[ \t]*include(?:if)?(?=[ \t\]])")
 
 
 class InventoryError(ValueError):
@@ -214,7 +215,15 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 "info",
                 "info/exclude",
             ):
-                inspect_metadata(root / relative, directory=relative == "info")
+                path = root / relative
+                metadata = inspect_metadata(path, directory=relative == "info")
+                if metadata is not None and relative in ("config", "config.worktree"):
+                    try:
+                        contents = path.read_bytes()
+                    except OSError as error:
+                        raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+                    if GIT_CONFIG_INCLUDE.search(contents):
+                        raise InventoryError("Git config includes are not supported")
             try:
                 shared_indexes = (
                     entry for entry in root.iterdir() if entry.name.startswith("sharedindex.")
@@ -982,10 +991,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     and path.removeprefix(b"./")
                     == os.fsencode(selected.relative_to(repository).as_posix())
                 )
-                or (
-                    worktree is None
-                    and not any(path.startswith(root) for root in inspected_prefixes)
-                )
+                or not any(path.startswith(root) for root in inspected_prefixes)
                 or any(path.startswith(worktree) for worktree in nested_worktrees)
             }
         recorded = {normalized(row.removesuffix(b"\n")) for row in rows}
