@@ -530,6 +530,27 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./nested/private.ts");
   });
 
+  test.each([".ignore", ".rgignore", ".gitignore"])(
+    "does not inspect checkout metadata excluded by outer %s rules",
+    async (ignore) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      const external = join(dirname(checkout), "external.config");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await writeFile(external, "[core]\n\tignoreCase = true\n");
+      execFileSync("git", ["config", "--local", "include.path", external], {
+        cwd: nested,
+      });
+      await writeFile(join(checkout, ignore), "nested/\n");
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      expect(await inventory(checkout)).toContain("./visible.ts");
+    },
+  );
+
   test("discovers self-hidden checkouts through visible snapshot directories", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -888,6 +909,30 @@ describe("security scan file inventory", () => {
     expect(await readFile(trace, "utf8")).not.toContain(external);
   });
 
+  test
+    .skipIf(process.platform === "win32")
+    .each(["objects", "objects/info/alternates"])(
+    "rejects symbolic Git object metadata at %s",
+    async (relative) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const external = await repository();
+      const metadata = join(checkout, ".git", relative);
+      const target =
+        relative === "objects"
+          ? join(external, ".git", "objects")
+          : join(dirname(checkout), "external-alternates");
+      if (relative !== "objects") await writeFile(target, "external\n");
+      await rm(metadata, { recursive: relative === "objects", force: true });
+      await symlink(target, metadata);
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
   test.skipIf(process.platform === "win32")(
     "rejects escaped Git index entries before probing sibling metadata",
     async () => {
@@ -904,7 +949,7 @@ describe("security scan file inventory", () => {
       const wrapper = join(wrappers, "git");
       await writeFile(
         wrapper,
-        `#!/bin/sh\ncase " $* " in\n  *" ls-files --cached "*) printf '../outside\\000' ;;\n  *) exec ${JSON.stringify(git)} "$@" ;;\nesac\n`,
+        `#!/bin/sh\ncase " $* " in\n  *" ls-files --sparse --cached "*) printf '../outside\\000' ;;\n  *) exec ${JSON.stringify(git)} "$@" ;;\nesac\n`,
       );
       await chmod(wrapper, 0o755);
 

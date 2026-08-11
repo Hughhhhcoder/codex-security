@@ -236,9 +236,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 "config.worktree",
                 "info",
                 "info/exclude",
+                "objects",
+                "objects/info",
+                "objects/info/alternates",
             ):
                 path = root / relative
-                metadata = inspect_metadata(path, directory=relative == "info")
+                metadata = inspect_metadata(
+                    path, directory=relative in ("info", "objects", "objects/info")
+                )
                 if metadata is not None and relative in ("config", "config.worktree"):
                     try:
                         contents = path.read_bytes()
@@ -682,9 +687,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             worktree = None
 
     scoped_files: dict[Path, list[Path]] = {}
+    inspected_directories: set[tuple[int, int]] = set()
     if selected.is_dir():
         pending = [selected]
-        inspected_directories: set[tuple[int, int]] = set()
         while pending:
             visibility_groups: dict[tuple[tuple[str, ...], ...], list[Path]] = {}
             for directory in pending:
@@ -708,15 +713,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         and not entry.is_symlink()
                         and entry.is_file()
                     ]
-                for entry in children:
-                    if has_git_marker(entry):
-                        candidate = run_git(["rev-parse", "--show-toplevel"], directory=entry)
-                        if candidate.returncode == 0:
-                            try:
-                                if owns_git_root(candidate.stdout, entry):
-                                    discovered_roots[directory_identity(entry)] = entry
-                            except (OSError, ValueError):
-                                pass
                 if children:
                     context: list[tuple[str, ...]] = []
                     current = directory
@@ -736,11 +732,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             pending = []
             for children in visibility_groups.values():
                 visible = visible_to_outer_ignores(children[0], children, directories_only=True)
-                pending.extend(
-                    entry
-                    for entry in children
-                    if normalized(os.fsencode(entry.relative_to(repository).as_posix())) in visible
-                )
+                for entry in children:
+                    if normalized(os.fsencode(entry.relative_to(repository).as_posix())) not in visible:
+                        continue
+                    if has_git_marker(entry):
+                        candidate = run_git(["rev-parse", "--show-toplevel"], directory=entry)
+                        if candidate.returncode == 0:
+                            try:
+                                if owns_git_root(candidate.stdout, entry):
+                                    discovered_roots[directory_identity(entry)] = entry
+                            except (OSError, ValueError):
+                                pass
+                    pending.append(entry)
 
     rows = ripgrep_inventory(repository, scope)
     visible_directories = set(ancestors)
@@ -758,12 +761,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         for entry in directory.iterdir():
             if entry.name != ".git" and git_metadata_path(directory, entry.name):
                 metadata_aliases.add(entry.relative_to(repository).parts)
-            elif (
-                entry.name != ".git"
-                and nonsymbolic_directory(entry)
-                and has_git_marker(entry)
-            ):
-                discovered_roots[directory_identity(entry)] = entry
     if metadata_aliases:
         rows = {
             row
@@ -820,7 +817,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             for index, arguments in enumerate(
                 (["--cached"], ["--others", "--exclude-standard"])
             ):
-                result = run_git(["ls-files", *arguments, "-z", "--", scope])
+                result = run_git(["ls-files", "--sparse", *arguments, "-z", "--", scope])
                 if result.returncode:
                     detail = result.stderr.decode("utf-8", errors="replace").strip()
                     message = f"git ls-files exited with status {result.returncode}"
@@ -867,6 +864,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 candidate = repository / os.fsdecode(relative)
                 current = candidate if nonsymbolic_directory(candidate) else candidate.parent
                 while current != repository:
+                    if index != 0 and directory_identity(current) not in inspected_directories:
+                        current = current.parent
+                        continue
                     if nonsymbolic_directory(current) and has_git_marker(current):
                         try:
                             discovered = current.resolve(strict=True)
@@ -916,7 +916,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 (["--cached"], ["--others", "--exclude-standard"])
             ):
                 result = run_git(
-                    ["ls-files", *arguments, "-z", "--", nested_scope],
+                    ["ls-files", "--sparse", *arguments, "-z", "--", nested_scope],
                     directory=nested,
                 )
                 if result.returncode:
@@ -955,7 +955,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         if scope not in (".", "./"):
             for identity, (root, _) in list(cached_by_root.items()):
-                tracked = run_git(["ls-files", "--cached", "-z"], directory=root)
+                tracked = run_git(["ls-files", "--sparse", "--cached", "-z"], directory=root)
                 if tracked.returncode:
                     detail = tracked.stderr.decode("utf-8", errors="replace").strip()
                     raise InventoryError(
@@ -992,7 +992,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         tracked_gitlinks = []
         for owner, _tracked_paths in cached_by_root.values():
-            staged = run_git(["ls-files", "--stage", "-z"], directory=owner)
+            staged = run_git(["ls-files", "--sparse", "--stage", "-z"], directory=owner)
             if staged.returncode:
                 detail = staged.stderr.decode("utf-8", errors="replace").strip()
                 raise InventoryError(f"git ls-files --stage exited with status {staged.returncode}: {detail}")
