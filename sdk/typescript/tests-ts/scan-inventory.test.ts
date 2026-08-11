@@ -330,6 +330,7 @@ describe("security scan file inventory", () => {
     ["Ä", "ä"],
     ["Σ", "ς"],
     ["ss", "\u00df"],
+    ["I", "\u0131"],
     ["caf\u00e9", "cafe\u0301"],
   ])(
     "matches indexed %s against replacement %s using filesystem identity",
@@ -2364,6 +2365,67 @@ describe("security scan file inventory", () => {
     expect(await inventory(checkout)).toContain("./visible.ts");
   });
 
+  test.each([
+    ["unset", "directory", false],
+    ["false", "symbolic", false],
+    ["false", "fifo", false],
+    ["true", "directory", true],
+    ["worktree-false", "directory", false],
+    ["worktree-true", "directory", true],
+  ])(
+    "inspects %s sparse-checkout %s metadata only when active",
+    async (setting, kind, active) => {
+      if (
+        Bun.which("rg") === null ||
+        (kind !== "directory" && process.platform === "win32") ||
+        (kind === "fifo" && Bun.which("mkfifo") === null)
+      ) {
+        return;
+      }
+
+      const checkout = await repository();
+      if (setting.startsWith("worktree-")) {
+        execFileSync(
+          "git",
+          ["config", "core.sparseCheckout", active ? "false" : "true"],
+          { cwd: checkout },
+        );
+        execFileSync("git", ["config", "extensions.worktreeConfig", "true"], {
+          cwd: checkout,
+        });
+        execFileSync(
+          "git",
+          ["config", "--worktree", "core.sparseCheckout", String(active)],
+          { cwd: checkout },
+        );
+      } else if (setting !== "unset") {
+        execFileSync("git", ["config", "core.sparseCheckout", setting], {
+          cwd: checkout,
+        });
+      }
+
+      const metadata = join(checkout, ".git", "info", "sparse-checkout");
+      if (kind === "symbolic") {
+        const external = join(dirname(checkout), "unused-sparse-checkout");
+        await writeFile(external, "external\n");
+        await symlink(external, metadata);
+      } else if (kind === "fifo") {
+        execFileSync("mkfifo", [metadata]);
+      } else {
+        await mkdir(metadata);
+      }
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      if (active) {
+        await expect(inventory(checkout)).rejects.toThrow(
+          "non-regular Git metadata files are not supported",
+        );
+      } else {
+        expect(await inventory(checkout)).toContain("./visible.ts");
+      }
+    },
+  );
+
   test
     .skipIf(process.platform === "win32")
     .each(["config", "info/sparse-checkout"])(
@@ -2372,6 +2434,11 @@ describe("security scan file inventory", () => {
       if (Bun.which("rg") === null || Bun.which("mkfifo") === null) return;
 
       const checkout = await repository();
+      if (relative === "info/sparse-checkout") {
+        execFileSync("git", ["config", "core.sparseCheckout", "true"], {
+          cwd: checkout,
+        });
+      }
       const metadata = join(checkout, ".git", relative);
       await rm(metadata, { force: true });
       execFileSync("mkfifo", [metadata]);
@@ -2410,6 +2477,11 @@ describe("security scan file inventory", () => {
     if (Bun.which("rg") === null) return;
 
     const checkout = await repository();
+    if (relative === "info/sparse-checkout") {
+      execFileSync("git", ["config", "core.sparseCheckout", "true"], {
+        cwd: checkout,
+      });
+    }
     const external = await repository();
     await writeFile(join(external, "source.ts"), "tracked\n");
     execFileSync("git", ["add", "source.ts"], { cwd: external });

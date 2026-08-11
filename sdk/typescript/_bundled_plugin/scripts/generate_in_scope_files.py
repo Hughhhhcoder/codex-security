@@ -433,6 +433,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError("invalid Git worktree path")
             return bytes(decoded), bytes(normalized)
 
+        def config_enabled(value: str | None) -> bool:
+            if value is None:
+                return True
+            normalized = os.fsdecode(decode_config_value(value)[0]).strip(" \t\r").casefold()
+            return normalized not in ("", "false", "no", "off", "0")
+
         options: dict[tuple[str, str], str | None] = {}
         config_path = roots[-1] / "config"
         worktree_config_enabled = False
@@ -441,13 +447,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             try:
                 for candidate in (config_path, gitdir / "config.worktree"):
                     if candidate != config_path:
-                        extension = options.get(("extensions", "worktreeconfig"), "false")
-                        normalized = (
-                            "true"
-                            if extension is None
-                            else os.fsdecode(decode_config_value(extension)[0]).strip(" \t\r").casefold()
+                        worktree_config_enabled = config_enabled(
+                            options.get(("extensions", "worktreeconfig"), "false")
                         )
-                        worktree_config_enabled = normalized not in ("", "false", "no", "off", "0")
                         if not worktree_config_enabled:
                             continue
                         if inspect_metadata(candidate, directory=False) is None:
@@ -496,6 +498,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             config_includes = True
                         if (section, key) in (
                             ("core", "worktree"),
+                            ("core", "sparsecheckout"),
                             ("extensions", "worktreeconfig"),
                         ):
                             options[(section, key)] = (
@@ -507,6 +510,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
         if config_includes:
             raise InventoryError("Git config includes are not supported")
+        sparse_checkout_enabled = config_enabled(
+            options.get(("core", "sparsecheckout"), "false")
+        )
 
         configured_worktree = options.get(("core", "worktree"))
         if gitfile:
@@ -564,8 +570,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     if relative in ("HEAD", "index", "config.worktree", "info/sparse-checkout")
                     else roots[-1]
                 )
-                if root != effective_root or (
-                    relative == "config.worktree" and not worktree_config_enabled
+                if (
+                    root != effective_root
+                    or relative == "config.worktree" and not worktree_config_enabled
+                    or relative == "info/sparse-checkout" and not sparse_checkout_enabled
                 ):
                     continue
                 if relative == "info/sparse-checkout" and root != roots[-1]:
@@ -1431,7 +1439,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         directory_entries: dict[tuple[int, int], dict[bytes, list[Path]]] = {}
 
         def indexed_name_key(value: str) -> bytes:
-            return os.fsencode(unicodedata.normalize("NFC", value).casefold())
+            return os.fsencode(unicodedata.normalize("NFC", value).upper().casefold())
 
         selected_parts = tuple(
             os.fsencode(part) for part in selected.relative_to(repository).parts
