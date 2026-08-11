@@ -113,6 +113,20 @@ describe("security scan file inventory", () => {
     ]);
   });
 
+  test.each([".gitignore", ".ignore", ".rgignore"])(
+    "inventories ordinary directories named %s",
+    async (name) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const directory = join(checkout, name);
+      await mkdir(directory);
+      await writeFile(join(directory, "visible.ts"), "visible\n");
+
+      expect(await inventory(checkout)).toContain(`./${name}/visible.ts`);
+    },
+  );
+
   test.each([".ignore", ".rgignore"])(
     "keeps ordinary files re-included by higher-precedence %s rules",
     async (override) => {
@@ -1275,15 +1289,29 @@ describe("security scan file inventory", () => {
 
     expect(await inventory(linked)).toContain("./visible.ts");
 
+    const gitdir = (await readFile(join(linked, ".git"), "utf8"))
+      .replace(/^gitdir: /, "")
+      .trim();
+    const alternateBackpointer = join(
+      dirname(linked),
+      "LINKED-WORKTREE",
+      ".git",
+    );
+    const equivalentBackpointer = await realpath(alternateBackpointer).then(
+      async (resolved) => resolved === (await realpath(join(linked, ".git"))),
+      () => false,
+    );
+    if (equivalentBackpointer) {
+      await writeFile(join(gitdir, "gitdir"), `${alternateBackpointer}\n`);
+      expect(await inventory(linked)).toContain("./visible.ts");
+    }
+
     const aliased = join(dirname(checkout), "REPOSITORY", ".git");
     const equivalent = await realpath(aliased).then(
       async (resolved) => resolved === (await realpath(join(checkout, ".git"))),
       () => false,
     );
     if (!equivalent) return;
-    const gitdir = (await readFile(join(linked, ".git"), "utf8"))
-      .replace(/^gitdir: /, "")
-      .trim();
     await writeFile(join(gitdir, "commondir"), `${aliased}\n`);
 
     expect(await inventory(linked)).toContain("./visible.ts");
@@ -1309,6 +1337,15 @@ describe("security scan file inventory", () => {
         "nested",
       ],
       { cwd: checkout },
+    );
+    const gitdir = execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
+      cwd: join(checkout, "nested"),
+      encoding: "utf8",
+    }).trim();
+    const config = join(gitdir, "config");
+    await writeFile(
+      config,
+      `${await readFile(config, "utf8")}\n[feature]\n\tenabled\n`,
     );
 
     expect(await inventory(checkout)).toContain("./nested/visible.ts");
