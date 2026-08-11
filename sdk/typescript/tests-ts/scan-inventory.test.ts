@@ -300,6 +300,45 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./middle/nested/private.ts");
   });
 
+  test("preserves outer Git file exclusions for explicit nested scopes", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "nested");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(checkout, ".gitignore"), "nested/private.ts\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+      writeFile(join(nested, "visible.ts"), "visible\n"),
+    ]);
+    execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
+
+    expect(await inventory(checkout, "nested")).toEqual(["nested/visible.ts"]);
+  });
+
+  test("does not grant Git link exemptions to replaced tracked files", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "nested");
+    await writeFile(nested, "previously tracked file\n");
+    execFileSync("git", ["add", "nested"], { cwd: checkout });
+    await rm(nested);
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(checkout, ".gitignore"), "nested/private.ts\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+      writeFile(join(nested, "visible.ts"), "visible\n"),
+    ]);
+    execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
+
+    const rows = await inventory(checkout);
+    expect(rows).toContain("./nested/visible.ts");
+    expect(rows).not.toContain("./nested/private.ts");
+  });
+
   test("discovers self-hidden checkouts through visible snapshot directories", async () => {
     if (Bun.which("rg") === null) return;
 

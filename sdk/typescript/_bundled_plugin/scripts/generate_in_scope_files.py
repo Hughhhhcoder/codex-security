@@ -158,6 +158,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         metadata = path.stat()
         return metadata.st_dev, metadata.st_ino
 
+    def nonsymbolic_directory(path: Path) -> bool:
+        try:
+            metadata = path.stat(follow_symlinks=False)
+        except OSError:
+            return False
+        return stat.S_ISDIR(metadata.st_mode) and not symbolic_metadata(metadata)
+
     discovered_roots: dict[tuple[int, int], Path] = {}
     metadata_aliases: set[tuple[str, ...]] = set()
     for ancestor in ancestors:
@@ -279,8 +286,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 metadata_aliases.add(entry.relative_to(repository).parts)
             elif (
                 entry.name != ".git"
-                and not entry.is_symlink()
-                and entry.is_dir()
+                and nonsymbolic_directory(entry)
                 and (entry / ".git").exists()
             ):
                 discovered_roots[directory_identity(entry)] = entry
@@ -525,31 +531,24 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 continue
             inspected_directories.add(identity)
             reject_symbolic_ignore(directory)
-            children = []
-            for entry in directory.iterdir():
-                try:
-                    metadata = entry.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                if (
-                    symbolic_metadata(metadata)
-                    or not stat.S_ISDIR(metadata.st_mode)
-                    or git_metadata_path(directory, entry.name)
-                ):
-                    continue
-                children.append(entry)
-            valid_roots = set()
+            children = [
+                entry
+                for entry in directory.iterdir()
+                if nonsymbolic_directory(entry) and not git_metadata_path(directory, entry.name)
+            ]
+            valid_roots: set[tuple[int, int]] = set()
             for entry in children:
                 if (entry / ".git").exists():
                     candidate = run_git(["rev-parse", "--show-toplevel"], directory=entry)
                     if candidate.returncode == 0:
                         try:
                             if resolve_git_root(candidate.stdout) == entry:
-                                discovered_roots[directory_identity(entry)] = entry
-                                valid_roots.add(entry)
+                                identity = directory_identity(entry)
+                                discovered_roots[identity] = entry
+                                valid_roots.add(identity)
                         except (OSError, ValueError):
                             pass
-            ordinary = [entry for entry in children if entry not in valid_roots]
+            ordinary = [entry for entry in children if directory_identity(entry) not in valid_roots]
             if ordinary:
                 visible = visible_to_outer_ignores(
                     ordinary[0], ordinary, directories_only=True
@@ -783,14 +782,34 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             os.fsencode(part) for part in selected.relative_to(repository).parts
         )
         selected_is_directory = selected.is_dir()
+
+        def exact_descendant(candidate: Path, parent: Path) -> bool:
+            candidate_parts = candidate.relative_to(repository).parts
+            parent_parts = parent.relative_to(repository).parts
+            return candidate_parts[: len(parent_parts)] == parent_parts
+
         tracked_gitlinks = []
-        for owner, tracked_paths in cached_by_root.values():
-            indexed_paths = set(tracked_paths)
+        for owner, _tracked_paths in cached_by_root.values():
+            staged = run_git(["ls-files", "--stage", "-z"], directory=owner)
+            if staged.returncode:
+                detail = staged.stderr.decode("utf-8", errors="replace").strip()
+                raise InventoryError(f"git ls-files --stage exited with status {staged.returncode}: {detail}")
+            indexed_paths = {
+                path
+                for record in staged.stdout.split(b"\0")
+                if record
+                and (parts := record.partition(b"\t"))[1]
+                and (header := parts[0].split())
+                and len(header) == 3
+                and header[0] == b"160000"
+                and header[2] == b"0"
+                for path in (parts[2],)
+            }
             tracked_gitlinks.extend(
                 (owner, nested)
                 for nested in inspected_roots.values()
                 if nested != owner
-                and nested.is_relative_to(owner)
+                and exact_descendant(nested, owner)
                 and os.fsencode(nested.relative_to(owner).as_posix()) in indexed_paths
             )
 
@@ -889,16 +908,31 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             )
             gitlink_groups: dict[tuple[tuple[Path, Path], ...], list[Path]] = {}
             if outer_visible is not None:
+                scope_exemptions: tuple[tuple[Path, Path], ...] = ()
+                if selected != repository and (
+                    selected == root or exact_descendant(selected, root)
+                ):
+                    selected_path = normalized(
+                        os.fsencode(selected.relative_to(repository).as_posix())
+                    )
+                    selected_visible = visible_to_outer_ignores(
+                        selected, [selected], directories_only=True
+                    )
+                    candidate_exemption = ((repository, selected),)
+                    if selected_path not in selected_visible and selected_path in visible_to_outer_ignores(
+                        selected,
+                        [selected],
+                        directories_only=True,
+                        exempt_gitignores=candidate_exemption,
+                    ):
+                        scope_exemptions = candidate_exemption
                 for candidate in candidates:
                     exemptions = tuple(
                         (owner, gitlink)
                         for owner, gitlink in tracked_gitlinks
-                        if candidate.is_relative_to(gitlink)
+                        if exact_descendant(candidate, gitlink)
                     )
-                    if selected != repository and (
-                        selected == root or selected.is_relative_to(root)
-                    ):
-                        exemptions += ((repository, selected),)
+                    exemptions += scope_exemptions
                     if exemptions:
                         gitlink_groups.setdefault(exemptions, []).append(candidate)
             gitlink_visible = {
