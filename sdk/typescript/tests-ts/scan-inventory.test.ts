@@ -808,6 +808,22 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test("rejects unrelated external Git common directories", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const external = await repository();
+    await writeFile(join(checkout, "visible.ts"), "visible\n");
+    await writeFile(
+      join(checkout, ".git", "commondir"),
+      `${join(external, ".git")}\n`,
+    );
+
+    await expect(inventory(checkout)).rejects.toThrow(
+      "Git common directory does not own selected worktree",
+    );
+  });
+
   test("binds Git discovery to the selected checkout despite external core.worktree", async () => {
     if (Bun.which("rg") === null) return;
 

@@ -217,6 +217,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
             if not common.is_absolute():
                 common = gitdir / common
+            common = Path(os.path.abspath(common))
+            if (common / "worktrees" / gitdir.name).parts != gitdir.parts:
+                raise InventoryError("Git common directory does not own selected worktree")
             for current in reversed((common, *common.parents)):
                 if inspect_metadata(current, directory=True) is None:
                     break
