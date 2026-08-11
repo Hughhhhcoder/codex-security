@@ -430,26 +430,6 @@ def git_blob_preview(
     repo: Path, path: Path, object_name: str, preview_bytes: int
 ) -> tuple[str, bool]:
     try:
-        description = subprocess.run(
-            [
-                "git",
-                "--no-replace-objects",
-                "-C",
-                str(repo),
-                "cat-file",
-                "--batch-check=%(objectname) %(objecttype) %(objectsize)",
-                "-Z",
-            ],
-            input=os.fsencode(object_name) + b"\0",
-            check=True,
-            capture_output=True,
-        ).stdout.removesuffix(b"\0")
-        expected, object_type, size = description.split(b" ")
-        algorithm = {40: "sha1", 64: "sha256"}.get(len(expected))
-        if object_type != b"blob" or algorithm is None or int(size) < 0:
-            raise ValueError("Git did not identify a supported blob object")
-        digest = hashlib.new(algorithm)
-        digest.update(b"blob " + size + b"\0")
         with subprocess.Popen(
             ["git", "--no-replace-objects", "-C", str(repo), "cat-file", "blob", object_name],
             stdout=subprocess.PIPE,
@@ -457,14 +437,17 @@ def git_blob_preview(
         ) as process:
             if process.stdout is None:
                 raise OSError("Git did not provide object contents")
-            data = process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES)
-            digest.update(data)
-            while chunk := process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES):
-                digest.update(chunk)
+            data = process.stdout.read(4096)
+            binary = is_binary_sample(data) and not data.startswith((b"\xff\xfe", b"\xfe\xff"))
+            if not binary:
+                data += process.stdout.read(DIRECT_SCOPE_PREVIEW_READ_BYTES - len(data))
             process.stdout.close()
-        if process.returncode or digest.hexdigest().encode("ascii") != expected:
-            raise OSError("Git could not read the requested object")
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            if binary or len(data) == DIRECT_SCOPE_PREVIEW_READ_BYTES:
+                if process.poll() is None:
+                    process.terminate()
+            elif process.wait():
+                raise OSError("Git could not read the requested object")
+    except OSError as error:
         raise SystemExit(f"Could not read changed Git object: {object_name}") from error
     return diff_preview_data(path, data, preview_bytes)
 
