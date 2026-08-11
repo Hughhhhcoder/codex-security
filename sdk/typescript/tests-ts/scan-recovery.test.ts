@@ -312,8 +312,12 @@ describe("malformed scan artifact recovery", () => {
       "--scan-id",
       fixture.scanId,
     ]);
+    const python = (
+      running["scan"] as { validationEnvironment: { python: string } }
+    ).validationEnvironment.python;
+    expect(await realpath(python)).toBe(await realpath(fixture.python));
     const available = {
-      python: fixture.python,
+      python,
       availableTools: expect.arrayContaining(["node"]),
     };
     expect(running["scan"]).toMatchObject({
@@ -359,7 +363,7 @@ describe("malformed scan artifact recovery", () => {
 
     expect(historical["scan"]).toMatchObject({
       validationEnvironment: {
-        python: fixture.python,
+        python,
         availableTools: [],
       },
     });
@@ -389,9 +393,12 @@ describe("malformed scan artifact recovery", () => {
       "--scan-id",
       fixture.scanId,
     ]);
+    const recipe = context["recipe"] as {
+      validationEnvironment: { python: string };
+    };
     expect(context["scan"]).toMatchObject({
       validationEnvironment: {
-        python: fixture.python,
+        python: recipe.validationEnvironment.python,
         availableTools: expect.arrayContaining(["node"]),
         blockers: [
           "Docker daemon is unavailable.",
@@ -399,9 +406,7 @@ describe("malformed scan artifact recovery", () => {
         ],
       },
     });
-    expect(
-      (context["recipe"] as Record<string, unknown>)["validationEnvironment"],
-    ).not.toHaveProperty("blockers");
+    expect(recipe.validationEnvironment).not.toHaveProperty("blockers");
   });
 
   test("returns authoritative clean, dirty, and nested Git target contracts", async () => {
