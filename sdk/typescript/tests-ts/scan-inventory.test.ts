@@ -1027,6 +1027,55 @@ describe("security scan file inventory", () => {
     await expect(readFile(trace, "utf8")).rejects.toThrow();
   });
 
+  test.each(["pack", "ab"])(
+    "rejects symbolic Git object-store %s directories",
+    async (name) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const external = await repository();
+      const internal = join(checkout, ".git", "extra-objects");
+      const target = join(external, ".git", "objects", name);
+      await mkdir(join(internal, "info"), { recursive: true });
+      if (name !== "pack") await mkdir(target);
+      await symlink(
+        target,
+        join(internal, name),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await writeFile(
+        join(checkout, ".git", "objects", "info", "alternates"),
+        `${internal}\n`,
+      );
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "preserves carriage returns in Git object-alternate paths",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const external = await repository();
+      const internal = join(checkout, ".git", "safe-objects");
+      await mkdir(join(internal, "info"), { recursive: true });
+      await mkdir(join(internal, "pack"));
+      await symlink(join(external, ".git", "objects"), `${internal}\r`);
+      await writeFile(
+        join(checkout, ".git", "objects", "info", "alternates"),
+        `${internal}\r\n`,
+      );
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
   test("rejects external transitive Git object alternates before invoking Git", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -1082,7 +1131,7 @@ describe("security scan file inventory", () => {
     await mkdir(join(objects, "pack"));
     await writeFile(
       join(checkout, ".git", "objects", "info", "alternates"),
-      `${objects}\n`,
+      `${JSON.stringify(objects)}\n`,
     );
     await writeFile(join(checkout, "visible.ts"), "visible\n");
 
@@ -1103,7 +1152,10 @@ describe("security scan file inventory", () => {
       join(checkout, ".git", "objects", "info", "alternates"),
       `${first}\n`,
     );
-    await writeFile(join(first, "info", "alternates"), `${second}\n`);
+    await writeFile(
+      join(first, "info", "alternates"),
+      `${JSON.stringify(second)}\n`,
+    );
     await writeFile(join(second, "info", "alternates"), `${first}\n`);
     await writeFile(join(checkout, "visible.ts"), "visible\n");
 

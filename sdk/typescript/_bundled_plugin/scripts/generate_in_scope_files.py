@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import configparser
 import io
 import os
@@ -173,6 +174,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError("non-regular Git metadata files are not supported")
             return metadata
 
+        def inspect_object_store(objects: Path) -> None:
+            try:
+                entries = objects.iterdir()
+                for entry in entries:
+                    if entry.name.casefold() in ("info", "pack") or re.fullmatch(
+                        r"[0-9a-fA-F]{2}", entry.name
+                    ):
+                        inspect_metadata(entry, directory=True)
+            except OSError as error:
+                raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+
         try:
             metadata = marker.stat(follow_symlinks=False)
         except FileNotFoundError:
@@ -292,6 +304,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         "objects/info",
                     ),
                 )
+                if metadata is not None and relative == "objects":
+                    inspect_object_store(path)
                 if metadata is not None and relative in (
                     "config",
                     "config.worktree",
@@ -307,9 +321,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         while pending:
                             object_root, records = pending.pop()
                             for line in records.split(b"\n"):
-                                line = line.removesuffix(b"\r")
                                 if not line:
                                     continue
+                                if line.startswith(b'"'):
+                                    if not line.endswith(b'"'):
+                                        raise InventoryError("invalid Git object alternate paths")
+                                    try:
+                                        line = codecs.escape_decode(line[1:-1])[0]
+                                    except (ValueError, UnicodeError) as error:
+                                        raise InventoryError(
+                                            "invalid Git object alternate paths"
+                                        ) from error
                                 alternate = Path(os.fsdecode(line))
                                 if not alternate.is_absolute():
                                     alternate = object_root / alternate
@@ -341,6 +363,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 if identity in inspected:
                                     continue
                                 inspected.add(identity)
+                                inspect_object_store(alternate)
                                 info = alternate / "info"
                                 if inspect_metadata(info, directory=True) is None:
                                     continue
