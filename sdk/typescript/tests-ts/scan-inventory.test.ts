@@ -168,6 +168,17 @@ describe("security scan file inventory", () => {
       expect(
         (await inventory(checkout)).includes(`./${replacement}/private.ts`),
       ).toBe(expected);
+
+      if (indexed === "caf\u00e9") {
+        execFileSync("git", ["config", "core.ignoreCase", "false"], {
+          cwd: checkout,
+        });
+        expect(
+          (await inventory(checkout, replacement)).includes(
+            `${replacement}/private.ts`,
+          ),
+        ).toBe(expected);
+      }
     },
   );
 
@@ -617,6 +628,28 @@ describe("security scan file inventory", () => {
       if (kind === "gitfile") {
         await writeFile(join(checkout, ".git"), `gitdir: ${metadata}\n`);
       }
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      await expect(inventory(checkout)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
+  test
+    .skipIf(process.platform === "win32")
+    .each(["index", "config", "info/exclude"])(
+    "rejects a symbolic Git metadata %s",
+    async (relative) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const external = await repository();
+      await writeFile(join(external, "source.ts"), "tracked\n");
+      execFileSync("git", ["add", "source.ts"], { cwd: external });
+      const metadata = join(checkout, ".git", relative);
+      await rm(metadata, { force: true });
+      await symlink(join(external, ".git", relative), metadata);
       await writeFile(join(checkout, "visible.ts"), "visible\n");
 
       await expect(inventory(checkout)).rejects.toThrow(

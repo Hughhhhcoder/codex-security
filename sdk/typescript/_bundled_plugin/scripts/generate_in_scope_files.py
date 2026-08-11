@@ -147,6 +147,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
     def has_git_marker(directory: Path) -> bool:
         marker = directory / ".git"
+
+        def inspect_metadata(path: Path) -> os.stat_result | None:
+            try:
+                metadata = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+            except (OSError, ValueError) as error:
+                raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+            if symbolic_metadata(metadata):
+                raise InventoryError("symbolic Git metadata paths are not supported")
+            return metadata
+
         try:
             metadata = marker.stat(follow_symlinks=False)
         except FileNotFoundError:
@@ -155,25 +167,48 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             raise InventoryError(f"could not inspect Git metadata: {directory}") from error
         if symbolic_metadata(metadata):
             raise InventoryError("symbolic Git metadata paths are not supported")
-        if not stat.S_ISREG(metadata.st_mode):
-            return stat.S_ISDIR(metadata.st_mode)
-        try:
-            contents = marker.read_bytes()
-        except OSError as error:
-            raise InventoryError(f"could not inspect Git metadata: {directory}") from error
-        if contents.startswith(b"gitdir: "):
+        if stat.S_ISDIR(metadata.st_mode):
+            gitdir = marker
+        elif stat.S_ISREG(metadata.st_mode):
+            try:
+                contents = marker.read_bytes()
+            except OSError as error:
+                raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+            if not contents.startswith(b"gitdir: "):
+                return True
             gitdir = Path(os.fsdecode(contents.removeprefix(b"gitdir: ").rstrip(b"\r\n")))
             if not gitdir.is_absolute():
                 gitdir = directory / gitdir
             for current in reversed((gitdir, *gitdir.parents)):
-                try:
-                    component = current.stat(follow_symlinks=False)
-                except FileNotFoundError:
+                if inspect_metadata(current) is None:
                     break
-                except (OSError, ValueError) as error:
-                    raise InventoryError(f"could not inspect Git metadata: {directory}") from error
-                if symbolic_metadata(component):
-                    raise InventoryError("symbolic Git metadata paths are not supported")
+        else:
+            return False
+
+        roots = [gitdir]
+        common_marker = gitdir / "commondir"
+        common_metadata = inspect_metadata(common_marker)
+        if common_metadata is not None and stat.S_ISREG(common_metadata.st_mode):
+            try:
+                common = Path(os.fsdecode(common_marker.read_bytes().rstrip(b"\r\n")))
+            except (OSError, ValueError) as error:
+                raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+            if not common.is_absolute():
+                common = gitdir / common
+            for current in reversed((common, *common.parents)):
+                if inspect_metadata(current) is None:
+                    break
+            roots.append(common)
+        for root in roots:
+            for relative in (
+                "HEAD",
+                "index",
+                "config",
+                "config.worktree",
+                "info",
+                "info/exclude",
+            ):
+                inspect_metadata(root / relative)
         return True
 
     discovered_roots: dict[tuple[int, int], Path] = {}
@@ -980,11 +1015,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 return
             for index, requested in enumerate(selected_parts):
                 indexed = indexed_parts[index]
-                if index < len(root_parts) or not case_insensitive_roots[root_identity]:
-                    if indexed != requested:
-                        return
-                elif indexed_name_key(os.fsdecode(indexed)) != indexed_name_key(
-                    os.fsdecode(requested)
+                if indexed == requested:
+                    continue
+                if index < len(root_parts):
+                    return
+                indexed_name = os.fsdecode(indexed)
+                requested_name = os.fsdecode(requested)
+                if unicodedata.normalize("NFC", indexed_name) != unicodedata.normalize(
+                    "NFC", requested_name
+                ) and (
+                    not case_insensitive_roots[root_identity]
+                    or indexed_name_key(indexed_name) != indexed_name_key(requested_name)
                 ):
                     return
 
