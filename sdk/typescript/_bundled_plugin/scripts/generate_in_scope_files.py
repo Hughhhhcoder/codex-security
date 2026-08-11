@@ -496,6 +496,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 pattern = line[1:] if negated else line
                                 if pattern.startswith(b"/"):
                                     pattern = pattern[1:]
+                                    if not pattern:
+                                        continue
                                 elif b"/" not in pattern.rstrip(b"/"):
                                     pattern = b"**/" + pattern
                                 rebased.append(

@@ -558,6 +558,30 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./.RGIGNORE/private.ts");
   });
 
+  test("keeps slash-only ignores inert when isolating nested checkout names", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const container = join(checkout, "container");
+    const nested = join(container, ".IGNORE");
+    await mkdir(container);
+    await writeFile(join(container, ".ignore"), "/\n");
+    try {
+      await mkdir(nested);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await writeFile(join(nested, ".ignore"), "*\n");
+    await writeFile(join(nested, "tracked.ts"), "tracked\n");
+    execFileSync("git", ["add", "tracked.ts"], { cwd: nested });
+
+    expect(await inventory(checkout)).toContain(
+      "./container/.IGNORE/tracked.ts",
+    );
+  });
+
   test("preserves canonically equivalent tracked directory spellings", async () => {
     if (Bun.which("rg") === null) return;
 
