@@ -1191,6 +1191,62 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each(["worktrees", "owner"])(
+    "rejects symbolic common %s metadata before following worktree ownership",
+    async (kind) => {
+      const checkout = await repository();
+      await writeFile(join(checkout, "tracked.ts"), "tracked\n");
+      execFileSync("git", ["add", "tracked.ts"], { cwd: checkout });
+      commit(checkout);
+      const linked = join(dirname(checkout), "linked-worktree");
+      execFileSync("git", ["worktree", "add", "--detach", linked, "HEAD"], {
+        cwd: checkout,
+        stdio: "ignore",
+      });
+      const gitdir = (await readFile(join(linked, ".git"), "utf8"))
+        .replace(/^gitdir: /, "")
+        .trim();
+      const common = join(dirname(checkout), "common-metadata");
+      const external = join(dirname(checkout), "external-worktrees");
+      await mkdir(common);
+      await mkdir(external);
+      if (kind === "owner") await mkdir(join(common, "worktrees"));
+      const symbolic =
+        kind === "worktrees"
+          ? join(common, "worktrees")
+          : join(common, "worktrees", basename(gitdir));
+      await symlink(
+        external,
+        symbolic,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await writeFile(join(gitdir, "commondir"), `${common}\n`);
+
+      const instrumentation = join(dirname(checkout), "instrumentation");
+      await mkdir(instrumentation);
+      await writeFile(
+        join(instrumentation, "sitecustomize.py"),
+        [
+          "from pathlib import Path",
+          `owner = Path(${JSON.stringify(join(common, "worktrees", basename(gitdir)))})`,
+          "original = Path.stat",
+          "def guarded(self, *args, **kwargs):",
+          "    if self == owner and kwargs.get('follow_symlinks', True):",
+          "        raise RuntimeError('followed unvalidated Git worktree owner')",
+          "    return original(self, *args, **kwargs)",
+          "Path.stat = guarded",
+        ].join("\n"),
+      );
+
+      await expect(
+        inventory(linked, ".", {
+          ...process.env,
+          PYTHONPATH: instrumentation,
+        }),
+      ).rejects.toThrow("symbolic Git metadata paths are not supported");
+    },
+  );
+
   test.each([".GIT", ".GIT.", ".g\u0131t", ".g\u0131t."])(
     "rejects symbolic %s metadata before resolving its filesystem alias",
     async (alias) => {

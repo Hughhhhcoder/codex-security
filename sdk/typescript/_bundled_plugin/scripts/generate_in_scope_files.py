@@ -363,8 +363,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if inspected_common is None:
                 raise InventoryError("Git common directory does not own selected worktree")
             common = inspected_common
-            owner = common / "worktrees" / gitdir.name
-            if not same_filesystem_path(owner, gitdir):
+            owner = inspect_metadata_path(
+                common / "worktrees" / gitdir.name,
+                directory_path=True,
+            )
+            if owner is None or not same_filesystem_path(owner, gitdir):
                 raise InventoryError("Git common directory does not own selected worktree")
             roots.append(common)
 
