@@ -152,11 +152,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         return metadata.st_dev, metadata.st_ino
 
     def same_filesystem_path(first: Path, second: Path) -> bool:
-        return tuple(unicodedata.normalize("NFC", part).casefold() for part in first.parts) == tuple(
-            unicodedata.normalize("NFC", part).casefold() for part in second.parts
-        ) and directory_identity(first) == directory_identity(second) and directory_identity(
-            first.parent
-        ) == directory_identity(second.parent)
+        try:
+            return directory_identity(first) == directory_identity(second) and directory_identity(
+                first.parent
+            ) == directory_identity(second.parent)
+        except FileNotFoundError:
+            return False
 
     def nonsymbolic_directory(path: Path) -> bool:
         try:
@@ -187,6 +188,26 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if directory is False and not stat.S_ISREG(metadata.st_mode):
                 raise InventoryError("non-regular Git metadata files are not supported")
             return metadata
+
+        def inspect_metadata_path(path: Path, *, directory_path: bool | None) -> Path | None:
+            current = Path(path.anchor)
+            if inspect_metadata(current, directory=True) is None:
+                return None
+            components = path.parts[1:]
+            for index, component in enumerate(components):
+                if component == "..":
+                    current = current.parent
+                    continue
+                current /= component
+                if (
+                    inspect_metadata(
+                        current,
+                        directory=directory_path if index + 1 == len(components) else True,
+                    )
+                    is None
+                ):
+                    return None
+            return current
 
         def aliases_canonical_path(path: Path, canonical: str) -> bool:
             try:
@@ -278,10 +299,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             gitdir = Path(os.fsdecode(contents.removeprefix(b"gitdir: ").rstrip(b"\r\n")))
             if not gitdir.is_absolute():
                 gitdir = directory / gitdir
-            gitdir = Path(os.path.abspath(gitdir))
-            for current in reversed((gitdir, *gitdir.parents)):
-                if inspect_metadata(current, directory=True) is None:
-                    break
+            inspected_gitdir = inspect_metadata_path(gitdir, directory_path=True)
+            if inspected_gitdir is None:
+                raise InventoryError("Git metadata directory does not own selected worktree")
+            gitdir = inspected_gitdir
             internally_owned = len(gitdir.parts) >= len(repository.parts)
             if internally_owned:
                 ancestor = gitdir
@@ -297,7 +318,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     raise InventoryError(f"could not inspect Git metadata: {directory}") from error
                 if not target.is_absolute():
                     target = gitdir / target
-                if not same_filesystem_path(Path(os.path.abspath(target)), marker):
+                inspected_target = inspect_metadata_path(target, directory_path=None)
+                if inspected_target is None or not same_filesystem_path(inspected_target, marker):
                     raise InventoryError("Git metadata directory does not own selected worktree")
             elif not internally_owned:
                 raise InventoryError("Git metadata directory does not own selected worktree")
@@ -322,13 +344,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
             if not common.is_absolute():
                 common = gitdir / common
-            common = Path(os.path.abspath(common))
+            inspected_common = inspect_metadata_path(common, directory_path=True)
+            if inspected_common is None:
+                raise InventoryError("Git common directory does not own selected worktree")
+            common = inspected_common
             owner = common / "worktrees" / gitdir.name
             if not same_filesystem_path(owner, gitdir):
                 raise InventoryError("Git common directory does not own selected worktree")
-            for current in reversed((common, *common.parents)):
-                if inspect_metadata(current, directory=True) is None:
-                    break
             roots.append(common)
 
         def config_value(value: str | None) -> str | None:
@@ -474,25 +496,26 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 target = Path(configured_worktree)
                 if not target.is_absolute():
                     target = gitdir / target
+                inspected_target = inspect_metadata_path(target, directory_path=True)
+                if inspected_target is None:
+                    raise InventoryError("Git metadata directory does not own selected worktree")
                 if decoded != normalized:
                     normalized_target = Path(os.fsdecode(normalized))
                     if not normalized_target.is_absolute():
                         normalized_target = gitdir / normalized_target
-                    try:
-                        normalized_metadata = normalized_target.stat(follow_symlinks=False)
-                    except FileNotFoundError:
+                    inspected_normalized = inspect_metadata_path(
+                        normalized_target,
+                        directory_path=True,
+                    )
+                    if inspected_normalized is None:
                         raise InventoryError(
                             "Git metadata directory does not own selected worktree"
-                        ) from None
-                    else:
-                        if symbolic_metadata(normalized_metadata) or (
-                            normalized_metadata.st_dev,
-                            normalized_metadata.st_ino,
-                        ) != directory_identity(directory):
-                            raise InventoryError(
-                                "Git metadata directory does not own selected worktree"
-                            )
-                if not same_filesystem_path(Path(os.path.abspath(target)), directory):
+                        )
+                    if directory_identity(inspected_normalized) != directory_identity(directory):
+                        raise InventoryError(
+                            "Git metadata directory does not own selected worktree"
+                        )
+                if not same_filesystem_path(inspected_target, directory):
                     raise InventoryError("Git metadata directory does not own selected worktree")
 
         for root in roots:
@@ -1403,7 +1426,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 and (header := parts[0].split())
                 and len(header) == 3
                 and header[0] == b"160000"
-                and header[2] == b"0"
+                and header[2] in (b"0", b"1", b"2", b"3")
                 for path in (parts[2],)
             }
             tracked_gitlinks.extend(

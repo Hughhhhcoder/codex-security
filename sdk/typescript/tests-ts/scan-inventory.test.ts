@@ -566,34 +566,51 @@ describe("security scan file inventory", () => {
     expect(rows).not.toContain("./middle/nested/private.ts");
   });
 
-  test("admits tracked Gitlinks through configured directory excludes", async () => {
-    if (Bun.which("rg") === null) return;
+  test.each(["stage-0", "conflicted"])(
+    "admits %s tracked Gitlinks through configured directory excludes",
+    async (staging) => {
+      if (Bun.which("rg") === null) return;
 
-    const checkout = await repository();
-    const nested = join(checkout, "nested");
-    await mkdir(nested);
-    execFileSync("git", ["init", "-q"], { cwd: nested });
-    await Promise.all([
-      writeFile(join(nested, "visible.ts"), "visible\n"),
-      writeFile(join(nested, "private.ts"), "private\n"),
-    ]);
-    execFileSync("git", ["add", "visible.ts", "private.ts"], {
-      cwd: nested,
-    });
-    commit(nested);
-    execFileSync("git", ["add", "nested"], {
-      cwd: checkout,
-      stdio: "ignore",
-    });
-    await writeFile(
-      join(checkout, ".git", "info", "exclude"),
-      "nested/\nnested/private.ts\n",
-    );
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(join(nested, "visible.ts"), "visible\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+      ]);
+      execFileSync("git", ["add", "visible.ts", "private.ts"], {
+        cwd: nested,
+      });
+      commit(nested);
+      execFileSync("git", ["add", "nested"], {
+        cwd: checkout,
+        stdio: "ignore",
+      });
+      if (staging === "conflicted") {
+        const object = execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: nested,
+          encoding: "utf8",
+        }).trim();
+        execFileSync("git", ["update-index", "--index-info"], {
+          cwd: checkout,
+          input: [
+            `0 ${"0".repeat(40)}\tnested`,
+            ...[1, 2, 3].map((stage) => `160000 ${object} ${stage}\tnested`),
+            "",
+          ].join("\n"),
+        });
+      }
+      await writeFile(
+        join(checkout, ".git", "info", "exclude"),
+        "nested/\nnested/private.ts\n",
+      );
 
-    const rows = await inventory(checkout);
-    expect(rows).toContain("./nested/visible.ts");
-    expect(rows).not.toContain("./nested/private.ts");
-  });
+      const rows = await inventory(checkout);
+      expect(rows).toContain("./nested/visible.ts");
+      expect(rows).not.toContain("./nested/private.ts");
+    },
+  );
 
   test.skipIf(process.platform === "win32").each([".ignore", ".rgignore"])(
     "rejects a hidden Gitlink ancestor's symbolic %s",
@@ -988,6 +1005,65 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each(["gitdir", "backpointer", "commondir", "worktree"])(
+    "rejects symbolic %s metadata hops before parent traversal",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      await writeFile(join(checkout, "visible.ts"), "tracked\n");
+      execFileSync("git", ["add", "visible.ts"], { cwd: checkout });
+      commit(checkout);
+      const linked = join(dirname(checkout), "linked-worktree");
+      execFileSync("git", ["worktree", "add", "--detach", linked, "HEAD"], {
+        cwd: checkout,
+        stdio: "ignore",
+      });
+      const gitdir = (await readFile(join(linked, ".git"), "utf8"))
+        .replace(/^gitdir: /, "")
+        .trim();
+      const outside = join(dirname(checkout), "outside", "hop-target");
+      await mkdir(outside, { recursive: true });
+      const hop =
+        kind === "gitdir"
+          ? join(dirname(gitdir), "hop")
+          : kind === "commondir"
+            ? join(checkout, "hop")
+            : join(linked, "hop");
+      await symlink(
+        outside,
+        hop,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      if (kind === "gitdir") {
+        await writeFile(
+          join(linked, ".git"),
+          `gitdir: ${hop}/../${basename(gitdir)}\n`,
+        );
+      } else if (kind === "backpointer") {
+        await writeFile(join(gitdir, "gitdir"), `${hop}/../.git\n`);
+      } else if (kind === "commondir") {
+        await writeFile(join(gitdir, "commondir"), `${hop}/../.git\n`);
+      } else {
+        execFileSync("git", ["config", "extensions.worktreeConfig", "true"], {
+          cwd: linked,
+        });
+        execFileSync(
+          "git",
+          ["config", "--worktree", "core.worktree", `${hop}/..`],
+          {
+            cwd: linked,
+          },
+        );
+      }
+
+      await expect(inventory(linked)).rejects.toThrow(
+        "symbolic Git metadata paths are not supported",
+      );
+    },
+  );
+
   test.each(["missing", "mismatched"])(
     "rejects an external gitdir with a %s worktree backpointer",
     async (ownership) => {
@@ -1061,6 +1137,7 @@ describe("security scan file inventory", () => {
     "quoted-tab-owned",
     "case-alias",
     "short-alias",
+    "short-worktree",
     "owned",
     "external",
     "mixed-case-external",
@@ -1076,7 +1153,7 @@ describe("security scan file inventory", () => {
         ownership.startsWith("literal-tab") || ownership === "quoted-tab-owned";
       if (tabOwnership && process.platform === "win32") return;
       if (
-        ownership === "short-alias" &&
+        ownership.startsWith("short-") &&
         (process.platform !== "win32" || python === null)
       )
         return;
@@ -1126,7 +1203,8 @@ describe("security scan file inventory", () => {
       const effective =
         ownership === "owned" ||
         ownership === "case-alias" ||
-        ownership === "short-alias"
+        ownership === "short-alias" ||
+        ownership === "short-worktree"
           ? nested
           : external;
       const config = join(metadata, "config");
@@ -1191,7 +1269,10 @@ describe("security scan file inventory", () => {
           ),
         );
       }
-      const override = `[${ownership === "mixed-case-external" ? "Core" : "core"}]\n\tworktree = ${effective}\n`;
+      const configuredOwner =
+        ownership === "short-worktree" ? windowsShortPath(nested) : effective;
+      if (configuredOwner === null) return;
+      const override = `[${ownership === "mixed-case-external" ? "Core" : "core"}]\n\tworktree = ${configuredOwner}\n`;
       if (ownership === "disabled-symlink") {
         const unused = join(dirname(checkout), "unused.config");
         await writeFile(unused, override);
@@ -2071,6 +2152,12 @@ describe("security scan file inventory", () => {
     await writeFile(join(gitdir, "config"), "[include]\npath = inactive\n");
     await mkdir(join(gitdir, "info", "exclude"), { recursive: true });
     expect(await inventory(linked)).toContain("./visible.ts");
+
+    const shortBackpointer = windowsShortPath(join(linked, ".git"));
+    if (shortBackpointer !== null) {
+      await writeFile(join(gitdir, "gitdir"), `${shortBackpointer}\n`);
+      expect(await inventory(linked)).toContain("./visible.ts");
+    }
 
     const alternateBackpointer = join(
       dirname(linked),
