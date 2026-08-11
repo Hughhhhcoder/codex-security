@@ -165,6 +165,37 @@ describe("security scan file inventory", () => {
     expect(await countLookups(18)).toBeLessThanOrEqual(await countLookups(2));
   });
 
+  test("validates Git object files once across many scan directories", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const instrumentation = join(dirname(checkout), "instrumentation");
+    const trace = join(dirname(checkout), "object-stats.log");
+    await mkdir(instrumentation);
+    await writeFile(
+      join(instrumentation, "sitecustomize.py"),
+      "import os\nfrom pathlib import Path\noriginal = Path.stat\ndef observed(self, *args, **kwargs):\n    if self.parent.parent.name == 'objects' and len(self.parent.name) == 2 and len(self.name) == 38:\n        with open(os.environ['INVENTORY_OBJECT_STAT_TRACE'], 'a') as trace:\n            trace.write(str(self) + '\\n')\n    return original(self, *args, **kwargs)\nPath.stat = observed\n",
+    );
+    for (let index = 0; index < 5; index++) {
+      execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: checkout,
+        input: `object-${index}\n`,
+      });
+    }
+    for (let index = 0; index < 10; index++) {
+      const branch = join(checkout, `branch-${index}`, "nested");
+      await mkdir(branch, { recursive: true });
+      await writeFile(join(branch, "visible.ts"), "visible\n");
+    }
+
+    await inventory(checkout, ".", {
+      ...process.env,
+      PYTHONPATH: instrumentation,
+      INVENTORY_OBJECT_STAT_TRACE: trace,
+    });
+    expect((await readFile(trace, "utf8")).trim().split("\n")).toHaveLength(5);
+  });
+
   test.each([".ignore", ".rgignore"])(
     "preserves ancestor %s precedence for explicit directory scopes",
     async (override) => {
@@ -1079,13 +1110,29 @@ describe("security scan file inventory", () => {
     }
     const directory = join(objects, kind);
     if (kind !== "pack") await mkdir(directory);
-    const member = kind === "pack" ? "pack-external.pack" : "0".repeat(38);
+    const member =
+      kind === "pack" ? `pack-${"0".repeat(40)}.pack` : "0".repeat(38);
     await symlink(external, join(directory, member));
 
     await expect(inventory(checkout)).rejects.toThrow(
       "symbolic Git metadata paths are not supported",
     );
   });
+
+  test.each(["pack", "ab"])(
+    "allows unrelated tooling directories inside Git object %s",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const directory = join(checkout, ".git", "objects", kind);
+      if (kind !== "pack") await mkdir(directory);
+      await mkdir(join(directory, "unrelated-dir"));
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      expect(await inventory(checkout)).toContain("./visible.ts");
+    },
+  );
 
   test.skipIf(process.platform === "win32").each(["PACK", "AB"])(
     "ignores unrelated uppercase Git object-store name %s",
@@ -1559,7 +1606,7 @@ describe("security scan file inventory", () => {
     const config = join(gitdir, "config");
     const configured = (await readFile(config, "utf8")).replace(
       /^([ \t]*worktree[ \t]*=[ \t]*)(.+)$/m,
-      '$1"$2"',
+      '$1"$2" # valid Git comment',
     );
     await writeFile(config, `${configured}\n[feature]\n\tenabled\n`);
 

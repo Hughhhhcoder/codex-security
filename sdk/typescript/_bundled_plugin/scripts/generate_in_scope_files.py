@@ -153,6 +153,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         return stat.S_ISDIR(metadata.st_mode) and not symbolic_metadata(metadata)
 
     gitdir_owners: dict[tuple[int, int], tuple[int, int]] = {}
+    validated_object_stores: set[tuple[int, int]] = set()
 
     def has_git_marker(directory: Path) -> bool:
         marker = directory / ".git"
@@ -176,6 +177,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         def inspect_object_store(objects: Path) -> None:
             try:
+                identity = directory_identity(objects)
+                if identity in validated_object_stores:
+                    return
                 entries = objects.iterdir()
                 for entry in entries:
                     canonical = entry.name.casefold()
@@ -194,7 +198,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     inspect_metadata(entry, directory=True)
                     if canonical != "info":
                         for member in entry.iterdir():
+                            if canonical == "pack":
+                                if member.name != "multi-pack-index" and not re.fullmatch(
+                                    r"(?:pack|multi-pack-index)-[0-9a-f]{40}(?:[0-9a-f]{24})?"
+                                    r"\.(?:pack|idx|rev|bitmap|keep|promisor|mtimes)",
+                                    member.name,
+                                ):
+                                    continue
+                            elif not re.fullmatch(r"(?:[0-9a-f]{38}|[0-9a-f]{62})", member.name):
+                                continue
                             inspect_metadata(member, directory=False)
+                validated_object_stores.add(identity)
             except OSError as error:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
 
@@ -253,6 +267,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     raise InventoryError(f"could not inspect Git metadata: {directory}") from error
                 if configured_worktree is None:
                     raise InventoryError("Git metadata directory does not own selected worktree")
+                quoted = False
+                escaped = False
+                for index, character in enumerate(configured_worktree):
+                    if escaped:
+                        escaped = False
+                    elif character == "\\":
+                        escaped = True
+                    elif character == '"':
+                        quoted = not quoted
+                    elif character in "#;" and not quoted:
+                        configured_worktree = configured_worktree[:index].rstrip()
+                        break
                 if configured_worktree.startswith('"'):
                     if not configured_worktree.endswith('"'):
                         raise InventoryError("invalid Git worktree path")
@@ -275,8 +301,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
         identity = directory_identity(gitdir)
         owner = directory_identity(directory)
-        if identity in gitdir_owners and gitdir_owners[identity] != owner:
-            raise InventoryError("Git metadata directory does not own selected worktree")
+        if identity in gitdir_owners:
+            if gitdir_owners[identity] != owner:
+                raise InventoryError("Git metadata directory does not own selected worktree")
+            return True
         gitdir_owners[identity] = owner
 
         roots = [gitdir]
