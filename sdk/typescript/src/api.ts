@@ -2093,7 +2093,11 @@ async function scanPrompt(
     targetInstruction(target),
     "Write the complete canonical scan-manifest.json, findings.json, and coverage.json, but do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
     ...(additionalPrompt?.trim()
-      ? ["Additional scan instructions:", additionalPrompt]
+      ? [
+          "Apply setup and testing instructions during validation.",
+          "Additional scan instructions:",
+          additionalPrompt,
+        ]
       : []),
   ].join("\n");
 }

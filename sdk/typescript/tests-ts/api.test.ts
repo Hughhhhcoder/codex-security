@@ -1778,7 +1778,7 @@ describe("CodexSecurity orchestration", () => {
         client.run(repository, { mode, scanPrompt: instructions }),
       ).rejects.toThrow("validation instructions captured");
       expect(prompt).toContain(
-        `Additional scan instructions:\n${instructions}`,
+        `Apply setup and testing instructions during validation.\nAdditional scan instructions:\n${instructions}`,
       );
       await client.close();
     },
