@@ -1735,55 +1735,6 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test.each(["standard", "deep"] as const)(
-    "includes user-provided validation instructions in the %s scan prompt",
-    async (mode) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const scanDir = join(root, "scan");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await mkdir(scanDir, { mode: 0o700 });
-      const instructions = [
-        "## Validation",
-        "",
-        "Start the application with `npm run dev`.",
-        "Wait for `http://127.0.0.1:3000/health`.",
-        "Check authenticated and unauthenticated access.",
-        "",
-      ].join("\n");
-      let prompt = "";
-      const client = new TestClient(
-        {},
-        {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
-          createCodex: () => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed(input: string) {
-                prompt = input;
-                throw new Error("validation instructions captured");
-              },
-            }),
-          }),
-        },
-      );
-
-      await expect(
-        client.run(repository, { mode, scanPrompt: instructions }),
-      ).rejects.toThrow("validation instructions captured");
-      expect(prompt).toContain(
-        `Apply setup and testing instructions during validation.\nAdditional scan instructions:\n${instructions}`,
-      );
-      await client.close();
-    },
-  );
-
   test("uses deterministic Codex doubles and forwards Python only to plugin execution", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1970,7 +1921,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     ).toBe(false);
     expect(prompt).toContain(
-      "Additional scan instructions:\nFocus on authentication and authorization.",
+      "Apply setup and testing instructions during validation.\nAdditional scan instructions:\nFocus on authentication and authorization.",
     );
     expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
     expect(

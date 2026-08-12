@@ -114,10 +114,6 @@ await security.run(".", {
   stopAfterNoNew: 3,
   maxDiscoveryRuns: 10,
 });
-await security.run(".", {
-  scanPrompt:
-    "During validation, use the local application and its existing tests.",
-});
 
 console.log(result.reportPath);
 await security.close();
