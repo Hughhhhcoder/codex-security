@@ -76,6 +76,7 @@ Pass scan configuration to `security.run(repository, options)` or
 | `target`                | Select a repository, repository-relative paths, committed diff, or working-tree diff. |
 | `mode`                  | Select `"standard"` or `"deep"`; deep mode supports repositories and paths.           |
 | `knowledgeBasePaths`    | Add architecture documents, security policies, threat models, or directories.         |
+| `scanPrompt`            | Add instructions for the scan, including application setup and validation.            |
 | `outputDir`             | Choose an artifact directory outside the enclosing Git worktree.                      |
 | `archiveExisting`       | Archive results already in `outputDir` before starting a scan.                        |
 | `maxCostUsd`            | Stop after the estimated model cost exceeds a positive USD amount.                    |
@@ -253,6 +254,41 @@ to
 Repeat `--knowledge-base PATH` for multiple files or directories; `bulk-scan`
 shares them with every repository. Directories are searched recursively for
 Markdown, text, PDF, and Word (`.docx`) files.
+
+### Add custom validation instructions
+
+Use `--scan-prompt-file` to tell the scanner how to start and check your
+application during validation:
+
+```bash
+npx @openai/codex-security scan . --scan-prompt-file validation.md
+```
+
+For example, `validation.md` might contain:
+
+```text
+During validation:
+- Start the application from the repository root with its documented command.
+- Wait for its local health endpoint to respond.
+- Check the existing authenticated and unauthenticated request tests.
+- Stop the application when validation finishes.
+- If the application cannot start, explain why and continue with source review.
+```
+
+The scan may run from its output directory; use the repository root rather than
+assuming the current directory contains the application. From TypeScript, pass
+the same instructions as `scanPrompt`:
+
+```ts
+await security.run("/path/to/repository", {
+  scanPrompt:
+    "During validation, start the application from the repository root and run its existing authentication checks.",
+});
+```
+
+Scan prompts contain instructions you explicitly provide. `SECURITY.md` and
+knowledge-base documents provide security context; they do not authorize
+application startup or other commands.
 
 ### Configure deep scans
 

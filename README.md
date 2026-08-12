@@ -72,6 +72,19 @@ root cause, reuses saved matches, and identifies new, persisting, reopened,
 resolved, or unknown findings. Missing findings remain unknown when coverage is
 incomplete or their original location was not reviewed.
 
+## Custom validation instructions
+
+Use a scan prompt file to explain how to run and check your application:
+
+```bash
+npx @openai/codex-security scan . --scan-prompt-file validation.md
+```
+
+For example, `validation.md` can tell the scanner to start the application from
+the repository root, check its local health endpoint, compare authenticated and
+unauthenticated access, stop the application afterward, and use source review
+if it cannot start.
+
 ## Verbose diagnostics
 
 Add `--verbose` to print redacted scan diagnostics to stderr:
@@ -100,6 +113,10 @@ await security.run(".", {
   subagents: 0,
   stopAfterNoNew: 3,
   maxDiscoveryRuns: 10,
+});
+await security.run(".", {
+  scanPrompt:
+    "During validation, use the local application and its existing tests.",
 });
 
 console.log(result.reportPath);

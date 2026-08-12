@@ -43,6 +43,47 @@ describe("CLI scan prompts", () => {
     }
   });
 
+  test.each(["standard", "deep"] as const)(
+    "passes user-provided validation instructions unchanged to %s scans",
+    async (mode) => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
+      const instructions = [
+        "## Validation",
+        "",
+        "Start the application with `npm run dev`.",
+        "Wait for `http://127.0.0.1:3000/health`.",
+        "Check authenticated and unauthenticated access.",
+        "",
+      ].join("\n");
+      try {
+        await writeFile(join(root, "validation.md"), instructions);
+        let options: unknown;
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--mode",
+              mode,
+              "--scan-prompt-file",
+              "validation.md",
+              "--json",
+            ],
+            capture().stream,
+            capture().stream,
+            dependencies({
+              currentDirectory: root,
+              onTurn: (_repository, value) => (options = value),
+            }),
+          ),
+        ).toBe(0);
+        expect(options).toMatchObject({ mode, scanPrompt: instructions });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("combines shared and repository-specific bulk scan prompts", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-prompts-"));
     try {
