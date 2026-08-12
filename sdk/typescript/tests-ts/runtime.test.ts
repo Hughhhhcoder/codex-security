@@ -1715,6 +1715,36 @@ describe("plugin runtime preparation", () => {
     ).toBe(resolveCodexCommand().command);
   });
 
+  test("uses only directly spawnable Windows Codex overrides for nested workers", () => {
+    const configured = String.raw`C:\Users\example\AppData\Local\OpenAI\Codex\bin\0.146.0\codex.exe`;
+    const bundled = resolveCodexCommand().command;
+
+    expect(
+      pluginExecutionEnvironment(
+        String.raw`C:\Python\python.exe`,
+        { Codex_Cli_Path: ` ${configured} ` },
+        "win32",
+      ),
+    ).toEqual({
+      CODEX_CLI_PATH: configured,
+      PYTHON: String.raw`C:\Python\python.exe`,
+    });
+
+    for (const rejected of [
+      String.raw`C:\Users\example\AppData\Roaming\npm\codex`,
+      String.raw`C:\Users\example\AppData\Roaming\npm\codex.cmd`,
+      String.raw`C:\Program Files\WindowsApps\OpenAI.Codex_26.727.6591.0_x64__2p2nqsd0c76g0\app\resources\codex.exe`,
+    ]) {
+      expect(
+        pluginExecutionEnvironment(
+          String.raw`C:\Python\python.exe`,
+          { CODEX_CLI_PATH: rejected },
+          "win32",
+        )["CODEX_CLI_PATH"],
+      ).toBe(bundled);
+    }
+  });
+
   test("selects the native Windows Codex executable package", () => {
     expect(codexPlatformPackage("win32", "x64")).toEqual({
       packageName: "@openai/codex-win32-x64",

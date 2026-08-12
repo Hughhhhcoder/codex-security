@@ -63,6 +63,8 @@ const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
 const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
+const WINDOWS_APPS_PATH = /(^|[\\/])windowsapps([\\/]|$)/iu;
+const WINDOWS_DIRECT_EXECUTABLE = /^\.(?:exe|com)$/iu;
 
 export interface PluginInstall {
   pluginRoot: string;
@@ -2289,13 +2291,44 @@ export async function resolvePluginPython(
 export function pluginExecutionEnvironment(
   python: string,
   environment: ProcessEnvironment = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): ProcessEnvironment {
+  const configuredCodexPath = configuredCodexCliPath(environment, platform);
+  const codexPath =
+    configuredCodexPath !== undefined &&
+    (platform !== "win32" ||
+      (WINDOWS_DIRECT_EXECUTABLE.test(extname(configuredCodexPath)) &&
+        !WINDOWS_APPS_PATH.test(configuredCodexPath)))
+      ? configuredCodexPath
+      : resolveCodexCommand().command;
+  const normalizedEnvironment =
+    platform === "win32"
+      ? Object.fromEntries(
+          Object.entries(environment).filter(
+            ([name]) => name.toUpperCase() !== "CODEX_CLI_PATH",
+          ),
+        )
+      : environment;
   return {
-    ...environment,
+    ...normalizedEnvironment,
     PYTHON: python,
-    CODEX_CLI_PATH:
-      environment["CODEX_CLI_PATH"]?.trim() || resolveCodexCommand().command,
+    CODEX_CLI_PATH: codexPath,
   };
+}
+
+function configuredCodexCliPath(
+  environment: ProcessEnvironment,
+  platform: NodeJS.Platform,
+): string | undefined {
+  const exact = environment["CODEX_CLI_PATH"]?.trim();
+  if (exact) return exact;
+  if (platform !== "win32") return undefined;
+  return Object.entries(environment)
+    .find(
+      ([name, value]) =>
+        name.toUpperCase() === "CODEX_CLI_PATH" && value?.trim(),
+    )?.[1]
+    ?.trim();
 }
 
 export async function cleanupSdkDirectory(path: string): Promise<void> {
