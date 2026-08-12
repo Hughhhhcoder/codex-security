@@ -80,6 +80,20 @@ export interface CodexCommand {
 
 export type ProcessEnvironment = Record<string, string | undefined>;
 
+function environmentValue(
+  environment: ProcessEnvironment,
+  requested: string,
+): string | undefined {
+  const exact = environment[requested]?.trim();
+  if (exact) return exact;
+  return Object.entries(environment)
+    .find(
+      ([name, value]) =>
+        name.toUpperCase() === requested.toUpperCase() && value?.trim(),
+    )?.[1]
+    ?.trim();
+}
+
 export interface PluginPythonOptions {
   configuredPath?: string;
   environment?: ProcessEnvironment;
@@ -100,18 +114,10 @@ export interface WorkbenchCommandOptions {
 export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
-  const environmentValue = (requested: string): string | undefined => {
-    const exact = environment[requested]?.trim();
-    if (exact) return exact;
-    return Object.entries(environment)
-      .find(
-        ([name, value]) => name.toUpperCase() === requested && value?.trim(),
-      )?.[1]
-      ?.trim();
-  };
-  const configured = environmentValue("CODEX_SECURITY_STATE_DIR");
+  const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
   if (configured !== undefined) return resolve(expandHome(configured));
-  const codexHome = environmentValue("CODEX_HOME") ?? join(homedir(), ".codex");
+  const codexHome =
+    environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
   return resolve(expandHome(codexHome), "state", "plugins", "codex-security");
 }
 
@@ -2293,9 +2299,32 @@ export function pluginExecutionEnvironment(
   return {
     ...environment,
     PYTHON: python,
-    CODEX_CLI_PATH:
-      environment["CODEX_CLI_PATH"]?.trim() || resolveCodexCommand().command,
+    CODEX_CLI_PATH: resolveNestedCodexPath(environment),
   };
+}
+
+export function resolveNestedCodexPath(
+  environment: ProcessEnvironment = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const configured = environmentValue(environment, "CODEX_CLI_PATH");
+  if (configured !== undefined && isSpawnableCodexPath(configured, platform)) {
+    return configured;
+  }
+  return resolveCodexCommand().command;
+}
+
+function isSpawnableCodexPath(
+  value: string,
+  platform: NodeJS.Platform,
+): boolean {
+  if (platform !== "win32") return true;
+  // CodexExec passes this path directly to spawn() without a shell. Windows
+  // cannot execute npm's extensionless/.cmd shims there, and MSIX package
+  // executables under WindowsApps can be denied to spawned MCP processes.
+  const windowsPath = value.replaceAll("/", "\\");
+  if (/(?:^|\\)windowsapps(?:\\|$)/iu.test(windowsPath)) return false;
+  return [".exe", ".com"].includes(extname(value).toLowerCase());
 }
 
 export async function cleanupSdkDirectory(path: string): Promise<void> {

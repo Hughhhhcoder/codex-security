@@ -68,6 +68,7 @@ import {
   requireSecureCredentialHome,
   requireSecureOutputAncestry,
   requireTrustedOutputAncestor,
+  resolveNestedCodexPath,
   runWorkbench,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
@@ -1696,7 +1697,11 @@ describe("plugin runtime preparation", () => {
   });
 
   test("preserves an explicit Codex executable override for nested workers", () => {
-    const configured = join(tmpdir(), "custom codex", "codex");
+    const configured = join(
+      tmpdir(),
+      "custom codex",
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
 
     expect(
       pluginExecutionEnvironment("/managed/python", {
@@ -1713,6 +1718,27 @@ describe("plugin runtime preparation", () => {
         CODEX_CLI_PATH: "   ",
       })["CODEX_CLI_PATH"],
     ).toBe(resolveCodexCommand().command);
+  });
+
+  test("keeps only spawnable Windows Codex overrides for nested workers", () => {
+    const fallback = resolveCodexCommand().command;
+    const executable =
+      "C:\\Users\\alice\\AppData\\Local\\OpenAI\\Codex\\bin\\0.146.0\\codex.exe";
+
+    expect(
+      resolveNestedCodexPath({ Codex_Cli_Path: ` ${executable} ` }, "win32"),
+    ).toBe(executable);
+
+    for (const unusable of [
+      "C:\\Users\\alice\\AppData\\Roaming\\npm\\codex",
+      "C:\\Users\\alice\\AppData\\Roaming\\npm\\codex.cmd",
+      "C:\\Program Files\\WindowsApps\\OpenAI.Codex_1\\app\\resources\\codex.exe",
+      "   ",
+    ]) {
+      expect(
+        resolveNestedCodexPath({ CODEX_CLI_PATH: unusable }, "win32"),
+      ).toBe(fallback);
+    }
   });
 
   test("selects the native Windows Codex executable package", () => {
