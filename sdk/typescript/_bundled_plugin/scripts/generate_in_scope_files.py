@@ -877,6 +877,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         directories_only: bool = False,
         exempt_gitignores: tuple[tuple[Path, Path], ...] = (),
         preserve_gitignore_descendants: bool = False,
+        configured_excludes_only: bool = False,
     ) -> set[bytes]:
         requested = {
             normalized(os.fsencode(candidate.relative_to(repository).as_posix()))
@@ -893,7 +894,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             current = current.parent
         for directory in directories:
             reject_symbolic_ignore(directory)
-        ignore_files = [
+        ignore_files = [] if configured_excludes_only else [
             directory / name
             for directory in directories
             for name in IGNORE_FILE_NAMES
@@ -1033,10 +1034,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         contents += separator + existing
                     destination.write_bytes(contents)
 
-                def admit_gitlink_directories(directory: Path, contents: bytes) -> bytes:
-                    if not preserve_gitignore_descendants:
+                def admit_gitlink_directories(
+                    directory: Path, contents: bytes, *, scope_only: bool = False
+                ) -> bytes:
+                    if not preserve_gitignore_descendants and not scope_only:
                         return contents
                     for owner, selected_root in exempt_gitignores:
+                        if scope_only and selected_root != selected:
+                            continue
                         if not (
                             directory.is_relative_to(owner)
                             and selected_root.is_relative_to(directory)
@@ -1055,6 +1060,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     contents = ignore.read_bytes()
                     if ignore.name == ".gitignore":
                         contents = admit_gitlink_directories(ignore.parent, contents)
+                    else:
+                        contents = admit_gitlink_directories(
+                            ignore.parent, contents, scope_only=True
+                        )
                     install_ignore(ignore.parent, ignore.name, contents)
                 for directory, contents in configured_excludes.items():
                     contents = admit_gitlink_directories(directory, contents)
@@ -1684,11 +1693,20 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         selected, [selected], directories_only=True
                     )
                     candidate_exemption = ((repository, selected),)
-                    if selected_path not in selected_visible and selected_path in visible_to_outer_ignores(
-                        selected,
-                        [selected],
-                        directories_only=True,
-                        exempt_gitignores=candidate_exemption,
+                    if (
+                        selected_path not in selected_visible
+                        and selected_path in visible_to_outer_ignores(
+                            selected,
+                            [selected],
+                            directories_only=True,
+                            exempt_gitignores=candidate_exemption,
+                        )
+                        and selected_path in visible_to_outer_ignores(
+                            selected,
+                            [selected],
+                            directories_only=True,
+                            configured_excludes_only=True,
+                        )
                     ):
                         scope_exemptions = candidate_exemption
                 for candidate in candidates:

@@ -1129,22 +1129,54 @@ describe("security scan file inventory", () => {
     expect(rows).toContain("./nested/cafe\u0301/second.ts");
   });
 
-  test("keeps tracked files when an ignored snapshot checkout is explicitly selected", async () => {
-    if (Bun.which("rg") === null) return;
+  test.each([".gitignore", ".ignore", ".rgignore"])(
+    "keeps explicitly selected tracked files through an outer %s",
+    async (ignore) => {
+      if (Bun.which("rg") === null) return;
 
-    const checkout = await repository(false);
-    const nested = join(checkout, "ignored");
-    await mkdir(nested);
-    await writeFile(join(checkout, ".gitignore"), "ignored/\n");
-    execFileSync("git", ["init", "-q"], { cwd: nested });
-    await Promise.all([
-      writeFile(join(nested, "public.ts"), "tracked\n"),
-      writeFile(join(nested, "private.ts"), "ignored\n"),
-    ]);
-    execFileSync("git", ["add", "public.ts"], { cwd: nested });
+      const checkout = await repository(false);
+      const nested = join(checkout, "ignored");
+      await mkdir(nested);
+      await writeFile(join(checkout, ignore), "ignored/\nignored/private.ts\n");
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(
+          join(nested, ".ignore"),
+          "public.ts\nprivate.ts\nuntracked.ts\n",
+        ),
+        writeFile(join(nested, "public.ts"), "tracked\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+        writeFile(join(nested, "untracked.ts"), "untracked\n"),
+      ]);
+      execFileSync("git", ["add", "--force", "public.ts", "private.ts"], {
+        cwd: nested,
+      });
 
-    expect(await inventory(checkout, "ignored")).toEqual(["ignored/public.ts"]);
-  });
+      expect(await inventory(checkout, "ignored")).toEqual([
+        "ignored/public.ts",
+      ]);
+    },
+  );
+
+  test.each([".ignore", ".rgignore"])(
+    "keeps configured Git excludes authoritative through an outer %s",
+    async (ignore) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "ignored");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(join(checkout, ignore), "ignored/\n"),
+        writeFile(join(checkout, ".git", "info", "exclude"), "ignored/\n"),
+        writeFile(join(nested, "public.ts"), "tracked\n"),
+      ]);
+      execFileSync("git", ["add", "public.ts"], { cwd: nested });
+
+      expect(await inventory(checkout, "ignored")).toEqual([]);
+    },
+  );
 
   test.each(["marker", "gitfile"])(
     "rejects symbolic Git metadata through a %s",
