@@ -176,6 +176,12 @@ def _indexed_findings(
             triage.status AS decision_status,
             triage.close_reason,
             triage.updated_at AS decision_updated_at,
+            COALESCE(
+                (SELECT MAX(decisions.rowid)
+                 FROM finding_decisions AS decisions
+                 WHERE decisions.occurrence_id = occurrences.id),
+                triage.rowid
+            ) AS decision_sequence,
             occurrences.title,
             occurrences.summary,
             (
@@ -204,7 +210,7 @@ def _indexed_findings(
         )
         decision = max(
             (row for row in occurrences if row["decision_status"] is not None),
-            key=lambda row: (row["decision_updated_at"], row["occurrence_id"]),
+            key=lambda row: (row["decision_sequence"], row["occurrence_id"]),
             default=None,
         )
         status = decision["decision_status"] if decision is not None else "open"

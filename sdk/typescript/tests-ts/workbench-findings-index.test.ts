@@ -15,6 +15,7 @@ const findingsIndexProbe = [
   "CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, seal_manifest_digest TEXT, started_at TEXT, updated_at TEXT, scope TEXT, scan_dir TEXT);",
   "CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, severity TEXT, created_at TEXT, title TEXT, summary TEXT);",
   "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, updated_at TEXT, close_reason TEXT);",
+  "CREATE TABLE finding_decisions (occurrence_id TEXT);",
   "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
   "CREATE TABLE scan_comparison_matches (before_occurrence_id TEXT, after_occurrence_id TEXT);",
   "''')",
@@ -71,8 +72,13 @@ const findingsIndexProbe = [
   "if settings.get('closedBeforeRollback'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-old-finding', created_at = '2025-12-02' WHERE id = 'current-new-occurrence'\")",
   "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', 'already_fixed')\")",
+  "    connection.execute(\"INSERT INTO finding_decisions VALUES ('current-old-occurrence')\")",
   "if settings.get('matchedTriage'):",
   "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', ?)\", (settings['matchedTriage'],))",
+  "    connection.execute(\"INSERT INTO finding_decisions VALUES ('current-old-occurrence')\")",
+  "    if settings.get('triageClockRollback'):",
+  "        connection.execute(\"INSERT INTO finding_triage VALUES ('current-new-occurrence', 'open', '2025-12-01', NULL)\")",
+  "        connection.execute(\"INSERT INTO finding_decisions VALUES ('current-new-occurrence')\")",
   "connection.executemany('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'src/old.py', 'root_control', 0),",
   "    ('current-new-occurrence', 'src/new.py', 'root_control', 0),",
@@ -109,7 +115,7 @@ const findingsIndexProbe = [
   "    result = indexes.list_repositories(connection, read_coverage=coverage)",
   "else:",
   "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
-  "finding_detail, scan_pages, rejected_previous_owner, rejected_previous_owner_list, rejected_legacy_owner, rejected_legacy_owner_list = None, None, None, None, None, None",
+  "finding_detail, scan_pages, rejected_previous_owner, rejected_previous_owner_list, rejected_legacy_owner, rejected_legacy_owner_list, rejected_legacy_descendant, rejected_legacy_descendant_list = None, None, None, None, None, None, None, None",
   "if settings.get('matchedTriage'):",
   "    import workbench_db as workbench",
   "    if not settings.get('ownershipReuse'):",
@@ -156,6 +162,8 @@ const findingsIndexProbe = [
   "        rejected_previous_owner, rejected_previous_owner_list = rejected_finding_access('current-old-occurrence', 'current-old')",
   "        connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (sys.argv[1],))",
   "        rejected_legacy_owner, rejected_legacy_owner_list = rejected_finding_access('reused-legacy-occurrence', 'reused-legacy')",
+  "        connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (os.path.join(sys.argv[1], 'nested'),))",
+  "        rejected_legacy_descendant, rejected_legacy_descendant_list = rejected_finding_access('reused-legacy-occurrence', 'reused-legacy')",
   "scoped_scan_ids = []",
   "matching_scan_count = None",
   "old_owner_matches = None",
@@ -168,7 +176,7 @@ const findingsIndexProbe = [
   "    matching_scan_count = matching['scanCount']",
   "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
   "    old_owner_matches = indexes.scan_history._same_registered_repository(connection, *scans)",
-  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'scanPages': scan_pages, 'rejectedPreviousOwner': rejected_previous_owner, 'rejectedPreviousOwnerList': rejected_previous_owner_list, 'rejectedLegacyOwner': rejected_legacy_owner, 'rejectedLegacyOwnerList': rejected_legacy_owner_list, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
+  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'scanPages': scan_pages, 'rejectedPreviousOwner': rejected_previous_owner, 'rejectedPreviousOwnerList': rejected_previous_owner_list, 'rejectedLegacyOwner': rejected_legacy_owner, 'rejectedLegacyOwnerList': rejected_legacy_owner_list, 'rejectedLegacyDescendant': rejected_legacy_descendant, 'rejectedLegacyDescendantList': rejected_legacy_descendant_list, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -192,6 +200,7 @@ function runFindingsIndex(
     ownershipTransition?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
+    triageClockRollback?: boolean;
   } = {},
 ) {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -236,6 +245,7 @@ function probeFindingsIndex(
     ownershipTransition?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
+    triageClockRollback?: boolean;
   } = {},
 ): {
   findings: Array<{
@@ -253,6 +263,8 @@ function probeFindingsIndex(
   rejectedPreviousOwnerList: string | null;
   rejectedLegacyOwner: string | null;
   rejectedLegacyOwnerList: string | null;
+  rejectedLegacyDescendant: string | null;
+  rejectedLegacyDescendantList: string | null;
   repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
   matchingScanCount: number | null;
@@ -409,6 +421,33 @@ describe("workbench findings index", () => {
     });
   });
 
+  test("keeps the latest finding decision after the system clock moves backward", () => {
+    const result = probeFindingsIndex("current-target", {
+      matchedTriage: "false_positive",
+      triageClockRollback: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        occurrenceId: "current-new-occurrence",
+        status: "open",
+      }),
+    ]);
+    expect(result.findingDetail).toMatchObject({
+      occurrenceId: "current-new-occurrence",
+      status: "open",
+      triage: { status: "open" },
+    });
+    expect(result.scanPages?.["open"]).toMatchObject({
+      findings: [{ occurrenceId: "current-new-occurrence", status: "open" }],
+      total: 1,
+    });
+    expect(result.scanPages?.["closed"]).toMatchObject({
+      findings: [],
+      total: 0,
+    });
+  });
+
   test("does not inherit finding triage from a previous checkout owner", () => {
     const result = probeFindingsIndex("current-target", {
       matchedTriage: "false_positive",
@@ -431,6 +470,8 @@ describe("workbench findings index", () => {
     expect(result.rejectedPreviousOwnerList).toContain("checkout owner");
     expect(result.rejectedLegacyOwner).toContain("checkout owner");
     expect(result.rejectedLegacyOwnerList).toContain("checkout owner");
+    expect(result.rejectedLegacyDescendant).toContain("checkout owner");
+    expect(result.rejectedLegacyDescendantList).toContain("checkout owner");
   });
 
   test("retains covered same-owner findings while preparing semantic matching", () => {

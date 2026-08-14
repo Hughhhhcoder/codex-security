@@ -2923,10 +2923,14 @@ def _require_finding_checkout_owner(
         "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
     ).fetchone()
     if scan["target_id"] is None:
-        target = connection.execute(
-            "SELECT current_path FROM security_targets WHERE current_path = ?",
-            (scan["target_path"],),
-        ).fetchone()
+        scan_path = Path(scan["target_path"]).expanduser().resolve()
+        for candidate in (scan_path, *scan_path.parents):
+            target = connection.execute(
+                "SELECT current_path FROM security_targets WHERE current_path = ?",
+                (str(candidate),),
+            ).fetchone()
+            if target is not None:
+                break
         if target is None:
             return None
     if target is not None:
