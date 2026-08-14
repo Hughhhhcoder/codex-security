@@ -67,6 +67,7 @@ def split_index_backing(index: Path, hash_size: int) -> str | None:
                 if end < 0:
                     return None
                 position = end + 1 if version == 4 else entry + ((end - entry + 8) & ~7)
+            backing = None
             while position + 8 <= limit:
                 signature = contents[position : position + 4]
                 length = int.from_bytes(contents[position + 4 : position + 8], "big")
@@ -76,8 +77,9 @@ def split_index_backing(index: Path, hash_size: int) -> str | None:
                 if signature == b"link":
                     if length < hash_size:
                         return None
-                    return contents[position : position + hash_size].hex()
+                    backing = contents[position : position + hash_size].hex()
                 position += length
+            return backing
     return None
 
 

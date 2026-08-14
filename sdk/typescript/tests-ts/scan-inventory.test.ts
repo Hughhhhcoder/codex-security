@@ -2728,7 +2728,9 @@ describe("security scan file inventory", () => {
     expect(await inventory(checkout)).toContain("./tracked.ts");
   });
 
-  test.skipIf(process.platform === "win32").each(["lowercase", "uppercase"])(
+  test
+    .skipIf(process.platform === "win32")
+    .each(["lowercase", "uppercase", "duplicate-link"])(
     "rejects %s split-index backing files that leave the checkout",
     async (casing) => {
       if (Bun.which("rg") === null) return;
@@ -2754,6 +2756,37 @@ describe("security scan file inventory", () => {
       const replacement =
         casing === "uppercase" ? join(gitdir, shared.toUpperCase()) : original;
       await symlink(external, replacement);
+      if (casing === "duplicate-link") {
+        const safe = Buffer.alloc(20, 0xff);
+        await writeFile(
+          join(gitdir, `sharedindex.${safe.toString("hex")}`),
+          "safe decoy\n",
+        );
+        const indexPath = join(gitdir, "index");
+        const index = await readFile(indexPath);
+        const backing = Buffer.from(shared.slice("sharedindex.".length), "hex");
+        const offset = index.indexOf(backing) - 8;
+        if (
+          offset < 0 ||
+          index.subarray(offset, offset + 4).toString() !== "link"
+        ) {
+          throw new Error("Expected the active split-index link extension.");
+        }
+        const extension = Buffer.concat([
+          Buffer.from("link"),
+          Buffer.from([0, 0, 0, safe.length]),
+          safe,
+        ]);
+        const body = Buffer.concat([
+          index.subarray(0, offset),
+          extension,
+          index.subarray(offset, index.length - safe.length),
+        ]);
+        await writeFile(
+          indexPath,
+          Buffer.concat([body, createHash("sha1").update(body).digest()]),
+        );
+      }
       if (
         casing === "uppercase" &&
         !(await realpath(original).then(
