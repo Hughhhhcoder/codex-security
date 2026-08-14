@@ -56,6 +56,8 @@ const findingsIndexProbe = [
   "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('previous-owner-identity', 'current-target', sys.argv[1], 'complete', 'sealed', '2026-01-15', '2026-01-15', '.', '/private/tmp/previous-owner', -1, -1))",
   "    connection.execute(\"DELETE FROM scans WHERE id = 'current-new'\")",
   "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('current-new', 'current-target', sys.argv[1], 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/current-new', serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
+  "if settings.get('legacyDescendant'):",
+  "    connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (os.path.join(sys.argv[1], 'nested'),))",
   "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'current-old-finding', 'current-old', 'high', '2026-01-01', 'Resolved current finding', 'Older issue'),",
   "    ('current-new-occurrence', 'current-new-finding', 'current-new', 'critical', '2026-02-01', 'Current CLI finding', 'Latest issue'),",
@@ -193,6 +195,7 @@ function runFindingsIndex(
     inactiveRepresentative?: boolean;
     indexedAliases?: boolean;
     lateCompletion?: boolean;
+    legacyDescendant?: boolean;
     legacyPriority?: boolean;
     matchedTriage?: "already_fixed" | "false_positive";
     mixedLegacyOwnership?: boolean;
@@ -238,6 +241,7 @@ function probeFindingsIndex(
     inactiveRepresentative?: boolean;
     indexedAliases?: boolean;
     lateCompletion?: boolean;
+    legacyDescendant?: boolean;
     legacyPriority?: boolean;
     matchedTriage?: "already_fixed" | "false_positive";
     mixedLegacyOwnership?: boolean;
@@ -472,6 +476,20 @@ describe("workbench findings index", () => {
     expect(result.rejectedLegacyOwnerList).toContain("checkout owner");
     expect(result.rejectedLegacyDescendant).toContain("checkout owner");
     expect(result.rejectedLegacyDescendantList).toContain("checkout owner");
+  });
+
+  test("keeps previous-owner checkout descendants out of global finding lists", () => {
+    const result = probeFindingsIndex(null, {
+      legacyDescendant: true,
+      ownershipReuse: true,
+    });
+
+    expect(result.findings).toContainEqual(
+      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+    );
+    expect(result.findings).not.toContainEqual(
+      expect.objectContaining({ occurrenceId: "reused-legacy-occurrence" }),
+    );
   });
 
   test("retains covered same-owner findings while preparing semantic matching", () => {

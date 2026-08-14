@@ -334,10 +334,16 @@ def _active_findings(
         "AND (" + " AND ".join(repository_clauses) + ")" if repository_clauses else ""
     )
     target_values.extend(repository_values)
+    connection.create_function(
+        "codex_security_path_contains",
+        2,
+        lambda root, path: Path(path).is_relative_to(root),
+        deterministic=True,
+    )
     current_owner_only = (
         "AND NOT (scans.target_id IS NULL AND EXISTS ("
         "SELECT 1 FROM security_targets AS path_owner "
-        "WHERE path_owner.current_path = scans.target_path))"
+        "WHERE codex_security_path_contains(path_owner.current_path, scans.target_path)))"
     )
     scan_columns = {
         column["name"] for column in connection.execute("PRAGMA table_info(scans)")
