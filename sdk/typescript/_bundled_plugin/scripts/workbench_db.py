@@ -2923,7 +2923,12 @@ def _require_finding_checkout_owner(
         "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
     ).fetchone()
     if scan["target_id"] is None:
-        return target
+        target = connection.execute(
+            "SELECT current_path FROM security_targets WHERE current_path = ?",
+            (scan["target_path"],),
+        ).fetchone()
+        if target is None:
+            return None
     if target is not None:
         clauses, values, _, _ = scan_history.repository_scan_scope(
             connection, target["current_path"]

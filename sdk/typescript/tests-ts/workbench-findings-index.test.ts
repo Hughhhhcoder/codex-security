@@ -109,10 +109,12 @@ const findingsIndexProbe = [
   "    result = indexes.list_repositories(connection, read_coverage=coverage)",
   "else:",
   "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
-  "finding_detail, scan_pages, rejected_previous_owner, rejected_previous_owner_list = None, None, None, None",
+  "finding_detail, scan_pages, rejected_previous_owner, rejected_previous_owner_list, rejected_legacy_owner, rejected_legacy_owner_list = None, None, None, None, None, None",
   "if settings.get('matchedTriage'):",
   "    import workbench_db as workbench",
   "    if not settings.get('ownershipReuse'):",
+  "        connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
+  "        connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (sys.argv[1],))",
   "        connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
   "        connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
   "        connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
@@ -136,18 +138,24 @@ const findingsIndexProbe = [
   "    if settings.get('ownershipReuse'):",
   "        from contextlib import nullcontext, redirect_stdout",
   "        from io import StringIO",
-  "        workbench.parse_args = lambda _description: argparse.Namespace(command='get-finding', occurrence_id='current-old-occurrence')",
   "        workbench.connect = lambda: connection",
   "        workbench.closing = nullcontext",
-  "        try:",
-  "            with redirect_stdout(StringIO()):",
-  "                workbench.main()",
-  "        except SystemExit as error:",
-  "            rejected_previous_owner = str(error)",
-  "        try:",
-  "            workbench.list_findings(connection, argparse.Namespace(scan_id='current-old', query=None, severity=None, status=None, offset=0, limit=20))",
-  "        except SystemExit as error:",
-  "            rejected_previous_owner_list = str(error)",
+  "        def rejected_finding_access(occurrence_id, scan_id):",
+  "            finding_error, listing_error = None, None",
+  "            workbench.parse_args = lambda _description: argparse.Namespace(command='get-finding', occurrence_id=occurrence_id)",
+  "            try:",
+  "                with redirect_stdout(StringIO()):",
+  "                    workbench.main()",
+  "            except SystemExit as error:",
+  "                finding_error = str(error)",
+  "            try:",
+  "                workbench.list_findings(connection, argparse.Namespace(scan_id=scan_id, query=None, severity=None, status=None, offset=0, limit=20))",
+  "            except SystemExit as error:",
+  "                listing_error = str(error)",
+  "            return finding_error, listing_error",
+  "        rejected_previous_owner, rejected_previous_owner_list = rejected_finding_access('current-old-occurrence', 'current-old')",
+  "        connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (sys.argv[1],))",
+  "        rejected_legacy_owner, rejected_legacy_owner_list = rejected_finding_access('reused-legacy-occurrence', 'reused-legacy')",
   "scoped_scan_ids = []",
   "matching_scan_count = None",
   "old_owner_matches = None",
@@ -160,7 +168,7 @@ const findingsIndexProbe = [
   "    matching_scan_count = matching['scanCount']",
   "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
   "    old_owner_matches = indexes.scan_history._same_registered_repository(connection, *scans)",
-  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'scanPages': scan_pages, 'rejectedPreviousOwner': rejected_previous_owner, 'rejectedPreviousOwnerList': rejected_previous_owner_list, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
+  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'scanPages': scan_pages, 'rejectedPreviousOwner': rejected_previous_owner, 'rejectedPreviousOwnerList': rejected_previous_owner_list, 'rejectedLegacyOwner': rejected_legacy_owner, 'rejectedLegacyOwnerList': rejected_legacy_owner_list, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -243,6 +251,8 @@ function probeFindingsIndex(
   > | null;
   rejectedPreviousOwner: string | null;
   rejectedPreviousOwnerList: string | null;
+  rejectedLegacyOwner: string | null;
+  rejectedLegacyOwnerList: string | null;
   repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
   matchingScanCount: number | null;
@@ -419,6 +429,8 @@ describe("workbench findings index", () => {
     expect(result.findingDetail?.["triage"]).not.toHaveProperty("closeReason");
     expect(result.rejectedPreviousOwner).toContain("checkout owner");
     expect(result.rejectedPreviousOwnerList).toContain("checkout owner");
+    expect(result.rejectedLegacyOwner).toContain("checkout owner");
+    expect(result.rejectedLegacyOwnerList).toContain("checkout owner");
   });
 
   test("retains covered same-owner findings while preparing semantic matching", () => {
