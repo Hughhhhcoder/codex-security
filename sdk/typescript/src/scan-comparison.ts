@@ -15,6 +15,7 @@ import {
   codexSecurityCredentialHome,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
+  runCodexCommand,
 } from "./runtime.js";
 
 type Finding = { occurrenceId: string } & Record<string, unknown>;
@@ -96,14 +97,57 @@ export async function matchScanFindingsInternal(
   options: ScanComparisonOptions = {},
   runtimeOptions: { surface: CodexSecuritySurface },
 ): Promise<ScanComparisonResult> {
-  const codex =
-    options.codex ??
-    new Codex({
-      env: await comparisonEnvironment(
-        options.environment,
-        accountStatus,
-        options.signal,
-      ),
+  let codex = options.codex;
+  if (codex === undefined) {
+    const environment = await comparisonEnvironment(
+      options.environment,
+      accountStatus,
+      options.signal,
+    );
+    const command = resolveCodexCommand(environment);
+    const configuredServers = await runCodexCommand(
+      command,
+      ["mcp", "list", "--json"],
+      environment,
+      undefined,
+      options.signal,
+    );
+    if (!configuredServers.success) {
+      throw new CodexSecurityError(
+        "Could not inspect configured comparison MCP servers.",
+      );
+    }
+    let servers: unknown;
+    try {
+      servers = JSON.parse(configuredServers.stdout);
+    } catch {
+      throw new CodexSecurityError(
+        "Could not inspect configured comparison MCP servers.",
+      );
+    }
+    if (!Array.isArray(servers)) {
+      throw new CodexSecurityError(
+        "Could not inspect configured comparison MCP servers.",
+      );
+    }
+    const mcpServers: Record<string, { enabled: false }> = {};
+    for (const server of servers) {
+      if (
+        typeof server !== "object" ||
+        server === null ||
+        !("name" in server) ||
+        typeof server.name !== "string" ||
+        !/^[A-Za-z0-9_-]+$/u.test(server.name)
+      ) {
+        throw new CodexSecurityError(
+          "Could not inspect configured comparison MCP servers.",
+        );
+      }
+      mcpServers[server.name] = { enabled: false };
+    }
+    codex = new Codex({
+      codexPathOverride: command.command,
+      env: environment,
       config: {
         allow_login_shell: false,
         responses_api_metadata: {
@@ -118,6 +162,7 @@ export async function matchScanFindingsInternal(
         "features.plugins": false,
         "features.shell_tool": false,
         "features.unified_exec": false,
+        ...(servers.length === 0 ? {} : { mcp_servers: mcpServers }),
         shell_environment_policy: {
           inherit: "core",
           ignore_default_excludes: false,
@@ -125,6 +170,7 @@ export async function matchScanFindingsInternal(
         },
       },
     });
+  }
   const thread = codex.startThread({
     ...(options.model === undefined ? {} : { model: options.model }),
     modelReasoningEffort: options.reasoningEffort ?? "medium",
