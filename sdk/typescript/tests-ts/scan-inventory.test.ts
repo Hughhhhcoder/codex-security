@@ -1071,7 +1071,7 @@ describe("security scan file inventory", () => {
     ["slash-only", "/\n"],
     ["whitespace-only", "   \n"],
     ["embedded-carriage-return", ".IGNORE/tracked.ts\rignored\n"],
-    ["unterminated-carriage-return", ".IGNORE/tracked.ts\r"],
+    ["unterminated-embedded-carriage-return", ".IGNORE/tracked.ts\rignored"],
   ])(
     "keeps %s ignores inert when isolating nested checkout names",
     async (_description, contents) => {
@@ -3869,6 +3869,7 @@ describe("security scan file inventory", () => {
       .trim();
     await writeFile(join(gitdir, "objects"), "inactive worktree metadata\n");
     await mkdir(join(gitdir, "packed-refs"));
+    await mkdir(join(gitdir, "refs"), { recursive: true });
     await writeFile(
       join(gitdir, "refs", "heads"),
       "inactive worktree references\n",
