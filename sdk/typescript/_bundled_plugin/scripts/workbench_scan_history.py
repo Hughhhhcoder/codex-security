@@ -538,9 +538,7 @@ def list_scans(
         {where}
         ORDER BY
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
-            MAX(scans.updated_at, progress.updated_at) DESC,
-            scans.started_at DESC,
-            scans.id
+            scans.rowid DESC
         {pagination}
         """,
         values,

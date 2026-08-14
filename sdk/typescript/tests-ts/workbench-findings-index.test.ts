@@ -66,6 +66,9 @@ const findingsIndexProbe = [
   "    connection.execute(\"UPDATE finding_occurrences SET severity = 'critical' WHERE id = 'orphan-old-occurrence'\")",
   "if settings.get('lateCompletion'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-new-finding', created_at = '2026-03-01' WHERE id = 'current-old-occurrence'\")",
+  "if settings.get('closedBeforeRollback'):",
+  "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-old-finding', created_at = '2025-12-02' WHERE id = 'current-new-occurrence'\")",
+  "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', 'already_fixed')\")",
   "connection.executemany('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'src/old.py', 'root_control', 0),",
   "    ('current-new-occurrence', 'src/new.py', 'root_control', 0),",
@@ -123,6 +126,7 @@ function runFindingsIndex(
     targetPaths?: string[];
     query?: string;
     clockRollback?: boolean;
+    closedBeforeRollback?: boolean;
     coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
     includeResolved?: boolean;
     indexedAliases?: boolean;
@@ -164,6 +168,7 @@ function probeFindingsIndex(
     targetPaths?: string[];
     query?: string;
     clockRollback?: boolean;
+    closedBeforeRollback?: boolean;
     coverageFailure?: "pruned";
     includeResolved?: boolean;
     indexedAliases?: boolean;
@@ -258,6 +263,20 @@ describe("workbench findings index", () => {
 
     expect(result.findings).toEqual([
       expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+    ]);
+  });
+
+  test("reopens fixed findings rediscovered after the system clock moves backward", () => {
+    const result = probeFindingsIndex("current-target", {
+      clockRollback: true,
+      closedBeforeRollback: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        occurrenceId: "current-new-occurrence",
+        status: "open",
+      }),
     ]);
   });
 

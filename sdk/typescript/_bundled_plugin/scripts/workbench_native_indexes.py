@@ -209,7 +209,7 @@ def _indexed_findings(
         if (
             status == "closed"
             and decision["close_reason"] == "already_fixed"
-            and latest["created_at"] > decision["decision_updated_at"]
+            and latest["scan_sequence"] > decision["scan_sequence"]
         ):
             status = "open"
         scans = sorted(

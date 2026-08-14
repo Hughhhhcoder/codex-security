@@ -368,11 +368,13 @@ describe("CLI findings history", () => {
                         scanId: "latest",
                         targetPath: "/current/repository",
                         progress: { status: "complete" },
+                        completedAt: "2025-12-01T00:00:00Z",
                       },
                       {
                         scanId: "older",
                         targetPath: "/current/repository",
                         progress: { status: "complete" },
+                        completedAt: "2026-01-01T00:00:00Z",
                       },
                     ],
                   }

@@ -535,19 +535,9 @@ export function renderScanHistory(
           "",
       ),
     );
-    const completed = scans
-      .filter(
-        (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
-      )
-      .sort((left, right) => {
-        const leftCompleted = String(
-          left["completedAt"] ?? left["startedAt"] ?? "",
-        );
-        const rightCompleted = String(
-          right["completedAt"] ?? right["startedAt"] ?? "",
-        );
-        return rightCompleted.localeCompare(leftCompleted);
-      });
+    const completed = scans.filter(
+      (scan) => (scan["progress"] as JsonObject)["status"] === "complete",
+    );
     const latest = completed[0]?.["findingCount"];
     const multipleRepositories =
       options.repository === undefined &&

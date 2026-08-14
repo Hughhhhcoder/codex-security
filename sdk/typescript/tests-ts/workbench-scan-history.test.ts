@@ -63,6 +63,35 @@ test("loads each scan's matching findings once in insertion order after clock ro
   });
 });
 
+test("lists completed scans in insertion order after clock rollback", () => {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  if (python === null) throw new Error("A Python interpreter is required.");
+
+  const probe = [
+    "import json, sqlite3, sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_history as history",
+    "import workbench_schema as schema",
+    "connection = sqlite3.connect(':memory:')",
+    "connection.row_factory = sqlite3.Row",
+    "schema.apply_migrations(connection, schema.MIGRATIONS, lambda: '2026-01-01', lambda _connection: None)",
+    "connection.execute(\"INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', '2026-01-01', '2026-01-01')\")",
+    "for scan, status, started in [('older', 'complete', '2026-02-01'), ('newer', 'complete', '2026-01-01'), ('running', 'running', '2025-12-01')]:",
+    "    connection.execute('INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan, 'workspace', '/repository', 'revision', '.', 'standard', '/scans/' + scan, status, 'reporting', started, started, started))",
+    "    connection.execute('INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)', (scan, started))",
+    "print(json.dumps([scan['scanId'] for scan in history.list_scans(connection)['scans']]))",
+  ].join("\n");
+
+  const result = spawnSync(
+    python,
+    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual(["running", "newer", "older"]);
+});
+
 test("compares registered scan history after its checkout moves", () => {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   if (python === null) throw new Error("A Python interpreter is required.");

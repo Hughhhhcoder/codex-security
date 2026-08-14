@@ -181,7 +181,7 @@ describe("scan history renderer", () => {
         mode: "standard",
         progress: { status: "complete" },
         findingCount: 8,
-        startedAt: "2026-07-24T12:00:00Z",
+        startedAt: "2026-07-23T12:00:00Z",
       },
       {
         scanId: "22222222-2222-4222-8222-222222222222",
@@ -189,7 +189,7 @@ describe("scan history renderer", () => {
         mode: "deep",
         progress: { status: "complete" },
         findingCount: 2,
-        startedAt: "2026-07-23T12:00:00Z",
+        startedAt: "2026-07-24T12:00:00Z",
       },
     ];
 
@@ -205,6 +205,8 @@ describe("scan history renderer", () => {
       expect(output).toContain("payment-service");
       expect(output).toContain(scans[0]!.scanId);
       expect(output).toContain(scans[1]!.scanId);
+      expect(output).toContain("latest: 8 findings");
+      expect(output).toContain("scans show 11111111");
       if (columns >= 96) expect(output).toContain("REPOSITORY");
     }
   });

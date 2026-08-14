@@ -1106,22 +1106,11 @@ export async function main(
           const latest = await history(
             ["list-scans", "--repository", repository],
             ({ scans }) => {
-              const scan = (scans as JsonObject[])
-                .filter(
-                  (entry) =>
-                    (entry["progress"] as JsonObject | undefined)?.[
-                      "status"
-                    ] === "complete",
-                )
-                .sort((left, right) => {
-                  const leftCompleted = String(
-                    left["completedAt"] ?? left["startedAt"] ?? "",
-                  );
-                  const rightCompleted = String(
-                    right["completedAt"] ?? right["startedAt"] ?? "",
-                  );
-                  return rightCompleted.localeCompare(leftCompleted);
-                })[0];
+              const scan = (scans as JsonObject[]).find(
+                (entry) =>
+                  (entry["progress"] as JsonObject | undefined)?.["status"] ===
+                  "complete",
+              );
               if (typeof scan?.["scanId"] !== "string") {
                 throw new CodexSecurityError(
                   `No completed scans found for ${repository}. Run 'codex-security scan .' first.`,
