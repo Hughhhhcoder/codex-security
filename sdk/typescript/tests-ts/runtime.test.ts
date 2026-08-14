@@ -247,6 +247,13 @@ describe("plugin runtime preparation", () => {
       join(repository, "nested", "tracked-secret.py"),
       "secret = True\n",
     );
+    const mixedLongPath =
+      process.platform === "win32" ? `long-file-${"c".repeat(180)}.ts` : null;
+    if (mixedLongPath !== null) {
+      const mixedLongFile = join(repository, mixedLongPath);
+      expect(mixedLongFile.length).toBeGreaterThan(260);
+      await writeFile(mixedLongFile, "export {};\n");
+    }
     for (const args of [
       ["init", "--quiet", repository],
       ["-C", repository, "add", "--force", "--", "nested/tracked-secret.py"],
@@ -259,13 +266,16 @@ describe("plugin runtime preparation", () => {
     expect(python).not.toBeNull();
     const output = join(root, "inventory.txt");
     const repeatedOutput = join(root, "inventory-repeated.txt");
-    const generatorArguments = (destination: string) =>
+    const generatorArguments = (
+      destination: string,
+      sourceRepository = repository,
+    ) =>
       [
         "-I",
         "-B",
         join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
         "--repo",
-        repository,
+        sourceRepository,
         "--scope",
         ".",
         "--out",
@@ -330,6 +340,270 @@ describe("plugin runtime preparation", () => {
         .split(/\r?\n/u);
       expect(posixRows).toContain(String.raw`./literal\backslash.txt`);
       expect(posixRows).toContain("./literal:colon.txt");
+    } else {
+      expect(rows).toContain(`./${mixedLongPath}`);
+      const committed = spawnSync(
+        "git",
+        [
+          "-C",
+          repository,
+          "-c",
+          "user.name=Codex Security Test",
+          "-c",
+          "user.email=codex-security-test@example.invalid",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "--quiet",
+          "-m",
+          "base",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(committed.status, committed.stderr).toBe(0);
+      const mixedScopeOutput = join(root, "inventory-mixed-long-scope.txt");
+      const mixedScopeInventory = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          mixedLongPath!,
+          "--out",
+          mixedScopeOutput,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(mixedScopeInventory.status, mixedScopeInventory.stderr).toBe(0);
+      expect(await readFile(mixedScopeOutput, "utf8")).toBe(
+        `${mixedLongPath}\n`,
+      );
+      const mixedDiffOutput = join(root, "inventory-mixed-long-diff.txt");
+      const mixedDiffInventory = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          repository,
+          "--scope",
+          ".",
+          "--out",
+          mixedDiffOutput,
+          "--diff-base",
+          "HEAD",
+          "--diff-mode",
+          "local-patch",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(mixedDiffInventory.status, mixedDiffInventory.stderr).toBe(0);
+      expect(await readFile(mixedDiffOutput, "utf8")).toBe(
+        `${mixedLongPath}\n`,
+      );
+      await writeFile(join(repository, "SECURITY.md"), "# mixed policy\n");
+      const mixedPolicy = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "resolve_security_md.py"),
+          "--repo",
+          repository,
+          "--scope",
+          mixedLongPath!,
+          "--out",
+          "-",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(mixedPolicy.status, mixedPolicy.stderr).toBe(0);
+      expect(mixedPolicy.stdout).toBe(
+        '## SECURITY.md source: "SECURITY.md"\n\n# mixed policy\n',
+      );
+      const longRepository = join(
+        root,
+        `long-${"a".repeat(100)}`,
+        `long-${"b".repeat(100)}`,
+        "repository",
+      );
+      await mkdir(longRepository, { recursive: true });
+      await writeFile(join(longRepository, "SECURITY.md"), "# policy\n");
+      await writeFile(join(longRepository, "app.ts"), "export {};\n");
+      expect(longRepository.length).toBeGreaterThan(260);
+      const longOutput = join(root, "inventory-long-path.txt");
+      const inventory = spawnSync(
+        python!,
+        generatorArguments(longOutput, longRepository),
+        { encoding: "utf8" },
+      );
+      expect(inventory.status, inventory.stderr).toBe(0);
+      expect(await readFile(longOutput, "utf8")).toBe(
+        "./SECURITY.md\n./app.ts\n",
+      );
+
+      const policy = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "resolve_security_md.py"),
+          "--repo",
+          longRepository,
+          "--scope",
+          "app.ts",
+          "--out",
+          "-",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(policy.status, policy.stderr).toBe(0);
+      expect(policy.stdout).toBe(
+        '## SECURITY.md source: "SECURITY.md"\n\n# policy\n',
+      );
+
+      const candidates = join(root, "long-path-candidates.jsonl");
+      const normalized = join(root, "long-path-normalized.jsonl");
+      await writeFile(
+        candidates,
+        `${JSON.stringify({
+          cwe_ids: ["CWE-20"],
+          locations: [{ path: "app.ts", start_line: 1, role: "sink" }],
+          summary: "summary",
+          evidence: "evidence",
+        })}\n`,
+      );
+      const normalization = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+          "--input",
+          candidates,
+          "--out",
+          normalized,
+          "--repo-root",
+          longRepository,
+          "--in-scope-files",
+          longOutput,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(normalization.status, normalization.stderr).toBe(0);
+      expect(
+        JSON.parse((await readFile(normalized, "utf8")).trim()),
+      ).toMatchObject({
+        cwe_ids: ["CWE-20"],
+        locations: [{ path: "app.ts", start_line: 1, role: "sink" }],
+      });
+
+      const stateDirectory = join(root, "long-path-state");
+      const scanRoot = join(root, "long-path-scans");
+      const workbench = join(PLUGIN_ROOT, "scripts", "workbench_db.py");
+      const mixedStarted = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "start-headless-standard-scan",
+          "--thread-id",
+          "mixed-long-path-test",
+          "--target-path",
+          repository,
+          "--scope",
+          ".",
+          "--scan-root",
+          scanRoot,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(mixedStarted.status, mixedStarted.stderr).toBe(0);
+      expect(JSON.parse(mixedStarted.stdout)).toMatchObject({
+        scan: { targetPath: repository },
+        workspace: { targetPath: repository },
+      });
+      const inspected = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "inspect-target",
+          "--target-path",
+          longRepository,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(inspected.status, inspected.stderr).toBe(0);
+      expect(JSON.parse(inspected.stdout)).toMatchObject({
+        displayName: "repository",
+        targetPath: longRepository,
+      });
+
+      const preflight = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, pathlib, runpy, sys",
+            "module = runpy.run_path(sys.argv[1])",
+            "_, metadata = module['discover_config_paths'](cwd=pathlib.Path(sys.argv[2]), profile_layer_path=None)",
+            "print(json.dumps(metadata))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          longRepository,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(preflight.status, preflight.stderr).toBe(0);
+      expect(JSON.parse(preflight.stdout)).toMatchObject({
+        cwd: longRepository,
+        project_root: longRepository,
+      });
+
+      const started = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "start-headless-standard-scan",
+          "--thread-id",
+          "long-path-test",
+          "--target-path",
+          longRepository,
+          "--scope",
+          ".",
+          "--scan-root",
+          scanRoot,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(started.status, started.stderr).toBe(0);
+      expect(JSON.parse(started.stdout)).toMatchObject({
+        scan: { targetPath: longRepository },
+        workspace: { targetPath: longRepository },
+      });
     }
   });
 

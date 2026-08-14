@@ -44,6 +44,7 @@ from rank_preview import (
     preview_for_bytes,
 )
 from workbench_target import git_blob_bytes, git_directory_snapshot_paths
+from windows_paths import extended_path, filesystem_path, portable_path
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -303,10 +304,12 @@ def resolve_scope(
     scope_path = Path(scope).expanduser() if expand_user else Path(scope)
     if not scope_path.is_absolute():
         scope_path = repo / scope_path
+    scope_path = filesystem_path(scope_path)
+    repository = filesystem_path(repo).resolve()
+    portable_repository = portable_path(repository)
     if reject_symlinks:
-        repository = repo.resolve()
         try:
-            relative = scope_path.relative_to(repository)
+            relative = portable_path(scope_path).relative_to(portable_repository)
         except ValueError as exc:
             raise SystemExit(f"Scope must be inside repo: {scope_path}") from exc
         ancestor = repository
@@ -316,7 +319,7 @@ def resolve_scope(
                     raise SystemExit(f"Scope must be inside repo: {scope_path}")
                 ancestor = ancestor.parent
                 continue
-            ancestor /= part
+            ancestor = filesystem_path(ancestor / part)
             try:
                 metadata = ancestor.stat(follow_symlinks=False)
             except OSError as exc:
@@ -324,9 +327,8 @@ def resolve_scope(
             if ancestor.is_symlink() or getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
                 raise SystemExit(f"Requested scope must not contain symbolic links: {ancestor}")
     scope_path = scope_path.resolve()
-    repo_resolved = repo.resolve()
     try:
-        scope_path.relative_to(repo_resolved)
+        portable_path(scope_path).relative_to(portable_repository)
     except ValueError as exc:
         raise SystemExit(f"Scope must be inside repo: {scope_path}") from exc
     if not scope_path.is_dir() and not scope_path.is_file():
@@ -441,7 +443,7 @@ def require_unique_paths(rows: list[JsonRow], label: str) -> None:
 
 
 def make_repo_rank_input(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).expanduser().resolve()
+    repo = filesystem_path(Path(args.repo).expanduser()).resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
     scopes = [args.scope]
@@ -457,20 +459,25 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
     }
     rows_by_path: dict[str, JsonRow] = {}
     for scope_abs in resolved_scopes:
-        scope_rel = scope_abs.relative_to(repo)
+        scope_rel = portable_path(scope_abs).relative_to(portable_path(repo))
         area = args.area or scope_rel.as_posix()
-        candidates = (scope_abs,) if scope_abs.is_file() else scope_abs.rglob("*")
+        candidates = (
+            (scope_abs,) if scope_abs.is_file() else extended_path(scope_abs).rglob("*")
+        )
         for path in candidates:
+            path = filesystem_path(path)
             try:
                 if path.is_symlink() or not path.is_file():
                     continue
-                path.resolve(strict=True).relative_to(repo)
+                portable_path(path.resolve(strict=True)).relative_to(portable_path(repo))
             except (OSError, ValueError):
                 continue
-            rel = path.relative_to(repo)
+            rel = portable_path(path).relative_to(portable_path(repo))
             directly_requested = path in directly_requested_files
             excluded_path = (
-                path.relative_to(scope_abs if scope_abs.is_dir() else scope_abs.parent)
+                portable_path(path).relative_to(
+                    portable_path(scope_abs if scope_abs.is_dir() else scope_abs.parent)
+                )
                 if explicit_scopes
                 else rel
             )
@@ -499,17 +506,19 @@ def make_repo_rank_input(args: argparse.Namespace) -> None:
             )
 
     rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))
-    output = Path(args.out).expanduser()
+    output = filesystem_path(Path(args.out).expanduser())
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} rows to {output}")
 
 
 def make_repo_scope_input(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).expanduser().resolve()
+    repo = filesystem_path(Path(args.repo).expanduser()).resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
 
-    scopes = load_scopes_file(Path(args.scopes_file).expanduser())
+    scopes = load_scopes_file(
+        filesystem_path(Path(args.scopes_file).expanduser())
+    )
     rows_by_path: dict[str, JsonRow] = {}
     for scope in scopes:
         scope_path = resolve_scope(repo, scope, expand_user=False, reject_symlinks=True)
@@ -529,7 +538,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                     "--glob",
                     "!.git/**",
                     "--",
-                    str(scope_path.relative_to(repo)),
+                    str(portable_path(scope_path).relative_to(portable_path(repo))),
                 ]
                 try:
                     result = subprocess.run(command, cwd=repo, capture_output=True, check=False)
@@ -546,7 +555,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                         )
                         or any(
                             path.name in ignore_names
-                            for path in scope_path.rglob("*")
+                            for path in extended_path(scope_path).rglob("*")
                             if path.is_file()
                         )
                     )
@@ -554,19 +563,24 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                         raise SystemExit(
                             "Could not safely enumerate ignored scoped files without Git or ripgrep."
                         ) from exc
-                    candidates = scope_path.rglob("*")
+                    candidates = extended_path(scope_path).rglob("*")
                 else:
                     if result.returncode not in (0, 1):
                         detail = result.stderr.decode("utf-8", errors="replace").strip()
                         raise SystemExit(f"Could not enumerate scoped repository files: {detail}")
                     candidates = (
-                        repo / os.fsdecode(path) for path in result.stdout.split(b"\0") if path
+                        filesystem_path(repo / os.fsdecode(path))
+                        for path in result.stdout.split(b"\0")
+                        if path
                     )
         for path in candidates:
+            path = filesystem_path(path)
             try:
                 if path.is_symlink() or not path.is_file():
                     continue
-                relative = path.resolve(strict=True).relative_to(repo)
+                relative = portable_path(path.resolve(strict=True)).relative_to(
+                    portable_path(repo)
+                )
             except (OSError, ValueError):
                 continue
             if ".git" in relative.parts:
@@ -574,7 +588,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
             rows_by_path.setdefault(relative.as_posix(), {"path": relative.as_posix()})
 
     rows = sorted(rows_by_path.values(), key=lambda row: str(row["path"]))
-    output = Path(args.out).expanduser()
+    output = filesystem_path(Path(args.out).expanduser())
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} scoped paths to {output}")
 
@@ -664,18 +678,18 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
 
 
 def make_diff_rank_input(args: argparse.Namespace) -> None:
-    repo = Path(args.repo).expanduser().resolve()
+    repo = filesystem_path(Path(args.repo).expanduser()).resolve()
     if not repo.is_dir():
         raise SystemExit(f"Repo path not found: {repo}")
 
     changed = [
         (path, status)
         for path, status in git_changed_paths(repo, args.base, args.head, args.mode)
-        if not path_is_excluded(path.relative_to(repo))
+        if not path_is_excluded(portable_path(path).relative_to(portable_path(repo)))
         and path.suffix.lower() in TEXT_CODE_EXTENSIONS
     ]
     revision_paths = [
-        path.relative_to(repo)
+        portable_path(path).relative_to(portable_path(repo))
         for path, status in changed
         if args.mode == "revisions" and status != "D"
     ]
@@ -691,7 +705,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
 
     rows: list[JsonRow] = []
     for path, status in changed:
-        rel = path.relative_to(repo)
+        rel = portable_path(path).relative_to(portable_path(repo))
 
         if status == "D":
             preview = ""
@@ -704,23 +718,25 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
             preview, is_binary = preview_for_bytes(rel, content, args.preview_bytes)
             if is_binary:
                 continue
-        elif path.is_symlink():
-            preview = ""
-        elif path.is_file():
-            try:
-                path.resolve(strict=True).relative_to(repo)
-            except (OSError, ValueError):
-                preview = ""
-            else:
-                preview, is_binary = preview_for(path, args.preview_bytes)
-                if is_binary:
-                    continue
         else:
-            preview = ""
+            path = filesystem_path(path)
+            if path.is_symlink():
+                preview = ""
+            elif path.is_file():
+                try:
+                    portable_path(path.resolve(strict=True)).relative_to(portable_path(repo))
+                except (OSError, ValueError):
+                    preview = ""
+                else:
+                    preview, is_binary = preview_for(path, args.preview_bytes)
+                    if is_binary:
+                        continue
+            else:
+                preview = ""
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
 
     rows.sort(key=lambda row: str(row["path"]))
-    output = Path(args.out).expanduser()
+    output = filesystem_path(Path(args.out).expanduser())
     write_jsonl(output, rows)
     print(f"Wrote {len(rows)} rows to {output}")
 

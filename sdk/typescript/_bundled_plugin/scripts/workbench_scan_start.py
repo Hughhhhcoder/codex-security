@@ -23,6 +23,7 @@ from workbench_target import (
     worktree_content_digest,
 )
 from workbench_validation import optional_text, user_text
+from windows_paths import portable_path
 
 
 def safe_segment(value: str) -> str:
@@ -93,6 +94,7 @@ def archive_scan(
     timestamp: str,
     canonical_directory: Callable[[Path], Path],
 ) -> None:
+    portable_scan_dir = portable_path(scan_dir)
     archived_scan_dir = (
         canonical_directory(Path(args.archived_scan_dir).expanduser())
         if args.archived_scan_dir is not None
@@ -106,7 +108,7 @@ def archive_scan(
         raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
 
     previous_scan = connection.execute(
-        "SELECT id, status FROM scans WHERE scan_dir = ?", (str(scan_dir),)
+        "SELECT id, status FROM scans WHERE scan_dir = ?", (str(portable_scan_dir),)
     ).fetchone()
     if previous_scan is None:
         return
@@ -131,17 +133,17 @@ def archive_scan(
         ).resolve()
     connection.execute(
         "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
-        (str(archived_scan_dir), timestamp, previous_scan["id"]),
+        (str(portable_path(archived_scan_dir)), timestamp, previous_scan["id"]),
     )
     for artifact in artifacts:
         try:
-            relative_path = Path(artifact["path"]).relative_to(scan_dir)
+            relative_path = Path(artifact["path"]).relative_to(portable_scan_dir)
         except ValueError:
             continue
         connection.execute(
             "UPDATE scan_artifacts SET path = ? WHERE scan_id = ? AND kind = ?",
             (
-                str(archived_scan_dir / relative_path),
+                str(portable_path(archived_scan_dir / relative_path)),
                 previous_scan["id"],
                 artifact["kind"],
             ),
@@ -191,7 +193,7 @@ def insert_running_scan(
             scan_id,
             workspace["id"],
             workspace["target_id"],
-            str(target),
+            workspace["target_path"],
             *target_identity,
             scope,
             workspace["default_mode"],
@@ -202,7 +204,7 @@ def insert_running_scan(
             diff_target["headRevision"] if diff_target else None,
             diff_target.get("contentDigest") if diff_target else None,
             target_summary,
-            str(scan_dir),
+            str(portable_path(scan_dir)),
             optional_text(model, maximum=200),
             optional_text(reasoning_effort, maximum=32),
             handoff_status,

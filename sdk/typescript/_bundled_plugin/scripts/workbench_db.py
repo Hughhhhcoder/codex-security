@@ -129,6 +129,7 @@ from workbench_validation import (
     sqlite_busy,
     user_text,
 )
+from windows_paths import filesystem_path, portable_path
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
@@ -251,7 +252,7 @@ def require_target(value: str) -> Path:
     expanded = Path(value).expanduser()
     if not expanded.is_absolute():
         raise SystemExit("Scan target must be an absolute local directory path.")
-    target = expanded.resolve()
+    target = filesystem_path(expanded).resolve()
     if not target.is_dir():
         raise SystemExit(f"Scan target is not a readable local directory: {target}")
     return target
@@ -262,7 +263,7 @@ def inspect_target(target_path: str) -> dict[str, Any]:
     return {
         "displayName": target.name,
         "targetMetadata": git_target_metadata(target),
-        "targetPath": str(target),
+        "targetPath": str(portable_path(target)),
     }
 
 
@@ -402,7 +403,10 @@ def inspect_setup(args: argparse.Namespace) -> dict[str, Any]:
 def require_review_changes_target(target: Path) -> str:
     revision = require_git_worktree_head(target)
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
-    if repository_root is None or Path(repository_root).resolve() != target:
+    if (
+        repository_root is None
+        or filesystem_path(Path(repository_root)).resolve() != target
+    ):
         raise SystemExit(
             "Review changes requires the checked-out Git repository root as the target."
         )
@@ -609,11 +613,11 @@ def require_scope(scope: str, mode: str, target: Path) -> str:
         raise SystemExit("Scan scope must stay inside the scanned target.")
     try:
         resolved_scope = (
-            Path(parsed.as_posix()).resolve()
+            filesystem_path(Path(parsed.as_posix())).resolve()
             if parsed.is_absolute()
-            else (target / parsed.as_posix()).resolve()
+            else filesystem_path(target / parsed.as_posix()).resolve()
         )
-        relative_scope = resolved_scope.relative_to(target)
+        relative_scope = portable_path(resolved_scope).relative_to(portable_path(target))
     except (RuntimeError, ValueError) as exc:
         raise SystemExit("Scan scope must stay inside the scanned target.") from exc
     normalized = relative_scope.as_posix() or "."
@@ -792,9 +796,18 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
 
 
 def scan_target_root(scan_root: str | None, target: Path) -> Path:
-    root = Path(scan_root).expanduser().resolve() if scan_root else state_dir() / "scans"
-    target_root = (root / safe_segment(target.name)).resolve()
-    if target_root == target or target in target_root.parents:
+    root = (
+        filesystem_path(Path(scan_root).expanduser()).resolve()
+        if scan_root
+        else state_dir() / "scans"
+    )
+    target_root = filesystem_path(root / safe_segment(target.name)).resolve()
+    portable_target = portable_path(target)
+    portable_target_root = portable_path(target_root)
+    if (
+        portable_target_root == portable_target
+        or portable_target in portable_target_root.parents
+    ):
         raise SystemExit("The scan artifact directory must be outside the selected target.")
     return target_root
 
@@ -864,7 +877,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             return workspace_state(connection, workspace["id"])
         if workspace["updated_at"] != workspace_version:
             raise SystemExit("Codex Security setup changed while the scan was starting. Try again.")
-        current_target = require_remediation_target(str(target))
+        current_target = require_remediation_target(workspace["target_path"])
         current_target_metadata = current_target.stat()
         if (current_target_metadata.st_dev, current_target_metadata.st_ino) != (
             target_metadata.st_dev,
@@ -877,7 +890,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             owned_active_scan = deep_scan.existing_deep_scan_for_target(
                 connection,
                 workspace["thread_id"],
-                str(target),
+                workspace["target_path"],
                 scope,
             )
             if owned_active_scan is not None:
@@ -936,8 +949,8 @@ def _start_prompt_driven_scan(
         args.diff_head_revision,
         args.diff_content_digest,
     )
-    target = Path(inspected["target"]["targetPath"])
-    target_path = str(target)
+    target_path = inspected["target"]["targetPath"]
+    target = require_target(target_path)
     scope = inspected["scope"]
     diff_target = inspected["diffTarget"]
     user_context = user_text(args.user_context)
@@ -1644,7 +1657,8 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     connection.execute("BEGIN IMMEDIATE")
     try:
         archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
-        target_id = ensure_security_target(connection, str(repository))
+        repository_path = str(portable_path(repository))
+        target_id = ensure_security_target(connection, repository_path)
         if parent_scan_id is not None:
             parent = require_scan(connection, parent_scan_id)
             if parent["target_id"] != target_id:
@@ -1661,7 +1675,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             (
                 workspace_id,
                 target_id,
-                str(repository),
+                repository_path,
                 repository.name,
                 scope,
                 mode,
