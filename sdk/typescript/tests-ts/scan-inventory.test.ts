@@ -2624,6 +2624,75 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each(["different casing", "trailing dot", "trailing space"])(
+    "does not prove metadata ownership through a %s repository prefix",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const forged =
+        kind === "different casing"
+          ? join(dirname(checkout), basename(checkout).toUpperCase())
+          : `${checkout}${kind === "trailing dot" ? "." : " "}`;
+      const equivalent = await realpath(forged).then(
+        async (resolved) => resolved === (await realpath(checkout)),
+        () => false,
+      );
+      let environment = process.env;
+      if (equivalent) {
+        if (kind !== "different casing" || process.platform === "win32") return;
+        const instrumentation = join(dirname(checkout), "instrumentation");
+        await mkdir(instrumentation);
+        await writeFile(
+          join(instrumentation, "sitecustomize.py"),
+          [
+            "from pathlib import Path",
+            `forged = Path(${JSON.stringify(forged)})`,
+            "original = Path.stat",
+            "def case_sensitive(self, *args, **kwargs):",
+            "    if self == forged and kwargs.get('follow_symlinks') is False:",
+            "        raise FileNotFoundError(self)",
+            "    return original(self, *args, **kwargs)",
+            "Path.stat = case_sensitive",
+          ].join("\n"),
+        );
+        environment = { ...process.env, PYTHONPATH: instrumentation };
+      }
+
+      const application = join(checkout, "application");
+      const owner = join(application, "owner");
+      await mkdir(owner, { recursive: true });
+      await Promise.all([
+        writeFile(join(application, ".gitignore"), "owner/\n"),
+        writeFile(join(application, "HEAD"), "ref: refs/heads/main\n"),
+        writeFile(
+          join(application, "config"),
+          `[core]\n\tworktree = ${join(forged, "application", "owner")}\n`,
+        ),
+        writeFile(join(application, "vulnerable.py"), "unsafe = True\n"),
+        writeFile(join(checkout, "visible.ts"), "visible\n"),
+      ]);
+      execFileSync("git", ["add", "application", "visible.ts"], {
+        cwd: checkout,
+      });
+      commit(checkout);
+      await writeFile(
+        join(owner, ".git"),
+        `gitdir: ${join(forged, "application")}\n`,
+      );
+
+      expect(await inventory(checkout, ".", environment)).toContain(
+        "./application/vulnerable.py",
+      );
+      expect(await inventory(checkout, "application", environment)).toContain(
+        "application/vulnerable.py",
+      );
+      expect(
+        await inventory(checkout, "application/vulnerable.py", environment),
+      ).toEqual(["application/vulnerable.py"]);
+    },
+  );
+
   test("preserves a nested checkout that is its own Git directory", async () => {
     if (Bun.which("rg") === null) return;
 

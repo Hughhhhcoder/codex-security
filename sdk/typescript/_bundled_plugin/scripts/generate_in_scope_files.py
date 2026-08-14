@@ -885,11 +885,28 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 candidate = Path(os.fsdecode(value))
                 if not candidate.is_absolute():
                     candidate = base / candidate
-                if len(candidate.parts) < len(repository.parts) or any(
-                    filesystem_name_key(actual) != filesystem_name_key(expected)
-                    for actual, expected in zip(candidate.parts, repository.parts)
-                ):
+                if len(candidate.parts) < len(repository.parts) or os.path.normcase(
+                    candidate.anchor
+                ) != os.path.normcase(repository.anchor):
                     return None
+                supplied = Path(candidate.anchor)
+                trusted = Path(repository.anchor)
+                for actual, expected in zip(
+                    candidate.parts[1 : len(repository.parts)], repository.parts[1:]
+                ):
+                    if actual in (".", ".."):
+                        return None
+                    supplied /= actual
+                    trusted /= expected
+                    actual_metadata = supplied.stat(follow_symlinks=False)
+                    expected_metadata = trusted.stat(follow_symlinks=False)
+                    if (
+                        not stat.S_ISDIR(actual_metadata.st_mode)
+                        or symbolic_metadata(actual_metadata)
+                        or (actual_metadata.st_dev, actual_metadata.st_ino)
+                        != (expected_metadata.st_dev, expected_metadata.st_ino)
+                    ):
+                        return None
                 components = candidate.parts[len(repository.parts) :]
             except (OSError, UnicodeError, ValueError):
                 return None
