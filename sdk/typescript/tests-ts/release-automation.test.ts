@@ -608,6 +608,31 @@ describe("monotonic stable release versions", () => {
 });
 
 describe("published GitHub and npm release history", () => {
+  test("parses Windows line endings at the release-history CLI boundary", () => {
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(automationScript), "release-history", "npm-v0.1.2"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_SECURITY_PUBLISHED_NPM_VERSIONS: JSON.stringify([
+            "0.1.1",
+            "0.1.2",
+          ]),
+          CODEX_SECURITY_PUBLISHED_GITHUB_TAGS: "npm-v0.1.1\r\n",
+          CODEX_SECURITY_REACHABLE_RELEASE_TAGS: "npm-v0.1.1\r\n",
+        },
+      },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      previousTag: "npm-v0.1.1",
+      makeLatest: true,
+    });
+  });
+
   test("marks the first verified GitHub release as latest", () => {
     expect(
       releaseHistory("npm-v0.1.2", {

@@ -787,12 +787,12 @@ function main() {
     const githubReleaseTags = (
       process.env.CODEX_SECURITY_PUBLISHED_GITHUB_TAGS ?? ""
     )
-      .split("\n")
+      .split(/\r?\n/u)
       .filter(Boolean);
     const reachableTags = (
       process.env.CODEX_SECURITY_REACHABLE_RELEASE_TAGS ?? ""
     )
-      .split("\n")
+      .split(/\r?\n/u)
       .filter(Boolean);
     console.log(
       JSON.stringify(
