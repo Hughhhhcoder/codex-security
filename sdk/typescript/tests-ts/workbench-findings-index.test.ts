@@ -29,6 +29,8 @@ const findingsIndexProbe = [
   "    ('orphan-old', None, '/orphan/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/orphan-old'),",
   "    ('orphan-new', None, '/orphan/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/orphan-new'),",
   "])",
+  "if settings.get('clockRollback'):",
+  "    connection.execute(\"UPDATE scans SET started_at = '2025-12-01' WHERE id = 'current-new'\")",
   "if settings.get('mixedLegacyOwnership'):",
   "    connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
   "    connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
@@ -59,6 +61,9 @@ const findingsIndexProbe = [
   "    ('orphan-old-occurrence', 'orphan-old-finding', 'orphan-old', 'high', '2026-01-01', 'Older orphan finding', 'Still outside follow-up coverage'),",
   "    ('orphan-new-occurrence', 'orphan-new-finding', 'orphan-new', 'medium', '2026-02-01', 'Latest orphan finding', 'Target row does not exist'),",
   "])",
+  "if settings.get('legacyPriority'):",
+  "    connection.execute(\"UPDATE finding_occurrences SET severity = 'low' WHERE id = 'current-new-occurrence'\")",
+  "    connection.execute(\"UPDATE finding_occurrences SET severity = 'critical' WHERE id = 'orphan-old-occurrence'\")",
   "if settings.get('lateCompletion'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-new-finding', created_at = '2026-03-01' WHERE id = 'current-old-occurrence'\")",
   "connection.executemany('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', [",
@@ -117,9 +122,11 @@ function runFindingsIndex(
     targetPath?: string;
     targetPaths?: string[];
     query?: string;
+    clockRollback?: boolean;
     coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
     indexedAliases?: boolean;
     lateCompletion?: boolean;
+    legacyPriority?: boolean;
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
     ownershipTransition?: boolean;
@@ -155,9 +162,11 @@ function probeFindingsIndex(
     targetPath?: string;
     targetPaths?: string[];
     query?: string;
+    clockRollback?: boolean;
     coverageFailure?: "pruned";
     indexedAliases?: boolean;
     lateCompletion?: boolean;
+    legacyPriority?: boolean;
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
     ownershipTransition?: boolean;
@@ -223,6 +232,20 @@ describe("workbench findings index", () => {
         openFindingsCount: 1,
       }),
     );
+  });
+
+  test("uses scan insertion order when the system clock moves backward", () => {
+    const result = probeFindingsIndex("current-target", {
+      clockRollback: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        confirmedInLatestScan: true,
+        occurrenceId: "current-new-occurrence",
+      }),
+    ]);
+    expect(result.coverageReads).toEqual(["current-new"]);
   });
 
   test("excludes replaced checkout owners from findings and repository counts", () => {
@@ -357,6 +380,19 @@ describe("workbench findings index", () => {
     });
     expect(siblingPrefix.findings).toEqual([]);
     expect(siblingPrefix.coverageReads).toEqual([]);
+  });
+
+  test("orders registered and legacy findings together by severity", () => {
+    const result = probeFindingsIndex(null, {
+      legacyPriority: true,
+      targetPaths: ["/current/repository", "/orphan/repository"],
+    });
+
+    expect(result.findings.map((finding) => finding.occurrenceId)).toEqual([
+      "orphan-old-occurrence",
+      "orphan-new-occurrence",
+      "current-new-occurrence",
+    ]);
   });
 
   test("combines exact target identities with legacy checkout paths", () => {

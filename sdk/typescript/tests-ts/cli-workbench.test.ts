@@ -18,12 +18,6 @@ describe("CLI workbench", () => {
     const stdout = capture();
     const calls: Array<readonly string[]> = [];
     const responses: JsonObject[] = [
-      {
-        repositories: [
-          { targetId: "other", targetPath: `${repository}-clone` },
-          { targetId: "selected", targetPath: repository },
-        ],
-      },
       { findings: [{ title: "Finding 1" }], nextOffset: 1 },
       { findings: [{ title: "Finding 2" }], nextOffset: null },
     ];
@@ -37,15 +31,14 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(calls[0]).toEqual(["list-repositories"]);
-    expect(calls[1]).toEqual([
+    expect(calls[0]).toEqual([
       "list-global-findings",
-      "--target-id",
-      "selected",
+      "--repository",
+      repository,
       "--status",
       "open",
     ]);
-    expect(calls[2]).toEqual([...calls[1]!, "--offset", "1"]);
+    expect(calls[1]).toEqual([...calls[0]!, "--offset", "1"]);
     expect(JSON.parse(stdout.text())).toEqual({
       repository,
       findings: [{ title: "Finding 1" }, { title: "Finding 2" }],

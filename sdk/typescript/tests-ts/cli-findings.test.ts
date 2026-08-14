@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { JsonObject } from "../src/index.js";
 import { main } from "../src/cli.js";
@@ -5,26 +6,17 @@ import { capture, dependencies } from "./cli-fixtures.js";
 
 describe("CLI findings history", () => {
   test("lists active findings for the current repository by default", async () => {
+    const repository = resolve("/current/repository");
     for (const command of [
       ["findings"],
       ["findings", "list"],
-      ["findings", "list", "/current/repository"],
+      ["findings", "list", repository],
     ]) {
       const calls: Array<readonly string[]> = [];
       const stdout = capture();
       const deps = dependencies({
         onWorkbench: (args): JsonObject => {
           calls.push(args);
-          if (args[0] === "list-repositories") {
-            return {
-              repositories: [
-                {
-                  targetId: "target-1",
-                  targetPath: "/current/repository",
-                },
-              ],
-            };
-          }
           return {
             findings: [
               { occurrenceId: "occ-1", title: "Missing authorization" },
@@ -48,8 +40,13 @@ describe("CLI findings history", () => {
         ),
       ).toBe(0);
       expect(calls).toEqual([
-        ["list-repositories"],
-        ["list-global-findings", "--target-id", "target-1", "--status", "open"],
+        [
+          "list-global-findings",
+          "--repository",
+          repository,
+          "--status",
+          "open",
+        ],
       ]);
       expect(JSON.parse(stdout.text())).toMatchObject({
         findings: [{ occurrenceId: "occ-1" }],
@@ -58,26 +55,16 @@ describe("CLI findings history", () => {
   });
 
   test("lets the workbench scope findings from a checkout subdirectory", async () => {
+    const repository = resolve("/current/repository/src");
     const calls: Array<readonly string[]> = [];
     const stdout = capture();
     const deps = dependencies({
       onWorkbench: (args): JsonObject => {
         calls.push(args);
-        return args[0] === "list-repositories"
-          ? {
-              repositories: [
-                {
-                  targetId: "target-1",
-                  targetPath: "/current/repository",
-                },
-              ],
-            }
-          : {
-              findings: [{ occurrenceId: "nested-finding" }],
-            };
+        return { findings: [{ occurrenceId: "nested-finding" }] };
       },
     });
-    deps.currentDirectory = () => "/current/repository/src";
+    deps.currentDirectory = () => repository;
 
     expect(
       await main(
@@ -88,14 +75,7 @@ describe("CLI findings history", () => {
       ),
     ).toBe(0);
     expect(calls).toEqual([
-      ["list-repositories"],
-      [
-        "list-global-findings",
-        "--repository",
-        "/current/repository/src",
-        "--status",
-        "open",
-      ],
+      ["list-global-findings", "--repository", repository, "--status", "open"],
     ]);
     expect(JSON.parse(stdout.text())).toMatchObject({
       findings: [{ occurrenceId: "nested-finding" }],

@@ -33,7 +33,6 @@ import {
   classifyConnectionFailure,
   CodexSecurity,
   createSecurityInternal,
-  listRepositoryFindings,
   scanAuthentication,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -874,32 +873,29 @@ export async function main(
           options.status === undefined &&
           !argv.some((argument) => /^--(?:offset|limit)(?:=|$)/u.test(argument))
         ) {
+          const scopedArguments = [
+            "list-global-findings",
+            "--repository",
+            repository,
+            "--status",
+            "open",
+          ];
           return presentHistory(
             await history(
-              ["list-repositories"],
-              async (value): Promise<JsonObject> => {
-                const target = (value["repositories"] as JsonObject[]).find(
-                  (entry) => entry["targetPath"] === repository,
-                );
-                const findings =
-                  target === undefined
-                    ? (
-                        await dependencies.runWorkbench([
-                          "list-global-findings",
-                          "--repository",
-                          repository,
-                          "--status",
-                          "open",
-                        ])
-                      )["findings"]
-                    : await listRepositoryFindings(
-                        dependencies.runWorkbench,
-                        target["targetId"] as string,
-                      );
-                return {
-                  repository,
-                  findings: Array.isArray(findings) ? findings : [],
-                };
+              scopedArguments,
+              async (first): Promise<JsonObject> => {
+                const findings: JsonObject[] = [];
+                let page = first;
+                while (Array.isArray(page["findings"])) {
+                  findings.push(...(page["findings"] as JsonObject[]));
+                  if (typeof page["nextOffset"] !== "number") break;
+                  page = await dependencies.runWorkbench([
+                    ...scopedArguments,
+                    "--offset",
+                    String(page["nextOffset"]),
+                  ]);
+                }
+                return { repository, findings };
               },
             ),
             "findings",

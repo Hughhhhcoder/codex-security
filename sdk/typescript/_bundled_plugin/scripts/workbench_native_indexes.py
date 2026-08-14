@@ -150,7 +150,7 @@ def _indexed_findings(
         row["target_id"]: row["id"]
         for row in connection.execute(
             "SELECT target_id, id FROM scans "
-            "WHERE status = 'complete' ORDER BY started_at, id"
+            "WHERE status = 'complete' ORDER BY rowid"
         )
         if allowed_scan_ids is None or row["id"] in allowed_scan_ids
     }
@@ -226,6 +226,10 @@ def _indexed_findings(
             }
         )
 
+    yield from _sorted_findings(findings)
+
+
+def _sorted_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     findings.sort(key=lambda finding: finding["occurrence_id"])
     findings.sort(
         key=lambda finding: (
@@ -235,7 +239,7 @@ def _indexed_findings(
         ),
         reverse=True,
     )
-    yield from findings
+    return findings
 
 
 def _indexed_active_findings(
@@ -253,6 +257,7 @@ def _indexed_active_findings(
             **settings,
         )
     }
+    combined = []
     for row in _indexed_findings(connection, allowed_scan_ids):
         matched = [
             active.pop(occurrence_id)
@@ -260,14 +265,17 @@ def _indexed_active_findings(
             if occurrence_id in active
         ]
         if matched:
-            yield {
-                **matched[0],
-                **row,
-                "secondary_location_match": any(
-                    finding["secondary_location_match"] for finding in matched
-                ),
-            }
-    yield from active.values()
+            combined.append(
+                {
+                    **matched[0],
+                    **row,
+                    "secondary_location_match": any(
+                        finding["secondary_location_match"] for finding in matched
+                    ),
+                }
+            )
+    combined.extend(active.values())
+    yield from _sorted_findings(combined)
 
 
 def _active_findings(
@@ -360,12 +368,13 @@ def _active_findings(
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""
-        SELECT scans.*, COALESCE(targets.id, scans.target_path) AS indexed_target_id
+        SELECT scans.*, scans.rowid AS scan_sequence,
+            COALESCE(targets.id, scans.target_path) AS indexed_target_id
         FROM scans
         LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
         WHERE scans.status = 'complete' AND scans.seal_manifest_digest IS NOT NULL
             {target_filter} {repository_filter} {current_owner_only}
-        ORDER BY scans.started_at DESC, scans.id DESC
+        ORDER BY scans.rowid DESC
         """,
         target_values,
     ):
@@ -394,6 +403,7 @@ def _active_findings(
                 occurrences.created_at,
                 scans.id AS scan_id,
                 scans.started_at AS scan_started_at,
+                scans.rowid AS scan_sequence,
                 targets.id AS target_id,
                 COALESCE(targets.id, scans.target_path) AS indexed_target_id,
                 COALESCE(targets.current_path, scans.target_path) AS target_path,
@@ -450,10 +460,7 @@ def _active_findings(
     for row in rows:
         resolved = False
         for scan in completed_scans_by_target.get(row["indexed_target_id"], ()):
-            if (scan["started_at"], scan["id"]) <= (
-                row["scan_started_at"],
-                row["scan_id"],
-            ):
+            if scan["scan_sequence"] <= row["scan_sequence"]:
                 break
             if scan["id"] not in coverage_by_scan_id:
                 try:
