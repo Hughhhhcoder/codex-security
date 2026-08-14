@@ -6239,7 +6239,10 @@ setInterval(() => {}, 1000);
     );
     const login = client.loginApiKey("secret-key");
     void login.catch(() => undefined);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    // Windows secures and revalidates the managed credential home before the
+    // login child starts. Give that PowerShell boundary time to complete on a
+    // loaded runner before testing cancellation of the running child.
+    for (let attempt = 0; attempt < 1_000; attempt += 1) {
       const started = await import("node:fs/promises").then(({ stat }) =>
         stat(ready).catch(() => null),
       );
