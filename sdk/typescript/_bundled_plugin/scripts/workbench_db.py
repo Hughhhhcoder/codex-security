@@ -1890,68 +1890,92 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
     try:
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
+        triaged_occurrences = [occurrence]
+        if close_reason == "already_fixed":
+            scan = require_scan(connection, occurrence["scan_id"])
+            indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
+            if indexed_finding is not None and indexed_finding["occurrence_id"] != occurrence["id"]:
+                triaged_occurrences.append(
+                    require_occurrence(connection, indexed_finding["occurrence_id"])
+                )
         if args.status == "closed":
-            remediation = connection.execute(
-                """
-                SELECT *
-                FROM finding_remediation_attempts
-                WHERE occurrence_id = ?
-                ORDER BY created_at DESC, rowid DESC
-                LIMIT 1
-                """,
-                (occurrence["id"],),
+            for triaged_occurrence in triaged_occurrences:
+                remediation = connection.execute(
+                    """
+                    SELECT *
+                    FROM finding_remediation_attempts
+                    WHERE occurrence_id = ?
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (triaged_occurrence["id"],),
+                ).fetchone()
+                if (
+                    remediation is not None
+                    and remediation["pending_action"] is not None
+                    and not (
+                        remediation["state"] == "failed"
+                        and not remediation_claim_is_active(remediation)
+                    )
+                ):
+                    raise SystemExit(
+                        "Wait for the pending remediation operation to finish before closing this finding."
+                    )
+                if (
+                    close_reason == "already_fixed"
+                    and remediation is not None
+                    and remediation["state"] == "verified"
+                ):
+                    scan = require_scan(connection, triaged_occurrence["scan_id"])
+                    require_remediation_checkout_unchanged(
+                        scan,
+                        remediation,
+                        require_applied_content=True,
+                    )
+        for triaged_occurrence in triaged_occurrences:
+            previous_triage = connection.execute(
+                "SELECT status, close_reason, note FROM finding_triage WHERE occurrence_id = ?",
+                (triaged_occurrence["id"],),
             ).fetchone()
-            if (
-                remediation is not None
-                and remediation["pending_action"] is not None
-                and not (
-                    remediation["state"] == "failed"
-                    and not remediation_claim_is_active(remediation)
+            changed = previous_triage is None or (
+                previous_triage["status"],
+                previous_triage["close_reason"],
+                previous_triage["note"],
+            ) != (args.status, close_reason, note)
+            if changed or triaged_occurrence["id"] != occurrence["id"]:
+                connection.execute(
+                    """
+                    INSERT INTO finding_decisions (
+                        id, occurrence_id, status, close_reason, note, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        triaged_occurrence["id"],
+                        args.status,
+                        close_reason,
+                        note,
+                        timestamp,
+                    ),
                 )
-            ):
-                raise SystemExit(
-                    "Wait for the pending remediation operation to finish before closing this finding."
-                )
-            if (
-                close_reason == "already_fixed"
-                and remediation is not None
-                and remediation["state"] == "verified"
-            ):
-                scan = require_scan(connection, occurrence["scan_id"])
-                require_remediation_checkout_unchanged(
-                    scan,
-                    remediation,
-                    require_applied_content=True,
-                )
-        previous_triage = connection.execute(
-            "SELECT status, close_reason, note FROM finding_triage WHERE occurrence_id = ?",
-            (occurrence["id"],),
-        ).fetchone()
-        if previous_triage is None or (
-            previous_triage["status"],
-            previous_triage["close_reason"],
-            previous_triage["note"],
-        ) != (args.status, close_reason, note):
             connection.execute(
                 """
-                INSERT INTO finding_decisions (
-                    id, occurrence_id, status, close_reason, note, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(occurrence_id) DO UPDATE SET
+                    status = excluded.status,
+                    close_reason = excluded.close_reason,
+                    note = excluded.note,
+                    updated_at = excluded.updated_at
                 """,
-                (str(uuid.uuid4()), occurrence["id"], args.status, close_reason, note, timestamp),
+                (
+                    triaged_occurrence["id"],
+                    args.status,
+                    close_reason,
+                    note,
+                    timestamp,
+                ),
             )
-        connection.execute(
-            """
-            INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(occurrence_id) DO UPDATE SET
-                status = excluded.status,
-                close_reason = excluded.close_reason,
-                note = excluded.note,
-                updated_at = excluded.updated_at
-            """,
-            (occurrence["id"], args.status, close_reason, note, timestamp),
-        )
         connection.commit()
     except BaseException:
         connection.rollback()
@@ -2933,6 +2957,8 @@ def _require_finding_checkout_owner(
                 break
         if target is None:
             return None
+    elif target is not None and not Path(target["current_path"]).exists():
+        return target
     if target is not None:
         clauses, values, _, _ = scan_history.repository_scan_scope(
             connection, target["current_path"]

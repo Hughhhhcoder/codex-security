@@ -1027,11 +1027,11 @@ def finding_matches(
                         ON matches.before_occurrence_id = linked.occurrence_id
                         OR matches.after_occurrence_id = linked.occurrence_id
                 )
-                SELECT DISTINCT scans.started_at, scans.id AS scan_id
+                SELECT DISTINCT scans.started_at, scans.id AS scan_id, scans.rowid AS scan_sequence
                 FROM linked_occurrences AS linked
                 JOIN finding_occurrences AS occurrences ON occurrences.id = linked.occurrence_id
                 JOIN scans ON scans.id = occurrences.scan_id
-                ORDER BY scans.started_at, scans.id
+                ORDER BY scan_sequence
                 """,
                 (occurrence_id,),
             )
