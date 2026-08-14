@@ -20,7 +20,7 @@ def list_global_findings(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
     *,
-    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     limit = min(args.limit, FINDINGS_PAGE_MAX)
     query = args.query.strip().casefold() if args.query else ""
@@ -41,9 +41,10 @@ def list_global_findings(
         else None
     )
     repository = getattr(args, "repository", None)
-    findings = (
-        row
-        for row in _active_findings(
+    indexed_findings = (
+        _indexed_findings(connection)
+        if read_coverage is None
+        else _indexed_active_findings(
             connection,
             read_coverage,
             target_ids=target_ids,
@@ -51,6 +52,10 @@ def list_global_findings(
             repository=repository,
             query=query,
         )
+    )
+    findings = (
+        row
+        for row in indexed_findings
         if (
             (target_ids is None and target_paths is None)
             or (target_ids is not None and row["target_id"] in target_ids)
@@ -72,7 +77,7 @@ def list_global_findings(
                 )
                 if value is not None
             )
-            or row["secondary_location_match"]
+            or row.get("secondary_location_match", 0)
         )
     )
     rows = list(islice(findings, args.offset, args.offset + limit + 1))
@@ -80,9 +85,13 @@ def list_global_findings(
     return {
         "findings": [
             {
+                "confirmedInLatestScan": row.get("confirmed_in_latest_scan", True),
                 "createdAt": row["created_at"],
                 "findingId": row["finding_id"],
+                "knownSince": row.get("known_since", row["scan_started_at"]),
+                "knownScanIds": row.get("known_scan_ids", [row["scan_id"]]),
                 "locationPath": row["location_path"],
+                "matchedFindingIds": row.get("matched_finding_ids", [row["finding_id"]]),
                 "occurrenceCount": row["occurrence_count"],
                 "occurrenceId": row["occurrence_id"],
                 "scanId": row["scan_id"],
@@ -103,6 +112,164 @@ def list_global_findings(
     }
 
 
+def _indexed_findings(
+    connection: sqlite3.Connection,
+    allowed_scan_ids: set[str] | None = None,
+) -> Iterator[dict[str, Any]]:
+    parents: dict[tuple[str, str], tuple[str, str]] = {}
+
+    def group(identity: tuple[str, str]) -> tuple[str, str]:
+        while identity in parents:
+            identity = parents[identity]
+        return identity
+
+    for match in connection.execute(
+        """
+        SELECT before_scans.target_id, before_scans.id AS before_scan_id,
+            after_scans.id AS after_scan_id,
+            before.finding_id AS before_finding_id, after.finding_id AS after_finding_id
+        FROM scan_comparison_matches AS matches
+        JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
+        JOIN scans AS before_scans ON before_scans.id = before.scan_id
+        JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
+        JOIN scans AS after_scans ON after_scans.id = after.scan_id
+        WHERE before_scans.target_id = after_scans.target_id
+        """
+    ):
+        if allowed_scan_ids is not None and (
+            match["before_scan_id"] not in allowed_scan_ids
+            or match["after_scan_id"] not in allowed_scan_ids
+        ):
+            continue
+        before = group((match["target_id"], match["before_finding_id"]))
+        after = group((match["target_id"], match["after_finding_id"]))
+        if before != after:
+            parents[after] = before
+
+    latest_scan_by_target = {
+        row["target_id"]: row["id"]
+        for row in connection.execute(
+            "SELECT target_id, id FROM scans "
+            "WHERE status = 'complete' ORDER BY started_at, id"
+        )
+        if allowed_scan_ids is None or row["id"] in allowed_scan_ids
+    }
+
+    grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in connection.execute(
+        """
+        SELECT
+            occurrences.id AS occurrence_id,
+            occurrences.finding_id,
+            occurrences.severity,
+            occurrences.created_at,
+            scans.id AS scan_id,
+            scans.started_at AS scan_started_at,
+            scans.target_id,
+            targets.current_path AS target_path,
+            scans.scope,
+            MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
+            triage.status AS decision_status,
+            triage.close_reason,
+            triage.updated_at AS decision_updated_at,
+            occurrences.title,
+            occurrences.summary,
+            (
+                SELECT locations.relative_path
+                FROM finding_locations AS locations
+                WHERE locations.occurrence_id = occurrences.id
+                ORDER BY
+                    CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
+                    locations.sort_order
+                LIMIT 1
+            ) AS location_path
+        FROM finding_occurrences AS occurrences
+        JOIN scans ON scans.id = occurrences.scan_id
+        JOIN security_targets AS targets ON targets.id = scans.target_id
+        LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        """
+    ):
+        if allowed_scan_ids is None or row["scan_id"] in allowed_scan_ids:
+            grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
+
+    findings = []
+    for occurrences in grouped.values():
+        latest = max(occurrences, key=lambda row: (row["created_at"], row["occurrence_id"]))
+        decision = max(
+            (row for row in occurrences if row["decision_status"] is not None),
+            key=lambda row: (row["decision_updated_at"], row["occurrence_id"]),
+            default=None,
+        )
+        status = decision["decision_status"] if decision is not None else "open"
+        if (
+            status == "closed"
+            and decision["close_reason"] == "already_fixed"
+            and latest["created_at"] > decision["decision_updated_at"]
+        ):
+            status = "open"
+        scans = sorted({(row["scan_started_at"], row["scan_id"]) for row in occurrences})
+        findings.append(
+            {
+                **dict(latest),
+                "confirmed_in_latest_scan": latest_scan_by_target.get(latest["target_id"])
+                == latest["scan_id"],
+                "known_since": scans[0][0],
+                "known_scan_ids": [scan_id for _, scan_id in scans],
+                "matched_finding_ids": sorted({row["finding_id"] for row in occurrences}),
+                "occurrence_count": len(occurrences),
+                "occurrence_ids": {row["occurrence_id"] for row in occurrences},
+                "status": status,
+                "updated_at": max(
+                    latest["updated_at"],
+                    decision["decision_updated_at"] if decision is not None else "",
+                ),
+            }
+        )
+
+    findings.sort(key=lambda finding: finding["occurrence_id"])
+    findings.sort(
+        key=lambda finding: (
+            finding["status"] == "open",
+            -scan_history.SEVERITY_ORDER.get(finding["severity"], 5),
+            finding["created_at"],
+        ),
+        reverse=True,
+    )
+    yield from findings
+
+
+def _indexed_active_findings(
+    connection: sqlite3.Connection,
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    **settings: Any,
+) -> Iterator[dict[str, Any]]:
+    allowed_scan_ids: set[str] = set()
+    active = {
+        row["occurrence_id"]: dict(row)
+        for row in _active_findings(
+            connection,
+            read_coverage,
+            allowed_scan_ids=allowed_scan_ids,
+            **settings,
+        )
+    }
+    for row in _indexed_findings(connection, allowed_scan_ids):
+        matched = [
+            active.pop(occurrence_id)
+            for occurrence_id in row["occurrence_ids"]
+            if occurrence_id in active
+        ]
+        if matched:
+            yield {
+                **matched[0],
+                **row,
+                "secondary_location_match": any(
+                    finding["secondary_location_match"] for finding in matched
+                ),
+            }
+    yield from active.values()
+
+
 def _active_findings(
     connection: sqlite3.Connection,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
@@ -111,6 +278,7 @@ def _active_findings(
     target_paths: set[str] | None = None,
     repository: str | None = None,
     query: str = "",
+    allowed_scan_ids: set[str] | None = None,
 ) -> Iterator[sqlite3.Row]:
     target_filters = []
     target_values = []
@@ -202,6 +370,8 @@ def _active_findings(
         target_values,
     ):
         completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
+        if allowed_scan_ids is not None:
+            allowed_scan_ids.add(scan["id"])
 
     coverage_by_scan_id: dict[str, dict[str, Any] | None] = {}
     if query:
@@ -322,6 +492,8 @@ def _active_findings(
                 resolved = True
                 break
         if not resolved:
+            if allowed_scan_ids is not None:
+                allowed_scan_ids.add(row["scan_id"])
             yield row
 
 
@@ -346,7 +518,7 @@ def list_repositories(
 
     open_findings_by_target = Counter(
         row["target_id"]
-        for row in _active_findings(connection, read_coverage)
+        for row in _indexed_active_findings(connection, read_coverage)
         if row["status"] == "open"
     )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}

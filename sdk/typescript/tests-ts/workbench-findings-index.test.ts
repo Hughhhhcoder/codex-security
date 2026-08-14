@@ -14,8 +14,9 @@ const findingsIndexProbe = [
   "CREATE TABLE security_targets (id TEXT PRIMARY KEY, current_path TEXT NOT NULL, display_name TEXT NOT NULL);",
   "CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, seal_manifest_digest TEXT, started_at TEXT, updated_at TEXT, scope TEXT, scan_dir TEXT);",
   "CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, severity TEXT, created_at TEXT, title TEXT, summary TEXT);",
-  "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, updated_at TEXT);",
+  "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, updated_at TEXT, close_reason TEXT);",
   "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
+  "CREATE TABLE scan_comparison_matches (before_occurrence_id TEXT, after_occurrence_id TEXT);",
   "''')",
   "connection.executemany('INSERT INTO security_targets VALUES (?, ?, ?)', [('current-target', '/current/repository', 'current'), ('stale-target', '/stale/repository', 'stale')])",
   "stale_directory = sys.argv[1] if settings.get('coverageFailure') in ('noncanonical', 'pruned') else '/private/tmp/codex-security-findings-index-missing-stale'",
@@ -70,6 +71,8 @@ const findingsIndexProbe = [
   "    ('orphan-old-occurrence', 'src/orphan-old.py', 'root_control', 0),",
   "    ('orphan-new-occurrence', 'src/orphan-new.py', 'root_control', 0),",
   "])",
+  "if settings.get('indexedAliases') and settings.get('ownershipReuse'):",
+  "    connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?)', ('current-old-occurrence', 'current-new-occurrence'))",
   "coverage_reads = []",
   "def coverage(scan):",
   "    coverage_reads.append(scan['id'])",
@@ -86,8 +89,6 @@ const findingsIndexProbe = [
   "    if scan['id'] == 'orphan-new':",
   "        return {'completeness': 'partial', 'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    return {'completeness': 'complete', 'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
-  "location_queries = []",
-  "connection.set_trace_callback(lambda statement: location_queries.append(statement) if 'finding_locations' in statement else None)",
   "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), offset=0, limit=20)",
   "if settings.get('repositories'):",
   "    indexes.scan_history.list_scans = lambda connection: {'scans': [{'scanId': row['id'], 'targetId': row['target_id']} for row in connection.execute('SELECT id, target_id FROM scans')]}",
@@ -106,7 +107,7 @@ const findingsIndexProbe = [
   "    matching_scan_count = matching['scanCount']",
   "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
   "    old_owner_matches = indexes.scan_history._same_registered_repository(connection, *scans)",
-  "print(json.dumps({'findings': result.get('findings', []), 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'locationQueryCount': len(location_queries), 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
+  "print(json.dumps({'findings': result.get('findings', []), 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -117,6 +118,7 @@ function runFindingsIndex(
     targetPaths?: string[];
     query?: string;
     coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
+    indexedAliases?: boolean;
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
@@ -154,6 +156,7 @@ function probeFindingsIndex(
     targetPaths?: string[];
     query?: string;
     coverageFailure?: "pruned";
+    indexedAliases?: boolean;
     lateCompletion?: boolean;
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
@@ -170,7 +173,6 @@ function probeFindingsIndex(
   }>;
   repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
-  locationQueryCount: number;
   matchingScanCount: number | null;
   oldOwnerMatches: boolean | null;
   scopedScanIds: string[];
@@ -283,6 +285,21 @@ describe("workbench findings index", () => {
     expect(result.oldOwnerMatches).toBe(false);
   });
 
+  test("never combines indexed finding aliases across checkout owners", () => {
+    const result = probeFindingsIndex("current-target", {
+      indexedAliases: true,
+      ownershipReuse: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        occurrenceId: "current-new-occurrence",
+        knownScanIds: ["current-new"],
+        matchedFindingIds: ["current-new-finding"],
+      }),
+    ]);
+  });
+
   test("keeps active findings when a later scan artifact was pruned", () => {
     const result = probeFindingsIndex("stale-target", {
       coverageFailure: "pruned",
@@ -369,7 +386,6 @@ describe("workbench findings index", () => {
       expect(result.findings).toEqual([
         expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
       ]);
-      expect(result.locationQueryCount).toBe(1);
     }
   });
 });

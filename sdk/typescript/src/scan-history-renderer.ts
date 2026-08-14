@@ -74,7 +74,10 @@ export function renderScanHistory(
     show: "SCAN DETAILS",
     compare: "SCAN COMPARISON",
     "match-all": "MATCH RESULTS",
-    findings: "SAVED FINDINGS",
+    findings:
+      typeof result["scanId"] === "string"
+        ? "SAVED FINDINGS"
+        : "REPOSITORY FINDINGS",
     finding: "FINDING DETAILS",
   };
   const lines = [
@@ -209,6 +212,11 @@ export function renderScanHistory(
     }
     for (const entry of findings) {
       lines.push("");
+      if (typeof entry["confirmedInLatestScan"] === "boolean") {
+        lines.push(
+          `  ${strong(entry["confirmedInLatestScan"] ? "Seen this scan" : "Not confirmed in latest scan")}`,
+        );
+      }
       finding(entry, false);
     }
     if (typeof result["nextOffset"] === "number") {

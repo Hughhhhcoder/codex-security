@@ -1,21 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import type { JsonObject } from "../src/index.js";
 import { main } from "../src/cli.js";
-import { capture, dependencies } from "./support/cli.js";
+import { capture, dependencies } from "./cli-fixtures.js";
 
 describe("CLI findings history", () => {
   test("lists active findings for the current repository by default", async () => {
-    for (const command of [["findings"], ["findings", "list"]]) {
+    for (const command of [
+      ["findings"],
+      ["findings", "list"],
+      ["findings", "list", "/current/repository"],
+    ]) {
       const calls: Array<readonly string[]> = [];
       const stdout = capture();
       const deps = dependencies({
         onWorkbench: (args): JsonObject => {
           calls.push(args);
-          if (args[0] === "list-scans") {
+          if (args[0] === "list-repositories") {
             return {
-              scans: [
+              repositories: [
                 {
-                  scanId: "scan-1",
                   targetId: "target-1",
                   targetPath: "/current/repository",
                 },
@@ -45,22 +48,58 @@ describe("CLI findings history", () => {
         ),
       ).toBe(0);
       expect(calls).toEqual([
-        [
-          "list-global-findings",
-          "--repository",
-          "/current/repository",
-          "--status",
-          "open",
-          "--offset",
-          "0",
-          "--limit",
-          "20",
-        ],
+        ["list-repositories"],
+        ["list-global-findings", "--target-id", "target-1", "--status", "open"],
       ]);
       expect(JSON.parse(stdout.text())).toMatchObject({
         findings: [{ occurrenceId: "occ-1" }],
       });
     }
+  });
+
+  test("lets the workbench scope findings from a checkout subdirectory", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    const deps = dependencies({
+      onWorkbench: (args): JsonObject => {
+        calls.push(args);
+        return args[0] === "list-repositories"
+          ? {
+              repositories: [
+                {
+                  targetId: "target-1",
+                  targetPath: "/current/repository",
+                },
+              ],
+            }
+          : {
+              findings: [{ occurrenceId: "nested-finding" }],
+            };
+      },
+    });
+    deps.currentDirectory = () => "/current/repository/src";
+
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      ["list-repositories"],
+      [
+        "list-global-findings",
+        "--repository",
+        "/current/repository/src",
+        "--status",
+        "open",
+      ],
+    ]);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      findings: [{ occurrenceId: "nested-finding" }],
+    });
   });
 
   test("defaults all-repository finding lists to open without overriding explicit status", async () => {
@@ -343,7 +382,7 @@ describe("CLI findings history", () => {
       ["findings", "list", "--offset", "-1"],
       ["findings", "list", "--severity", "urgent"],
       ["findings", "list", "--scan"],
-      ["findings", "list", "31107fbe"],
+      ["findings", "list", "first", "second"],
     ];
     for (const command of invalid) {
       let called = false;

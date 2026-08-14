@@ -19,12 +19,16 @@ npx @openai/codex-security login
 npx @openai/codex-security scan .
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
-npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10
+npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
 ```
 
 For CI, set `OPENAI_API_KEY` or `CODEX_API_KEY` instead of signing in.
 Environment API keys are passed directly to the current scan and are never
 stored in Codex's credential home or system keyring.
+
+Deep-scan discovery stops after 96 hours by default. Set `--max-time-hours` to
+any positive number of hours, including fractional hours, up to 96. Completed
+findings are preserved and returned when the limit is reached.
 
 To use another inference provider, set its API key and select a model:
 
@@ -69,6 +73,8 @@ directory outside the repository.
 
 Use `scans` to browse previous scans, `scans show` to inspect the latest
 completed scan, and `findings` to list saved findings for the current repository.
+`findings list [repository]` also identifies findings not confirmed in the latest
+scan.
 To review every finding from an earlier scan, including results beyond the first
 page, run `findings list --scan SCAN_ID --offset 20`. Use
 `findings show OCCURRENCE_ID` for the complete finding and any saved cross-scan
@@ -81,15 +87,21 @@ incomplete or their original location was not reviewed.
 
 ## Verbose diagnostics
 
-Add `--verbose` to print redacted scan diagnostics to stderr:
+Add `--verbose` to print scan diagnostics to stderr:
 
 ```bash
 npx @openai/codex-security scan . --verbose
 ```
 
 `CODEX_SECURITY_LOG_LEVEL=debug` also enables diagnostics;
-`LOG_LEVEL=debug` is its fallback. JSON results remain on stdout, and
-credentials and provider identifiers remain redacted.
+`LOG_LEVEL=debug` is its fallback. JSON results remain on stdout.
+
+Verbose diagnostics may contain sensitive data. Review local logs before
+sharing them. Saved failure summaries, bulk-scan receipts, and the interactive
+dashboard omit messages that contain recognizable credentials.
+
+Use `npx @openai/codex-security scans logs SCAN_ID` to inspect saved session
+events from a scan and its workers.
 
 ## TypeScript SDK
 
@@ -104,6 +116,7 @@ await security.run(".", {
   subagents: 0,
   stopAfterNoNew: 3,
   maxDiscoveryRuns: 10,
+  maxTimeHours: 1.5,
 });
 
 console.log(result.reportPath);

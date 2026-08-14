@@ -150,6 +150,10 @@ def parse_args(description: str) -> argparse.Namespace:
     register_cli_scan.add_argument("--archive-existing", action="store_true")
     register_cli_scan.add_argument("--archived-scan-dir")
 
+    set_scan_thread = subparsers.add_parser("set-scan-thread")
+    set_scan_thread.add_argument("--scan-id", required=True)
+    set_scan_thread.add_argument("--thread-id", required=True)
+
     get_scan_recipe = subparsers.add_parser("get-scan-recipe")
     get_scan_recipe.add_argument("--scan-id", required=True)
 
@@ -213,6 +217,11 @@ def parse_args(description: str) -> argparse.Namespace:
     complete_scan.add_argument("--claim-token")
     complete_scan.add_argument("--cost-json")
     complete_scan.add_argument("--thread-id")
+
+    complete_budget_exhausted_scan = subparsers.add_parser("complete-budget-exhausted-scan")
+    complete_budget_exhausted_scan.add_argument("--scan-id", required=True)
+    complete_budget_exhausted_scan.add_argument("--cost-json", required=True)
+    complete_budget_exhausted_scan.add_argument("--message")
 
     cancel_scan = subparsers.add_parser("cancel-scan")
     cancel_scan.add_argument("--scan-id", required=True)
