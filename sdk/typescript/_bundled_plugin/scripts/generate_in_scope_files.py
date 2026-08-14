@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import fnmatch
 import io
 import mmap
 import os
@@ -930,6 +931,38 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if not ignore_files and not configured_excludes:
             return requested
 
+        def scope_is_allowlisted(ignore: Path) -> bool:
+            try:
+                components = tuple(
+                    os.fsencode(part)
+                    for part in selected.relative_to(ignore.parent).parts
+                )
+            except ValueError:
+                return True
+            for line in ignore.read_bytes().splitlines():
+                line = line.removeprefix(b"\xef\xbb\xbf")
+                if not line.startswith(b"!"):
+                    continue
+                pattern = line[1:].rstrip(b" \t").rstrip(b"/")
+                anchored = pattern.startswith(b"/")
+                pattern = pattern.lstrip(b"/")
+                if any(character in pattern for character in (b"\\", b"{", b"}", b"[")) or (
+                    not anchored and b"/" not in pattern
+                ):
+                    return True
+                for actual, expected in zip(components, pattern.split(b"/")):
+                    if expected == b"**":
+                        return True
+                    if not fnmatch.fnmatchcase(actual, expected):
+                        break
+                else:
+                    return True
+            return False
+
+        preserve_allowlisted_scope = bool(exempt_gitignores) and any(
+            scope_is_allowlisted(ignore) for ignore in ignore_files
+        )
+
         batches: list[tuple[dict[str, str], set[bytes]]] = []
 
         for relative in requested:
@@ -1037,7 +1070,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     destination.write_bytes(contents)
 
                 def admit_gitlink_directories(
-                    directory: Path, contents: bytes, *, scope_only: bool = False
+                    directory: Path,
+                    contents: bytes,
+                    *,
+                    scope_only: bool = False,
+                    reopen_scope: bool = False,
                 ) -> bytes:
                     if not preserve_gitignore_descendants and not scope_only:
                         return contents
@@ -1055,13 +1092,39 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             if contents and not contents.endswith(b"\n"):
                                 contents += b"\n"
                             admitted = "/".join(re.escape(part) for part in parts[: index + 1])
+                            if (
+                                (scope_only or (reopen_scope and selected_root == selected))
+                                and not preserve_allowlisted_scope
+                            ):
+                                scope = "/".join(parts[: index + 1])
+
+                                def reopen_recursive(match: re.Match[bytes]) -> bytes:
+                                    pattern = os.fsdecode(match.group(2)).lstrip("/")
+                                    if not (
+                                        fnmatch.fnmatchcase(scope, pattern)
+                                        or fnmatch.fnmatchcase(
+                                            scope, pattern.removeprefix("**/")
+                                        )
+                                        or pattern == admitted
+                                    ):
+                                        return match.group(0)
+                                    return (match.group(1) or b"") + match.group(2) + b"/"
+
+                                contents = re.sub(
+                                    rb"(?m)^(\xef\xbb\xbf)?(/?[^!#\r\n][^\r\n]*?)/"
+                                    rb"(?:\*\*/)*\*{1,2}[ \t]*(?=\r?$)",
+                                    reopen_recursive,
+                                    contents,
+                                )
                             contents += os.fsencode(f"!/{admitted}/\n")
                     return contents
 
                 for ignore in ignore_files:
                     contents = ignore.read_bytes()
                     if ignore.name == ".gitignore":
-                        contents = admit_gitlink_directories(ignore.parent, contents)
+                        contents = admit_gitlink_directories(
+                            ignore.parent, contents, reopen_scope=True
+                        )
                     else:
                         contents = admit_gitlink_directories(
                             ignore.parent, contents, scope_only=True
@@ -1696,7 +1759,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     )
                     candidate_exemption = ((repository, selected),)
                     if (
-                        selected_path not in selected_visible
+                        (
+                            selected_path not in selected_visible
+                            or any(
+                                normalized(
+                                    os.fsencode(candidate.relative_to(repository).as_posix())
+                                )
+                                not in outer_visible
+                                for candidate in candidates
+                            )
+                        )
                         and selected_path in visible_to_outer_ignores(
                             selected,
                             [selected],

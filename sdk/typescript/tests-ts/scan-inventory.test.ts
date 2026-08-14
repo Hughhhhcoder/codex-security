@@ -1129,24 +1129,131 @@ describe("security scan file inventory", () => {
     expect(rows).toContain("./nested/cafe\u0301/second.ts");
   });
 
-  test.each([".gitignore", ".ignore", ".rgignore"])(
-    "keeps explicitly selected tracked files through an outer %s",
-    async (ignore) => {
+  test.each([
+    [".gitignore", "ignored/"],
+    [".ignore", "ignored/"],
+    [".rgignore", "ignored/"],
+    [".gitignore", "ignored/**"],
+    [".ignore", "ignored/**"],
+    [".rgignore", "ignored/**"],
+    [".gitignore", "/ignored/**"],
+    [".ignore", "/ignored/**"],
+    [".rgignore", "/ignored/**"],
+    [".gitignore", "ignored/** "],
+    [".ignore", "ignored/** "],
+    [".rgignore", "ignored/** "],
+    [".gitignore", "ignored/**/*"],
+    [".ignore", "ignored/**/*"],
+    [".rgignore", "ignored/**/*"],
+    [".gitignore", "ignored/**/**"],
+    [".ignore", "ignored/**/**"],
+    [".rgignore", "ignored/**/**"],
+    [".gitignore", "**/ignored/**"],
+    [".ignore", "**/ignored/**"],
+    [".rgignore", "**/ignored/**"],
+    [".gitignore", "ign*/**"],
+    [".ignore", "ign*/**"],
+    [".rgignore", "ign*/**"],
+    [".gitignore", "ignor[e]d/**"],
+    [".ignore", "ignor[e]d/**"],
+    [".rgignore", "ignor[e]d/**"],
+  ])(
+    "keeps explicitly selected tracked files through an outer %s rule %s",
+    async (ignore, rule) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const nested = join(checkout, "ignored");
+      await mkdir(join(nested, "src"), { recursive: true });
+      await writeFile(
+        join(checkout, ignore),
+        `ignored/private-before.ts\n${rule}\nignored/private.ts\nignored/src/private.ts\n`,
+      );
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(
+          join(nested, ".ignore"),
+          "public.ts\nprivate.ts\nprivate-before.ts\nuntracked.ts\nsrc/\n",
+        ),
+        writeFile(join(nested, "public.ts"), "tracked\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+        writeFile(join(nested, "private-before.ts"), "private\n"),
+        writeFile(join(nested, "untracked.ts"), "untracked\n"),
+        writeFile(join(nested, "src", "public.ts"), "tracked\n"),
+        writeFile(join(nested, "src", "private.ts"), "private\n"),
+        writeFile(join(nested, "src", "untracked.ts"), "untracked\n"),
+      ]);
+      execFileSync(
+        "git",
+        [
+          "add",
+          "--force",
+          "public.ts",
+          "private.ts",
+          "private-before.ts",
+          "src/public.ts",
+          "src/private.ts",
+        ],
+        { cwd: nested },
+      );
+
+      expect(await inventory(checkout, "ignored")).toEqual([
+        "ignored/public.ts",
+        "ignored/src/public.ts",
+      ]);
+    },
+  );
+
+  test.each(["ignored-v2", "ignored.v2", "ignored checkout", ".IGNORE"])(
+    "reopens an explicitly selected checkout named %s",
+    async (name) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const nested = join(checkout, name);
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(
+          join(checkout, ".rgignore"),
+          `${name}/**\n${name}/private.ts\n`,
+        ),
+        writeFile(join(nested, ".ignore"), "*\n"),
+        writeFile(join(nested, "public.ts"), "tracked\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+      ]);
+      execFileSync("git", ["add", "--force", "public.ts", "private.ts"], {
+        cwd: nested,
+      });
+
+      expect(await inventory(checkout, name)).toEqual([`${name}/public.ts`]);
+    },
+  );
+
+  test.each([
+    [".gitignore", "!/README.md"],
+    [".ignore", "!/README.md"],
+    [".rgignore", "!/README.md"],
+    [".gitignore", "!unrelated/public.ts"],
+    [".ignore", "!unrelated/public.ts"],
+    [".rgignore", "!unrelated/public.ts"],
+  ])(
+    "ignores unrelated %s allowlist rule %s when reopening the selected checkout",
+    async (ignore, unrelated) => {
       if (Bun.which("rg") === null) return;
 
       const checkout = await repository(false);
       const nested = join(checkout, "ignored");
       await mkdir(nested);
-      await writeFile(join(checkout, ignore), "ignored/\nignored/private.ts\n");
       execFileSync("git", ["init", "-q"], { cwd: nested });
       await Promise.all([
         writeFile(
-          join(nested, ".ignore"),
-          "public.ts\nprivate.ts\nuntracked.ts\n",
+          join(checkout, ignore),
+          `ignored/**\n${unrelated}\nignored/private.ts\n`,
         ),
+        writeFile(join(nested, ".ignore"), "*\n"),
         writeFile(join(nested, "public.ts"), "tracked\n"),
         writeFile(join(nested, "private.ts"), "private\n"),
-        writeFile(join(nested, "untracked.ts"), "untracked\n"),
       ]);
       execFileSync("git", ["add", "--force", "public.ts", "private.ts"], {
         cwd: nested,
@@ -1158,9 +1265,95 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test.each([".ignore", ".rgignore"])(
-    "keeps configured Git excludes authoritative through an outer %s",
-    async (ignore) => {
+  test.each([
+    [".gitignore", ".gitignore", "present"],
+    [".ignore", ".ignore", "present"],
+    [".rgignore", ".rgignore", "present"],
+    [".gitignore", ".ignore", "present"],
+    [".gitignore", ".rgignore", "present"],
+    [".ignore", ".rgignore", "present"],
+    [".gitignore", ".gitignore", "missing"],
+    [".ignore", ".ignore", "missing"],
+    [".rgignore", ".rgignore", "missing"],
+    [".gitignore", ".ignore", "missing"],
+    [".gitignore", ".rgignore", "missing"],
+    [".ignore", ".rgignore", "missing"],
+  ] as const)(
+    "preserves an outer %s deny and %s allowlist when the public file is %s",
+    async (deny, allow, state) => {
+      if (Bun.which("rg") === null) return;
+
+      const exists = state === "present";
+      const checkout = await repository(false);
+      const nested = join(checkout, "ignored");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      if (deny === allow) {
+        await writeFile(
+          join(checkout, deny),
+          "ignored/**\n!ignored/public.ts\n",
+        );
+      } else {
+        await Promise.all([
+          writeFile(join(checkout, deny), "ignored/**\n"),
+          writeFile(join(checkout, allow), "!ignored/public.ts\n"),
+        ]);
+      }
+      await Promise.all([
+        writeFile(join(nested, ".ignore"), "*\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+        ...(exists ? [writeFile(join(nested, "public.ts"), "tracked\n")] : []),
+      ]);
+      execFileSync(
+        "git",
+        ["add", "--force", "private.ts", ...(exists ? ["public.ts"] : [])],
+        {
+          cwd: nested,
+        },
+      );
+
+      expect(await inventory(checkout, "ignored")).toEqual(
+        exists ? ["ignored/public.ts"] : [],
+      );
+    },
+  );
+
+  test.each([
+    "!{ignored,other}/public.ts",
+    "!{other,ignored}/public.ts",
+    "!ign{ored,other}/public.ts",
+    "!ignore[^x]/public.ts",
+  ])("preserves an expanded outer allowlist rule %s", async (rule) => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository(false);
+    const nested = join(checkout, "ignored");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(checkout, ".ignore"), "ignored/**\n"),
+      writeFile(join(checkout, ".rgignore"), `${rule}\n`),
+      writeFile(join(nested, ".ignore"), "*\n"),
+      writeFile(join(nested, "public.ts"), "tracked\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+    ]);
+    execFileSync("git", ["add", "--force", "public.ts", "private.ts"], {
+      cwd: nested,
+    });
+
+    expect(await inventory(checkout, "ignored")).toEqual(["ignored/public.ts"]);
+  });
+
+  test.each([
+    [".ignore", "ignored/", "ignored/"],
+    [".rgignore", "ignored/", "ignored/"],
+    [".ignore", "ignored/**", "ignored/"],
+    [".rgignore", "ignored/**", "ignored/"],
+    [".ignore", "ignored/**", "ignored/**"],
+    [".rgignore", "ignored/**", "ignored/**"],
+  ])(
+    "keeps configured Git excludes authoritative through an outer %s rule %s and exclude %s",
+    async (ignore, outer, configured) => {
       if (Bun.which("rg") === null) return;
 
       const checkout = await repository();
@@ -1168,8 +1361,8 @@ describe("security scan file inventory", () => {
       await mkdir(nested);
       execFileSync("git", ["init", "-q"], { cwd: nested });
       await Promise.all([
-        writeFile(join(checkout, ignore), "ignored/\n"),
-        writeFile(join(checkout, ".git", "info", "exclude"), "ignored/\n"),
+        writeFile(join(checkout, ignore), `${outer}\n`),
+        writeFile(join(checkout, ".git", "info", "exclude"), `${configured}\n`),
         writeFile(join(nested, "public.ts"), "tracked\n"),
       ]);
       execFileSync("git", ["add", "public.ts"], { cwd: nested });
