@@ -1669,6 +1669,10 @@ export async function main(
       }),
       options: z.object({
         effort: effortOption(),
+        approveForMe: z
+          .boolean()
+          .default(false)
+          .describe("Automatically review execution approval requests."),
         codex: z
           .array(optionValue("--codex"))
           .default([])
@@ -1683,6 +1687,7 @@ export async function main(
             positionals,
             options.codex,
             options.effort,
+            options.approveForMe,
             output,
             errorOutput,
             dependencies,
@@ -1705,6 +1710,10 @@ export async function main(
       }),
       options: z.object({
         effort: effortOption(),
+        approveForMe: z
+          .boolean()
+          .default(false)
+          .describe("Automatically review execution approval requests."),
         codex: z
           .array(optionValue("--codex"))
           .default([])
@@ -1719,6 +1728,7 @@ export async function main(
             positionals,
             options.codex,
             options.effort,
+            options.approveForMe,
             output,
             errorOutput,
             dependencies,
@@ -2350,6 +2360,7 @@ async function runSkill(
   inputs: readonly string[],
   codexOverrides: readonly string[],
   effort: ScanReasoningEffort | undefined,
+  approveForMe: boolean,
   stdout: Writable,
   stderr: Writable,
   dependencies: CliDependencies,
@@ -2444,15 +2455,15 @@ async function runSkill(
       "--color",
       "never",
       "--json",
-      "--approve-for-me",
+      ...(approveForMe ? ["--approve-for-me"] : []),
       "--config",
       `model=${JSON.stringify(model)}`,
       "--config",
       `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`,
+      ...(approveForMe ? [] : ["--config", 'approval_policy="never"']),
       "--config",
       'responses_api_metadata.codex_security_surface="cli"',
-      "--sandbox",
-      "workspace-write",
+      ...(approveForMe ? [] : ["--sandbox", "workspace-write"]),
       "--skip-git-repo-check",
       "--cd",
       directory,

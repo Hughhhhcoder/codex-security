@@ -54,11 +54,12 @@ describe("CLI skill commands", () => {
           "--color",
           "never",
           "--json",
-          "--approve-for-me",
           "--config",
           'model="gpt-5.6-sol"',
           "--config",
           'model_reasoning_effort="xhigh"',
+          "--config",
+          'approval_policy="never"',
           "--config",
           'responses_api_metadata.codex_security_surface="cli"',
           "--sandbox",
@@ -96,10 +97,77 @@ describe("CLI skill commands", () => {
         expect(help.text()).toContain(
           "--effort <minimal|low|medium|high|xhigh|max>",
         );
+        expect(help.text()).toContain("--approve-for-me");
         expect(help.text()).toContain("--codex <array>");
         expect(help.text()).toContain('model="gpt-5.6-terra"');
         expect(help.text()).toContain('model_reasoning_effort="high"');
         expect(help.text()).not.toContain("--provider");
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("passes both approval modes through the pinned Codex argument parser", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-security-skills-"));
+    try {
+      const node = Bun.which("node");
+      expect(node).not.toBeNull();
+      const environment: NodeJS.ProcessEnv = {
+        ...process.env,
+        CODEX_HOME: directory,
+      };
+      delete environment["OPENAI_API_KEY"];
+      delete environment["CODEX_API_KEY"];
+
+      for (const command of ["validate", "patch"] as const) {
+        for (const approveForMe of [false, true]) {
+          let invocation: readonly string[] = [];
+          expect(
+            await main(
+              [
+                command,
+                ...(approveForMe ? ["--approve-for-me"] : []),
+                "synthetic finding",
+              ],
+              capture().stream,
+              capture().stream,
+              dependencies({
+                currentDirectory: directory,
+                onCodex: (args) => {
+                  invocation = args;
+                  return 0;
+                },
+              }),
+            ),
+          ).toBe(0);
+          expect(invocation.includes("--approve-for-me")).toBe(approveForMe);
+          expect(invocation.includes("--sandbox")).toBe(!approveForMe);
+          expect(invocation.includes('approval_policy="never"')).toBe(
+            !approveForMe,
+          );
+
+          const parsed = Bun.spawnSync(
+            [
+              node!,
+              join(
+                import.meta.dir,
+                "..",
+                "node_modules",
+                "@openai",
+                "codex",
+                "bin",
+                "codex.js",
+              ),
+              ...invocation.slice(0, -1),
+            ],
+            { env: environment, stdin: "ignore", stderr: "pipe" },
+          );
+          expect(parsed.exitCode).toBe(1);
+          expect(new TextDecoder().decode(parsed.stderr)).toContain(
+            "No prompt provided via stdin.",
+          );
+        }
       }
     } finally {
       await rm(directory, { recursive: true, force: true });

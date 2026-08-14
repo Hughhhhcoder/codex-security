@@ -87,11 +87,11 @@ environment credentials it needs.
 
 ### Standalone validation and patching
 
-The `validate` and `patch` commands use Codex's `--approve-for-me` mode with
-its `workspace-write` sandbox. Approval requests are reviewed automatically
-without an interactive prompt; a reviewed request can permit additional actions
-for its specific operation. Independently enforced host and network
-restrictions still apply.
+The `validate` and `patch` commands use a `workspace-write` sandbox and never
+approve execution requests by default. Pass `--approve-for-me` to explicitly
+enable automatic review instead. A reviewed request can grant additional
+permissions for its specific operation. Independently enforced host and
+network restrictions still apply.
 
 ### Security boundaries
 

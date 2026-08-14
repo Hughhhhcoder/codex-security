@@ -616,13 +616,13 @@ Run `npx @openai/codex-security export --help` for all export options.
 Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional
 input can be either a file, whose contents are read into the request, or literal
-text. Both commands operate on the current directory with Codex's
-`--approve-for-me` mode and its `workspace-write` sandbox, use the scan model
-and reasoning defaults, ignore unrelated user configuration and plugins, and
-print the final response without the underlying Codex event stream. Approval
-requests are reviewed automatically without an interactive prompt; a reviewed
-request can permit additional actions for its specific operation. Independently
-enforced host and network restrictions still apply. Override the model with
+text. Both commands operate on the current directory with a `workspace-write`
+sandbox, use the scan model and reasoning defaults, ignore unrelated user
+configuration and plugins, and print the final response without the underlying
+Codex event stream. Execution approvals are denied by default. Pass
+`--approve-for-me` to explicitly enable automatic review; a reviewed request can
+grant additional permissions for its specific operation. Independently enforced
+host and network restrictions still apply. Override the model with
 `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with `--effort high` or
 `--codex 'model_reasoning_effort="high"'`.
 
