@@ -229,6 +229,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     gitdir_owners: dict[tuple[int, int], tuple[int, int]] = {}
     validated_metadata_roots: set[tuple[int, int]] = set()
     validated_object_stores: set[tuple[int, int]] = set()
+    validated_object_artifacts: set[tuple[int, int]] = set()
 
     def config_value(value: str | None) -> str | None:
         if value is None:
@@ -395,7 +396,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                             layer, layer_canonical
                                         ):
                                             continue
-                                        inspect_metadata(layer, directory=False)
+                                        details = inspect_metadata(layer, directory=False)
+                                        if details is not None:
+                                            validated_object_artifacts.add(
+                                                (details.st_dev, details.st_ino)
+                                            )
                                     continue
                                 if member_canonical == "multi-pack-index":
                                     expected = member_canonical
@@ -414,7 +419,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 expected = member_canonical
                             if member.name != expected and not aliases_canonical_path(member, expected):
                                 continue
-                            inspect_metadata(member, directory=False)
+                            details = inspect_metadata(member, directory=False)
+                            if details is not None:
+                                validated_object_artifacts.add(
+                                    (details.st_dev, details.st_ino)
+                                )
                 validated_object_stores.add(identity)
             except OSError as error:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
@@ -663,6 +672,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if metadata is not None and relative == "objects":
                     inspect_object_store(path)
                 if metadata is not None and relative == "objects/info/alternates":
+                    validated_object_artifacts.add((metadata.st_dev, metadata.st_ino))
                     try:
                         contents = path.read_bytes()
                     except OSError as error:
@@ -750,8 +760,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     if inspect_metadata(info, directory=True) is None:
                                         continue
                                     nested_alternates = info / "alternates"
-                                    if inspect_metadata(nested_alternates, directory=False) is None:
+                                    details = inspect_metadata(
+                                        nested_alternates, directory=False
+                                    )
+                                    if details is None:
                                         continue
+                                    validated_object_artifacts.add(
+                                        (details.st_dev, details.st_ino)
+                                    )
                                     try:
                                         records = nested_alternates.read_bytes()
                                     except OSError as error:
@@ -803,8 +819,48 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             or identity == repository_identity
         ):
             return False
-        if identity in validated_metadata_roots or identity in validated_object_stores:
+        if identity in validated_metadata_roots:
             return True
+        if identity in validated_object_stores:
+            try:
+                marker = (path / ".git").stat(follow_symlinks=False)
+            except OSError:
+                return True
+            if symbolic_metadata(marker) or not (
+                stat.S_ISREG(marker.st_mode) or stat.S_ISDIR(marker.st_mode)
+            ):
+                return True
+            if not selected.is_relative_to(path):
+                relative = path.relative_to(repository).as_posix()
+                visible = visible_to_outer_ignores(
+                    path, [path], directories_only=True
+                )
+                if normalized(os.fsencode(relative)) not in visible:
+                    tracked = run_git(
+                        ["ls-files", "--stage", "-z", "--", relative]
+                    )
+                    expected = normalized(os.fsencode(relative))
+                    indexed = (
+                        record.partition(b"\t")
+                        for record in tracked.stdout.split(b"\0")
+                        if record
+                    )
+                    if tracked.returncode or not any(
+                        (header.split(maxsplit=1)[0] == b"160000" and path == expected)
+                        or path.startswith(expected + b"/")
+                        for header, _separator, path in indexed
+                    ):
+                        return True
+            if not has_git_marker(path):
+                return True
+            candidate = run_git(["rev-parse", "--absolute-git-dir"], directory=path)
+            if candidate.returncode:
+                return True
+            try:
+                gitdir = resolve_git_root(candidate.stdout)
+                return gitdir_owners.get(directory_identity(gitdir)) != identity
+            except (OSError, ValueError):
+                return True
         if identity in unowned_metadata_candidates:
             return False
         try:
@@ -921,12 +977,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 return True
         unowned_metadata_candidates.add(identity)
         return False
-
-    for ancestor in ancestors:
-        if ancestor != repository and validated_metadata_directory(ancestor):
-            raise InventoryError("--scope: Git metadata paths are not supported")
-        reject_symbolic_ignore(ancestor)
-        has_git_marker(ancestor)
 
     command = [
         "rg",
@@ -1358,44 +1408,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         return True
             return False
 
-        def scope_is_allowlisted(ignore: Path) -> bool:
-            try:
-                components = tuple(
-                    os.fsencode(part)
-                    for part in selected.relative_to(ignore.parent).parts
-                )
-            except ValueError:
-                return True
-            for line in without_ignore_bom(ignore.read_bytes()).split(b"\n"):
-                line = line.rstrip(b"\r")
-                if not line.startswith(b"!"):
-                    continue
-                raw_pattern = line[1:]
-                if not raw_pattern.endswith(b"\\ "):
-                    raw_pattern = raw_pattern.rstrip(b" \t")
-                anchored = raw_pattern.startswith(b"/")
-                pattern = re.sub(
-                    rb"(\\+)/",
-                    lambda escaped: (
-                        escaped.group(1)[:-1] + b"/"
-                        if len(escaped.group(1)) % 2
-                        else escaped.group(0)
-                    ),
-                    raw_pattern,
-                ).rstrip(b"/")
-                if anchored:
-                    pattern = pattern.lstrip(b"/")
-                if not anchored and b"/" not in pattern:
-                    # Basename rules can allowlist missing or untracked descendants.
-                    return True
-                if ignore_pattern_matches(components, pattern):
-                    return True
-            return False
-
-        preserve_allowlisted_scope = bool(exempt_gitignores) and any(
-            scope_is_allowlisted(ignore) for ignore in ignore_files
-        )
-
         recursive_scope_matches: dict[tuple[str, bytes], bool] = {}
 
         def recursive_ignore_matches(scope: str, pattern: bytes) -> bool:
@@ -1427,6 +1439,63 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             matched = result.returncode == 0 and not result.stderr
             recursive_scope_matches[key] = matched
             return matched
+
+        def scope_is_allowlisted(ignore: Path, allowlisted: bool) -> bool:
+            try:
+                components = tuple(
+                    os.fsencode(part)
+                    for part in selected.relative_to(ignore.parent).parts
+                )
+            except ValueError:
+                return True
+            scope = os.fsdecode(b"/".join(components))
+            for line in without_ignore_bom(ignore.read_bytes()).split(b"\n"):
+                line = line.rstrip(b"\r")
+                if not line.startswith(b"!"):
+                    if allowlisted:
+                        deny = re.fullmatch(
+                            rb"(/?[^!#\r\n][^\r\n]*?)/(?:\*\*/)*\*{1,2}[ \t]*",
+                            line,
+                        )
+                        if deny is not None and recursive_ignore_matches(
+                            scope, deny.group(1)
+                        ):
+                            allowlisted = False
+                    continue
+                raw_pattern = line[1:]
+                if not raw_pattern.endswith(b"\\ "):
+                    raw_pattern = raw_pattern.rstrip(b" \t")
+                anchored = raw_pattern.startswith(b"/")
+                pattern = re.sub(
+                    rb"(\\+)/",
+                    lambda escaped: (
+                        escaped.group(1)[:-1] + b"/"
+                        if len(escaped.group(1)) % 2
+                        else escaped.group(0)
+                    ),
+                    raw_pattern,
+                ).rstrip(b"/")
+                if anchored:
+                    pattern = pattern.lstrip(b"/")
+                if not anchored and b"/" not in pattern:
+                    # Basename rules can allowlist missing or untracked descendants.
+                    allowlisted = True
+                elif ignore_pattern_matches(components, pattern):
+                    allowlisted = True
+            return allowlisted
+
+        preserve_allowlisted_scope = False
+        if exempt_gitignores:
+            for ignore in sorted(
+                ignore_files,
+                key=lambda path: (
+                    IGNORE_FILE_NAMES.index(path.name),
+                    len(path.parent.relative_to(repository).parts),
+                ),
+            ):
+                preserve_allowlisted_scope = scope_is_allowlisted(
+                    ignore, preserve_allowlisted_scope
+                )
 
         batches: list[tuple[dict[str, str], set[bytes]]] = []
 
@@ -1718,6 +1787,16 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if os.name == "nt":
             root_path = root_path.removesuffix(b"\r")
         return Path(os.fsdecode(root_path)).resolve(strict=True)
+
+    for ancestor in ancestors:
+        if ancestor != repository and validated_metadata_directory(ancestor):
+            raise InventoryError("--scope: Git metadata paths are not supported")
+        reject_symbolic_ignore(ancestor)
+        has_git_marker(ancestor)
+    if selected.is_file():
+        metadata = selected.stat(follow_symlinks=False)
+        if (metadata.st_dev, metadata.st_ino) in validated_object_artifacts:
+            raise InventoryError("--scope: Git metadata paths are not supported")
 
     def owns_git_root(value: bytes, expected: Path) -> bool:
         actual = resolve_git_root(value)
@@ -2313,6 +2392,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     def metadata_inventory_row(row: bytes) -> bool:
         relative = Path(os.fsdecode(row.removesuffix(b"\n")))
         if any(relative.parts[: len(alias)] == alias for alias in metadata_aliases):
+            return True
+        try:
+            metadata = (repository / relative).stat(follow_symlinks=False)
+        except OSError:
+            return False
+        if (metadata.st_dev, metadata.st_ino) in validated_object_artifacts:
             return True
         current = (repository / relative).parent
         inspected: list[Path] = []

@@ -1509,6 +1509,67 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each([".gitignore", ".ignore", ".rgignore"])(
+    "reopens a selected checkout when a later %s deny overrides its allowlist",
+    async (ignore) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const nested = join(checkout, "ignored");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(
+          join(checkout, ignore),
+          "!ignored/public.ts\nignored/**\nignored/private.ts\n",
+        ),
+        writeFile(join(nested, ".ignore"), "*\n"),
+        writeFile(join(nested, "public.ts"), "tracked\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+      ]);
+      execFileSync("git", ["add", "--force", "public.ts", "private.ts"], {
+        cwd: nested,
+      });
+
+      expect(await inventory(checkout, "ignored")).toEqual([
+        "ignored/public.ts",
+      ]);
+    },
+  );
+
+  test.each([
+    [".gitignore", ".ignore"],
+    [".gitignore", ".rgignore"],
+    [".ignore", ".rgignore"],
+  ])(
+    "reopens a checkout when a %s allowlist is overridden by %s",
+    async (allow, deny) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const nested = join(checkout, "ignored");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(
+          join(checkout, allow),
+          "!ignored/public.ts\nignored/private.ts\n",
+        ),
+        writeFile(join(checkout, deny), "ignored/**\n"),
+        writeFile(join(nested, ".ignore"), "*\n"),
+        writeFile(join(nested, "public.ts"), "tracked\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+      ]);
+      execFileSync("git", ["add", "--force", "public.ts", "private.ts"], {
+        cwd: nested,
+      });
+
+      expect(await inventory(checkout, "ignored")).toEqual([
+        "ignored/public.ts",
+      ]);
+    },
+  );
+
   test.each(["present", "missing"])(
     "preserves an allowlisted %s file beneath a brace-recursive deny",
     async (state) => {
@@ -3169,6 +3230,48 @@ describe("security scan file inventory", () => {
     }
   });
 
+  test.each(["empty", "malformed", "directory", "HEAD"])(
+    "does not treat the %s marker inside an object store as a checkout",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const objects = join(checkout, "shared-objects");
+      await mkdir(join(objects, "info"), { recursive: true });
+      await mkdir(join(objects, "pack"));
+      await Promise.all([
+        writeFile(
+          join(checkout, ".git", "objects", "info", "alternates"),
+          `${objects}\n`,
+        ),
+        writeFile(join(objects, "private.ts"), "private\n"),
+        writeFile(join(checkout, "visible.ts"), "visible\n"),
+      ]);
+      execFileSync("git", ["add", "--force", "shared-objects/private.ts"], {
+        cwd: checkout,
+      });
+      if (kind === "directory" || kind === "HEAD") {
+        const marker = join(objects, ".git");
+        await mkdir(marker);
+        if (kind === "HEAD") {
+          await writeFile(join(marker, "HEAD"), "ref: refs/heads/main\n");
+        }
+      } else {
+        await writeFile(
+          join(objects, ".git"),
+          kind === "empty" ? "" : "not a gitfile\n",
+        );
+      }
+
+      expect(await inventory(checkout)).toEqual(["./visible.ts"]);
+      for (const scope of ["shared-objects", "shared-objects/private.ts"]) {
+        await expect(inventory(checkout, scope)).rejects.toThrow(
+          "--scope: Git metadata paths are not supported",
+        );
+      }
+    },
+  );
+
   test("preserves source when an object alternate overlaps the repository", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -3182,6 +3285,171 @@ describe("security scan file inventory", () => {
     ]);
 
     expect(await inventory(checkout)).toEqual(["./visible.ts"]);
+  });
+
+  test("preserves a nested checkout that doubles as an object store", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "nested");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await mkdir(join(nested, "info"));
+    await mkdir(join(nested, "pack"));
+    await Promise.all([
+      writeFile(
+        join(checkout, ".git", "objects", "info", "alternates"),
+        `${nested}\n`,
+      ),
+      writeFile(join(nested, "visible.ts"), "visible\n"),
+    ]);
+    execFileSync("git", ["add", "visible.ts"], { cwd: nested });
+
+    expect(await inventory(checkout)).toContain("./nested/visible.ts");
+    expect(await inventory(checkout, "nested")).toContain("nested/visible.ts");
+  });
+
+  test.each(["repository", "nested"])(
+    "excludes actual Git objects from an overlapping %s checkout",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const objects =
+        kind === "repository" ? checkout : join(checkout, "nested");
+      if (kind === "nested") {
+        await mkdir(objects);
+        execFileSync("git", ["init", "-q"], { cwd: objects });
+      }
+      await Promise.all([
+        mkdir(join(objects, "info")),
+        mkdir(join(objects, "pack", "multi-pack-index.d"), { recursive: true }),
+        mkdir(join(objects, "ab")),
+      ]);
+      const artifacts = [
+        "pack/private.pack",
+        "pack/private.idx",
+        "pack/multi-pack-index",
+        "pack/multi-pack-index.d/multi-pack-index-chain",
+        `ab/${"0".repeat(38)}`,
+        `ab/${"1".repeat(62)}`,
+      ];
+      if (kind === "nested") {
+        artifacts.push("info/alternates");
+      }
+      await Promise.all([
+        writeFile(
+          join(checkout, ".git", "objects", "info", "alternates"),
+          `${objects}\n`,
+        ),
+        ...[
+          "visible.ts",
+          "info/source.ts",
+          "pack/source.ts",
+          "ab/source.ts",
+        ].map((relative) => writeFile(join(objects, relative), "source\n")),
+        ...artifacts.map((relative) =>
+          writeFile(
+            join(objects, relative),
+            relative === "info/alternates"
+              ? `${join(objects, ".git", "objects")}\n`
+              : "private\n",
+          ),
+        ),
+      ]);
+      await hardlink(join(objects, artifacts[0]!), join(objects, "alias.ts"));
+      artifacts.push("alias.ts");
+
+      const prefix = kind === "repository" ? "./" : "./nested/";
+      const rows = await inventory(checkout);
+      for (const source of [
+        "visible.ts",
+        "info/source.ts",
+        "pack/source.ts",
+        "ab/source.ts",
+      ]) {
+        expect(rows).toContain(`${prefix}${source}`);
+      }
+      for (const artifact of artifacts) {
+        expect(rows).not.toContain(`${prefix}${artifact}`);
+        const scope = kind === "repository" ? artifact : `nested/${artifact}`;
+        await expect(inventory(checkout, scope)).rejects.toThrow(
+          "--scope: Git metadata paths are not supported",
+        );
+      }
+      if (kind === "nested") {
+        const scoped = await inventory(checkout, "nested");
+        for (const artifact of artifacts) {
+          expect(scoped).not.toContain(`nested/${artifact}`);
+        }
+      }
+    },
+  );
+
+  test.each([".gitignore", ".ignore", ".rgignore"])(
+    "does not inspect object-store checkouts hidden by %s",
+    async (ignore) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const nested = join(checkout, "nested");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        mkdir(join(nested, "info")),
+        mkdir(join(nested, "pack")),
+      ]);
+      const external = join(dirname(checkout), "external.config");
+      await writeFile(external, "[core]\n\tignoreCase = true\n");
+      execFileSync("git", ["config", "--local", "include.path", external], {
+        cwd: nested,
+      });
+      await Promise.all([
+        writeFile(
+          join(checkout, ".git", "objects", "info", "alternates"),
+          `${nested}\n`,
+        ),
+        writeFile(join(checkout, ignore), "nested/\n"),
+        writeFile(join(checkout, "visible.ts"), "visible\n"),
+      ]);
+
+      expect(await inventory(checkout)).toContain("./visible.ts");
+    },
+  );
+
+  test("preserves ignored tracked Git checkouts that double as object stores", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "nested");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      mkdir(join(nested, "info")),
+      mkdir(join(nested, "pack")),
+      writeFile(join(nested, "private.ts"), "private\n"),
+      writeFile(join(nested, "visible.ts"), "visible\n"),
+    ]);
+    execFileSync("git", ["add", "private.ts", "visible.ts"], { cwd: nested });
+    commit(nested);
+    await Promise.all([
+      writeFile(
+        join(checkout, ".git", "objects", "info", "alternates"),
+        `${nested}\n`,
+      ),
+      writeFile(join(checkout, ".gitignore"), "nested/\nnested/private.ts\n"),
+    ]);
+    execFileSync("git", ["add", "--force", "nested"], {
+      cwd: checkout,
+      stdio: "ignore",
+    });
+
+    expect(await inventory(checkout)).toContain("./nested/visible.ts");
+    expect(await inventory(checkout)).not.toContain("./nested/private.ts");
+    expect(await inventory(checkout, "nested")).toContain("nested/visible.ts");
+    expect(await inventory(checkout, "nested")).not.toContain(
+      "nested/private.ts",
+    );
   });
 
   test.each(["quoted", "unquoted"])(
