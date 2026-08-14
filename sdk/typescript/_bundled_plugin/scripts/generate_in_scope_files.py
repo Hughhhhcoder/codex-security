@@ -969,38 +969,105 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 return True
             return result.returncode != 1 or bool(result.stderr)
 
-        def scope_is_allowlisted(ignore: Path) -> bool:
-            try:
-                components = tuple(
-                    os.fsencode(part)
-                    for part in selected.relative_to(ignore.parent).parts
-                )
-            except ValueError:
+        def without_ignore_bom(contents: bytes) -> bytes:
+            return re.sub(rb"\A(?:\xef\xbb\xbf)+", b"", contents)
+
+        def ignore_pattern_matches(components: tuple[bytes, ...], pattern: bytes) -> bool:
+            if not components:
                 return True
-            for line in ignore.read_bytes().splitlines():
-                line = line.removeprefix(b"\xef\xbb\xbf")
-                if not line.startswith(b"!"):
+
+            def prefix_matches(actual: bytes, candidate: bytes) -> bool:
+                pending = [(0, candidate)]
+                seen: set[tuple[int, bytes]] = set()
+                while pending:
+                    offset, remaining = pending.pop()
+                    state = (offset, remaining)
+                    if state in seen:
+                        continue
+                    seen.add(state)
+                    for index, character in enumerate(remaining):
+                        if character in b"*?[\\/":
+                            return True
+                        if character == ord("{"):
+                            depth = 1
+                            separators: list[int] = []
+                            escaped = False
+                            character_class = False
+                            first_class_character = False
+                            for end in range(index + 1, len(remaining)):
+                                current = remaining[end]
+                                if escaped:
+                                    escaped = False
+                                elif current == ord("\\"):
+                                    escaped = True
+                                elif current == ord("["):
+                                    character_class = True
+                                    first_class_character = True
+                                elif current == ord("]") and character_class:
+                                    if first_class_character:
+                                        first_class_character = False
+                                    else:
+                                        character_class = False
+                                elif character_class:
+                                    if current == ord("/"):
+                                        return True
+                                    if first_class_character and current in (
+                                        ord("!"),
+                                        ord("^"),
+                                    ):
+                                        continue
+                                    first_class_character = False
+                                elif current == ord("/"):
+                                    return True
+                                elif current == ord("{"):
+                                    depth += 1
+                                elif current == ord("}"):
+                                    depth -= 1
+                                    if depth:
+                                        continue
+                                    beginning = index + 1
+                                    for separator in (*separators, end):
+                                        pending.append(
+                                            (
+                                                offset,
+                                                remaining[beginning:separator]
+                                                + remaining[end + 1 :],
+                                            )
+                                        )
+                                        beginning = separator + 1
+                                    break
+                                elif current == ord(",") and depth == 1:
+                                    separators.append(end)
+                            else:
+                                return True
+                            break
+                        if offset == len(actual) or actual[offset] != character:
+                            break
+                        offset += 1
+                    else:
+                        return True
+                return False
+
+            def component_matches(actual: bytes, expected: bytes) -> bool:
+                if any(value in expected for value in (b"\\", b"{", b"}", b"[")):
+                    return ignore_component_matches(actual, expected)
+                return fnmatch.fnmatchcase(actual, expected)
+
+            pending = [(0, pattern)]
+            seen: set[tuple[int, bytes]] = set()
+            while pending:
+                component_index, candidate = pending.pop()
+                state = (component_index, candidate)
+                if state in seen:
                     continue
-                raw_pattern = line[1:].rstrip(b" \t")
-                anchored = raw_pattern.startswith(b"/")
-                pattern = re.sub(
-                    rb"(\\+)/",
-                    lambda escaped: (
-                        escaped.group(1)[:-1] + b"/"
-                        if len(escaped.group(1)) % 2
-                        else escaped.group(0)
-                    ),
-                    raw_pattern,
-                ).rstrip(b"/")
-                if anchored:
-                    pattern = pattern.lstrip(b"/")
-                if not anchored and b"/" not in pattern:
-                    return True
-                brace_depth = 0
+                seen.add(state)
+                if not prefix_matches(components[component_index], candidate):
+                    continue
+                braces: list[tuple[int, list[int], bool]] = []
                 escaped = False
                 character_class = False
                 first_class_character = False
-                for character in pattern:
+                for index, character in enumerate(candidate):
                     if escaped:
                         escaped = False
                     elif character == ord("\\"):
@@ -1019,23 +1086,111 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         if first_class_character and character in (ord("!"), ord("^")):
                             continue
                         first_class_character = False
-                        continue
                     elif character == ord("{"):
-                        brace_depth += 1
-                    elif character == ord("}") and brace_depth:
-                        brace_depth -= 1
-                    elif character == ord("/") and brace_depth:
-                        return True
-                for actual, expected in zip(components, pattern.split(b"/")):
-                    if expected == b"**":
-                        return True
-                    if any(character in expected for character in (b"\\", b"{", b"}", b"[")):
-                        matches = ignore_component_matches(actual, expected)
-                    else:
-                        matches = fnmatch.fnmatchcase(actual, expected)
-                    if not matches:
+                        braces.append((index, [], False))
+                    elif character == ord(",") and braces:
+                        braces[-1][1].append(index)
+                    elif character == ord("/") and braces:
+                        opening, separators, _ = braces[-1]
+                        braces[-1] = (opening, separators, True)
+                    elif character == ord("/"):
+                        if component_index == len(components):
+                            return True
+                        expected = candidate[:index]
+                        if expected == b"**":
+                            return True
+                        if not component_matches(components[component_index], expected):
+                            break
+                        component_index += 1
+                        if component_index == len(components):
+                            return True
+                        pending.append((component_index, candidate[index + 1 :]))
+                        break
+                    elif character == ord("}") and braces:
+                        opening, separators, crosses_components = braces.pop()
+                        if not crosses_components:
+                            continue
+                        if braces:
+                            outer_opening, outer_separators, _ = braces[-1]
+                            braces[-1] = (outer_opening, outer_separators, True)
+                            continue
+                        same_component = []
+                        start = opening + 1
+                        for separator in (*separators, index):
+                            alternative = candidate[start:separator]
+                            if b"/" in alternative:
+                                pending.append(
+                                    (
+                                        component_index,
+                                        candidate[:opening]
+                                        + alternative
+                                        + candidate[index + 1 :],
+                                    )
+                                )
+                            elif prefix_matches(
+                                components[component_index],
+                                candidate[:opening] + alternative,
+                            ):
+                                same_component.append(alternative)
+                            start = separator + 1
+                        if same_component:
+                            grouped = (
+                                same_component[0]
+                                if len(same_component) == 1
+                                else b"{" + b",".join(same_component) + b"}"
+                            )
+                            pending.append(
+                                (
+                                    component_index,
+                                    candidate[:opening] + grouped + candidate[index + 1 :],
+                                )
+                            )
                         break
                 else:
+                    if escaped or character_class or any(
+                        crosses for _, _, crosses in braces
+                    ):
+                        return True
+                    for actual, expected in zip(
+                        components[component_index:],
+                        candidate.split(b"/"),
+                    ):
+                        if expected == b"**":
+                            return True
+                        if not component_matches(actual, expected):
+                            break
+                    else:
+                        return True
+            return False
+
+        def scope_is_allowlisted(ignore: Path) -> bool:
+            try:
+                components = tuple(
+                    os.fsencode(part)
+                    for part in selected.relative_to(ignore.parent).parts
+                )
+            except ValueError:
+                return True
+            for line in without_ignore_bom(ignore.read_bytes()).split(b"\n"):
+                line = line.rstrip(b"\r")
+                if not line.startswith(b"!"):
+                    continue
+                raw_pattern = line[1:].rstrip(b" \t")
+                anchored = raw_pattern.startswith(b"/")
+                pattern = re.sub(
+                    rb"(\\+)/",
+                    lambda escaped: (
+                        escaped.group(1)[:-1] + b"/"
+                        if len(escaped.group(1)) % 2
+                        else escaped.group(0)
+                    ),
+                    raw_pattern,
+                ).rstrip(b"/")
+                if anchored:
+                    pattern = pattern.lstrip(b"/")
+                if not anchored and b"/" not in pattern:
+                    return True
+                if ignore_pattern_matches(components, pattern):
                     return True
             return False
 
@@ -1109,7 +1264,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 )
                             )
                             rebased = []
-                            lines = contents.removeprefix(b"\xef\xbb\xbf").split(b"\n")
+                            lines = without_ignore_bom(contents).split(b"\n")
                             for index, line in enumerate(lines):
                                 terminated = index < len(lines) - 1
                                 if terminated:
@@ -1144,7 +1299,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     destination = probe.joinpath(*relative)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     if prepend and destination.exists():
-                        existing = destination.read_bytes()
+                        existing = without_ignore_bom(destination.read_bytes())
                         separator = b"" if not contents or contents.endswith(b"\n") else b"\n"
                         contents += separator + existing
                     destination.write_bytes(contents)
@@ -1201,8 +1356,8 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     return (match.group(1) or b"") + match.group(2) + b"/"
 
                                 contents = re.sub(
-                                    rb"(?m)^(\xef\xbb\xbf)?(/?[^!#\r\n][^\r\n]*?)/"
-                                    rb"(?:\*\*/)*\*{1,2}[ \t]*(?=\r?$)",
+                                    rb"(?m)^(\A(?:\xef\xbb\xbf)+)?(/?[^!#\r\n][^\r\n]*?)/"
+                                    rb"(?:\*\*/)*\*{1,2}[ \t]*(?=\r*$)",
                                     reopen_recursive,
                                     contents,
                                 )
