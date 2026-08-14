@@ -1252,12 +1252,14 @@ describe("security scan file inventory", () => {
   test.each([
     ["!ignored", "\\!ignored"],
     ["#ignored", "\\#ignored"],
+    ["e\u0301ignored", "e{\u0301,other}ignored"],
+    ["ignored/nested", "ignore[]/d]/nested"],
   ])("preserves explicit allowlists for checkout %s", async (name, rule) => {
     if (Bun.which("rg") === null) return;
 
     const checkout = await repository(false);
     const nested = join(checkout, name);
-    await mkdir(nested);
+    await mkdir(nested, { recursive: true });
     execFileSync("git", ["init", "-q"], { cwd: nested });
     await Promise.all([
       writeFile(join(checkout, ".ignore"), `${rule}/**\n`),
@@ -1297,6 +1299,21 @@ describe("security scan file inventory", () => {
     [".gitignore", "!unrelated/public.ts"],
     [".ignore", "!unrelated/public.ts"],
     [".rgignore", "!unrelated/public.ts"],
+    [".gitignore", "!unrelated[ab]/public.ts"],
+    [".ignore", "!unrelated[ab]/public.ts"],
+    [".rgignore", "!unrelated[ab]/public.ts"],
+    [".gitignore", "!{unrelated,other}/public.ts"],
+    [".ignore", "!{unrelated,other}/public.ts"],
+    [".rgignore", "!{unrelated,other}/public.ts"],
+    [".gitignore", "!unrelated\\[ab\\]/public.ts"],
+    [".ignore", "!unrelated\\[ab\\]/public.ts"],
+    [".rgignore", "!unrelated\\[ab\\]/public.ts"],
+    [".gitignore", "!unrelated\\{/public.ts"],
+    [".ignore", "!unrelated[{]/public.ts"],
+    [".rgignore", "!unrelated[{]/public.ts"],
+    [".gitignore", "!unrelated[[:alpha:]]/public.ts"],
+    [".ignore", "!unrelated[[:alpha:]]/public.ts"],
+    [".rgignore", "!unrelated[[:alpha:]]/public.ts"],
   ])(
     "ignores unrelated %s allowlist rule %s when reopening the selected checkout",
     async (ignore, unrelated) => {
@@ -1382,7 +1399,13 @@ describe("security scan file inventory", () => {
     "!{ignored,other}/public.ts",
     "!{other,ignored}/public.ts",
     "!ign{ored,other}/public.ts",
+    "!{ignored/public.ts,other/private.ts}",
+    "!{other/private.ts,ignored/public.ts}",
     "!ignore[^x]/public.ts",
+    "!ignore[d/x]/public.ts",
+    "!/ignored[^x]public.ts",
+    "!/ignored[!x]public.ts",
+    "!/ignored[.-0]public.ts",
   ])("preserves an expanded outer allowlist rule %s", async (rule) => {
     if (Bun.which("rg") === null) return;
 

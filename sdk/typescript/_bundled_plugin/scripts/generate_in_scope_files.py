@@ -931,6 +931,44 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if not ignore_files and not configured_excludes:
             return requested
 
+        def ignore_component_matches(actual: bytes, pattern: bytes) -> bool:
+            prefix = bytearray()
+            for character in pattern:
+                if character in b"*?[{\\":
+                    break
+                prefix.append(character)
+            if prefix and not actual.startswith(bytes(prefix)):
+                return False
+            if (
+                b"[:" in pattern
+                or b"[^" in pattern
+                or b"[!" in pattern
+                or (b"[" in pattern and b"-" in pattern)
+            ):
+                return True
+            try:
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    probe = Path(temporary_directory)
+                    component = probe / os.fsdecode(actual)
+                    component.mkdir()
+                    (component / "source").touch()
+                    result = subprocess.run(
+                        [
+                            *command,
+                            "--glob",
+                            os.fsdecode(b"/" + pattern + b"/**"),
+                            "--",
+                            ".",
+                        ],
+                        cwd=probe,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+            except (OSError, ValueError):
+                return True
+            return result.returncode != 1 or bool(result.stderr)
+
         def scope_is_allowlisted(ignore: Path) -> bool:
             try:
                 components = tuple(
@@ -946,14 +984,48 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 pattern = line[1:].rstrip(b" \t").rstrip(b"/")
                 anchored = pattern.startswith(b"/")
                 pattern = pattern.lstrip(b"/")
-                if any(character in pattern for character in (b"\\", b"{", b"}", b"[")) or (
-                    not anchored and b"/" not in pattern
-                ):
+                if not anchored and b"/" not in pattern:
                     return True
+                if b"\\/" in pattern:
+                    return True
+                brace_depth = 0
+                escaped = False
+                character_class = False
+                first_class_character = False
+                for character in pattern:
+                    if escaped:
+                        escaped = False
+                    elif character == ord("\\"):
+                        escaped = True
+                    elif character == ord("["):
+                        character_class = True
+                        first_class_character = True
+                    elif character == ord("]") and character_class:
+                        if first_class_character:
+                            first_class_character = False
+                        else:
+                            character_class = False
+                    elif character_class:
+                        if character == ord("/"):
+                            return True
+                        if first_class_character and character in (ord("!"), ord("^")):
+                            continue
+                        first_class_character = False
+                        continue
+                    elif character == ord("{"):
+                        brace_depth += 1
+                    elif character == ord("}") and brace_depth:
+                        brace_depth -= 1
+                    elif character == ord("/") and brace_depth:
+                        return True
                 for actual, expected in zip(components, pattern.split(b"/")):
                     if expected == b"**":
                         return True
-                    if not fnmatch.fnmatchcase(actual, expected):
+                    if any(character in expected for character in (b"\\", b"{", b"}", b"[")):
+                        matches = ignore_component_matches(actual, expected)
+                    else:
+                        matches = fnmatch.fnmatchcase(actual, expected)
+                    if not matches:
                         break
                 else:
                     return True
