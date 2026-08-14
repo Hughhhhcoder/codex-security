@@ -69,6 +69,8 @@ const findingsIndexProbe = [
   "if settings.get('closedBeforeRollback'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-old-finding', created_at = '2025-12-02' WHERE id = 'current-new-occurrence'\")",
   "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', 'already_fixed')\")",
+  "if settings.get('matchedTriage'):",
+  "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', ?)\", (settings['matchedTriage'],))",
   "connection.executemany('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'src/old.py', 'root_control', 0),",
   "    ('current-new-occurrence', 'src/new.py', 'root_control', 0),",
@@ -79,7 +81,7 @@ const findingsIndexProbe = [
   "    ('orphan-old-occurrence', 'src/orphan-old.py', 'root_control', 0),",
   "    ('orphan-new-occurrence', 'src/orphan-new.py', 'root_control', 0),",
   "])",
-  "if settings.get('indexedAliases') and settings.get('ownershipReuse'):",
+  "if settings.get('matchedTriage') or (settings.get('indexedAliases') and settings.get('ownershipReuse')):",
   "    connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?)', ('current-old-occurrence', 'current-new-occurrence'))",
   "coverage_reads = []",
   "def coverage(scan):",
@@ -103,6 +105,24 @@ const findingsIndexProbe = [
   "    result = indexes.list_repositories(connection, read_coverage=coverage)",
   "else:",
   "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
+  "finding_detail = None",
+  "if settings.get('matchedTriage'):",
+  "    import workbench_db as workbench",
+  "    connection.execute(\"ALTER TABLE finding_occurrences ADD COLUMN details_json TEXT DEFAULT '{}'\")",
+  "    connection.execute(\"ALTER TABLE finding_occurrences ADD COLUMN confidence TEXT DEFAULT 'high'\")",
+  "    connection.execute(\"ALTER TABLE finding_occurrences ADD COLUMN remediation TEXT DEFAULT 'Fix the finding.'\")",
+  "    connection.execute('ALTER TABLE finding_locations ADD COLUMN start_line INTEGER DEFAULT 1')",
+  "    connection.execute('ALTER TABLE finding_locations ADD COLUMN end_line INTEGER DEFAULT 1')",
+  "    connection.execute('ALTER TABLE finding_triage ADD COLUMN note TEXT')",
+  "    connection.execute(\"UPDATE finding_triage SET note = 'Verified test dismissal' WHERE occurrence_id = 'current-old-occurrence'\")",
+  "    workbench.require_scan_target_identity = lambda *arguments, **keywords: None",
+  "    workbench.finding_remediation_result = lambda *arguments: {'state': 'idle'}",
+  "    workbench.finding_source_excerpt = lambda *arguments: None",
+  "    workbench.finding_artifact_paths = lambda *arguments: []",
+  "    workbench.scan_history.finding_matches = lambda *arguments: ([], '2026-01-01', [])",
+  "    scan = connection.execute(\"SELECT * FROM scans WHERE id = 'current-new'\").fetchone()",
+  "    occurrence = connection.execute(\"SELECT * FROM finding_occurrences WHERE id = 'current-new-occurrence'\").fetchone()",
+  "    finding_detail = workbench.finding_result(connection, scan, occurrence, full_details=True)",
   "scoped_scan_ids = []",
   "matching_scan_count = None",
   "old_owner_matches = None",
@@ -115,7 +135,7 @@ const findingsIndexProbe = [
   "    matching_scan_count = matching['scanCount']",
   "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
   "    old_owner_matches = indexes.scan_history._same_registered_repository(connection, *scans)",
-  "print(json.dumps({'findings': result.get('findings', []), 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
+  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -132,6 +152,7 @@ function runFindingsIndex(
     indexedAliases?: boolean;
     lateCompletion?: boolean;
     legacyPriority?: boolean;
+    matchedTriage?: "already_fixed" | "false_positive";
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
     ownershipTransition?: boolean;
@@ -174,6 +195,7 @@ function probeFindingsIndex(
     indexedAliases?: boolean;
     lateCompletion?: boolean;
     legacyPriority?: boolean;
+    matchedTriage?: "already_fixed" | "false_positive";
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
     ownershipTransition?: boolean;
@@ -187,6 +209,7 @@ function probeFindingsIndex(
     targetId: string | null;
     targetPath: string;
   }>;
+  findingDetail: Record<string, unknown> | null;
   repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
   matchingScanCount: number | null;
@@ -278,6 +301,67 @@ describe("workbench findings index", () => {
         status: "open",
       }),
     ]);
+  });
+
+  test("uses inherited triage when showing matched finding details", () => {
+    const result = probeFindingsIndex("current-target", {
+      matchedTriage: "false_positive",
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        occurrenceId: "current-new-occurrence",
+        status: "closed",
+      }),
+    ]);
+    expect(result.findingDetail).toMatchObject({
+      occurrenceId: "current-new-occurrence",
+      status: "closed",
+      triage: {
+        closeReason: "false_positive",
+        note: "Verified test dismissal",
+        status: "closed",
+      },
+    });
+  });
+
+  test("keeps rediscovered fixed finding details open", () => {
+    const result = probeFindingsIndex("current-target", {
+      matchedTriage: "already_fixed",
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        occurrenceId: "current-new-occurrence",
+        status: "open",
+      }),
+    ]);
+    expect(result.findingDetail).toMatchObject({
+      occurrenceId: "current-new-occurrence",
+      status: "open",
+      triage: { status: "open" },
+    });
+    expect(result.findingDetail?.["triage"]).not.toHaveProperty("closeReason");
+  });
+
+  test("does not inherit finding triage from a previous checkout owner", () => {
+    const result = probeFindingsIndex("current-target", {
+      matchedTriage: "false_positive",
+      ownershipReuse: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        occurrenceId: "current-new-occurrence",
+        status: "open",
+      }),
+    ]);
+    expect(result.findingDetail).toMatchObject({
+      occurrenceId: "current-new-occurrence",
+      status: "open",
+      triage: { status: "open" },
+    });
+    expect(result.findingDetail?.["triage"]).not.toHaveProperty("closeReason");
   });
 
   test("retains covered same-owner findings while preparing semantic matching", () => {
@@ -405,11 +489,13 @@ describe("workbench findings index", () => {
 
     expect(result.findings).toEqual([
       expect.objectContaining({
+        confirmedInLatestScan: false,
         occurrenceId: "orphan-old-occurrence",
         targetId: null,
         targetPath: "/orphan/repository",
       }),
       expect.objectContaining({
+        confirmedInLatestScan: true,
         occurrenceId: "orphan-new-occurrence",
         targetId: null,
         targetPath: "/orphan/repository",

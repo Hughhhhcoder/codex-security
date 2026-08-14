@@ -3272,6 +3272,24 @@ def finding_result(
             )
         locations.append(location)
     triage = finding_triage_result(connection, occurrence["id"])
+    if full_details and scan["target_id"] is not None:
+        indexed = next(
+            (
+                finding
+                for finding in native_indexes._indexed_active_findings(
+                    connection,
+                    coverage_for_comparison,
+                    target_ids={scan["target_id"]},
+                    include_resolved=True,
+                )
+                if occurrence["id"] in finding.get("occurrence_ids", ())
+            ),
+            None,
+        )
+        if indexed is not None and indexed["decision_occurrence_id"] is not None:
+            triage = finding_triage_result(connection, indexed["decision_occurrence_id"])
+            if triage["status"] != indexed["status"]:
+                triage = {"status": indexed["status"]}
     result = {
         **details,
         "confidence": {

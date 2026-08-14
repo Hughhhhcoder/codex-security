@@ -223,6 +223,7 @@ def _indexed_findings(
                 **dict(latest),
                 "confirmed_in_latest_scan": latest_scan_by_target.get(latest["target_id"])
                 == latest["scan_id"],
+                "decision_occurrence_id": decision["occurrence_id"] if decision is not None else None,
                 "known_since": scans[0][1],
                 "known_scan_ids": [scan_id for _, _, scan_id in scans],
                 "matched_finding_ids": sorted({row["finding_id"] for row in occurrences}),
@@ -259,7 +260,7 @@ def _indexed_active_findings(
 ) -> Iterator[dict[str, Any]]:
     allowed_scan_ids: set[str] = set()
     active = {
-        row["occurrence_id"]: dict(row)
+        row["occurrence_id"]: row
         for row in _active_findings(
             connection,
             read_coverage,
@@ -298,7 +299,7 @@ def _active_findings(
     query: str = "",
     include_resolved: bool = False,
     allowed_scan_ids: set[str] | None = None,
-) -> Iterator[sqlite3.Row]:
+) -> Iterator[dict[str, Any]]:
     target_filters = []
     target_values = []
     if target_ids:
@@ -469,13 +470,20 @@ def _active_findings(
         [*target_values, *([query] if query else [])],
     )
     for row in rows:
+        completed_scans = completed_scans_by_target.get(row["indexed_target_id"], ())
+        finding = {
+            **dict(row),
+            "confirmed_in_latest_scan": (
+                completed_scans[0]["id"] == row["scan_id"] if completed_scans else True
+            ),
+        }
         if include_resolved:
             if allowed_scan_ids is not None:
                 allowed_scan_ids.add(row["scan_id"])
-            yield row
+            yield finding
             continue
         resolved = False
-        for scan in completed_scans_by_target.get(row["indexed_target_id"], ()):
+        for scan in completed_scans:
             if scan["scan_sequence"] <= row["scan_sequence"]:
                 break
             if scan["id"] not in coverage_by_scan_id:
@@ -517,7 +525,7 @@ def _active_findings(
         if not resolved:
             if allowed_scan_ids is not None:
                 allowed_scan_ids.add(row["scan_id"])
-            yield row
+            yield finding
 
 
 def list_repositories(
