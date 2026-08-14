@@ -175,6 +175,7 @@ def parse_args(description: str) -> argparse.Namespace:
     list_global_findings.add_argument("--repository")
     list_global_findings.add_argument("--target-id", action="append")
     list_global_findings.add_argument("--target-path", action="append")
+    list_global_findings.add_argument("--include-resolved", action="store_true")
     list_global_findings.add_argument("--offset", type=non_negative_int, default=0)
     list_global_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
     list_repositories = subparsers.add_parser("list-repositories")

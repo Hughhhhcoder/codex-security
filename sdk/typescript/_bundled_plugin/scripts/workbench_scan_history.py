@@ -663,7 +663,7 @@ def list_unmatched_scan_pairs(
             "SELECT scans.*, scans.rowid AS ownership_sequence, "
             "targets.current_path AS current_target_path "
             "FROM scans LEFT JOIN security_targets AS targets ON targets.id = scans.target_id "
-            "WHERE scans.status = 'complete' ORDER BY scans.started_at, scans.id"
+            "WHERE scans.status = 'complete' ORDER BY scans.rowid"
         )
         if metadata is not None
         and _same_repository(scan, requested, before_target_path=scan["current_target_path"])

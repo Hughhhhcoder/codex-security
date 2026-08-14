@@ -94,7 +94,7 @@ const findingsIndexProbe = [
   "    if scan['id'] == 'orphan-new':",
   "        return {'completeness': 'partial', 'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    return {'completeness': 'complete', 'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
-  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), offset=0, limit=20)",
+  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), include_resolved=settings.get('includeResolved', False), offset=0, limit=20)",
   "if settings.get('repositories'):",
   "    indexes.scan_history.list_scans = lambda connection: {'scans': [{'scanId': row['id'], 'targetId': row['target_id']} for row in connection.execute('SELECT id, target_id FROM scans')]}",
   "    result = indexes.list_repositories(connection, read_coverage=coverage)",
@@ -124,6 +124,7 @@ function runFindingsIndex(
     query?: string;
     clockRollback?: boolean;
     coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
+    includeResolved?: boolean;
     indexedAliases?: boolean;
     lateCompletion?: boolean;
     legacyPriority?: boolean;
@@ -164,6 +165,7 @@ function probeFindingsIndex(
     query?: string;
     clockRollback?: boolean;
     coverageFailure?: "pruned";
+    includeResolved?: boolean;
     indexedAliases?: boolean;
     lateCompletion?: boolean;
     legacyPriority?: boolean;
@@ -246,6 +248,39 @@ describe("workbench findings index", () => {
       }),
     ]);
     expect(result.coverageReads).toEqual(["current-new"]);
+  });
+
+  test("keeps rediscovered findings active when the system clock moves backward", () => {
+    const result = probeFindingsIndex("current-target", {
+      clockRollback: true,
+      lateCompletion: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+    ]);
+  });
+
+  test("retains covered same-owner findings while preparing semantic matching", () => {
+    const result = probeFindingsIndex("current-target", {
+      includeResolved: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+      expect.objectContaining({ occurrenceId: "current-old-occurrence" }),
+    ]);
+    expect(result.findings).not.toContainEqual(
+      expect.objectContaining({ occurrenceId: "reused-legacy-occurrence" }),
+    );
+    expect(
+      probeFindingsIndex("current-target", {
+        includeResolved: true,
+        ownershipReuse: true,
+      }).findings,
+    ).toEqual([
+      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+    ]);
   });
 
   test("excludes replaced checkout owners from findings and repository counts", () => {

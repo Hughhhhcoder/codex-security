@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-test("loads each scan's matching findings once across historical batches", () => {
+test("loads each scan's matching findings once in insertion order after clock rollback", () => {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   expect(python).not.toBeNull();
   if (python === null) throw new Error("A Python interpreter is required.");
@@ -30,7 +30,7 @@ test("loads each scan's matching findings once across historical batches", () =>
     "connection.execute('INSERT INTO security_targets VALUES (?, ?)', ('owned-target', repository))",
     "for index in range(3):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, repository, 'owned-target', *identity, 'unversioned', 'complete', str(index)))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, repository, 'owned-target', *identity, 'unversioned', 'complete', str(2 - index)))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "queries = []",
     "connection.set_trace_callback(queries.append)",

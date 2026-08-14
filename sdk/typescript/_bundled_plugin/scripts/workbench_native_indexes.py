@@ -51,6 +51,7 @@ def list_global_findings(
             target_paths=target_paths,
             repository=repository,
             query=query,
+            include_resolved=getattr(args, "include_resolved", False),
         )
     )
     findings = (
@@ -165,6 +166,7 @@ def _indexed_findings(
             occurrences.created_at,
             scans.id AS scan_id,
             scans.started_at AS scan_started_at,
+            scans.rowid AS scan_sequence,
             scans.target_id,
             targets.current_path AS target_path,
             scans.scope,
@@ -194,7 +196,10 @@ def _indexed_findings(
 
     findings = []
     for occurrences in grouped.values():
-        latest = max(occurrences, key=lambda row: (row["created_at"], row["occurrence_id"]))
+        latest = max(
+            occurrences,
+            key=lambda row: (row["scan_sequence"], row["created_at"], row["occurrence_id"]),
+        )
         decision = max(
             (row for row in occurrences if row["decision_status"] is not None),
             key=lambda row: (row["decision_updated_at"], row["occurrence_id"]),
@@ -207,14 +212,19 @@ def _indexed_findings(
             and latest["created_at"] > decision["decision_updated_at"]
         ):
             status = "open"
-        scans = sorted({(row["scan_started_at"], row["scan_id"]) for row in occurrences})
+        scans = sorted(
+            {
+                (row["scan_sequence"], row["scan_started_at"], row["scan_id"])
+                for row in occurrences
+            }
+        )
         findings.append(
             {
                 **dict(latest),
                 "confirmed_in_latest_scan": latest_scan_by_target.get(latest["target_id"])
                 == latest["scan_id"],
-                "known_since": scans[0][0],
-                "known_scan_ids": [scan_id for _, scan_id in scans],
+                "known_since": scans[0][1],
+                "known_scan_ids": [scan_id for _, _, scan_id in scans],
                 "matched_finding_ids": sorted({row["finding_id"] for row in occurrences}),
                 "occurrence_count": len(occurrences),
                 "occurrence_ids": {row["occurrence_id"] for row in occurrences},
@@ -286,6 +296,7 @@ def _active_findings(
     target_paths: set[str] | None = None,
     repository: str | None = None,
     query: str = "",
+    include_resolved: bool = False,
     allowed_scan_ids: set[str] | None = None,
 ) -> Iterator[sqlite3.Row]:
     target_filters = []
@@ -415,7 +426,7 @@ def _active_findings(
                 ) AS occurrence_count,
                 ROW_NUMBER() OVER (
                     PARTITION BY COALESCE(targets.id, scans.target_path), occurrences.finding_id
-                    ORDER BY scans.started_at DESC, scans.id DESC,
+                    ORDER BY scans.rowid DESC,
                         occurrences.created_at DESC, occurrences.id DESC
                 ) AS occurrence_rank
             FROM finding_occurrences AS occurrences
@@ -458,6 +469,11 @@ def _active_findings(
         [*target_values, *([query] if query else [])],
     )
     for row in rows:
+        if include_resolved:
+            if allowed_scan_ids is not None:
+                allowed_scan_ids.add(row["scan_id"])
+            yield row
+            continue
         resolved = False
         for scan in completed_scans_by_target.get(row["indexed_target_id"], ()):
             if scan["scan_sequence"] <= row["scan_sequence"]:
@@ -519,7 +535,7 @@ def list_repositories(
 
     latest_scan_by_target: dict[str, dict[str, Any]] = {}
     for row in connection.execute(
-        "SELECT id, target_id FROM scans ORDER BY started_at DESC, id DESC"
+        "SELECT id, target_id FROM scans ORDER BY rowid DESC"
     ):
         latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
 

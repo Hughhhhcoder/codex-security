@@ -46,6 +46,10 @@ describe("CLI findings history", () => {
           repository,
           "--status",
           "open",
+          "--offset",
+          "0",
+          "--limit",
+          "20",
         ],
       ]);
       expect(JSON.parse(stdout.text())).toMatchObject({
@@ -75,11 +79,63 @@ describe("CLI findings history", () => {
       ),
     ).toBe(0);
     expect(calls).toEqual([
-      ["list-global-findings", "--repository", repository, "--status", "open"],
+      [
+        "list-global-findings",
+        "--repository",
+        repository,
+        "--status",
+        "open",
+        "--offset",
+        "0",
+        "--limit",
+        "20",
+      ],
     ]);
     expect(JSON.parse(stdout.text())).toMatchObject({
       findings: [{ occurrenceId: "nested-finding" }],
     });
+  });
+
+  test("preserves pagination for machine-readable current-repository findings", async () => {
+    const repository = resolve("/current/repository");
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    const page = {
+      findings: [{ occurrenceId: "first-finding" }],
+      limit: 20,
+      nextOffset: 20,
+      offset: 0,
+    };
+
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => {
+            calls.push(args);
+            return calls.length === 1
+              ? page
+              : { ...page, findings: [], nextOffset: null, offset: 20 };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      [
+        "list-global-findings",
+        "--repository",
+        repository,
+        "--status",
+        "open",
+        "--offset",
+        "0",
+        "--limit",
+        "20",
+      ],
+    ]);
+    expect(JSON.parse(stdout.text())).toEqual(page);
   });
 
   test("defaults all-repository finding lists to open without overriding explicit status", async () => {

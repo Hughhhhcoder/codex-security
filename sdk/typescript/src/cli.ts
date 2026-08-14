@@ -866,6 +866,9 @@ export async function main(
             );
         if (
           repository !== undefined &&
+          format === "toon" &&
+          output.isTTY === true &&
+          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument)) &&
           options.scan === undefined &&
           !options.allRepositories &&
           options.query === undefined &&
