@@ -234,7 +234,7 @@ describe("semantic scan comparison", () => {
       model: "comparison-model",
       modelReasoningEffort: "high",
       sandboxMode: "read-only",
-      approvalPolicy: "never",
+      approvalPolicy: "on-request",
       networkAccessEnabled: false,
       webSearchMode: "disabled",
       workingDirectory: "/tmp/comparison",
