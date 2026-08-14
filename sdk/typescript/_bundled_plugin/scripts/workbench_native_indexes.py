@@ -123,6 +123,25 @@ def _indexed_findings(
 ) -> Iterator[dict[str, Any]]:
     parents: dict[tuple[str, str], tuple[str, str]] = {}
     compatible_scan_pairs: dict[tuple[str, str], bool] = {}
+    include_targetless = allowed_scan_ids is not None
+
+    def target_identity(alias: str) -> str:
+        if include_targetless:
+            return f"COALESCE({alias}.target_id, {alias}.target_path)"
+        return f"{alias}.target_id"
+
+    target_join = "LEFT JOIN" if include_targetless else "JOIN"
+    target_path = (
+        "COALESCE(targets.current_path, scans.target_path)"
+        if include_targetless
+        else "targets.current_path"
+    )
+    legacy_matches = (
+        "OR (before_scans.target_id IS NULL AND after_scans.target_id IS NULL "
+        "AND before_scans.target_path = after_scans.target_path)"
+        if include_targetless
+        else ""
+    )
 
     def group(identity: tuple[str, str]) -> tuple[str, str]:
         while identity in parents:
@@ -130,9 +149,9 @@ def _indexed_findings(
         return identity
 
     for match in connection.execute(
-        """
-        SELECT before_scans.target_id AS before_target_id,
-            after_scans.target_id AS after_target_id,
+        f"""
+        SELECT {target_identity("before_scans")} AS before_target_id,
+            {target_identity("after_scans")} AS after_target_id,
             before_scans.id AS before_scan_id, after_scans.id AS after_scan_id,
             before.finding_id AS before_finding_id, after.finding_id AS after_finding_id
         FROM scan_comparison_matches AS matches
@@ -141,6 +160,7 @@ def _indexed_findings(
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
         WHERE before_scans.target_id = after_scans.target_id
+            {legacy_matches}
             OR (? AND before_scans.target_id IS NOT NULL AND after_scans.target_id IS NOT NULL)
         """,
         (allow_cross_target_matches,),
@@ -168,9 +188,9 @@ def _indexed_findings(
             parents[after] = before
 
     latest_scan_by_target = {
-        row["target_id"]: row["id"]
+        row["indexed_target_id"]: row["id"]
         for row in connection.execute(
-            "SELECT target_id, id FROM scans "
+            f"SELECT {target_identity('scans')} AS indexed_target_id, id FROM scans "
             "WHERE status = 'complete' ORDER BY rowid"
         )
         if allowed_scan_ids is None or row["id"] in allowed_scan_ids
@@ -178,7 +198,7 @@ def _indexed_findings(
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in connection.execute(
-        """
+        f"""
         SELECT
             occurrences.id AS occurrence_id,
             occurrences.finding_id,
@@ -188,7 +208,8 @@ def _indexed_findings(
             scans.started_at AS scan_started_at,
             scans.rowid AS scan_sequence,
             scans.target_id,
-            targets.current_path AS target_path,
+            {target_identity("scans")} AS indexed_target_id,
+            {target_path} AS target_path,
             scans.scope,
             MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
             triage.status AS decision_status,
@@ -213,12 +234,13 @@ def _indexed_findings(
             ) AS location_path
         FROM finding_occurrences AS occurrences
         JOIN scans ON scans.id = occurrences.scan_id
-        JOIN security_targets AS targets ON targets.id = scans.target_id
+        {target_join} security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        WHERE targets.id IS NOT NULL OR scans.target_id IS NULL
         """
     ):
         if allowed_scan_ids is None or row["scan_id"] in allowed_scan_ids:
-            grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
+            grouped.setdefault(group((row["indexed_target_id"], row["finding_id"])), []).append(row)
 
     findings = []
     for occurrences in grouped.values():
@@ -247,7 +269,7 @@ def _indexed_findings(
         findings.append(
             {
                 **dict(latest),
-                "confirmed_in_latest_scan": latest_scan_by_target.get(latest["target_id"])
+                "confirmed_in_latest_scan": latest_scan_by_target.get(latest["indexed_target_id"])
                 == latest["scan_id"],
                 "decision_occurrence_id": decision["occurrence_id"] if decision is not None else None,
                 "known_since": scans[0][1],
@@ -443,14 +465,14 @@ def _active_findings(
             COALESCE(targets.id, scans.target_path) AS indexed_target_id
         FROM scans
         LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
-        WHERE scans.status = 'complete' AND scans.seal_manifest_digest IS NOT NULL
+        WHERE scans.status = 'complete'
             {target_filter} {repository_filter} {current_owner_only}
         ORDER BY scans.rowid DESC
         """,
         target_values,
     ):
         completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
-        if allowed_scan_ids is not None:
+        if allowed_scan_ids is not None and scan["seal_manifest_digest"] is not None:
             allowed_scan_ids.add(scan["id"])
 
     coverage_by_scan_id: dict[str, dict[str, Any] | None] = {}
@@ -473,6 +495,7 @@ def _active_findings(
                 occurrences.severity,
                 occurrences.created_at,
                 scans.id AS scan_id,
+                scans.seal_manifest_digest,
                 scans.started_at AS scan_started_at,
                 scans.rowid AS scan_sequence,
                 targets.id AS target_id,
@@ -537,7 +560,7 @@ def _active_findings(
             ),
         }
         if include_resolved:
-            if allowed_scan_ids is not None:
+            if allowed_scan_ids is not None and row["seal_manifest_digest"] is not None:
                 allowed_scan_ids.add(row["scan_id"])
             yield finding
             continue
@@ -545,6 +568,8 @@ def _active_findings(
         for scan in completed_scans:
             if scan["scan_sequence"] <= row["scan_sequence"]:
                 break
+            if scan["seal_manifest_digest"] is None:
+                continue
             if scan["id"] not in coverage_by_scan_id:
                 try:
                     coverage_by_scan_id[scan["id"]] = read_coverage(scan)
@@ -582,7 +607,7 @@ def _active_findings(
                 resolved = True
                 break
         if not resolved:
-            if allowed_scan_ids is not None:
+            if allowed_scan_ids is not None and row["seal_manifest_digest"] is not None:
                 allowed_scan_ids.add(row["scan_id"])
             yield finding
 

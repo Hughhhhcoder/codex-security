@@ -30,6 +30,8 @@ const findingsIndexProbe = [
   "    ('orphan-old', None, '/orphan/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/orphan-old'),",
   "    ('orphan-new', None, '/orphan/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/orphan-new'),",
   "])",
+  "if settings.get('unsealedScans'):",
+  "    connection.execute(\"UPDATE scans SET seal_manifest_digest = NULL WHERE target_id = 'stale-target'\")",
   "if settings.get('inactiveRepresentative'):",
   "    connection.execute(\"INSERT INTO scans VALUES ('current-followup', 'current-target', '/current/repository', 'complete', 'sealed', '2026-03-01', '2026-03-01', '.', '/private/tmp/current-followup')\")",
   "if settings.get('clockRollback'):",
@@ -77,6 +79,13 @@ const findingsIndexProbe = [
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-new-finding', created_at = '2026-03-01' WHERE id = 'current-old-occurrence'\")",
   "if settings.get('repeatedStableFinding'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-new-finding' WHERE id = 'current-old-occurrence'\")",
+  "if settings.get('targetlessHistory'):",
+  "    connection.execute(\"INSERT INTO finding_triage VALUES ('orphan-old-occurrence', 'closed', '2026-01-02', 'false_positive')\")",
+  "    connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('orphan-old-occurrence')\")",
+  "    if settings['targetlessHistory'] == 'stable':",
+  "        connection.execute(\"UPDATE finding_occurrences SET finding_id = 'orphan-old-finding' WHERE id = 'orphan-new-occurrence'\")",
+  "    else:",
+  "        connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('orphan-old-occurrence', 'orphan-new-occurrence')\")",
   "if settings.get('closedBeforeRollback'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-old-finding', created_at = '2025-12-02' WHERE id = 'current-new-occurrence'\")",
   "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', 'already_fixed')\")",
@@ -112,6 +121,13 @@ const findingsIndexProbe = [
   "    connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('current-new-occurrence', 'stale-old-occurrence')\")",
   "    indexes.scan_history.repository_scan_scope = lambda _connection, _repository: (['scans.target_id IN (?, ?)'], ['current-target', 'linked-target'], ['current-target', 'linked-target'], ['/current/repository', '/linked/repository'])",
   "    indexes.scan_history._same_registered_repository = lambda _connection, _before, _after: not settings.get('incompatibleSibling', False)",
+  "if settings.get('unsealedScans'):",
+  "    original_indexed_findings = indexes._indexed_findings",
+  "    def sealed_indexed_findings(connection, allowed_scan_ids=None, **options):",
+  "        if allowed_scan_ids is not None:",
+  "            assert all(connection.execute('SELECT seal_manifest_digest FROM scans WHERE id = ?', (scan_id,)).fetchone()[0] is not None for scan_id in allowed_scan_ids), 'Unsealed scan entered aggregate finding history.'",
+  "        return original_indexed_findings(connection, allowed_scan_ids, **options)",
+  "    indexes._indexed_findings = sealed_indexed_findings",
   "coverage_reads = []",
   "def coverage(scan):",
   "    coverage_reads.append(scan['id'])",
@@ -254,7 +270,9 @@ function runFindingsIndex(
     repeatedStableFinding?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
+    targetlessHistory?: "stable" | "matched";
     triageClockRollback?: boolean;
+    unsealedScans?: boolean;
   } = {},
 ) {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -308,7 +326,9 @@ function probeFindingsIndex(
     repeatedStableFinding?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
+    targetlessHistory?: "stable" | "matched";
     triageClockRollback?: boolean;
+    unsealedScans?: boolean;
   } = {},
 ): {
   findings: Array<{
@@ -891,6 +911,24 @@ describe("workbench findings index", () => {
     expect(result.coverageReads).toEqual(["stale-new"]);
   });
 
+  test.each([false, true])(
+    "recognizes completed legacy scans without aggregating unsealed coverage (include resolved: %s)",
+    (includeResolved) => {
+      const result = probeFindingsIndex("stale-target", {
+        includeResolved,
+        unsealedScans: true,
+      });
+
+      expect(result.findings).toEqual([
+        expect.objectContaining({
+          confirmedInLatestScan: false,
+          occurrenceId: "stale-old-occurrence",
+        }),
+      ]);
+      expect(result.coverageReads).toEqual([]);
+    },
+  );
+
   test.each(["tampered", "sealedArtifact"] as const)(
     "rejects %s sealed scan artifacts",
     (coverageFailure) => {
@@ -922,6 +960,27 @@ describe("workbench findings index", () => {
     ]);
     expect(result.coverageReads).toEqual(["orphan-new"]);
   });
+
+  test.each(["stable", "matched"] as const)(
+    "preserves targetless finding history and triage through %s identifiers",
+    (targetlessHistory) => {
+      const result = probeFindingsIndex(null, {
+        targetlessHistory,
+        targetPath: "/orphan/repository",
+      });
+
+      expect(result.findings).toEqual([
+        expect.objectContaining({
+          knownScanIds: ["orphan-old", "orphan-new"],
+          occurrenceCount: 2,
+          occurrenceId: "orphan-new-occurrence",
+          status: "closed",
+          targetId: null,
+          targetPath: "/orphan/repository",
+        }),
+      ]);
+    },
+  );
 
   test("keeps multi-target repository queries inside the selected checkout", () => {
     const scoped = probeFindingsIndex(null, {
