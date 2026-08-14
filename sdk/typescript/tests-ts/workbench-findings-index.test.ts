@@ -830,6 +830,56 @@ describe("workbench findings index", () => {
     expect(result.findings).toEqual([]);
   });
 
+  test("keeps an active occurrence as the matched finding representative", () => {
+    const result = probeFindingsIndex("current-target", {
+      inactiveRepresentative: true,
+      indexedAliases: true,
+      mixedLegacyOwnership: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        confirmedInLatestScan: false,
+        createdAt: "2026-01-01",
+        findingId: "current-old-finding",
+        knownScanIds: ["current-old", "current-new"],
+        knownSince: "2026-01-01",
+        locationPath: "src/old.py",
+        matchedFindingIds: ["current-new-finding", "current-old-finding"],
+        occurrenceCount: 2,
+        occurrenceId: "current-old-occurrence",
+        scanId: "current-old",
+        severity: { level: "high" },
+        status: "open",
+        summary: "Older issue",
+        title: "Resolved current finding",
+        updatedAt: "2026-02-01",
+      }),
+    ]);
+  });
+
+  test("preserves the active linked-worktree target and aggregate triage", () => {
+    const result = probeFindingsIndex(null, {
+      inactiveRepresentative: true,
+      indexedAliases: true,
+      linkedWorktree: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        confirmedInLatestScan: true,
+        knownScanIds: ["current-old", "current-new"],
+        locationPath: "src/old.py",
+        occurrenceCount: 2,
+        occurrenceId: "current-old-occurrence",
+        scanId: "current-old",
+        status: "closed",
+        targetId: "linked-target",
+        targetPath: "/linked/repository",
+      }),
+    ]);
+  });
+
   test("keeps active findings when a later scan artifact was pruned", () => {
     const result = probeFindingsIndex("stale-target", {
       coverageFailure: "pruned",

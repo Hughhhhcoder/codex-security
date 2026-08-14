@@ -307,10 +307,21 @@ def _indexed_active_findings(
             if occurrence_id in active
         ]
         if matched:
+            representative = max(
+                matched,
+                key=lambda finding: (
+                    finding["scan_sequence"],
+                    finding["created_at"],
+                    finding["occurrence_id"],
+                ),
+            )
             combined.append(
                 {
-                    **matched[0],
                     **row,
+                    **representative,
+                    "status": row["status"],
+                    "updated_at": row["updated_at"],
+                    "occurrence_count": row["occurrence_count"],
                     "active_query_match": any(
                         query in finding["title"].casefold()
                         or query in finding["summary"].casefold()
