@@ -225,7 +225,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             return False
         return stat.S_ISDIR(metadata.st_mode) and not symbolic_metadata(metadata)
 
+    repository_identity = directory_identity(repository)
     gitdir_owners: dict[tuple[int, int], tuple[int, int]] = {}
+    validated_metadata_roots: set[tuple[int, int]] = set()
     validated_object_stores: set[tuple[int, int]] = set()
 
     def has_git_marker(directory: Path) -> bool:
@@ -413,13 +415,14 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             if inspected_common is None:
                 raise InventoryError("Git common directory does not own selected worktree")
             common = inspected_common
-            owner = inspect_metadata_path(
-                common / "worktrees" / gitdir.name,
-                directory_path=True,
-            )
-            if owner is None or not same_filesystem_path(owner, gitdir):
-                raise InventoryError("Git common directory does not own selected worktree")
-            roots.append(common)
+            if not same_filesystem_path(common, gitdir):
+                owner = inspect_metadata_path(
+                    common / "worktrees" / gitdir.name,
+                    directory_path=True,
+                )
+                if owner is None or not same_filesystem_path(owner, gitdir):
+                    raise InventoryError("Git common directory does not own selected worktree")
+                roots.append(common)
 
         def config_value(value: str | None) -> str | None:
             if value is None:
@@ -776,11 +779,93 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 continue
             except OSError as error:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
+        validated_metadata_roots.update(
+            directory_identity(root)
+            for root in roots
+            if directory_identity(root)
+            not in (repository_identity, directory_identity(directory))
+        )
         return True
 
     discovered_roots: dict[tuple[int, int], Path] = {}
     metadata_aliases: set[tuple[str, ...]] = set()
+
+    def validated_metadata_directory(path: Path) -> bool:
+        try:
+            metadata = path.stat(follow_symlinks=False)
+        except OSError:
+            return False
+        identity = metadata.st_dev, metadata.st_ino
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or symbolic_metadata(metadata)
+            or identity == repository_identity
+        ):
+            return False
+        if identity in validated_metadata_roots or identity in validated_object_stores:
+            return True
+
+        def git_shape(directory: Path) -> bool:
+            def member(
+                name: str, *, directory_member: bool = False
+            ) -> tuple[bool, bool]:
+                try:
+                    item = (directory / name).stat(follow_symlinks=False)
+                except OSError:
+                    return False, False
+                if symbolic_metadata(item):
+                    return True, True
+                expected = (
+                    stat.S_ISDIR(item.st_mode)
+                    if directory_member
+                    else stat.S_ISREG(item.st_mode)
+                )
+                return expected, False
+
+            valid_head, symbolic_head = member("HEAD")
+            if not valid_head:
+                return False
+            ordinary = (
+                member("objects", directory_member=True)[0]
+                and member("refs", directory_member=True)[0]
+            )
+            linked = member("gitdir")[0] and member("commondir")[0]
+            if not ordinary and not linked:
+                return False
+            if symbolic_head:
+                return True
+            try:
+                head = (directory / "HEAD").read_bytes()
+            except OSError:
+                return False
+            return (
+                re.fullmatch(
+                    rb"(?:ref: refs/[^\r\n]+|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\r?\n?",
+                    head,
+                )
+                is not None
+            )
+
+        if not git_shape(path):
+            return False
+        try:
+            marker = (path / ".git").stat(follow_symlinks=False)
+        except OSError:
+            return True
+        if symbolic_metadata(marker):
+            raise InventoryError("symbolic Git metadata paths are not supported")
+        if stat.S_ISREG(marker.st_mode):
+            try:
+                return not (path / ".git").read_bytes().startswith(b"gitdir: ")
+            except OSError:
+                return True
+        if stat.S_ISDIR(marker.st_mode):
+            return not git_shape(path / ".git")
+        return True
+
     for ancestor in ancestors:
+        if ancestor != repository and validated_metadata_directory(ancestor):
+            raise InventoryError("--scope: Git metadata paths are not supported")
         reject_symbolic_ignore(ancestor)
         has_git_marker(ancestor)
 
@@ -1242,6 +1327,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if anchored:
                     pattern = pattern.lstrip(b"/")
                 if not anchored and b"/" not in pattern:
+                    # Basename rules can allowlist missing or untracked descendants.
                     return True
                 if ignore_pattern_matches(components, pattern):
                     return True
@@ -1577,6 +1663,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         while pending:
             visibility_groups: dict[tuple[tuple[str, ...], ...], list[Path]] = {}
             for directory in pending:
+                if validated_metadata_directory(directory):
+                    metadata_aliases.add(directory.relative_to(repository).parts)
+                    continue
                 identity = directory_identity(directory)
                 if identity in inspected_directories:
                     continue
@@ -1586,13 +1675,17 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 metadata_aliases.update(
                     entry.relative_to(repository).parts
                     for entry in entries
-                    if entry.name != ".git" and git_metadata_path(directory, entry.name)
+                    if (
+                        entry.name != ".git" and git_metadata_path(directory, entry.name)
+                    )
+                    or validated_metadata_directory(entry)
                 )
                 children = [
                     entry
                     for entry in entries
                     if nonsymbolic_directory(entry)
                     and not git_metadata_path(directory, entry.name)
+                    and not validated_metadata_directory(entry)
                 ]
                 if scope not in (".", "./"):
                     scoped_files[directory] = [
@@ -1948,7 +2041,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     try:
                         with os.scandir(parent) as entries:
                             for entry in entries:
-                                if not git_metadata_path(parent, entry.name):
+                                if not git_metadata_path(
+                                    parent, entry.name
+                                ) and not validated_metadata_directory(parent / entry.name):
                                     grouped.setdefault(indexed_name_key(entry.name), []).append(
                                         parent / entry.name
                                     )
@@ -2114,7 +2209,30 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     rows.add(relative_path + b"\n")
                     recorded.add(key)
 
-    rows = sorted(rows)
+    metadata_inventory_directories: dict[Path, bool] = {}
+
+    def metadata_inventory_row(row: bytes) -> bool:
+        relative = Path(os.fsdecode(row.removesuffix(b"\n")))
+        if any(relative.parts[: len(alias)] == alias for alias in metadata_aliases):
+            return True
+        current = (repository / relative).parent
+        inspected: list[Path] = []
+        while current != repository:
+            if current in metadata_inventory_directories:
+                excluded = metadata_inventory_directories[current]
+                break
+            inspected.append(current)
+            if validated_metadata_directory(current):
+                excluded = True
+                break
+            current = current.parent
+        else:
+            excluded = False
+        for directory in inspected:
+            metadata_inventory_directories[directory] = excluded
+        return excluded
+
+    rows = sorted(row for row in rows if not metadata_inventory_row(row))
 
     return write_inventory(output, rows)
 
