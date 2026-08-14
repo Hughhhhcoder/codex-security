@@ -939,27 +939,76 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 prefix.append(character)
             if prefix and not actual.startswith(bytes(prefix)):
                 return False
-            if (
-                b"[:" in pattern
-                or b"[^" in pattern
-                or b"[!" in pattern
-                or (b"[" in pattern and b"-" in pattern)
-            ):
-                return True
+            single_class = re.fullmatch(
+                rb"([^*?{\[\\/]*)(\[(?:[!^])?[^\]/]+\])", pattern
+            )
+            if single_class is not None and len(actual) != len(single_class.group(1)) + 1:
+                return False
+
+            classes: list[tuple[int, tuple[int, ...]]] = []
+            brace_ends: dict[int, int] = {}
+            braces: list[int] = []
+            index = 0
+            while index < len(pattern):
+                character = pattern[index]
+                if character == ord("\\"):
+                    index += 2
+                    continue
+                if character == ord("{"):
+                    braces.append(index)
+                    index += 1
+                    continue
+                if character == ord("}") and braces:
+                    brace_ends[braces.pop()] = index
+                    index += 1
+                    continue
+                if character != ord("["):
+                    index += 1
+                    continue
+                index += 1
+                if index < len(pattern) and pattern[index] in (ord("!"), ord("^")):
+                    index += 1
+                if index < len(pattern) and pattern[index] == ord("]"):
+                    index += 1
+                while index < len(pattern) and pattern[index] != ord("]"):
+                    index += 1
+                if index == len(pattern):
+                    return True
+                index += 1
+                classes.append((index, tuple(braces)))
+
+            globs = [b"/" + pattern + b"/**"]
+            for end, openings in classes:
+                position = end
+                pending = list(openings)
+                while position < len(pattern):
+                    character = pattern[position]
+                    if character == ord("}") and pending:
+                        pending.pop()
+                        position += 1
+                    elif character == ord(",") and pending:
+                        closing = brace_ends.get(pending.pop())
+                        if closing is None:
+                            return True
+                        position = closing + 1
+                    else:
+                        if character != ord("/"):
+                            globs.append(
+                                b"/" + pattern[:end] + b"}" * len(openings) + b"*"
+                            )
+                        break
             try:
                 with tempfile.TemporaryDirectory() as temporary_directory:
                     probe = Path(temporary_directory)
                     component = probe / os.fsdecode(actual)
                     component.mkdir()
                     (component / "source").touch()
+                    arguments = [*command]
+                    for glob in globs:
+                        arguments.extend(["--glob", os.fsdecode(glob)])
+                    arguments.extend(["--", "."])
                     result = subprocess.run(
-                        [
-                            *command,
-                            "--glob",
-                            os.fsdecode(b"/" + pattern + b"/**"),
-                            "--",
-                            ".",
-                        ],
+                        arguments,
                         cwd=probe,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.PIPE,
@@ -996,19 +1045,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                             first_class_character = False
                             for end in range(index + 1, len(remaining)):
                                 current = remaining[end]
-                                if escaped:
-                                    escaped = False
-                                elif current == ord("\\"):
-                                    escaped = True
-                                elif current == ord("["):
-                                    character_class = True
-                                    first_class_character = True
-                                elif current == ord("]") and character_class:
-                                    if first_class_character:
-                                        first_class_character = False
-                                    else:
-                                        character_class = False
-                                elif character_class:
+                                if character_class:
+                                    if current == ord("]"):
+                                        if first_class_character:
+                                            first_class_character = False
+                                        else:
+                                            character_class = False
+                                        continue
                                     if current == ord("/"):
                                         return True
                                     if first_class_character and current in (
@@ -1017,6 +1060,13 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                     ):
                                         continue
                                     first_class_character = False
+                                elif escaped:
+                                    escaped = False
+                                elif current == ord("\\"):
+                                    escaped = True
+                                elif current == ord("["):
+                                    character_class = True
+                                    first_class_character = True
                                 elif current == ord("/"):
                                     return True
                                 elif current == ord("{"):
@@ -1068,24 +1118,25 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 character_class = False
                 first_class_character = False
                 for index, character in enumerate(candidate):
-                    if escaped:
+                    if character_class:
+                        if character == ord("]"):
+                            if first_class_character:
+                                first_class_character = False
+                            else:
+                                character_class = False
+                            continue
+                        if character == ord("/"):
+                            return True
+                        if first_class_character and character in (ord("!"), ord("^")):
+                            continue
+                        first_class_character = False
+                    elif escaped:
                         escaped = False
                     elif character == ord("\\"):
                         escaped = True
                     elif character == ord("["):
                         character_class = True
                         first_class_character = True
-                    elif character == ord("]") and character_class:
-                        if first_class_character:
-                            first_class_character = False
-                        else:
-                            character_class = False
-                    elif character_class:
-                        if character == ord("/"):
-                            return True
-                        if first_class_character and character in (ord("!"), ord("^")):
-                            continue
-                        first_class_character = False
                     elif character == ord("{"):
                         braces.append((index, [], False))
                     elif character == ord(",") and braces:
@@ -1175,7 +1226,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 line = line.rstrip(b"\r")
                 if not line.startswith(b"!"):
                     continue
-                raw_pattern = line[1:].rstrip(b" \t")
+                raw_pattern = line[1:]
+                if not raw_pattern.endswith(b"\\ "):
+                    raw_pattern = raw_pattern.rstrip(b" \t")
                 anchored = raw_pattern.startswith(b"/")
                 pattern = re.sub(
                     rb"(\\+)/",
