@@ -1396,6 +1396,38 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             scope_is_allowlisted(ignore) for ignore in ignore_files
         )
 
+        recursive_scope_matches: dict[tuple[str, bytes], bool] = {}
+
+        def recursive_ignore_matches(scope: str, pattern: bytes) -> bool:
+            pattern = pattern.lstrip(b"/")
+            key = scope, pattern
+            if key in recursive_scope_matches:
+                return recursive_scope_matches[key]
+            try:
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    probe = Path(temporary_directory)
+                    scoped = probe / scope
+                    scoped.mkdir(parents=True)
+                    (scoped / "source").touch()
+                    result = subprocess.run(
+                        [
+                            *command,
+                            "--glob",
+                            os.fsdecode(b"/" + pattern + b"/**"),
+                            "--",
+                            ".",
+                        ],
+                        cwd=probe,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+            except (OSError, ValueError):
+                return False
+            matched = result.returncode == 0 and not result.stderr
+            recursive_scope_matches[key] = matched
+            return matched
+
         batches: list[tuple[dict[str, str], set[bytes]]] = []
 
         for relative in requested:
@@ -1542,13 +1574,21 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                         ),
                                         original,
                                     )
-                                    if not any(
-                                        fnmatch.fnmatchcase(scope, pattern)
-                                        or fnmatch.fnmatchcase(
-                                            scope, pattern.removeprefix("**/")
+                                    if not (
+                                        any(
+                                            fnmatch.fnmatchcase(scope, pattern)
+                                            or fnmatch.fnmatchcase(
+                                                scope, pattern.removeprefix("**/")
+                                            )
+                                            or pattern == admitted
+                                            for pattern in (original, decoded)
                                         )
-                                        or pattern == admitted
-                                        for pattern in (original, decoded)
+                                        or (
+                                            b"{" in match.group(2)
+                                            and recursive_ignore_matches(
+                                                scope, match.group(2)
+                                            )
+                                        )
                                     ):
                                         return match.group(0)
                                     return (match.group(1) or b"") + match.group(2) + b"/"
