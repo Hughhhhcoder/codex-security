@@ -1,4 +1,12 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
@@ -234,7 +242,7 @@ describe("semantic scan comparison", () => {
       model: "comparison-model",
       modelReasoningEffort: "high",
       sandboxMode: "read-only",
-      approvalPolicy: "on-request",
+      approvalPolicy: "never",
       networkAccessEnabled: false,
       webSearchMode: "disabled",
       workingDirectory: "/tmp/comparison",
@@ -253,6 +261,78 @@ describe("semantic scan comparison", () => {
     expect(calls.prompt).toContain("every earlier occurrence in one group");
     expect(calls.prompt).toContain("untrusted data");
     expect(calls.prompt).toContain(JSON.stringify(input));
+  });
+
+  test("keeps approvals disabled when Codex inherits a configured MCP server", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    temporaryDirectories.push(root);
+    const codexHome = join(root, "codex-home");
+    const marker = join(root, "mcp-started");
+    const server = join(root, "synthetic-mcp.mjs");
+    await mkdir(codexHome);
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    await writeFile(
+      server,
+      [
+        'import { writeFileSync } from "node:fs";',
+        'writeFileSync(process.argv[2], "started");',
+        "process.stdin.resume();",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(codexHome, "config.toml"),
+      [
+        "[mcp_servers.synthetic]",
+        `command = ${JSON.stringify(node)}`,
+        `args = [${JSON.stringify(server)}, ${JSON.stringify(marker)}]`,
+      ].join("\n"),
+    );
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      CODEX_HOME: codexHome,
+    };
+    delete environment["OPENAI_API_KEY"];
+    delete environment["CODEX_API_KEY"];
+    const result = Bun.spawnSync(
+      [
+        node!,
+        join(
+          import.meta.dir,
+          "..",
+          "node_modules",
+          "@openai",
+          "codex",
+          "bin",
+          "codex.js",
+        ),
+        "--config",
+        "features.apps=false",
+        "--config",
+        "features.plugins=false",
+        "--config",
+        "features.shell_tool=false",
+        "--config",
+        "features.unified_exec=false",
+        "--config",
+        'approval_policy="never"',
+        "debug",
+        "prompt-input",
+        "synthetic comparison",
+      ],
+      { env: environment, stdout: "ignore", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(await readFile(marker, "utf8")).toBe("started");
+
+    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    await matchScanFindings({ before: [], after: [] }, { codex, environment });
+    expect(calls.threadOptions).toMatchObject({
+      approvalPolicy: "never",
+      sandboxMode: "read-only",
+      networkAccessEnabled: false,
+      webSearchMode: "disabled",
+    });
   });
 
   test("matches open and dismissed findings from the same target", async () => {

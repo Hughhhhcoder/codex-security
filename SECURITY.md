@@ -105,10 +105,10 @@ A security issue must cross a boundary the product actually provides:
 ### Finding comparison
 
 Scans can start a separate model session to compare historical findings. This
-session uses automatically reviewed approvals with a `read-only` sandbox and
-disabled network access and web search. Shell, application, plugin, and
-multi-agent tools are disabled; the scan's main-session approval policy remains
-unchanged.
+session uses a `read-only` sandbox, never approves execution requests, and
+disables network access and web search. Shell, application, plugin, and
+multi-agent features are disabled; the scan's main-session approval policy
+remains unchanged.
 
 ## In-scope reports
 

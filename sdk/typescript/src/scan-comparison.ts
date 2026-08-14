@@ -105,7 +105,6 @@ export async function matchScanFindingsInternal(
         options.signal,
       ),
       config: {
-        approvals_reviewer: "auto_review",
         allow_login_shell: false,
         responses_api_metadata: {
           codex_security_surface: runtimeOptions.surface,
@@ -130,7 +129,7 @@ export async function matchScanFindingsInternal(
     ...(options.model === undefined ? {} : { model: options.model }),
     modelReasoningEffort: options.reasoningEffort ?? "medium",
     sandboxMode: "read-only",
-    approvalPolicy: "on-request",
+    approvalPolicy: "never",
     networkAccessEnabled: false,
     webSearchMode: "disabled",
     workingDirectory: options.workingDirectory ?? process.cwd(),
