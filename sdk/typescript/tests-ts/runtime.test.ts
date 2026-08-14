@@ -739,6 +739,37 @@ describe("plugin runtime preparation", () => {
           ],
         },
       });
+
+      const listed = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "list-scans",
+          "--repository",
+          longRepository,
+          "--scan-root",
+          longDeepScanRoot,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(listed.status, listed.stderr).toBe(0);
+      expect(JSON.parse(listed.stdout)).toMatchObject({
+        scans: [
+          {
+            scanDir: deepScan.scanDir,
+            scanId: deepScan.scanId,
+            targetPath: longRepository,
+          },
+        ],
+      });
     }
   });
 

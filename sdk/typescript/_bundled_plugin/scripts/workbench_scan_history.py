@@ -16,6 +16,7 @@ from report_projection import SEVERITY_ORDER
 from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output
+from windows_paths import filesystem_path, portable_path
 
 
 def _same_repository(
@@ -26,8 +27,8 @@ def _same_repository(
 ) -> bool:
     if before["target_id"] == after["target_id"]:
         return True
-    before_target = Path(before["target_path"])
-    after_target = Path(after["target_path"])
+    before_target = filesystem_path(Path(before["target_path"]))
+    after_target = filesystem_path(Path(after["target_path"]))
     before_git_dir = git_output(
         before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
@@ -39,7 +40,8 @@ def _same_repository(
     if (
         before_git_dir is not None
         and after_git_dir is not None
-        and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
+        and filesystem_path(Path(before_git_dir)).resolve()
+        == filesystem_path(Path(after_git_dir)).resolve()
     ):
         return True
     before_origin = _repository_origin(before_target)
@@ -81,13 +83,14 @@ def list_scans(
     clauses: list[str] = []
     values: list[Any] = []
     if args is not None and args.repository:
-        repository = Path(args.repository).expanduser().resolve()
+        repository = filesystem_path(Path(args.repository).expanduser()).resolve()
+        repository_path = str(portable_path(repository))
         requested_repository = connection.execute(
             """
             SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
                 ? AS target_path
             """,
-            (str(repository), str(repository)),
+            (repository_path, repository_path),
         ).fetchone()
         requested_identity = (
             git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
@@ -101,14 +104,16 @@ def list_scans(
             if _same_repository(target, requested_repository, after_identity=requested_identity)
         ]
         repository_clauses = ["scans.target_path = ?"]
-        values.append(str(repository))
+        values.append(repository_path)
         if related_target_ids:
             placeholders = ", ".join("?" for _ in related_target_ids)
             repository_clauses.append(f"scans.target_id IN ({placeholders})")
             values.extend(related_target_ids)
         clauses.append(f"({' OR '.join(repository_clauses)})")
     if args is not None and args.scan_root:
-        scan_root = str(Path(args.scan_root).expanduser().resolve())
+        scan_root = str(
+            portable_path(filesystem_path(Path(args.scan_root).expanduser()).resolve())
+        )
         prefix = scan_root.rstrip(os.sep) + os.sep
         clauses.append("(scans.scan_dir = ? OR substr(scans.scan_dir, 1, ?) = ?)")
         values.extend((scan_root, len(prefix), prefix))
@@ -226,20 +231,22 @@ def list_unmatched_scan_pairs(
     backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    repository = Path(args.repository).expanduser().resolve()
+    repository = filesystem_path(Path(args.repository).expanduser()).resolve()
+    repository_path = str(portable_path(repository))
     requested = connection.execute(
         """
         SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
             ? AS target_path
         """,
-        (str(repository), str(repository)),
+        (repository_path, repository_path),
     ).fetchone()
     selected = [
         scan
         for scan in connection.execute(
             "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
         )
-        if Path(scan["target_path"]).resolve() == repository or _same_repository(scan, requested)
+        if filesystem_path(Path(scan["target_path"])).resolve() == repository
+        or _same_repository(scan, requested)
     ]
 
     available = []
@@ -288,7 +295,7 @@ def list_unmatched_scan_pairs(
         )
     return {
         "batches": batches,
-        "repository": str(repository),
+        "repository": repository_path,
         "scanCount": len(selected),
         "skippedPairs": skipped,
         "unavailableScans": len(selected) - len(available),
