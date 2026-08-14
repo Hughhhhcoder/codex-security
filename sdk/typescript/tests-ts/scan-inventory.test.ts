@@ -2302,6 +2302,77 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.each(["comment", "quoted comment", "worktree config", "case alias"])(
+    "proves ignored Git metadata ownership from %s configuration",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const metadata = join(checkout, ".metadata");
+      const owner = join(checkout, "ignored", "nested");
+      execFileSync(
+        "git",
+        ["init", "-q", "--separate-git-dir", metadata, owner],
+        { cwd: checkout },
+      );
+      execFileSync("git", ["-C", owner, "config", "core.worktree", owner]);
+      const config = join(metadata, "config");
+      if (kind === "worktree config") {
+        execFileSync("git", [
+          "-C",
+          owner,
+          "config",
+          "extensions.worktreeConfig",
+          "true",
+        ]);
+        execFileSync("git", [
+          "-C",
+          owner,
+          "config",
+          "--unset",
+          "core.worktree",
+        ]);
+        await writeFile(
+          join(metadata, "config.worktree"),
+          `[core]\n\tworktree = ${JSON.stringify(owner)}\n`,
+        );
+      } else {
+        const configured = kind === "case alias" ? owner.toUpperCase() : owner;
+        if (kind === "case alias") {
+          const equivalent = await realpath(configured).then(
+            async (resolved) => resolved === (await realpath(owner)),
+            () => false,
+          );
+          if (!equivalent) return;
+        }
+        const value =
+          kind === "quoted comment"
+            ? `${JSON.stringify(configured)} # valid comment`
+            : `${configured}${kind === "comment" ? " # valid comment" : ""}`;
+        await writeFile(
+          config,
+          (await readFile(config, "utf8")).replace(
+            /^([ \t]*worktree[ \t]*=).*$/m,
+            `$1 ${value}`,
+          ),
+        );
+      }
+      await Promise.all([
+        writeFile(join(checkout, ".gitignore"), "ignored/\n"),
+        writeFile(join(checkout, "visible.ts"), "visible\n"),
+        writeFile(join(metadata, "private.ts"), "private\n"),
+      ]);
+
+      expect(await inventory(checkout)).toEqual([
+        "./.gitignore",
+        "./visible.ts",
+      ]);
+      await expect(inventory(checkout, ".metadata/private.ts")).rejects.toThrow(
+        "--scope: Git metadata paths are not supported",
+      );
+    },
+  );
+
   test.skipIf(process.platform === "win32").each(["HEAD", "objects", "refs"])(
     "excludes internal Git metadata with a symbolic %s",
     async (member) => {
@@ -2391,6 +2462,55 @@ describe("security scan file inventory", () => {
       ".metadata/refs/source.ts",
     ]);
   });
+
+  test.each(["objects", "linked", "forged owner"])(
+    "includes tracked source with an unowned %s Git directory shape",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const source = join(checkout, "application");
+      await mkdir(source);
+      await writeFile(join(source, "HEAD"), "ref: refs/heads/main\n");
+      if (kind === "linked") {
+        await Promise.all([
+          writeFile(join(source, "gitdir"), "not-an-owner\n"),
+          writeFile(join(source, "commondir"), ".\n"),
+        ]);
+      } else {
+        await mkdir(join(source, "objects"));
+        await mkdir(join(source, "refs"));
+        await Promise.all([
+          writeFile(join(source, "objects", "tracked.txt"), "source\n"),
+          writeFile(join(source, "refs", "tracked.txt"), "source\n"),
+        ]);
+      }
+      if (kind === "forged owner") {
+        await writeFile(
+          join(source, "config"),
+          `[core]\n\tworktree = ${checkout}\n`,
+        );
+      }
+      await Promise.all([
+        writeFile(join(source, "vulnerable.py"), "unsafe = True\n"),
+        writeFile(join(checkout, "visible.ts"), "visible\n"),
+      ]);
+      execFileSync("git", ["add", "--force", "application", "visible.ts"], {
+        cwd: checkout,
+      });
+      commit(checkout);
+      const cloned = await repository(false);
+      execFileSync("git", ["clone", "-q", "--no-local", checkout, cloned]);
+
+      expect(await inventory(cloned)).toContain("./application/vulnerable.py");
+      expect(await inventory(cloned, "application")).toContain(
+        "application/vulnerable.py",
+      );
+      expect(await inventory(cloned, "application/vulnerable.py")).toEqual([
+        "application/vulnerable.py",
+      ]);
+    },
+  );
 
   test("preserves a nested checkout that is its own Git directory", async () => {
     if (Bun.which("rg") === null) return;

@@ -230,6 +230,81 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     validated_metadata_roots: set[tuple[int, int]] = set()
     validated_object_stores: set[tuple[int, int]] = set()
 
+    def config_value(value: str | None) -> str | None:
+        if value is None:
+            return None
+        quoted = False
+        escaped = False
+        for index, character in enumerate(value):
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = not quoted
+            elif character in "#;" and not quoted:
+                return value[:index].rstrip(" \t\r")
+        return value.rstrip(" \t\r")
+
+    def join_config_lines(contents: bytes) -> bytes:
+        joined = bytearray()
+        quoted = False
+        comment = False
+        escaped = False
+        position = 0
+        while position < len(contents):
+            character = contents[position]
+            if character == ord("\n"):
+                quoted = False
+                comment = False
+                escaped = False
+            elif not comment and not escaped and character == ord("\\"):
+                if contents[position + 1 : position + 2] == b"\n":
+                    position += 2
+                    continue
+                if contents[position + 1 : position + 3] == b"\r\n":
+                    position += 3
+                    continue
+                escaped = True
+            elif escaped:
+                escaped = False
+            elif not comment and character == ord('"'):
+                quoted = not quoted
+            elif not quoted and character in (ord("#"), ord(";")):
+                comment = True
+            joined.append(character)
+            position += 1
+        return bytes(joined)
+
+    def decode_config_value(value: str) -> tuple[bytes, bytes]:
+        decoded = bytearray()
+        normalized = bytearray()
+        quoted = False
+        escaped = False
+        replacements = {ord("n"): ord("\n"), ord("t"): ord("\t"), ord("b"): ord("\b")}
+        for character in os.fsencode(value):
+            if escaped:
+                if character not in (*replacements, ord('"'), ord("\\")):
+                    raise InventoryError("invalid Git worktree path")
+                replacement = replacements.get(character, character)
+                decoded.append(replacement)
+                normalized.append(replacement)
+                escaped = False
+            elif character == ord("\\"):
+                escaped = True
+            elif character == ord('"'):
+                quoted = not quoted
+            else:
+                decoded.append(character)
+                normalized.append(
+                    ord(" ")
+                    if character in (ord("\t"), ord("\r")) and not quoted
+                    else character
+                )
+        if quoted or escaped:
+            raise InventoryError("invalid Git worktree path")
+        return bytes(decoded), bytes(normalized)
+
     def has_git_marker(directory: Path) -> bool:
         marker = directory / ".git"
 
@@ -423,81 +498,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 if owner is None or not same_filesystem_path(owner, gitdir):
                     raise InventoryError("Git common directory does not own selected worktree")
                 roots.append(common)
-
-        def config_value(value: str | None) -> str | None:
-            if value is None:
-                return None
-            quoted = False
-            escaped = False
-            for index, character in enumerate(value):
-                if escaped:
-                    escaped = False
-                elif character == "\\":
-                    escaped = True
-                elif character == '"':
-                    quoted = not quoted
-                elif character in "#;" and not quoted:
-                    return value[:index].rstrip(" \t\r")
-            return value.rstrip(" \t\r")
-
-        def join_config_lines(contents: bytes) -> bytes:
-            joined = bytearray()
-            quoted = False
-            comment = False
-            escaped = False
-            position = 0
-            while position < len(contents):
-                character = contents[position]
-                if character == ord("\n"):
-                    quoted = False
-                    comment = False
-                    escaped = False
-                elif not comment and not escaped and character == ord("\\"):
-                    if contents[position + 1 : position + 2] == b"\n":
-                        position += 2
-                        continue
-                    if contents[position + 1 : position + 3] == b"\r\n":
-                        position += 3
-                        continue
-                    escaped = True
-                elif escaped:
-                    escaped = False
-                elif not comment and character == ord('"'):
-                    quoted = not quoted
-                elif not quoted and character in (ord("#"), ord(";")):
-                    comment = True
-                joined.append(character)
-                position += 1
-            return bytes(joined)
-
-        def decode_config_value(value: str) -> tuple[bytes, bytes]:
-            decoded = bytearray()
-            normalized = bytearray()
-            quoted = False
-            escaped = False
-            replacements = {ord("n"): ord("\n"), ord("t"): ord("\t"), ord("b"): ord("\b")}
-            for character in os.fsencode(value):
-                if escaped:
-                    if character not in (*replacements, ord('"'), ord("\\")):
-                        raise InventoryError("invalid Git worktree path")
-                    replacement = replacements.get(character, character)
-                    decoded.append(replacement)
-                    normalized.append(replacement)
-                    escaped = False
-                elif character == ord("\\"):
-                    escaped = True
-                elif character == ord('"'):
-                    quoted = not quoted
-                else:
-                    decoded.append(character)
-                    normalized.append(
-                        ord(" ")
-                        if character in (ord("\t"), ord("\r")) and not quoted
-                        else character
-                    )
-            if quoted or escaped:
-                raise InventoryError("invalid Git worktree path")
-            return bytes(decoded), bytes(normalized)
 
         def config_enabled(value: str | None) -> bool:
             if value is None:
@@ -789,6 +789,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
     discovered_roots: dict[tuple[int, int], Path] = {}
     metadata_aliases: set[tuple[str, ...]] = set()
+    unowned_metadata_candidates: set[tuple[int, int]] = set()
 
     def validated_metadata_directory(path: Path) -> bool:
         try:
@@ -804,64 +805,122 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             return False
         if identity in validated_metadata_roots or identity in validated_object_stores:
             return True
-
-        def git_shape(directory: Path) -> bool:
-            def member(
-                name: str, *, directory_member: bool = False
-            ) -> tuple[bool, bool]:
-                try:
-                    item = (directory / name).stat(follow_symlinks=False)
-                except OSError:
-                    return False, False
-                if symbolic_metadata(item):
-                    return True, True
-                expected = (
-                    stat.S_ISDIR(item.st_mode)
-                    if directory_member
-                    else stat.S_ISREG(item.st_mode)
-                )
-                return expected, False
-
-            valid_head, symbolic_head = member("HEAD")
-            if not valid_head:
-                return False
-            ordinary = (
-                member("objects", directory_member=True)[0]
-                and member("refs", directory_member=True)[0]
-            )
-            linked = member("gitdir")[0] and member("commondir")[0]
-            if not ordinary and not linked:
-                return False
-            if symbolic_head:
-                return True
-            try:
-                head = (directory / "HEAD").read_bytes()
-            except OSError:
-                return False
-            return (
-                re.fullmatch(
-                    rb"(?:ref: refs/[^\r\n]+|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\r?\n?",
-                    head,
-                )
-                is not None
-            )
-
-        if not git_shape(path):
+        if identity in unowned_metadata_candidates:
             return False
         try:
-            marker = (path / ".git").stat(follow_symlinks=False)
+            head = (path / "HEAD").stat(follow_symlinks=False)
         except OSError:
-            return True
-        if symbolic_metadata(marker):
-            raise InventoryError("symbolic Git metadata paths are not supported")
-        if stat.S_ISREG(marker.st_mode):
+            return False
+        if not stat.S_ISREG(head.st_mode) and not symbolic_metadata(head):
+            return False
+
+        def regular_member(name: str) -> bytes | None:
+            member = path / name
             try:
-                return not (path / ".git").read_bytes().startswith(b"gitdir: ")
+                details = member.stat(follow_symlinks=False)
+                if not stat.S_ISREG(details.st_mode) or symbolic_metadata(details):
+                    return None
+                return member.read_bytes()
             except OSError:
+                return None
+
+        def repository_directory(value: bytes, base: Path) -> Path | None:
+            try:
+                candidate = Path(os.fsdecode(value))
+                if not candidate.is_absolute():
+                    candidate = base / candidate
+                if len(candidate.parts) < len(repository.parts) or any(
+                    filesystem_name_key(actual) != filesystem_name_key(expected)
+                    for actual, expected in zip(candidate.parts, repository.parts)
+                ):
+                    return None
+                components = candidate.parts[len(repository.parts) :]
+            except (OSError, UnicodeError, ValueError):
+                return None
+            current = repository
+            for component in components:
+                if component == ".":
+                    continue
+                if component == "..":
+                    if current == repository:
+                        return None
+                    current = current.parent
+                    continue
+                current /= component
+                try:
+                    details = current.stat(follow_symlinks=False)
+                except OSError:
+                    return None
+                if not stat.S_ISDIR(details.st_mode) or symbolic_metadata(details):
+                    return None
+            return current
+
+        owners: list[Path] = []
+        backpointer = regular_member("gitdir")
+        if backpointer is not None:
+            try:
+                marker = Path(os.fsdecode(backpointer.rstrip(b"\r\n")))
+                if not marker.is_absolute():
+                    marker = path / marker
+                if marker.name == ".git":
+                    owner = repository_directory(os.fsencode(marker.parent), repository)
+                    if owner is not None:
+                        owners.append(owner)
+            except (OSError, UnicodeError, ValueError):
+                pass
+
+        for config in (regular_member("config"), regular_member("config.worktree")):
+            if config is None:
+                continue
+            section = False
+            configured = None
+            contents = join_config_lines(config.removeprefix(codecs.BOM_UTF8))
+            for raw in contents.split(b"\n"):
+                line = raw.lstrip(b" \t\r").rstrip(b"\r")
+                if line.startswith(b"["):
+                    header = re.match(rb"\[[ \t]*core[ \t]*\]", line, re.IGNORECASE)
+                    section = header is not None
+                    line = line[header.end() :].lstrip(b" \t\r") if header else b""
+                if not section:
+                    continue
+                assignment = re.match(
+                    rb"worktree[ \t]*=[ \t\r]*(.*)", line, re.IGNORECASE
+                )
+                if assignment is not None:
+                    configured = assignment.group(1).strip(b" \t\r")
+            if configured:
+                try:
+                    value = config_value(os.fsdecode(configured))
+                    if value is None:
+                        continue
+                    decoded, _normalized = decode_config_value(value)
+                except (InventoryError, OSError, UnicodeError, ValueError):
+                    continue
+                owner = repository_directory(decoded, path)
+                if owner is not None:
+                    owners.append(owner)
+
+        for owner in owners:
+            if directory_identity(owner) == identity:
+                continue
+            marker = owner / ".git"
+            try:
+                details = marker.stat(follow_symlinks=False)
+                if not stat.S_ISREG(details.st_mode) or symbolic_metadata(details):
+                    continue
+                contents = marker.read_bytes()
+            except OSError:
+                continue
+            if not contents.startswith(b"gitdir: "):
+                continue
+            target = repository_directory(
+                contents.removeprefix(b"gitdir: ").rstrip(b"\r\n"), owner
+            )
+            if target is not None and same_filesystem_path(target, path):
+                validated_metadata_roots.add(identity)
                 return True
-        if stat.S_ISDIR(marker.st_mode):
-            return not git_shape(path / ".git")
-        return True
+        unowned_metadata_candidates.add(identity)
+        return False
 
     for ancestor in ancestors:
         if ancestor != repository and validated_metadata_directory(ancestor):
