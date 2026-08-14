@@ -560,6 +560,31 @@ describe("plugin runtime preparation", () => {
         `state-${"0".repeat(100)}`,
       );
       expect(stateDirectory.length).toBeGreaterThan(260);
+      await mkdir(stateDirectory, { recursive: true });
+      const longRolloutPath = join(stateDirectory, "rollout.jsonl");
+      await writeFile(longRolloutPath, '{"type":"synthetic"}\n');
+      const rolloutProbe = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "module = runpy.run_path(sys.argv[1])",
+            "path = module['_rollout_path'](sys.argv[2])",
+            "print(json.dumps({'available': path is not None, 'contents': None if path is None else path.read_text(encoding='utf-8')}))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "workbench_scan_usage.py"),
+          longRolloutPath,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(rolloutProbe.status, rolloutProbe.stderr).toBe(0);
+      expect(JSON.parse(rolloutProbe.stdout)).toEqual({
+        available: true,
+        contents: '{"type":"synthetic"}\n',
+      });
       const scanRoot = join(root, "long-path-scans");
       const workbench = join(PLUGIN_ROOT, "scripts", "workbench_db.py");
       const mixedStarted = spawnSync(
