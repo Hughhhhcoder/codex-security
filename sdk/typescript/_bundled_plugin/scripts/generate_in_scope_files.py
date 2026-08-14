@@ -1099,13 +1099,23 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 scope = "/".join(parts[: index + 1])
 
                                 def reopen_recursive(match: re.Match[bytes]) -> bytes:
-                                    pattern = os.fsdecode(match.group(2)).lstrip("/")
-                                    if not (
+                                    original = os.fsdecode(match.group(2)).lstrip("/")
+                                    decoded = re.sub(
+                                        r"\\(.)",
+                                        lambda escaped: (
+                                            f"[{escaped.group(1)}]"
+                                            if escaped.group(1) in "*?["
+                                            else escaped.group(1)
+                                        ),
+                                        original,
+                                    )
+                                    if not any(
                                         fnmatch.fnmatchcase(scope, pattern)
                                         or fnmatch.fnmatchcase(
                                             scope, pattern.removeprefix("**/")
                                         )
                                         or pattern == admitted
+                                        for pattern in (original, decoded)
                                     ):
                                         return match.group(0)
                                     return (match.group(1) or b"") + match.group(2) + b"/"

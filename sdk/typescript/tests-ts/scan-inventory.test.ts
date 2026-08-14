@@ -1204,20 +1204,39 @@ describe("security scan file inventory", () => {
     },
   );
 
-  test.each(["ignored-v2", "ignored.v2", "ignored checkout", ".IGNORE"])(
-    "reopens an explicitly selected checkout named %s",
-    async (name) => {
+  test.each([
+    ["ignored-v2", ".rgignore", "ignored-v2"],
+    ["ignored.v2", ".rgignore", "ignored.v2"],
+    ["ignored checkout", ".rgignore", "ignored checkout"],
+    [".IGNORE", ".rgignore", ".IGNORE"],
+    ["!ignored", ".gitignore", "\\!ignored"],
+    ["!ignored", ".ignore", "\\!ignored"],
+    ["!ignored", ".rgignore", "\\!ignored"],
+    ["!ignored", ".ignore", "/\\!ignored"],
+    ["!ignored", ".rgignore", "\\!ign*"],
+    ["!ignored", ".rgignore", "**/\\!ignored"],
+    ["group/!ignored", ".rgignore", "group/\\!ignored"],
+    ["group/!ignored", ".rgignore", "/group/\\!ignored"],
+    ["!group/!ignored", ".rgignore", "\\!group/\\!ignored"],
+    ["!ignored[scope", ".rgignore", "\\!ign*\\[scope"],
+    ["!ignored checkout", ".rgignore", "\\!ignored\\ checkout"],
+    ["#ignored", ".gitignore", "\\#ignored"],
+    ["#ignored", ".ignore", "\\#ignored"],
+    ["#ignored", ".rgignore", "\\#ignored"],
+    ["#ignored", ".rgignore", "\\#ign*"],
+    ["#ignored", ".rgignore", "**/\\#ignored"],
+    ["#ignored checkout", ".rgignore", "\\#ignored\\ checkout"],
+  ])(
+    "reopens an explicitly selected checkout named %s through %s",
+    async (name, ignore, rule) => {
       if (Bun.which("rg") === null) return;
 
       const checkout = await repository(false);
       const nested = join(checkout, name);
-      await mkdir(nested);
+      await mkdir(nested, { recursive: true });
       execFileSync("git", ["init", "-q"], { cwd: nested });
       await Promise.all([
-        writeFile(
-          join(checkout, ".rgignore"),
-          `${name}/**\n${name}/private.ts\n`,
-        ),
+        writeFile(join(checkout, ignore), `${rule}/**\n${rule}/private.ts\n`),
         writeFile(join(nested, ".ignore"), "*\n"),
         writeFile(join(nested, "public.ts"), "tracked\n"),
         writeFile(join(nested, "private.ts"), "private\n"),
@@ -1229,6 +1248,47 @@ describe("security scan file inventory", () => {
       expect(await inventory(checkout, name)).toEqual([`${name}/public.ts`]);
     },
   );
+
+  test.each([
+    ["!ignored", "\\!ignored"],
+    ["#ignored", "\\#ignored"],
+  ])("preserves explicit allowlists for checkout %s", async (name, rule) => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository(false);
+    const nested = join(checkout, name);
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(checkout, ".ignore"), `${rule}/**\n`),
+      writeFile(join(checkout, ".rgignore"), `!${rule}/public.ts\n`),
+      writeFile(join(nested, ".ignore"), "*\n"),
+      writeFile(join(nested, "public.ts"), "tracked\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+    ]);
+    execFileSync("git", ["add", "--force", "public.ts", "private.ts"], {
+      cwd: nested,
+    });
+
+    expect(await inventory(checkout, name)).toEqual([`${name}/public.ts`]);
+  });
+
+  test("preserves configured exclusions for an escaped checkout name", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const nested = join(checkout, "!ignored");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(join(checkout, ".rgignore"), "\\!ignored/**\n"),
+      writeFile(join(checkout, ".git", "info", "exclude"), "\\!ignored/**\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+    ]);
+    execFileSync("git", ["add", "private.ts"], { cwd: nested });
+
+    expect(await inventory(checkout, "!ignored")).toEqual([]);
+  });
 
   test.each([
     [".gitignore", "!/README.md"],
