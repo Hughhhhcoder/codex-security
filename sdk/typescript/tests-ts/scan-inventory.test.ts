@@ -1299,6 +1299,18 @@ describe("security scan file inventory", () => {
     [".gitignore", "!unrelated/public.ts"],
     [".ignore", "!unrelated/public.ts"],
     [".rgignore", "!unrelated/public.ts"],
+    [".gitignore", "!unrelated\\/public.ts"],
+    [".ignore", "!unrelated\\/public.ts"],
+    [".rgignore", "!unrelated\\/public.ts"],
+    [".gitignore", "!unrelated\\/deeper\\/public.ts"],
+    [".ignore", "!unrelated\\/deeper\\/public.ts"],
+    [".rgignore", "!unrelated\\/deeper\\/public.ts"],
+    [".gitignore", "!\\/ignored/public.ts"],
+    [".ignore", "!\\/ignored/public.ts"],
+    [".rgignore", "!\\/ignored/public.ts"],
+    [".gitignore", "!\\/ignored\\/public.ts"],
+    [".ignore", "!\\/ignored\\/public.ts"],
+    [".rgignore", "!\\/ignored\\/public.ts"],
     [".gitignore", "!unrelated[ab]/public.ts"],
     [".ignore", "!unrelated[ab]/public.ts"],
     [".rgignore", "!unrelated[ab]/public.ts"],
@@ -1406,6 +1418,8 @@ describe("security scan file inventory", () => {
     "!/ignored[^x]public.ts",
     "!/ignored[!x]public.ts",
     "!/ignored[.-0]public.ts",
+    "!ignored\\/public.ts",
+    "!/ignored\\/public.ts",
   ])("preserves an expanded outer allowlist rule %s", async (rule) => {
     if (Bun.which("rg") === null) return;
 

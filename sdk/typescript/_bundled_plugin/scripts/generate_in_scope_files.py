@@ -981,12 +981,20 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 line = line.removeprefix(b"\xef\xbb\xbf")
                 if not line.startswith(b"!"):
                     continue
-                pattern = line[1:].rstrip(b" \t").rstrip(b"/")
-                anchored = pattern.startswith(b"/")
-                pattern = pattern.lstrip(b"/")
+                raw_pattern = line[1:].rstrip(b" \t")
+                anchored = raw_pattern.startswith(b"/")
+                pattern = re.sub(
+                    rb"(\\+)/",
+                    lambda escaped: (
+                        escaped.group(1)[:-1] + b"/"
+                        if len(escaped.group(1)) % 2
+                        else escaped.group(0)
+                    ),
+                    raw_pattern,
+                ).rstrip(b"/")
+                if anchored:
+                    pattern = pattern.lstrip(b"/")
                 if not anchored and b"/" not in pattern:
-                    return True
-                if b"\\/" in pattern:
                     return True
                 brace_depth = 0
                 escaped = False
