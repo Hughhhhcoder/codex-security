@@ -1190,7 +1190,8 @@ def complete_budget_exhausted_scan(
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
         candidates = (
             []
-            if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
+            if run["manifest_path"]
+            == str(portable_path(scan_dir / "scan-manifest.json"))
             else budget_exhausted_candidates(scan, scan_dir)
         )
         warning = optional_text(args.message, maximum=2400)
@@ -1566,7 +1567,7 @@ def complete_scan_locked(
             if path is not None:
                 connection.execute(
                     "INSERT INTO scan_artifacts (scan_id, kind, path, created_at) VALUES (?, ?, ?, ?)",
-                    (scan["id"], kind, str(path), timestamp),
+                    (scan["id"], kind, str(portable_path(path)), timestamp),
                 )
         connection.execute("DELETE FROM finding_occurrences WHERE scan_id = ?", (scan["id"],))
         index_findings(connection, scan["id"], findings, timestamp)
@@ -1717,7 +1718,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     scan = require_scan(connection, scan_id)
     return {
         "contract": scan_contract(scan),
-        "scanDir": str(scan_dir),
+        "scanDir": str(portable_path(scan_dir)),
         "scanId": scan_id,
         "scopeFileCount": scope_file_count,
         "targetId": target_id,
@@ -2447,7 +2448,7 @@ def export_findings(connection: sqlite3.Connection, args: argparse.Namespace) ->
     if path is None:
         raise SystemExit(f"Could not export Codex Security findings as {args.format.upper()}.")
     return {
-        "export": {"format": args.format, "path": str(path)},
+        "export": {"format": args.format, "path": str(portable_path(path))},
         "scan": scan_result(connection, scan),
         "workspace": workspace_state(connection, scan["workspace_id"]),
     }
@@ -2994,12 +2995,12 @@ def scan_result(
             continue
         path = available_artifact_path(Path(scan["scan_dir"]), Path(row["path"]))
         if path is not None:
-            artifacts[row["kind"]] = str(path)
+            artifacts[row["kind"]] = str(portable_path(path))
     sarif_path = available_artifact_path(
         Path(scan["scan_dir"]), Path(scan["scan_dir"]) / "exports" / "results.sarif"
     )
     if sarif_path is not None:
-        artifacts["sarifReport"] = str(sarif_path)
+        artifacts["sarifReport"] = str(portable_path(sarif_path))
     occurrence_rows = scan_history.finding_occurrence_rows(
         connection, scan["id"], offset=0, limit=FINDINGS_RESULT_LIMIT
     )
@@ -3486,7 +3487,7 @@ def patch_artifact_preview(
 def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
     try:
         resolved_scan_dir = require_canonical_scan_directory(scan_dir)
-        resolved = candidate.resolve(strict=True)
+        resolved = filesystem_path(candidate).resolve(strict=True)
         resolved.relative_to(resolved_scan_dir)
     except (FileNotFoundError, RuntimeError, SystemExit, ValueError):
         return None
@@ -3513,7 +3514,8 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
 
 
 def require_canonical_scan_directory(scan_dir: Path) -> Path:
-    scan_dir = scan_dir.absolute()
+    portable_scan_dir = portable_path(scan_dir.absolute())
+    scan_dir = filesystem_path(portable_scan_dir)
     try:
         metadata = scan_dir.lstat()
         resolved = scan_dir.resolve(strict=True)
@@ -3521,9 +3523,9 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         raise SystemExit(
             "Scan directory must be an existing canonical non-symlink directory."
         ) from exc
-    if not stat.S_ISDIR(metadata.st_mode) or os.path.normcase(resolved) != os.path.normcase(
-        scan_dir
-    ):
+    if not stat.S_ISDIR(metadata.st_mode) or os.path.normcase(
+        portable_path(resolved)
+    ) != os.path.normcase(portable_scan_dir):
         raise SystemExit("Scan directory must be an existing canonical non-symlink directory.")
     # Re-check privacy on every resolution so a mid-scan rename/replace under a
     # shared parent cannot substitute another user's forged artifact tree.

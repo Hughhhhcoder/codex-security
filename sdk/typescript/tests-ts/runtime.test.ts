@@ -501,20 +501,22 @@ describe("plugin runtime preparation", () => {
       expect(
         await readFile(join(longScanDirectory, "report.md"), "utf8"),
       ).toContain("# Security Review: example/repo");
-      expect(JSON.parse(await readFile(longSarifOutput, "utf8"))).toMatchObject({
-        version: "2.1.0",
-        runs: [
-          {
-            results: [
-              {
-                partialFingerprints: {
-                  primaryLocationLineHash: expect.any(String),
+      expect(JSON.parse(await readFile(longSarifOutput, "utf8"))).toMatchObject(
+        {
+          version: "2.1.0",
+          runs: [
+            {
+              results: [
+                {
+                  partialFingerprints: {
+                    primaryLocationLineHash: expect.any(String),
+                  },
                 },
-              },
-            ],
-          },
-        ],
-      });
+              ],
+            },
+          ],
+        },
+      );
 
       const candidates = join(root, "long-path-candidates.jsonl");
       const normalized = join(root, "long-path-normalized.jsonl");
@@ -653,6 +655,89 @@ describe("plugin runtime preparation", () => {
       expect(JSON.parse(started.stdout)).toMatchObject({
         scan: { targetPath: longRepository },
         workspace: { targetPath: longRepository },
+      });
+
+      const longDeepScanRoot = join(
+        root,
+        `deep-${"d".repeat(100)}`,
+        `deep-${"e".repeat(100)}`,
+      );
+      expect(longDeepScanRoot.length).toBeGreaterThan(260);
+      const deepStarted = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "begin-deep-scan",
+          "--thread-id",
+          "deep-long-path-test",
+          "--target-path",
+          longRepository,
+          "--scan-root",
+          longDeepScanRoot,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(deepStarted.status, deepStarted.stderr).toBe(0);
+      const deepScan = JSON.parse(deepStarted.stdout).deepScan as {
+        scanDir: string;
+        scanId: string;
+      };
+      expect(deepScan.scanDir.length).toBeGreaterThan(260);
+      expect(deepScan.scanDir).not.toStartWith("\\\\?\\");
+
+      const deepPromptPath = join(deepScan.scanDir, "setup-prompt.md");
+      const deepArtifactDirectory = join(deepScan.scanDir, "setup-artifacts");
+      await writeFile(deepPromptPath, "# Setup\n");
+      await mkdir(deepArtifactDirectory);
+      const workerId = "00000000-0000-4000-8000-000000000001";
+      const workerUpdated = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "upsert-deep-scan-worker",
+          "--scan-id",
+          deepScan.scanId,
+          "--worker-id",
+          workerId,
+          "--kind",
+          "setup",
+          "--status",
+          "running",
+          "--prompt-path",
+          deepPromptPath,
+          "--artifact-dir",
+          deepArtifactDirectory,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(workerUpdated.status, workerUpdated.stderr).toBe(0);
+      expect(JSON.parse(workerUpdated.stdout)).toMatchObject({
+        deepScan: {
+          workers: [
+            {
+              artifactDir: deepArtifactDirectory,
+              id: workerId,
+              promptPath: deepPromptPath,
+              status: "running",
+            },
+          ],
+        },
       });
     }
   });
