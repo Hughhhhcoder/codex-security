@@ -29,6 +29,8 @@ const findingsIndexProbe = [
   "    ('orphan-old', None, '/orphan/repository', 'complete', 'sealed', '2026-01-01', '2026-01-01', '.', '/private/tmp/orphan-old'),",
   "    ('orphan-new', None, '/orphan/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/orphan-new'),",
   "])",
+  "if settings.get('inactiveRepresentative'):",
+  "    connection.execute(\"INSERT INTO scans VALUES ('current-followup', 'current-target', '/current/repository', 'complete', 'sealed', '2026-03-01', '2026-03-01', '.', '/private/tmp/current-followup')\")",
   "if settings.get('clockRollback'):",
   "    connection.execute(\"UPDATE scans SET started_at = '2025-12-01' WHERE id = 'current-new'\")",
   "if settings.get('mixedLegacyOwnership'):",
@@ -81,11 +83,13 @@ const findingsIndexProbe = [
   "    ('orphan-old-occurrence', 'src/orphan-old.py', 'root_control', 0),",
   "    ('orphan-new-occurrence', 'src/orphan-new.py', 'root_control', 0),",
   "])",
-  "if settings.get('matchedTriage') or (settings.get('indexedAliases') and settings.get('ownershipReuse')):",
+  "if settings.get('matchedTriage') or settings.get('indexedAliases'):",
   "    connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?)', ('current-old-occurrence', 'current-new-occurrence'))",
   "coverage_reads = []",
   "def coverage(scan):",
   "    coverage_reads.append(scan['id'])",
+  "    if settings.get('inactiveRepresentative') and scan['id'] == 'current-followup':",
+  "        return {'completeness': 'complete', 'includePaths': ['src/new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    if settings.get('mixedLegacyOwnership') and scan['id'] == 'current-new':",
   "        return {'completeness': 'partial', 'includePaths': ['src/new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    if scan['id'] == 'stale-new':",
@@ -149,6 +153,7 @@ function runFindingsIndex(
     closedBeforeRollback?: boolean;
     coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
     includeResolved?: boolean;
+    inactiveRepresentative?: boolean;
     indexedAliases?: boolean;
     lateCompletion?: boolean;
     legacyPriority?: boolean;
@@ -192,6 +197,7 @@ function probeFindingsIndex(
     closedBeforeRollback?: boolean;
     coverageFailure?: "pruned";
     includeResolved?: boolean;
+    inactiveRepresentative?: boolean;
     indexedAliases?: boolean;
     lateCompletion?: boolean;
     legacyPriority?: boolean;
@@ -459,6 +465,31 @@ describe("workbench findings index", () => {
         matchedFindingIds: ["current-new-finding"],
       }),
     ]);
+  });
+
+  test("searches titles and summaries across every active matched finding", () => {
+    for (const query of ["RESOLVED CURRENT FINDING", "OLDER ISSUE"]) {
+      const result = probeFindingsIndex("current-target", {
+        indexedAliases: true,
+        mixedLegacyOwnership: true,
+        query,
+      });
+
+      expect(result.findings).toEqual([
+        expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+      ]);
+    }
+  });
+
+  test("does not search resolved matched finding representatives", () => {
+    const result = probeFindingsIndex("current-target", {
+      inactiveRepresentative: true,
+      indexedAliases: true,
+      mixedLegacyOwnership: true,
+      query: "CURRENT CLI FINDING",
+    });
+
+    expect(result.findings).toEqual([]);
   });
 
   test("keeps active findings when a later scan artifact was pruned", () => {

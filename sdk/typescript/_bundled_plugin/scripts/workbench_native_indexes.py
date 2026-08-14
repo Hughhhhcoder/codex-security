@@ -66,17 +66,19 @@ def list_global_findings(
         and (args.status is None or row["status"] == args.status)
         and (
             not query
-            or any(
-                query in value.casefold()
-                for value in (
-                    row["title"],
-                    row["summary"],
-                    row["target_path"]
-                    if target_ids is None and target_paths is None and repository is None
-                    else None,
-                    row["location_path"],
-                )
-                if value is not None
+            or row.get(
+                "active_query_match",
+                any(
+                    query in value.casefold()
+                    for value in (row["title"], row["summary"], row["location_path"])
+                    if value is not None
+                ),
+            )
+            or (
+                target_ids is None
+                and target_paths is None
+                and repository is None
+                and query in row["target_path"].casefold()
             )
             or row.get("secondary_location_match", 0)
         )
@@ -259,6 +261,7 @@ def _indexed_active_findings(
     **settings: Any,
 ) -> Iterator[dict[str, Any]]:
     allowed_scan_ids: set[str] = set()
+    query = settings.get("query", "")
     active = {
         row["occurrence_id"]: row
         for row in _active_findings(
@@ -280,6 +283,11 @@ def _indexed_active_findings(
                 {
                     **matched[0],
                     **row,
+                    "active_query_match": any(
+                        query in finding["title"].casefold()
+                        or query in finding["summary"].casefold()
+                        for finding in matched
+                    ),
                     "secondary_location_match": any(
                         finding["secondary_location_match"] for finding in matched
                     ),
