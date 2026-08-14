@@ -571,6 +571,10 @@ cause; `scans match --all` matches all completed scans of the current repository
 including other worktrees and clones. Saved matches appear in `scans show` and
 are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
 
+Semantic matching uses a separate `read-only`, network-disabled Codex session
+with automatically reviewed approvals. Shell, application, plugin, and
+multi-agent tools and web search are disabled.
+
 `scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
 root cause, reuses saved matches, and reports findings as new, persisting,
 reopened, resolved, or unknown. Missing findings are not treated as resolved when
