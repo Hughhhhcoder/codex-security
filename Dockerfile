@@ -6,7 +6,10 @@ WORKDIR /build/sdk/typescript
 
 COPY sdk/typescript/package.json sdk/typescript/pnpm-lock.yaml ./
 
-RUN corepack enable \
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable \
     && corepack prepare "$(node --print 'require("./package.json").packageManager')" --activate \
     && pnpm install --frozen-lockfile
 
