@@ -128,7 +128,7 @@ export function renderScanHistory(
       : "";
     const knownSince =
       (command === "show" || command === "finding") &&
-      matches?.length &&
+      (matches?.length || (knownScanIds?.length ?? 0) > 1) &&
       entry["knownSince"]
         ? `  ${accent("·")}  ${strong(`Known since ${KNOWN_SINCE_DATE.format(new Date(clean(entry["knownSince"])))}`)}${knownScans}`
         : "";

@@ -1891,15 +1891,27 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         triaged_occurrences = [occurrence]
-        if close_reason == "already_fixed":
+        if args.status == "closed":
             scan = require_scan(connection, occurrence["scan_id"])
             indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
-            if indexed_finding is not None and indexed_finding["occurrence_id"] != occurrence["id"]:
+            if (
+                close_reason == "already_fixed"
+                and indexed_finding is not None
+                and indexed_finding["occurrence_id"] != occurrence["id"]
+            ):
                 triaged_occurrences.append(
                     require_occurrence(connection, indexed_finding["occurrence_id"])
                 )
-        if args.status == "closed":
-            for triaged_occurrence in triaged_occurrences:
+            checked_occurrences = (
+                [
+                    require_occurrence(connection, occurrence_id)
+                    for occurrence_id in indexed_finding["occurrence_ids"]
+                ]
+                if indexed_finding is not None
+                else triaged_occurrences
+            )
+            triaged_ids = {entry["id"] for entry in triaged_occurrences}
+            for checked_occurrence in checked_occurrences:
                 remediation = connection.execute(
                     """
                     SELECT *
@@ -1908,7 +1920,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                     ORDER BY created_at DESC, rowid DESC
                     LIMIT 1
                     """,
-                    (triaged_occurrence["id"],),
+                    (checked_occurrence["id"],),
                 ).fetchone()
                 if (
                     remediation is not None
@@ -1923,10 +1935,11 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                     )
                 if (
                     close_reason == "already_fixed"
+                    and checked_occurrence["id"] in triaged_ids
                     and remediation is not None
                     and remediation["state"] == "verified"
                 ):
-                    scan = require_scan(connection, triaged_occurrence["scan_id"])
+                    scan = require_scan(connection, checked_occurrence["scan_id"])
                     require_remediation_checkout_unchanged(
                         scan,
                         remediation,
@@ -3104,6 +3117,11 @@ def scan_result(
         if occurrence["scan_id"] != scan["id"]:
             raise SystemExit("This finding does not belong to the selected scan.")
         occurrence_rows.append(occurrence)
+    indexed_findings = (
+        _indexed_scan_findings(connection, scan)
+        if occurrence_rows and scan["target_id"] is not None and scan["status"] == "complete"
+        else {}
+    )
     finding_count = connection.execute(
         "SELECT COUNT(*) FROM finding_occurrences WHERE scan_id = ?", (scan["id"],)
     ).fetchone()[0]
@@ -3163,7 +3181,10 @@ def scan_result(
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
         "failureMessage": scan["failure_message"],
-        "findings": [finding_result(connection, scan, row) for row in occurrence_rows],
+        "findings": [
+            finding_result(connection, scan, row, indexed_finding=indexed_findings.get(row["id"]))
+            for row in occurrence_rows
+        ],
         "findingCount": finding_count,
         "findingsTruncated": finding_count > len(occurrence_rows),
         "severityCounts": severity_counts,
@@ -3432,8 +3453,21 @@ def finding_result(
     matches, known_since, known_scan_ids = scan_history.finding_matches(
         connection, occurrence["id"], scan["id"], scan["started_at"]
     )
+    if indexed_finding is not None:
+        matches = [
+            match
+            for match in matches
+            if match["occurrenceId"] in indexed_finding["occurrence_ids"]
+        ]
+        known_since = indexed_finding["known_since"]
+        known_scan_ids = indexed_finding["known_scan_ids"]
+        if indexed_finding["occurrence_count"] > 1:
+            result["occurrenceCount"] = indexed_finding["occurrence_count"]
+    elif scan["target_id"] is not None and scan["status"] == "complete":
+        matches = []
     if matches:
         result["matches"] = matches
+    if matches or result.get("occurrenceCount", 0) > 1:
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
     source_excerpt = finding_source_excerpt(scan, target, locations)

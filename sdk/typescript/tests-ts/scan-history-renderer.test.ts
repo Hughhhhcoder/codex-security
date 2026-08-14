@@ -413,6 +413,30 @@ describe("scan history renderer", () => {
     expect(output).not.toContain("CLOSED");
   });
 
+  test("renders repeated finding history without a semantic match", () => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          occurrenceId: "saved-occurrence",
+          scanId: "latest-scan",
+          targetPath: "/demo/repository",
+          severity: { level: "high" },
+          title: "Missing authorization",
+          locations: [{ path: "routes/login.ts", startLine: 34 }],
+          knownSince: "2026-01-01T00:00:00Z",
+          knownScanIds: ["earlier-scan", "latest-scan"],
+          occurrenceCount: 2,
+          triage: { status: "open" },
+        },
+        "finding",
+      ),
+    );
+
+    expect(output).toContain("Known since");
+    expect(output).toContain("2 scans");
+    expect(output).not.toContain("LINKED FINDINGS");
+  });
+
   test.each([
     ["already_fixed", "FIXED", "Fixed"],
     ["false_positive", "FALSE POSITIVE", "False Positive"],

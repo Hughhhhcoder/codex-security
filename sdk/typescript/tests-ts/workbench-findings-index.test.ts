@@ -75,11 +75,13 @@ const findingsIndexProbe = [
   "    connection.execute(\"UPDATE finding_occurrences SET severity = 'critical' WHERE id = 'orphan-old-occurrence'\")",
   "if settings.get('lateCompletion'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-new-finding', created_at = '2026-03-01' WHERE id = 'current-old-occurrence'\")",
+  "if settings.get('repeatedStableFinding'):",
+  "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-new-finding' WHERE id = 'current-old-occurrence'\")",
   "if settings.get('closedBeforeRollback'):",
   "    connection.execute(\"UPDATE finding_occurrences SET finding_id = 'current-old-finding', created_at = '2025-12-02' WHERE id = 'current-new-occurrence'\")",
   "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', 'already_fixed')\")",
   "    connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('current-old-occurrence')\")",
-  "if settings.get('matchedTriage') and not settings.get('closeAfterRediscovery'):",
+  "if settings.get('matchedTriage') and not settings.get('closeAfterRediscovery') and not settings.get('pendingMatchedRemediation'):",
   "    connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', ?)\", (settings['matchedTriage'],))",
   "    connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('current-old-occurrence')\")",
   "    if settings.get('triageClockRollback'):",
@@ -95,7 +97,11 @@ const findingsIndexProbe = [
   "    ('orphan-old-occurrence', 'src/orphan-old.py', 'root_control', 0),",
   "    ('orphan-new-occurrence', 'src/orphan-new.py', 'root_control', 0),",
   "])",
-  "if settings.get('matchedTriage') or settings.get('indexedAliases'):",
+  "if settings.get('pendingMatchedRemediation'):",
+  "    connection.execute(\"INSERT INTO finding_occurrences VALUES ('pending-occurrence', 'pending-finding', 'current-new', 'high', '2026-01-15', 'Pending finding', 'Pending remediation')\")",
+  "    connection.execute(\"INSERT INTO finding_locations VALUES ('pending-occurrence', 'src/new.py', 'root_control', 0)\")",
+  "    connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('pending-occurrence', 'current-new-occurrence')\")",
+  "if (settings.get('matchedTriage') and not settings.get('repeatedStableFinding')) or settings.get('indexedAliases'):",
   "    connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?)', ('current-old-occurrence', 'current-new-occurrence'))",
   "if settings.get('linkedWorktree'):",
   "    connection.execute(\"INSERT INTO security_targets VALUES ('linked-target', '/linked/repository', 'linked')\")",
@@ -130,7 +136,8 @@ const findingsIndexProbe = [
   "    result = indexes.list_repositories(connection, read_coverage=coverage)",
   "else:",
   "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
-  "finding_detail, scan_pages, rejected_previous_owner, rejected_previous_owner_list, rejected_legacy_owner, rejected_legacy_owner_list, rejected_legacy_descendant, rejected_legacy_descendant_list = None, None, None, None, None, None, None, None",
+  "finding_detail, overview_finding, scan_pages, rejected_previous_owner, rejected_previous_owner_list, rejected_legacy_owner, rejected_legacy_owner_list, rejected_legacy_descendant, rejected_legacy_descendant_list = None, None, None, None, None, None, None, None, None",
+  "pending_remediation_error, pending_triage_rows = None, None",
   "if settings.get('matchedTriage'):",
   "    import workbench_db as workbench",
   "    if not settings.get('ownershipReuse'):",
@@ -156,7 +163,17 @@ const findingsIndexProbe = [
   "    workbench.finding_source_excerpt = lambda *arguments: None",
   "    workbench.finding_artifact_paths = lambda *arguments: []",
   "    workbench.backfill_legacy_finding_details = lambda *arguments: None",
-  "    workbench.scan_history.finding_matches = lambda *arguments: ([], '2026-01-01', [])",
+  "    workbench.scan_history.finding_matches = lambda *arguments: ([{'findingId': 'previous-owner-finding', 'occurrenceId': 'current-old-occurrence', 'reason': 'Previous owner match reason', 'scanId': 'current-old', 'title': 'Previous owner match title'}], '2026-01-01', ['current-old', 'current-new']) if settings.get('previousOwnerHistory') else ([], '2026-01-01', [])",
+  "    if settings.get('pendingMatchedRemediation'):",
+  "        connection.execute('CREATE TABLE finding_remediation_attempts (occurrence_id TEXT, created_at TEXT, pending_action TEXT, state TEXT)')",
+  "        connection.execute(\"INSERT INTO finding_remediation_attempts VALUES ('pending-occurrence', '2026-02-01', 'apply', 'running')\")",
+  "        connection.commit()",
+  "        workbench.scan_context = lambda *arguments: {}",
+  "        try:",
+  "            workbench.set_finding_triage(connection, argparse.Namespace(occurrence_id='current-old-occurrence', status='closed', close_reason='false_positive', note='Verified test dismissal'))",
+  "        except SystemExit as error:",
+  "            pending_remediation_error = str(error)",
+  "        pending_triage_rows = connection.execute('SELECT COUNT(*) FROM finding_triage').fetchone()[0]",
   "    if settings.get('closeAfterRediscovery'):",
   "        connection.execute('CREATE TABLE finding_remediation_attempts (occurrence_id TEXT, created_at TEXT)')",
   "        connection.commit()",
@@ -166,6 +183,7 @@ const findingsIndexProbe = [
   "    scan = connection.execute(\"SELECT * FROM scans WHERE id = 'current-new'\").fetchone()",
   "    occurrence = connection.execute(\"SELECT * FROM finding_occurrences WHERE id = 'current-new-occurrence'\").fetchone()",
   "    finding_detail = workbench.finding_result(connection, scan, occurrence, full_details=True)",
+  "    overview_finding = workbench.finding_result(connection, scan, occurrence, indexed_finding=workbench._indexed_scan_findings(connection, scan).get(occurrence['id']))",
   "    scan_pages = {status: workbench.list_findings(connection, argparse.Namespace(scan_id='current-new', query=None, severity=None, status=status, offset=0, limit=20))['findingsPage'] for status in ('open', 'closed')}",
   "    if settings.get('ownershipReuse'):",
   "        from contextlib import nullcontext, redirect_stdout",
@@ -203,7 +221,7 @@ const findingsIndexProbe = [
   "    matching_scan_count = matching['scanCount']",
   "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
   "    old_owner_matches = indexes.scan_history._same_registered_repository(connection, *scans)",
-  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'scanPages': scan_pages, 'rejectedPreviousOwner': rejected_previous_owner, 'rejectedPreviousOwnerList': rejected_previous_owner_list, 'rejectedLegacyOwner': rejected_legacy_owner, 'rejectedLegacyOwnerList': rejected_legacy_owner_list, 'rejectedLegacyDescendant': rejected_legacy_descendant, 'rejectedLegacyDescendantList': rejected_legacy_descendant_list, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
+  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'overviewFinding': overview_finding, 'scanPages': scan_pages, 'rejectedPreviousOwner': rejected_previous_owner, 'rejectedPreviousOwnerList': rejected_previous_owner_list, 'rejectedLegacyOwner': rejected_legacy_owner, 'rejectedLegacyOwnerList': rejected_legacy_owner_list, 'rejectedLegacyDescendant': rejected_legacy_descendant, 'rejectedLegacyDescendantList': rejected_legacy_descendant_list, 'pendingRemediationError': pending_remediation_error, 'pendingTriageRows': pending_triage_rows, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -231,6 +249,9 @@ function runFindingsIndex(
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
     ownershipTransition?: boolean;
+    pendingMatchedRemediation?: boolean;
+    previousOwnerHistory?: boolean;
+    repeatedStableFinding?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
     triageClockRollback?: boolean;
@@ -282,6 +303,9 @@ function probeFindingsIndex(
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
     ownershipTransition?: boolean;
+    pendingMatchedRemediation?: boolean;
+    previousOwnerHistory?: boolean;
+    repeatedStableFinding?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
     triageClockRollback?: boolean;
@@ -294,6 +318,7 @@ function probeFindingsIndex(
     targetPath: string;
   }>;
   findingDetail: Record<string, unknown> | null;
+  overviewFinding: Record<string, unknown> | null;
   scanPages: Record<
     string,
     { findings: Array<Record<string, unknown>>; total: number }
@@ -304,6 +329,8 @@ function probeFindingsIndex(
   rejectedLegacyOwnerList: string | null;
   rejectedLegacyDescendant: string | null;
   rejectedLegacyDescendantList: string | null;
+  pendingRemediationError: string | null;
+  pendingTriageRows: number | null;
   repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
   matchingScanCount: number | null;
@@ -433,6 +460,43 @@ describe("workbench findings index", () => {
     });
   });
 
+  test("shows finding history when stable identifiers recur without saved matches", () => {
+    const result = probeFindingsIndex("current-target", {
+      matchedTriage: "false_positive",
+      repeatedStableFinding: true,
+    });
+
+    expect(result.findingDetail).toMatchObject({
+      knownSince: "2026-01-01",
+      knownScanIds: ["current-old", "current-new"],
+      occurrenceCount: 2,
+    });
+    expect(result.findingDetail).not.toHaveProperty("matches");
+    expect(result.overviewFinding).toMatchObject({
+      knownSince: "2026-01-01",
+      knownScanIds: ["current-old", "current-new"],
+      occurrenceCount: 2,
+    });
+    expect(result.overviewFinding).not.toHaveProperty("matches");
+    expect(result.scanPages?.["closed"]?.findings[0]).toMatchObject({
+      knownSince: "2026-01-01",
+      knownScanIds: ["current-old", "current-new"],
+      occurrenceCount: 2,
+    });
+  });
+
+  test("rejects closing a finding while any matched occurrence is being remediated", () => {
+    const result = probeFindingsIndex("current-target", {
+      matchedTriage: "false_positive",
+      pendingMatchedRemediation: true,
+    });
+
+    expect(result.pendingRemediationError).toContain(
+      "pending remediation operation",
+    );
+    expect(result.pendingTriageRows).toBe(0);
+  });
+
   test("keeps rediscovered fixed finding details open", () => {
     const result = probeFindingsIndex("current-target", {
       matchedTriage: "already_fixed",
@@ -549,6 +613,7 @@ describe("workbench findings index", () => {
     const result = probeFindingsIndex("current-target", {
       matchedTriage: "false_positive",
       ownershipReuse: true,
+      previousOwnerHistory: true,
     });
 
     expect(result.findings).toEqual([
@@ -563,6 +628,15 @@ describe("workbench findings index", () => {
       triage: { status: "open" },
     });
     expect(result.findingDetail?.["triage"]).not.toHaveProperty("closeReason");
+    expect(result.findingDetail).not.toHaveProperty("matches");
+    expect(result.findingDetail).not.toHaveProperty("knownSince");
+    expect(result.findingDetail).not.toHaveProperty("knownScanIds");
+    expect(result.overviewFinding).not.toHaveProperty("matches");
+    expect(result.overviewFinding).not.toHaveProperty("knownSince");
+    expect(result.overviewFinding).not.toHaveProperty("knownScanIds");
+    expect(JSON.stringify(result.findingDetail)).not.toContain(
+      "Previous owner match",
+    );
     expect(result.rejectedPreviousOwner).toContain("checkout owner");
     expect(result.rejectedPreviousOwnerList).toContain("checkout owner");
     expect(result.rejectedLegacyOwner).toContain("checkout owner");
