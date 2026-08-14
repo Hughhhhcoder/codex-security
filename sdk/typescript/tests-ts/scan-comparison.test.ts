@@ -265,14 +265,29 @@ describe("semantic scan comparison", () => {
   });
 
   test("disables inherited MCP servers in the real comparison session", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-comparison-")),
+    );
     temporaryDirectories.push(root);
     const codexHome = join(root, "codex-home");
-    const marker = join(root, "mcp-started");
+    const markerDirectory = join(root, "mcp-started");
+    const projectConfig = join(root, ".codex");
     const mcpServer = join(root, "synthetic-mcp.mjs");
-    await mkdir(codexHome);
+    await Promise.all(
+      [codexHome, markerDirectory, projectConfig].map((path) => mkdir(path)),
+    );
     const node = Bun.which("node");
     expect(node).not.toBeNull();
+    const homeServers = ["synthetic", "contains space", "café", "__proto__"];
+    const projectServer = "project_local";
+    const servers = [...homeServers, projectServer];
+    const startedServers = ["synthetic", "__proto__", projectServer];
+    const serverConfiguration = (name: string) =>
+      [
+        `[mcp_servers.${JSON.stringify(name)}]`,
+        `command = ${JSON.stringify(node)}`,
+        `args = [${JSON.stringify(mcpServer)}, ${JSON.stringify(join(markerDirectory, name))}]`,
+      ].join("\n");
     await writeFile(
       mcpServer,
       [
@@ -333,10 +348,14 @@ describe("semantic scan comparison", () => {
       join(codexHome, "config.toml"),
       [
         `openai_base_url = ${JSON.stringify(`${service.url}v1`)}`,
-        "[mcp_servers.synthetic]",
-        `command = ${JSON.stringify(node)}`,
-        `args = [${JSON.stringify(mcpServer)}, ${JSON.stringify(marker)}]`,
+        `[projects.${JSON.stringify(root)}]`,
+        'trust_level = "trusted"',
+        ...homeServers.map(serverConfiguration),
       ].join("\n"),
+    );
+    await writeFile(
+      join(projectConfig, "config.toml"),
+      serverConfiguration(projectServer),
     );
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
@@ -357,6 +376,8 @@ describe("semantic scan comparison", () => {
             "bin",
             "codex.js",
           ),
+          "--cd",
+          root,
           "--config",
           "features.apps=false",
           "--config",
@@ -375,27 +396,40 @@ describe("semantic scan comparison", () => {
         unrestricted.exitCode,
         new TextDecoder().decode(unrestricted.stderr),
       ).toBe(0);
-      expect(await readFile(marker, "utf8")).toBe("started");
-      await rm(marker);
+      for (const server of startedServers) {
+        expect(
+          await readFile(join(markerDirectory, server), "utf8"),
+          `${server}: ${new TextDecoder().decode(unrestricted.stderr)}`,
+        ).toBe("started");
+      }
+      await Promise.all(
+        startedServers.map((server) => rm(join(markerDirectory, server))),
+      );
 
-      await expect(
-        matchScanFindings(
+      expect(
+        await matchScanFindings(
           { before: [], after: [] },
           { environment, model: "gpt-5.6-sol", workingDirectory: root },
         ),
-      ).resolves.toEqual(response);
+      ).toEqual(response);
       expect(requests).toHaveLength(1);
       expect(JSON.stringify(requests[0]?.["tools"] ?? [])).not.toContain(
         "synthetic",
       );
-      await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      for (const server of servers) {
+        await expect(
+          readFile(join(markerDirectory, server)),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+      }
     } finally {
       service.stop(true);
     }
   });
 
   test("fails closed when configured MCP servers cannot be inspected", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-comparison-"));
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-comparison-")),
+    );
     temporaryDirectories.push(root);
     const preload = join(root, "codex.mjs");
     await writeFile(
@@ -404,6 +438,7 @@ describe("semantic scan comparison", () => {
         'import { basename } from "node:path";',
         "const args = [basename(process.argv[1]), ...process.argv.slice(2)];",
         'if (args.join(" ") !== "mcp list --json") process.exit(2);',
+        "if (process.cwd() !== process.env.SYNTHETIC_WORKING_DIRECTORY) process.exit(3);",
         'process.stdout.write(process.env.SYNTHETIC_MCP_LIST ?? "", () => {',
         '  process.exit(Number(process.env.SYNTHETIC_MCP_EXIT ?? "0"));',
         "});",
@@ -417,7 +452,9 @@ describe("semantic scan comparison", () => {
       { stdout: "not-json", exitCode: 0 },
       { stdout: "{}", exitCode: 0 },
       { stdout: "[{}]", exitCode: 0 },
+      { stdout: '[{"name":1}]', exitCode: 0 },
       { stdout: '[{"name":"unsafe.name"}]', exitCode: 0 },
+      { stdout: '[{"name":"unsafe=name"}]', exitCode: 0 },
     ]) {
       await expect(
         matchScanFindings(
@@ -430,7 +467,9 @@ describe("semantic scan comparison", () => {
               NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
               SYNTHETIC_MCP_LIST: result.stdout,
               SYNTHETIC_MCP_EXIT: String(result.exitCode),
+              SYNTHETIC_WORKING_DIRECTORY: root,
             },
+            workingDirectory: root,
           },
         ),
       ).rejects.toThrow("Could not inspect configured comparison MCP servers.");

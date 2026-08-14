@@ -97,6 +97,7 @@ export async function matchScanFindingsInternal(
   options: ScanComparisonOptions = {},
   runtimeOptions: { surface: CodexSecuritySurface },
 ): Promise<ScanComparisonResult> {
+  const workingDirectory = options.workingDirectory ?? process.cwd();
   let codex = options.codex;
   if (codex === undefined) {
     const environment = await comparisonEnvironment(
@@ -111,6 +112,7 @@ export async function matchScanFindingsInternal(
       environment,
       undefined,
       options.signal,
+      workingDirectory,
     );
     if (!configuredServers.success) {
       throw new CodexSecurityError(
@@ -130,14 +132,15 @@ export async function matchScanFindingsInternal(
         "Could not inspect configured comparison MCP servers.",
       );
     }
-    const mcpServers: Record<string, { enabled: false }> = {};
+    const mcpServers: Record<string, { enabled: false }> = Object.create(null);
     for (const server of servers) {
       if (
         typeof server !== "object" ||
         server === null ||
         !("name" in server) ||
         typeof server.name !== "string" ||
-        !/^[A-Za-z0-9_-]+$/u.test(server.name)
+        server.name.length === 0 ||
+        /[.=]/u.test(server.name)
       ) {
         throw new CodexSecurityError(
           "Could not inspect configured comparison MCP servers.",
@@ -178,7 +181,7 @@ export async function matchScanFindingsInternal(
     approvalPolicy: "never",
     networkAccessEnabled: false,
     webSearchMode: "disabled",
-    workingDirectory: options.workingDirectory ?? process.cwd(),
+    workingDirectory,
     skipGitRepoCheck: true,
   });
   const turn = await thread.run(comparisonPrompt(input), {

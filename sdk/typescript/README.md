@@ -573,7 +573,8 @@ are reused unless `--force` is passed. Scans without sealed artifacts are skippe
 
 Semantic matching uses a separate `read-only`, network-disabled Codex session
 that never approves execution requests. Shell, application, plugin, and
-multi-agent features, inherited MCP servers, and web search are disabled.
+multi-agent features, inherited MCP servers, and web search are disabled. If an
+inherited MCP server cannot be disabled safely, comparison fails closed.
 
 `scans compare BEFORE_SCAN_ID AFTER_SCAN_ID` automatically matches findings by
 root cause, reuses saved matches, and reports findings as new, persisting,
