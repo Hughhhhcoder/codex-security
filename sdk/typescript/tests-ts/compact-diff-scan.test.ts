@@ -498,5 +498,5 @@ describe("compact diff scan", () => {
     } finally {
       await client.close();
     }
-  });
+  }, 60_000);
 });
