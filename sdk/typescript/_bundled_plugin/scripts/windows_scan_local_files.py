@@ -29,6 +29,8 @@ from collections.abc import Iterator
 from ctypes import wintypes
 from pathlib import Path, PurePosixPath
 
+from windows_paths import filesystem_path
+
 _msvcrt = importlib.import_module("msvcrt") if os.name == "nt" else None
 
 
@@ -354,7 +356,7 @@ def _verify_regular_file(handle: int, expected_path: Path) -> None:
 
 
 def _canonical_scan_directory(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
-    absolute = Path(scan_dir).absolute()
+    absolute = filesystem_path(Path(scan_dir).absolute())
     try:
         expected = absolute.lstat()
         canonical = absolute.resolve(strict=True)

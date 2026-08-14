@@ -466,6 +466,77 @@ describe("plugin runtime preparation", () => {
         '## SECURITY.md source: "SECURITY.md"\n\n# policy\n',
       );
 
+      await mkdir(join(longRepository, "src"));
+      await writeFile(
+        join(longRepository, "src", "extract.py"),
+        Array.from({ length: 50 }, (_, index) => `line_${index + 1}`).join(
+          "\n",
+        ) + "\n",
+      );
+      const longScanDirectory = join(longRepository, "scan-output");
+      await mkdir(longScanDirectory);
+      await Promise.all(
+        ["scan-manifest.json", "findings.json", "coverage.json"].map(
+          (filename) =>
+            copyFile(
+              join(PLUGIN_ROOT, "examples", "completed-scan", filename),
+              join(longScanDirectory, filename),
+            ),
+        ),
+      );
+      const longSarifOutput = join(
+        longScanDirectory,
+        "exports",
+        "results.sarif",
+      );
+      const longSchemaDirectory = join(longRepository, "schemas");
+      await mkdir(longSchemaDirectory);
+      await Promise.all(
+        [
+          "scan-manifest.schema.json",
+          "findings.schema.json",
+          "coverage.schema.json",
+        ].map((filename) =>
+          copyFile(
+            join(PLUGIN_ROOT, "schemas", filename),
+            join(longSchemaDirectory, filename),
+          ),
+        ),
+      );
+      const finalization = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          longScanDirectory,
+          "--source-root",
+          longRepository,
+          "--schema-dir",
+          longSchemaDirectory,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(finalization.status, finalization.stderr).toBe(0);
+      expect(
+        await readFile(join(longScanDirectory, "report.md"), "utf8"),
+      ).toContain("# Security Review: example/repo");
+      expect(JSON.parse(await readFile(longSarifOutput, "utf8"))).toMatchObject({
+        version: "2.1.0",
+        runs: [
+          {
+            results: [
+              {
+                partialFingerprints: {
+                  primaryLocationLineHash: expect.any(String),
+                },
+              },
+            ],
+          },
+        ],
+      });
+
       const candidates = join(root, "long-path-candidates.jsonl");
       const normalized = join(root, "long-path-normalized.jsonl");
       await writeFile(

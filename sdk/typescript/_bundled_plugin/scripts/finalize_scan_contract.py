@@ -23,6 +23,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, TextIO
 from urllib.parse import quote, urlsplit
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_paths import filesystem_path
+
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
 FINGERPRINT_ALGORITHM = "codex-security/v1"
@@ -81,7 +85,7 @@ def _loads_json(value: str | bytes) -> Any:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        payload = _loads_json(path.read_text(encoding="utf-8"))
+        payload = _loads_json(filesystem_path(path).read_text(encoding="utf-8"))
         _require_safe_json_value(payload, str(path))
     except FileNotFoundError as exc:
         raise ContractError(f"missing required contract artifact: {path}") from exc
@@ -214,7 +218,7 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
 
 
 def _require_scan_directory(scan_dir: Path) -> Path:
-    scan_dir = scan_dir.absolute()
+    scan_dir = filesystem_path(scan_dir.absolute())
     try:
         metadata = scan_dir.lstat()
     except OSError as exc:
@@ -1618,7 +1622,7 @@ def _github_primary_location_line_hash(
         return None
     primary_location = _sarif_primary_location(finding)
     try:
-        source_root = source_root.resolve(strict=True)
+        source_root = filesystem_path(source_root).resolve(strict=True)
     except (OSError, RuntimeError):
         return None
     relative_path = _require_safe_relative_path(primary_location["path"], "SARIF source location")
@@ -1640,7 +1644,7 @@ def _github_line_hash_cache(
     if source_root is None:
         return {}
     try:
-        source_root = source_root.resolve(strict=True)
+        source_root = filesystem_path(source_root).resolve(strict=True)
     except (OSError, RuntimeError):
         return {}
     requested_lines_by_path: dict[str, set[int]] = {}
@@ -1884,7 +1888,7 @@ def build_sarif_projection(
 ) -> dict[str, Any]:
     if source_root is not None:
         try:
-            source_root = source_root.resolve(strict=True)
+            source_root = filesystem_path(source_root).resolve(strict=True)
             source_root_is_directory = source_root.is_dir()
         except (OSError, RuntimeError):
             source_root_is_directory = False
@@ -2027,7 +2031,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
     if export_format not in EXPORT_PATHS:
         raise ContractError(f"unsupported export format: {export_format}")
     scan_dir = _require_scan_directory(scan_dir)
-    output = Path(os.path.abspath(output))
+    output = filesystem_path(Path(os.path.abspath(output)))
     try:
         relative_output = output.relative_to(scan_dir).as_posix()
     except ValueError:
