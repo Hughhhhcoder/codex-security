@@ -58,6 +58,10 @@ const findingsIndexProbe = [
   "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('current-new', 'current-target', sys.argv[1], 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/current-new', serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
   "if settings.get('legacyDescendant'):",
   "    connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (os.path.join(sys.argv[1], 'nested'),))",
+  "if settings.get('missingOwnershipCheckout'):",
+  "    missing_checkout = os.path.join(sys.argv[1], 'codex-security-missing-owner')",
+  "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (missing_checkout,))",
+  "    connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (missing_checkout,))",
   "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)', [",
   "    ('current-old-occurrence', 'current-old-finding', 'current-old', 'high', '2026-01-01', 'Resolved current finding', 'Older issue'),",
   "    ('current-new-occurrence', 'current-new-finding', 'current-new', 'critical', '2026-02-01', 'Current CLI finding', 'Latest issue'),",
@@ -93,6 +97,15 @@ const findingsIndexProbe = [
   "])",
   "if settings.get('matchedTriage') or settings.get('indexedAliases'):",
   "    connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?)', ('current-old-occurrence', 'current-new-occurrence'))",
+  "if settings.get('linkedWorktree'):",
+  "    connection.execute(\"INSERT INTO security_targets VALUES ('linked-target', '/linked/repository', 'linked')\")",
+  "    connection.execute(\"UPDATE scans SET target_id = 'linked-target', target_path = '/linked/repository' WHERE id = 'current-old'\")",
+  "    if not settings.get('matchedTriage'):",
+  "        connection.execute(\"INSERT INTO finding_triage VALUES ('current-old-occurrence', 'closed', '2026-01-02', 'false_positive')\")",
+  "        connection.execute(\"INSERT INTO finding_decisions (occurrence_id) VALUES ('current-old-occurrence')\")",
+  "    connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('current-new-occurrence', 'stale-old-occurrence')\")",
+  "    indexes.scan_history.repository_scan_scope = lambda _connection, _repository: (['scans.target_id IN (?, ?)'], ['current-target', 'linked-target'], ['current-target', 'linked-target'], ['/current/repository', '/linked/repository'])",
+  "    indexes.scan_history._same_registered_repository = lambda _connection, _before, _after: not settings.get('incompatibleSibling', False)",
   "coverage_reads = []",
   "def coverage(scan):",
   "    coverage_reads.append(scan['id'])",
@@ -111,7 +124,7 @@ const findingsIndexProbe = [
   "    if scan['id'] == 'orphan-new':",
   "        return {'completeness': 'partial', 'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    return {'completeness': 'complete', 'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
-  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), include_resolved=settings.get('includeResolved', False), offset=0, limit=20)",
+  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), repository='/current/repository' if settings.get('linkedWorktree') else None, include_resolved=settings.get('includeResolved', False), offset=0, limit=20)",
   "if settings.get('repositories'):",
   "    indexes.scan_history.list_scans = lambda connection: {'scans': [{'scanId': row['id'], 'targetId': row['target_id']} for row in connection.execute('SELECT id, target_id FROM scans')]}",
   "    result = indexes.list_repositories(connection, read_coverage=coverage)",
@@ -173,9 +186,10 @@ const findingsIndexProbe = [
   "                listing_error = str(error)",
   "            return finding_error, listing_error",
   "        rejected_previous_owner, rejected_previous_owner_list = rejected_finding_access('current-old-occurrence', 'current-old')",
-  "        connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (sys.argv[1],))",
+  "        checkout = connection.execute(\"SELECT current_path FROM security_targets WHERE id = 'current-target'\").fetchone()[0]",
+  "        connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (checkout,))",
   "        rejected_legacy_owner, rejected_legacy_owner_list = rejected_finding_access('reused-legacy-occurrence', 'reused-legacy')",
-  "        connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (os.path.join(sys.argv[1], 'nested'),))",
+  "        connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (os.path.join(checkout, 'nested'),))",
   "        rejected_legacy_descendant, rejected_legacy_descendant_list = rejected_finding_access('reused-legacy-occurrence', 'reused-legacy')",
   "scoped_scan_ids = []",
   "matching_scan_count = None",
@@ -204,13 +218,16 @@ function runFindingsIndex(
     closedBeforeRollback?: boolean;
     coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
     includeResolved?: boolean;
+    incompatibleSibling?: boolean;
     inactiveRepresentative?: boolean;
     indexedAliases?: boolean;
     lateCompletion?: boolean;
     legacyDescendant?: boolean;
     legacyPriority?: boolean;
+    linkedWorktree?: boolean;
     matchedTriage?: "already_fixed" | "false_positive";
     missingCheckout?: boolean;
+    missingOwnershipCheckout?: boolean;
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
     ownershipTransition?: boolean;
@@ -252,13 +269,16 @@ function probeFindingsIndex(
     closedBeforeRollback?: boolean;
     coverageFailure?: "pruned";
     includeResolved?: boolean;
+    incompatibleSibling?: boolean;
     inactiveRepresentative?: boolean;
     indexedAliases?: boolean;
     lateCompletion?: boolean;
     legacyDescendant?: boolean;
     legacyPriority?: boolean;
+    linkedWorktree?: boolean;
     matchedTriage?: "already_fixed" | "false_positive";
     missingCheckout?: boolean;
+    missingOwnershipCheckout?: boolean;
     mixedLegacyOwnership?: boolean;
     ownershipReuse?: boolean;
     ownershipTransition?: boolean;
@@ -475,6 +495,29 @@ describe("workbench findings index", () => {
     });
   });
 
+  test("keeps earlier checkout owners isolated when the current checkout is missing", () => {
+    const result = probeFindingsIndex("current-target", {
+      indexedAliases: true,
+      matchedTriage: "false_positive",
+      missingOwnershipCheckout: true,
+      ownershipReuse: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        knownScanIds: ["current-new"],
+        occurrenceId: "current-new-occurrence",
+        status: "open",
+      }),
+    ]);
+    expect(result.findingDetail).toMatchObject({
+      occurrenceId: "current-new-occurrence",
+      status: "open",
+    });
+    expect(result.rejectedPreviousOwner).toContain("checkout owner");
+    expect(result.rejectedPreviousOwnerList).toContain("checkout owner");
+  });
+
   test("keeps the latest finding decision after the system clock moves backward", () => {
     const result = probeFindingsIndex("current-target", {
       matchedTriage: "false_positive",
@@ -635,6 +678,55 @@ describe("workbench findings index", () => {
         occurrenceId: "current-new-occurrence",
         knownScanIds: ["current-new"],
         matchedFindingIds: ["current-new-finding"],
+      }),
+    ]);
+  });
+
+  test("combines saved finding matches across scoped linked worktrees", () => {
+    const result = probeFindingsIndex(null, {
+      indexedAliases: true,
+      linkedWorktree: true,
+      matchedTriage: "false_positive",
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        knownScanIds: ["current-old", "current-new"],
+        matchedFindingIds: ["current-new-finding", "current-old-finding"],
+        occurrenceId: "current-new-occurrence",
+        status: "closed",
+        targetId: "current-target",
+      }),
+    ]);
+    expect(result.findingDetail).toMatchObject({
+      occurrenceId: "current-new-occurrence",
+      status: "closed",
+      triage: { closeReason: "false_positive", status: "closed" },
+    });
+    expect(result.scanPages?.["closed"]).toMatchObject({
+      findings: [{ occurrenceId: "current-new-occurrence", status: "closed" }],
+      total: 1,
+    });
+    expect(result.scanPages?.["open"]?.findings).toEqual([]);
+  });
+
+  test("never combines saved finding matches across independently registered siblings", () => {
+    const result = probeFindingsIndex(null, {
+      incompatibleSibling: true,
+      indexedAliases: true,
+      linkedWorktree: true,
+    });
+
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        knownScanIds: ["current-new"],
+        occurrenceId: "current-new-occurrence",
+        status: "open",
+      }),
+      expect.objectContaining({
+        knownScanIds: ["current-old"],
+        occurrenceId: "current-old-occurrence",
+        status: "closed",
       }),
     ]);
   });

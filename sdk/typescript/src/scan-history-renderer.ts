@@ -37,6 +37,12 @@ const SEVERITY_COLORS: Record<string, number> = {
   INFORMATIONAL: 37,
 };
 
+const CLOSE_REASON_LABELS: Record<string, string> = {
+  already_fixed: "Fixed",
+  false_positive: "False Positive",
+  wont_fix: "Ignored",
+};
+
 const KNOWN_SINCE_DATE = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
@@ -136,11 +142,16 @@ export function renderScanHistory(
       const occurrenceId = entry["occurrenceId"];
       const triage = entry["triage"] as JsonObject | undefined;
       const status = triage?.["status"] ?? entry["status"];
+      const closeReason = triage?.["closeReason"];
+      const statusLabel =
+        status === "closed" && typeof closeReason === "string"
+          ? CLOSE_REASON_LABELS[closeReason] ?? clean(status)
+          : clean(status);
       const scanId = entry["scanId"];
       const occurrenceCount = entry["occurrenceCount"];
       const details = [
         ...(occurrenceId ? [`${strong("ID")} ${clean(occurrenceId)}`] : []),
-        ...(status ? [strong(clean(status).toUpperCase())] : []),
+        ...(status ? [strong(statusLabel.toUpperCase())] : []),
         ...(command === "findings" && scanId
           ? [`${strong("SCAN")} ${clean(scanId).slice(0, 8)}`]
           : []),
@@ -512,7 +523,11 @@ export function renderScanHistory(
         ["Note", "note"],
       ] as const) {
         if (typeof details?.[key] === "string" && details[key]) {
-          wrap(`${label}: ${details[key]}`, 4);
+          const value =
+            key === "closeReason"
+              ? CLOSE_REASON_LABELS[details[key]] ?? details[key]
+              : details[key];
+          wrap(`${label}: ${value}`, 4);
         }
       }
     }

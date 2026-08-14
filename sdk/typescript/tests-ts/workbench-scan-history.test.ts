@@ -63,6 +63,60 @@ test("loads each scan's matching findings once in insertion order after clock ro
   });
 });
 
+test("never matches independently registered sibling repository targets", () => {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  if (python === null) throw new Error("A Python interpreter is required.");
+
+  const probe = [
+    "import argparse, json, os, pathlib, sqlite3, subprocess, sys, tempfile",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_history as history",
+    "from filesystem_identity import serialize_filesystem_identity",
+    "with tempfile.TemporaryDirectory() as temporary:",
+    "    repository = pathlib.Path(temporary).resolve() / 'repository'",
+    "    subprocess.run(['git', 'init', '-q', str(repository)], check=True)",
+    "    left, right = repository / 'left', repository / 'right'",
+    "    left.mkdir(); right.mkdir()",
+    "    connection = sqlite3.connect(':memory:')",
+    "    connection.row_factory = sqlite3.Row",
+    "    connection.executescript('''",
+    "        CREATE TABLE security_targets (id TEXT, current_path TEXT);",
+    "        CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT, status TEXT, started_at TEXT);",
+    "        CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);",
+    "        CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, details_json TEXT, remediation TEXT, severity TEXT, summary TEXT, title TEXT);",
+    "        CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);",
+    "        CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
+    "    ''')",
+    "    for target, path in [('left-target', left), ('right-target', right)]:",
+    "        connection.execute('INSERT INTO security_targets VALUES (?, ?)', (target, str(path)))",
+    "    for scan, target, path in [('left-old', 'left-target', left), ('right', 'right-target', right), ('left-new', 'left-target', left)]:",
+    "        metadata = path.stat()",
+    "        connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, str(path), target, serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), 'revision', 'complete', '2026-01-01'))",
+    "        connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
+    "    results = [history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(repository), force=force), backfill_finding_details=lambda *_args: None, read_coverage=lambda _scan: {}) for force in (False, True)]",
+    "    print(json.dumps(results))",
+  ].join("\n");
+
+  const result = spawnSync(
+    python,
+    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+
+  expect(result.status, result.stderr).toBe(0);
+  for (const matching of JSON.parse(result.stdout)) {
+    expect(matching).toMatchObject({
+      scanCount: 3,
+      batches: [
+        {
+          afterScanId: "left-new",
+          beforeScans: [{ scanId: "left-old" }],
+        },
+      ],
+    });
+  }
+});
+
 test("lists completed scans in insertion order after clock rollback", () => {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   if (python === null) throw new Error("A Python interpreter is required.");

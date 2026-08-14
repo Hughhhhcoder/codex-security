@@ -412,4 +412,30 @@ describe("scan history renderer", () => {
     }
     expect(output).not.toContain("CLOSED");
   });
+
+  test.each([
+    ["already_fixed", "FIXED", "Fixed"],
+    ["false_positive", "FALSE POSITIVE", "False Positive"],
+    ["wont_fix", "IGNORED", "Ignored"],
+  ])("uses clear finding-status labels for %s", (reason, status, label) => {
+    const output = stripVTControlCharacters(
+      renderScanHistory(
+        {
+          occurrenceId: "saved-occurrence",
+          scanId: "saved-scan",
+          targetPath: "/demo/repository",
+          severity: { level: "high" },
+          title: "Missing authorization",
+          locations: [{ path: "routes/login.ts", startLine: 34 }],
+          triage: { closeReason: reason, status: "closed" },
+        },
+        "finding",
+      ),
+    );
+
+    expect(output).toContain(status);
+    expect(output).toContain(`Reason: ${label}`);
+    expect(output).not.toContain(reason);
+    expect(output).not.toContain("CLOSED");
+  });
 });

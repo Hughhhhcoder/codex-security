@@ -807,11 +807,11 @@ export async function main(
     return result;
   };
   const findingFeedback = Cli.create("findings", {
-    description: "Browse, inspect, and manage findings from saved scans.",
+    description: "Browse, inspect, and manage security findings across scans.",
   })
     .command("list", {
       description:
-        "List saved findings for this repository or one previous scan.",
+        "List repository vulnerabilities or findings from one previous scan.",
       mcp: false,
       args: z.object({
         repository: z
@@ -827,7 +827,7 @@ export async function main(
           allRepositories: z
             .boolean()
             .default(false)
-            .describe("Include active findings from every saved repository."),
+            .describe("Include findings from every saved repository."),
           query: optionValue("--query")
             .optional()
             .describe("Search finding titles, summaries, or source paths."),
@@ -946,7 +946,7 @@ export async function main(
     })
     .command("show", {
       description:
-        "Show one finding, its occurrence ID, and saved links to previous scans.",
+        "Show finding details, its occurrence ID, and its scan history.",
       mcp: false,
       args: z.object({
         occurrenceId: z
@@ -1268,7 +1268,7 @@ export async function main(
     })
     .command("compare", {
       description:
-        "Show new, persisting, resolved, or unknown findings; matching uses Codex.",
+        "Show new, persisting, reopened, resolved, or unknown findings; matching uses Codex.",
       destructive: true,
       mcp: false,
       args: z.object({

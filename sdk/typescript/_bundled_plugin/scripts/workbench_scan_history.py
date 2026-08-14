@@ -243,6 +243,35 @@ def _ownership_epoch_start(
     return previous_owner["ownership_sequence"] if previous_owner is not None else None
 
 
+def _recorded_target_ownership(
+    connection: sqlite3.Connection, target_id: str
+) -> tuple[sqlite3.Row, int | None] | None:
+    recorded = connection.execute(
+        """
+        SELECT target_device, target_inode
+        FROM scans
+        WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
+        ORDER BY rowid DESC
+        LIMIT 1
+        """,
+        (target_id,),
+    ).fetchone()
+    if recorded is None:
+        return None
+    previous_owner = connection.execute(
+        """
+        SELECT rowid AS ownership_sequence
+        FROM scans
+        WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
+            AND (target_device != ? OR target_inode != ?)
+        ORDER BY rowid DESC
+        LIMIT 1
+        """,
+        (target_id, recorded["target_device"], recorded["target_inode"]),
+    ).fetchone()
+    return recorded, previous_owner["ownership_sequence"] if previous_owner is not None else None
+
+
 def repository_scan_scope(
     connection: sqlite3.Connection, repository: str | Path
 ) -> tuple[list[str], list[Any], list[str], list[str]]:
@@ -687,7 +716,8 @@ def list_unmatched_scan_pairs(
         previous = [
             before
             for before in available[:index]
-            if args.force or (before["id"], after["id"]) not in saved_pairs
+            if (args.force or (before["id"], after["id"]) not in saved_pairs)
+            and _same_registered_repository(connection, before, after)
         ]
         skipped += index - len(previous)
         if not previous:

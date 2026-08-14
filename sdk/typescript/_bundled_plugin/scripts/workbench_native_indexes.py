@@ -118,8 +118,11 @@ def list_global_findings(
 def _indexed_findings(
     connection: sqlite3.Connection,
     allowed_scan_ids: set[str] | None = None,
+    *,
+    allow_cross_target_matches: bool = False,
 ) -> Iterator[dict[str, Any]]:
     parents: dict[tuple[str, str], tuple[str, str]] = {}
+    compatible_scan_pairs: dict[tuple[str, str], bool] = {}
 
     def group(identity: tuple[str, str]) -> tuple[str, str]:
         while identity in parents:
@@ -128,8 +131,9 @@ def _indexed_findings(
 
     for match in connection.execute(
         """
-        SELECT before_scans.target_id, before_scans.id AS before_scan_id,
-            after_scans.id AS after_scan_id,
+        SELECT before_scans.target_id AS before_target_id,
+            after_scans.target_id AS after_target_id,
+            before_scans.id AS before_scan_id, after_scans.id AS after_scan_id,
             before.finding_id AS before_finding_id, after.finding_id AS after_finding_id
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
@@ -137,15 +141,29 @@ def _indexed_findings(
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
         WHERE before_scans.target_id = after_scans.target_id
-        """
+            OR (? AND before_scans.target_id IS NOT NULL AND after_scans.target_id IS NOT NULL)
+        """,
+        (allow_cross_target_matches,),
     ):
         if allowed_scan_ids is not None and (
             match["before_scan_id"] not in allowed_scan_ids
             or match["after_scan_id"] not in allowed_scan_ids
         ):
             continue
-        before = group((match["target_id"], match["before_finding_id"]))
-        after = group((match["target_id"], match["after_finding_id"]))
+        if match["before_target_id"] != match["after_target_id"]:
+            pair = (match["before_scan_id"], match["after_scan_id"])
+            if pair not in compatible_scan_pairs:
+                scans = [
+                    connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+                    for scan_id in pair
+                ]
+                compatible_scan_pairs[pair] = scan_history._same_registered_repository(
+                    connection, *scans
+                )
+            if not compatible_scan_pairs[pair]:
+                continue
+        before = group((match["before_target_id"], match["before_finding_id"]))
+        after = group((match["after_target_id"], match["after_finding_id"]))
         if before != after:
             parents[after] = before
 
@@ -278,7 +296,11 @@ def _indexed_active_findings(
         )
     }
     combined = []
-    for row in _indexed_findings(connection, allowed_scan_ids):
+    for row in _indexed_findings(
+        connection,
+        allowed_scan_ids,
+        allow_cross_target_matches=bool(settings.get("repository")),
+    ):
         matched = [
             active.pop(occurrence_id)
             for occurrence_id in row["occurrence_ids"]
@@ -369,6 +391,12 @@ def _active_findings(
         for target in connection.execute("SELECT id, current_path FROM security_targets"):
             checkout = Path(target["current_path"])
             if not checkout.exists():
+                recorded_ownership = scan_history._recorded_target_ownership(
+                    connection, target["id"]
+                )
+                if recorded_ownership is not None and recorded_ownership[1] is not None:
+                    transitioned_targets.append(target["id"])
+                    ownership_epochs.append((target["id"], recorded_ownership[1]))
                 continue
             verified = scan_history._verified_target_metadata(connection, target["id"], checkout)
             if verified is None:

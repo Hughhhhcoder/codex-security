@@ -2958,7 +2958,27 @@ def _require_finding_checkout_owner(
         if target is None:
             return None
     elif target is not None and not Path(target["current_path"]).exists():
-        return target
+        ownership = scan_history._recorded_target_ownership(connection, scan["target_id"])
+        if ownership is None:
+            return target
+        recorded, epoch_start = ownership
+        sequence = connection.execute(
+            "SELECT rowid AS ownership_sequence FROM scans WHERE id = ?", (scan["id"],)
+        ).fetchone()
+        same_owner = (
+            scan["target_device"] == recorded["target_device"]
+            and scan["target_inode"] == recorded["target_inode"]
+        ) or (
+            epoch_start is None
+            and scan["target_device"] is None
+            and scan["target_inode"] is None
+        )
+        if same_owner and (
+            epoch_start is None
+            or (sequence is not None and sequence["ownership_sequence"] > epoch_start)
+        ):
+            return target
+        raise SystemExit("Codex Security finding is unavailable for the current checkout owner.")
     if target is not None:
         clauses, values, _, _ = scan_history.repository_scan_scope(
             connection, target["current_path"]
@@ -2977,13 +2997,21 @@ def _indexed_scan_findings(
 ) -> dict[str, dict[str, Any]]:
     if scan["target_id"] is None:
         return {}
+    target = connection.execute(
+        "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+    ).fetchone()
+    scope = (
+        {"repository": target["current_path"]}
+        if target is not None and Path(target["current_path"]).exists()
+        else {"target_ids": {scan["target_id"]}}
+    )
     return {
         occurrence_id: finding
         for finding in native_indexes._indexed_active_findings(
             connection,
             coverage_for_comparison,
-            target_ids={scan["target_id"]},
             include_resolved=True,
+            **scope,
         )
         for occurrence_id in finding.get("occurrence_ids", ())
     }

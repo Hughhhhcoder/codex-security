@@ -544,7 +544,7 @@ root. `scans show` opens the latest completed scan;
 `scans show SCAN_ID` selects another saved scan. Both include scan configuration,
 results, coverage, and artifact locations.
 
-Run `findings` or `findings list` to browse active findings for the current
+Run `findings` or `findings list` to browse open vulnerabilities for the current
 repository across saved scans. Add `--all-repositories` to include every saved
 repository, or `--scan SCAN_ID` to inspect all findings from one previous scan.
 Filter results with `--query TEXT`, `--severity LEVEL`, or
@@ -554,6 +554,8 @@ complete set. Pages contain at most 20 findings.
 `findings show OCCURRENCE_ID` opens the selected finding, its remediation advice,
 and any saved links to previous occurrences. Finding lists include the
 occurrence IDs needed by `findings show` and `findings false-positive`.
+Closed finding details show whether the finding was fixed, marked as a false
+positive, or ignored.
 
 Add `--show-linked-findings` to `scans show` to include previously saved finding
 links. Links appear after running `scans compare BEFORE AFTER` or
