@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -19,6 +20,7 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
 
@@ -154,6 +156,191 @@ async function pluginFiles(directory) {
   }
 
   return files.sort();
+}
+
+async function smokeInstalledMcp(installedRoot, consumer) {
+  const privateRoot = await realpath(consumer);
+  const fixture = join(privateRoot, "mcp-fixture");
+  const state = join(privateRoot, "mcp-state");
+  const scans = join(privateRoot, "mcp-scans");
+  const home = join(privateRoot, "mcp-home");
+  await Promise.all(
+    [fixture, state, scans, home].map((directory) =>
+      mkdir(directory, { mode: 0o700 }),
+    ),
+  );
+  await writeFile(join(fixture, "fixture.js"), "export const smoke = true;\n");
+
+  const environment = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([name]) =>
+          !/^(?:OPENAI|ANTHROPIC|AWS|AZURE|GOOGLE|GCLOUD|FIREWORKS|OPENROUTER|GITHUB|GH|ACTIONS)_/iu.test(
+            name,
+          ) &&
+          !/(?:^|_)(?:API_?KEY|ACCESS_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)(?:_|$)/iu.test(
+            name,
+          ),
+      ),
+    ),
+    HOME: home,
+    USERPROFILE: home,
+    CODEX_HOME: home,
+    CODEX_SQLITE_HOME: home,
+    CODEX_SECURITY_SCAN_ROOT: scans,
+    CODEX_SECURITY_STATE_DIR: state,
+    PYTHONDONTWRITEBYTECODE: "1",
+  };
+  const child = spawn(
+    process.execPath,
+    [join(installedRoot, "_bundled_plugin", "mcp", "server.mjs"), "--stdio"],
+    {
+      cwd: consumer,
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  const messages = createInterface({ input: child.stdout })[
+    Symbol.asyncIterator
+  ]();
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.on("error", (error) => {
+    stderr += error.message;
+  });
+  let nextId = 0;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    child.kill();
+  }, 30_000);
+
+  async function request(method, params) {
+    const id = ++nextId;
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
+    );
+    while (true) {
+      const message = await messages.next();
+      if (message.done) {
+        const reason = timedOut ? "timed out" : "exited";
+        throw new Error(`Installed MCP ${reason} before ${method}: ${stderr}`);
+      }
+      const response = JSON.parse(message.value);
+      if (response.id !== id) continue;
+      if (response.error !== undefined || response.result?.isError === true) {
+        throw new Error(
+          `Installed MCP ${method} failed: ${JSON.stringify(response.error ?? response.result)}`,
+        );
+      }
+      return response.result;
+    }
+  }
+
+  try {
+    await request("initialize", {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: { name: "codex-security-package-smoke", version: "1.0.0" },
+    });
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+        params: {},
+      })}\n`,
+    );
+    const toolNames = new Set(
+      (await request("tools/list", {})).tools.map((tool) => tool.name),
+    );
+    const requiredTools = [
+      "start_codex_security_standard_scan",
+      "record_codex_security_scan_draft",
+      "complete_codex_security_scan",
+      "get_codex_security_completed_scan",
+    ];
+    for (const name of requiredTools) {
+      assert.equal(
+        toolNames.has(name),
+        true,
+        `Installed MCP is missing ${name}.`,
+      );
+    }
+
+    async function call(name, arguments_) {
+      return (
+        await request("tools/call", {
+          name,
+          arguments: arguments_,
+          _meta: { "openai/threadId": "codex-security-package-smoke" },
+        })
+      ).structuredContent;
+    }
+
+    const started = await call("start_codex_security_standard_scan", {
+      targetPath: fixture,
+    });
+    const { scanId, handoffClaimToken, scanDir } = started;
+    assert.equal(typeof scanId, "string");
+    assert.equal(typeof handoffClaimToken, "string");
+    await call("record_codex_security_scan_draft", {
+      scanId,
+      handoffClaimToken,
+      findings: [],
+      coverage: {
+        completeness: "complete",
+        surfaces: [{ label: "Fixture", disposition: "rejected" }],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    });
+    await call("complete_codex_security_scan", { scanId, handoffClaimToken });
+    const completed = await call("get_codex_security_completed_scan", {
+      scanId,
+      handoffClaimToken,
+    });
+    const pluginManifest = JSON.parse(
+      await readFile(
+        join(installedRoot, "_bundled_plugin", ".codex-plugin", "plugin.json"),
+        "utf8",
+      ),
+    );
+    assert.equal(completed.manifest.scan.id, scanId);
+    assert.equal(completed.manifest.scan.status, "completed");
+    assert.equal(
+      completed.manifest.scan.sealedAt,
+      completed.manifest.scan.completedAt,
+    );
+    assert.deepEqual(completed.manifest.scan.producer, {
+      name: "codex-security-plugin",
+      version: pluginManifest.version,
+    });
+    assert.equal(completed.coverage.scanId, scanId);
+    assert.equal(completed.coverage.completeness, "complete");
+    assert.deepEqual(completed.findings.findings, []);
+    for (const name of [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "report.md",
+    ]) {
+      assert.ok(
+        (await stat(join(scanDir, name))).size > 0,
+        `Completed installed MCP scan is missing ${name}.`,
+      );
+    }
+  } finally {
+    child.stdin.end();
+    await closed;
+    clearTimeout(timeout);
+  }
+
+  return { fixture, environment };
 }
 
 async function smokeNestedDeepScanWorker(installedRoot, consumer) {
@@ -399,10 +586,36 @@ try {
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
 
+  const { fixture, environment } = await smokeInstalledMcp(
+    installedRoot,
+    consumer,
+  );
+  const dryRun = JSON.parse(
+    run(
+      process.execPath,
+      [launcher, "scan", fixture, "--dry-run", "--json", "--auth", "api-key"],
+      {
+        cwd: consumer,
+        env: {
+          ...environment,
+          OPENAI_API_KEY: "synthetic-codex-security-package-smoke",
+        },
+        capture: true,
+      },
+    ),
+  );
+  assert.equal(dryRun.dryRun, true);
+  assert.equal(dryRun.repository, fixture);
+  assert.deepEqual(dryRun.authentication, {
+    method: "api_key",
+    source: "OPENAI_API_KEY",
+    verified: false,
+  });
+
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI dry run, ${expectedPluginFiles.length} bundled plugin files, completed MCP scan, bundled Codex version, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {
