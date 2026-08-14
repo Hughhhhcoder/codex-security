@@ -580,7 +580,8 @@ export function renderScanHistory(
       const scanQualifiedFindings =
         options.scanRoot !== undefined ||
         (options.currentDirectory !== undefined &&
-          latest["targetPath"] !== options.currentDirectory);
+          (options.repository ?? latest["targetPath"]) !==
+            options.currentDirectory);
       lines.push(
         "",
         `  ${strong("VIEW LATEST")}  codex-security scans show ${scanPrefix}`,

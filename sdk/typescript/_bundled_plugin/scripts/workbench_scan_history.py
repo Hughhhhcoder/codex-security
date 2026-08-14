@@ -1109,11 +1109,16 @@ def finding_occurrence_rows(
     query: str | None = None,
     severity: str | None = None,
     status: str | None = None,
+    aggregate_status: bool = False,
 ) -> list[sqlite3.Row]:
     if query is not None and query.strip():
         connection.create_function("codex_security_casefold", 1, str.casefold, deterministic=True)
     conditions, values = finding_occurrence_conditions(
-        scan_id, query=query, severity=severity, status=status
+        scan_id,
+        query=query,
+        severity=severity,
+        status=status,
+        aggregate_status=aggregate_status,
     )
     return connection.execute(
         f"""
@@ -1153,6 +1158,7 @@ def finding_occurrence_conditions(
     query: str | None,
     severity: str | None,
     status: str | None,
+    aggregate_status: bool = False,
 ) -> tuple[str, list[str]]:
     conditions = ["occurrences.scan_id = ?"]
     values = [scan_id]
@@ -1160,7 +1166,10 @@ def finding_occurrence_conditions(
         conditions.append("occurrences.severity = ?")
         values.append(severity)
     if status is not None:
-        conditions.append("COALESCE(triage.status, 'open') = ?")
+        value = "COALESCE(triage.status, 'open')"
+        if aggregate_status:
+            value = f"codex_security_aggregate_status(occurrences.id, {value})"
+        conditions.append(f"{value} = ?")
         values.append(status)
     if query:
         search = query.strip().casefold()

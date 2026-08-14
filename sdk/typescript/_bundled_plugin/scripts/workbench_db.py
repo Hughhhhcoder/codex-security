@@ -2916,9 +2916,55 @@ def scan_context(
     return context
 
 
+def _require_finding_checkout_owner(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> sqlite3.Row | None:
+    target = connection.execute(
+        "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+    ).fetchone()
+    if scan["target_id"] is None:
+        return target
+    if target is not None:
+        clauses, values, _, _ = scan_history.repository_scan_scope(
+            connection, target["current_path"]
+        )
+        allowed = connection.execute(
+            f"SELECT 1 FROM scans WHERE scans.id = ? AND {' AND '.join(clauses)}",
+            (scan["id"], *values),
+        ).fetchone()
+        if allowed is not None:
+            return target
+    raise SystemExit("Codex Security finding is unavailable for the current checkout owner.")
+
+
+def _indexed_scan_findings(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> dict[str, dict[str, Any]]:
+    if scan["target_id"] is None:
+        return {}
+    return {
+        occurrence_id: finding
+        for finding in native_indexes._indexed_active_findings(
+            connection,
+            coverage_for_comparison,
+            target_ids={scan["target_id"]},
+            include_resolved=True,
+        )
+        for occurrence_id in finding.get("occurrence_ids", ())
+    }
+
+
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
+    _require_finding_checkout_owner(connection, scan)
     backfill_legacy_finding_details(connection, scan)
+    indexed = _indexed_scan_findings(connection, scan)
+    connection.create_function(
+        "codex_security_aggregate_status",
+        2,
+        lambda occurrence_id, status: indexed.get(occurrence_id, {}).get("status", status),
+        deterministic=True,
+    )
     limit = min(args.limit, FINDINGS_PAGE_MAX)
     rows = scan_history.finding_occurrence_rows(
         connection,
@@ -2928,9 +2974,14 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
         query=args.query,
         severity=args.severity,
         status=args.status,
+        aggregate_status=True,
     )
     conditions, values = scan_history.finding_occurrence_conditions(
-        scan["id"], query=args.query, severity=args.severity, status=args.status
+        scan["id"],
+        query=args.query,
+        severity=args.severity,
+        status=args.status,
+        aggregate_status=True,
     )
     total = connection.execute(
         f"""
@@ -2944,7 +2995,10 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
     next_offset = args.offset + len(rows)
     return {
         "findingsPage": {
-            "findings": [finding_result(connection, scan, row) for row in rows],
+            "findings": [
+                finding_result(connection, scan, row, indexed_finding=indexed.get(row["id"]))
+                for row in rows
+            ],
             "limit": limit,
             "nextOffset": next_offset if next_offset < total else None,
             "offset": args.offset,
@@ -3199,6 +3253,7 @@ def finding_result(
     occurrence: sqlite3.Row,
     *,
     full_details: bool = False,
+    indexed_finding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     stored_details = read_finding_details(occurrence["details_json"])
     details = dict(stored_details if full_details else bounded_finding_details(stored_details))
@@ -3273,23 +3328,11 @@ def finding_result(
         locations.append(location)
     triage = finding_triage_result(connection, occurrence["id"])
     if full_details and scan["target_id"] is not None:
-        indexed = next(
-            (
-                finding
-                for finding in native_indexes._indexed_active_findings(
-                    connection,
-                    coverage_for_comparison,
-                    target_ids={scan["target_id"]},
-                    include_resolved=True,
-                )
-                if occurrence["id"] in finding.get("occurrence_ids", ())
-            ),
-            None,
-        )
-        if indexed is not None and indexed["decision_occurrence_id"] is not None:
-            triage = finding_triage_result(connection, indexed["decision_occurrence_id"])
-            if triage["status"] != indexed["status"]:
-                triage = {"status": indexed["status"]}
+        indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
+    if indexed_finding is not None and indexed_finding["decision_occurrence_id"] is not None:
+        triage = finding_triage_result(connection, indexed_finding["decision_occurrence_id"])
+        if triage["status"] != indexed_finding["status"]:
+            triage = {"status": indexed_finding["status"]}
     result = {
         **details,
         "confidence": {
@@ -3694,11 +3737,9 @@ def main() -> None:
         elif args.command == "get-finding":
             occurrence = require_occurrence(connection, args.occurrence_id)
             scan = require_scan(connection, occurrence["scan_id"])
+            current_target = _require_finding_checkout_owner(connection, scan)
             backfill_legacy_finding_details(connection, scan)
             occurrence = require_occurrence(connection, occurrence["id"])
-            current_target = connection.execute(
-                "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
-            ).fetchone()
             result = {
                 "scan": {
                     "findings": [

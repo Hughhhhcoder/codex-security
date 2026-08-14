@@ -109,9 +109,13 @@ const findingsIndexProbe = [
   "    result = indexes.list_repositories(connection, read_coverage=coverage)",
   "else:",
   "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
-  "finding_detail = None",
+  "finding_detail, scan_pages, rejected_previous_owner, rejected_previous_owner_list = None, None, None, None",
   "if settings.get('matchedTriage'):",
   "    import workbench_db as workbench",
+  "    if not settings.get('ownershipReuse'):",
+  "        connection.execute('ALTER TABLE scans ADD COLUMN target_device INTEGER')",
+  "        connection.execute('ALTER TABLE scans ADD COLUMN target_inode INTEGER')",
+  "        connection.execute('ALTER TABLE scans ADD COLUMN target_revision TEXT')",
   "    connection.execute(\"ALTER TABLE finding_occurrences ADD COLUMN details_json TEXT DEFAULT '{}'\")",
   "    connection.execute(\"ALTER TABLE finding_occurrences ADD COLUMN confidence TEXT DEFAULT 'high'\")",
   "    connection.execute(\"ALTER TABLE finding_occurrences ADD COLUMN remediation TEXT DEFAULT 'Fix the finding.'\")",
@@ -123,10 +127,27 @@ const findingsIndexProbe = [
   "    workbench.finding_remediation_result = lambda *arguments: {'state': 'idle'}",
   "    workbench.finding_source_excerpt = lambda *arguments: None",
   "    workbench.finding_artifact_paths = lambda *arguments: []",
+  "    workbench.backfill_legacy_finding_details = lambda *arguments: None",
   "    workbench.scan_history.finding_matches = lambda *arguments: ([], '2026-01-01', [])",
   "    scan = connection.execute(\"SELECT * FROM scans WHERE id = 'current-new'\").fetchone()",
   "    occurrence = connection.execute(\"SELECT * FROM finding_occurrences WHERE id = 'current-new-occurrence'\").fetchone()",
   "    finding_detail = workbench.finding_result(connection, scan, occurrence, full_details=True)",
+  "    scan_pages = {status: workbench.list_findings(connection, argparse.Namespace(scan_id='current-new', query=None, severity=None, status=status, offset=0, limit=20))['findingsPage'] for status in ('open', 'closed')}",
+  "    if settings.get('ownershipReuse'):",
+  "        from contextlib import nullcontext, redirect_stdout",
+  "        from io import StringIO",
+  "        workbench.parse_args = lambda _description: argparse.Namespace(command='get-finding', occurrence_id='current-old-occurrence')",
+  "        workbench.connect = lambda: connection",
+  "        workbench.closing = nullcontext",
+  "        try:",
+  "            with redirect_stdout(StringIO()):",
+  "                workbench.main()",
+  "        except SystemExit as error:",
+  "            rejected_previous_owner = str(error)",
+  "        try:",
+  "            workbench.list_findings(connection, argparse.Namespace(scan_id='current-old', query=None, severity=None, status=None, offset=0, limit=20))",
+  "        except SystemExit as error:",
+  "            rejected_previous_owner_list = str(error)",
   "scoped_scan_ids = []",
   "matching_scan_count = None",
   "old_owner_matches = None",
@@ -139,7 +160,7 @@ const findingsIndexProbe = [
   "    matching_scan_count = matching['scanCount']",
   "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
   "    old_owner_matches = indexes.scan_history._same_registered_repository(connection, *scans)",
-  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
+  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'scanPages': scan_pages, 'rejectedPreviousOwner': rejected_previous_owner, 'rejectedPreviousOwnerList': rejected_previous_owner_list, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -216,6 +237,12 @@ function probeFindingsIndex(
     targetPath: string;
   }>;
   findingDetail: Record<string, unknown> | null;
+  scanPages: Record<
+    string,
+    { findings: Array<Record<string, unknown>>; total: number }
+  > | null;
+  rejectedPreviousOwner: string | null;
+  rejectedPreviousOwnerList: string | null;
   repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
   matchingScanCount: number | null;
@@ -329,6 +356,20 @@ describe("workbench findings index", () => {
         status: "closed",
       },
     });
+    expect(result.scanPages?.["closed"]).toMatchObject({
+      findings: [
+        {
+          occurrenceId: "current-new-occurrence",
+          status: "closed",
+          triage: { closeReason: "false_positive", status: "closed" },
+        },
+      ],
+      total: 1,
+    });
+    expect(result.scanPages?.["open"]).toMatchObject({
+      findings: [],
+      total: 0,
+    });
   });
 
   test("keeps rediscovered fixed finding details open", () => {
@@ -348,6 +389,14 @@ describe("workbench findings index", () => {
       triage: { status: "open" },
     });
     expect(result.findingDetail?.["triage"]).not.toHaveProperty("closeReason");
+    expect(result.scanPages?.["open"]).toMatchObject({
+      findings: [{ occurrenceId: "current-new-occurrence", status: "open" }],
+      total: 1,
+    });
+    expect(result.scanPages?.["closed"]).toMatchObject({
+      findings: [],
+      total: 0,
+    });
   });
 
   test("does not inherit finding triage from a previous checkout owner", () => {
@@ -368,6 +417,8 @@ describe("workbench findings index", () => {
       triage: { status: "open" },
     });
     expect(result.findingDetail?.["triage"]).not.toHaveProperty("closeReason");
+    expect(result.rejectedPreviousOwner).toContain("checkout owner");
+    expect(result.rejectedPreviousOwnerList).toContain("checkout owner");
   });
 
   test("retains covered same-owner findings while preparing semantic matching", () => {

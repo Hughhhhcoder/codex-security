@@ -211,6 +211,34 @@ describe("scan history renderer", () => {
     }
   });
 
+  test("keeps finding links repository-scoped from checkout subdirectories", () => {
+    const scan = {
+      scanId: "11111111-1111-4111-8111-111111111111",
+      targetPath: "/demo/repository",
+      mode: "standard",
+      progress: { status: "complete" },
+      findingCount: 2,
+      startedAt: "2026-07-23T12:00:00Z",
+    };
+
+    const current = stripVTControlCharacters(
+      renderScanHistory({ scans: [scan] }, "list", {
+        currentDirectory: "/demo/repository/src",
+        repository: "/demo/repository/src",
+      }),
+    );
+    expect(current).toContain("codex-security findings list");
+    expect(current).not.toContain("codex-security findings list --scan");
+
+    const other = stripVTControlCharacters(
+      renderScanHistory({ scans: [scan] }, "list", {
+        currentDirectory: "/demo/another-repository",
+        repository: "/demo/repository",
+      }),
+    );
+    expect(other).toContain("codex-security findings list --scan 11111111");
+  });
+
   test("shows bounded findings, saved configuration, and failure reasons", () => {
     const scan = {
       scanId: "12345678-abcd-4567-abcd-1234567890ab",
