@@ -85,6 +85,14 @@ credential. Other variables, such as `GITHUB_TOKEN` or `AWS_SECRET_ACCESS_KEY`,
 can remain available to local subprocesses. Run a scan with only the
 environment credentials it needs.
 
+### Standalone validation and patching
+
+The `validate` and `patch` commands use Codex's `--approve-for-me` mode with
+its `workspace-write` sandbox. Approval requests are reviewed automatically
+without an interactive prompt; a reviewed request can permit additional actions
+for its specific operation. Independently enforced host and network
+restrictions still apply.
+
 ### Security boundaries
 
 A security issue must cross a boundary the product actually provides:
