@@ -150,9 +150,9 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
 def state_dir() -> Path:
     state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
     if state_dir:
-        return Path(state_dir).expanduser().resolve()
+        return filesystem_path(Path(state_dir).expanduser()).resolve()
     codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return (codex_home / "state" / "plugins" / "codex-security").resolve()
+    return filesystem_path(codex_home / "state" / "plugins" / "codex-security").resolve()
 
 
 def database_path() -> Path:

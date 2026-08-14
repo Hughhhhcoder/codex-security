@@ -554,7 +554,12 @@ describe("plugin runtime preparation", () => {
         locations: [{ path: "app.ts", start_line: 1, role: "sink" }],
       });
 
-      const stateDirectory = join(root, "long-path-state");
+      const stateDirectory = join(
+        root,
+        `state-${"f".repeat(100)}`,
+        `state-${"0".repeat(100)}`,
+      );
+      expect(stateDirectory.length).toBeGreaterThan(260);
       const scanRoot = join(root, "long-path-scans");
       const workbench = join(PLUGIN_ROOT, "scripts", "workbench_db.py");
       const mixedStarted = spawnSync(
