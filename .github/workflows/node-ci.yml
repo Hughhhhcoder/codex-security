@@ -13,6 +13,75 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  bundled-mcp-live-smoke:
+    name: Require manually initiated bundled MCP smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+
+    steps:
+      - name: Verify smoke-test results for bundled MCP changes
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pullRequest = context.payload.pull_request;
+            const bundledMcpPrefix = "sdk/typescript/_bundled_plugin/mcp/";
+            const changedFiles = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pullRequest.number,
+              per_page: 100,
+            });
+
+            if (!changedFiles.some(({ filename, previous_filename: previousFilename }) =>
+              filename.startsWith(bundledMcpPrefix) ||
+              previousFilename?.startsWith(bundledMcpPrefix)
+            )) {
+              core.info("No bundled MCP files changed; a manual smoke test is not required.");
+              return;
+            }
+
+            const headSha = pullRequest.head.sha;
+            const requiredContexts = [
+              "codex-security/live-smoke-linux",
+              "codex-security/live-smoke-windows",
+            ];
+            const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+              owner,
+              repo,
+              ref: headSha,
+              per_page: 100,
+            });
+            const latestStatuses = new Map();
+
+            for (const status of statuses) {
+              if (requiredContexts.includes(status.context) && !latestStatuses.has(status.context)) {
+                latestStatuses.set(status.context, status.state);
+              }
+            }
+
+            const missingOrFailed = requiredContexts.filter(
+              (statusContext) => latestStatuses.get(statusContext) !== "success",
+            );
+
+            if (missingOrFailed.length > 0) {
+              for (const statusContext of missingOrFailed) {
+                core.error(`${statusContext}: ${latestStatuses.get(statusContext) ?? "not run"}`);
+              }
+              core.setFailed(
+                `Bundled MCP changes require successful manually initiated Linux and Windows smoke scans for ${headSha}. ` +
+                `Run: gh workflow run live-scan-smoke.yml --repo ${owner}/${repo} --ref main --field pull_request=${pullRequest.number}`,
+              );
+              return;
+            }
+
+            core.info(`Linux and Windows manual smoke tests passed for ${headSha}.`);
+
   test:
     name: ${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ${{ matrix.os }}
@@ -250,7 +319,7 @@ jobs:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}
     runs-on: ubuntu-latest
     if: always()
-    needs: [windows-test, windows-verify]
+    needs: [bundled-mcp-live-smoke, windows-test, windows-verify]
     strategy:
       fail-fast: false
       matrix:
@@ -258,5 +327,5 @@ jobs:
 
     steps:
       - name: Require every Windows coverage job
-        if: needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'
+        if: needs.bundled-mcp-live-smoke.result != 'success' || needs.windows-test.result != 'success' || needs.windows-verify.result != 'success'
         run: exit 1

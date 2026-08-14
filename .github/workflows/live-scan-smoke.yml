@@ -1,0 +1,424 @@
+name: live-scan-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Same-repository pull request to smoke-test
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: live-scan-smoke-${{ inputs.pull_request }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Resolve trusted pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      head-sha: ${{ steps.pull-request.outputs.head-sha }}
+      pull-request: ${{ steps.pull-request.outputs.pull-request }}
+
+    steps:
+      - name: Require the reviewed workflow on the default branch
+        if: github.repository != 'openai/codex-security' || github.ref != 'refs/heads/main'
+        run: |
+          echo 'Run the reviewed workflow from openai/codex-security main.' >&2
+          exit 1
+
+      - name: Resolve immutable same-repository pull request head
+        id: pull-request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PULL_REQUEST: ${{ inputs.pull_request }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$INPUT_PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'pull_request must be a positive pull request number.' >&2
+            exit 1
+          fi
+
+          gh api "repos/$EXPECTED_REPOSITORY/pulls/$INPUT_PULL_REQUEST" \
+            > "$RUNNER_TEMP/pull-request.json"
+
+          node --input-type=module --eval '
+            import { appendFileSync, readFileSync } from "node:fs";
+
+            const pullRequest = JSON.parse(
+              readFileSync(process.argv[1], "utf8"),
+            );
+            const expectedRepository = process.env.EXPECTED_REPOSITORY;
+            const allowedAssociations = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+            if (pullRequest.state !== "open") {
+              throw new Error("The pull request must be open.");
+            }
+            if (pullRequest.base?.repo?.full_name !== expectedRepository) {
+              throw new Error("The pull request base must be this repository.");
+            }
+            if (pullRequest.base?.ref !== "main") {
+              throw new Error("The pull request must target main.");
+            }
+            if (pullRequest.head?.repo?.full_name !== expectedRepository) {
+              throw new Error("Fork pull requests cannot receive smoke-test credentials.");
+            }
+            if (!allowedAssociations.has(pullRequest.author_association)) {
+              throw new Error("The pull request author must be an organization member or trusted collaborator.");
+            }
+            if (!/^[0-9a-f]{40}$/.test(pullRequest.head?.sha ?? "")) {
+              throw new Error("The pull request head SHA is invalid.");
+            }
+
+            appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `head-sha=${pullRequest.head.sha}\npull-request=${pullRequest.number}\n`,
+            );
+            console.log(`Testing pull request #${pullRequest.number} at ${pullRequest.head.sha}.`);
+          ' "$RUNNER_TEMP/pull-request.json"
+
+  mark-pending:
+    name: Mark candidate smoke checks pending
+    runs-on: ubuntu-latest
+    needs: prepare
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+
+    steps:
+      - name: Publish pending statuses for this exact candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head-sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          for platform in linux windows; do
+            gh api \
+              --method POST \
+              "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+              -f state=pending \
+              -f "context=codex-security/live-smoke-$platform" \
+              -f "description=Manually dispatched smoke test is running" \
+              -f "target_url=$TARGET_URL" \
+              --silent
+          done
+
+  build:
+    name: Build immutable candidate package
+    runs-on: ubuntu-latest
+    needs: [prepare, mark-pending]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+
+    steps:
+      - name: Checkout exact candidate commit without persisted credentials
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare.outputs.head-sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        run: npm install --global pnpm@11.9.0 --no-audit --no-fund
+
+      - name: Install frozen candidate dependencies
+        working-directory: sdk/typescript
+        run: pnpm install --frozen-lockfile
+
+      - name: Build candidate
+        working-directory: sdk/typescript
+        run: pnpm run build
+
+      - name: Embed immutable candidate package provenance
+        working-directory: sdk/typescript
+        shell: bash
+        env:
+          HEAD_SHA: ${{ needs.prepare.outputs.head-sha }}
+        run: npm pkg set "gitHead=$HEAD_SHA"
+
+      - name: Pack candidate
+        working-directory: sdk/typescript
+        run: pnpm pack --pack-destination ../../dist
+
+      - name: Verify exact package commit and bundled plugin
+        working-directory: sdk/typescript
+        shell: bash
+        env:
+          HEAD_SHA: ${{ needs.prepare.outputs.head-sha }}
+          CODEX_SECURITY_EXPECTED_GIT_HEAD: ${{ needs.prepare.outputs.head-sha }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(../../dist/*.tgz)
+
+          if [[ "${#archives[@]}" -ne 1 ]]; then
+            echo 'Expected exactly one candidate npm package.' >&2
+            exit 1
+          fi
+
+          pnpm run check:package "${archives[0]}"
+          package_head="$(tar -xOf "${archives[0]}" package/package.json | node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).gitHead || ""')"
+          if [[ "$package_head" != "$HEAD_SHA" ]]; then
+            echo "Packed gitHead must match $HEAD_SHA; received ${package_head:-missing}." >&2
+            exit 1
+          fi
+
+      - name: Upload immutable candidate package
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-scan-candidate-${{ needs.prepare.outputs.head-sha }}
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  smoke:
+    name: Live scan (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    needs: [prepare, build]
+    timeout-minutes: 12
+    environment: security-live-smoke
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+          - platform: windows
+            runner: windows-latest
+
+    steps:
+      - name: Checkout trusted smoke-test helper from reviewed main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: "22.13.0"
+          package-manager-cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Download immutable candidate package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/live-scan-candidate
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Prepare private Windows scan root
+        if: runner.os == 'Windows'
+        id: windows-temp
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $env:USERPROFILE '.codex-security-live-smoke'
+          New-Item -ItemType Directory -Path $path -Force | Out-Null
+          $sid = (whoami /user /fo csv /nh | ConvertFrom-Csv -Header Name, Sid).Sid
+          & icacls $path /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Could not secure the Windows live smoke root' }
+          "path=$path" >> $env:GITHUB_OUTPUT
+
+      - name: Complete real model-backed scan
+        shell: bash
+        timeout-minutes: 6
+        env:
+          OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_SMOKE_OPENAI_API_KEY }}
+          OPENAI_IDENTITY_PROVIDER_ID: ${{ vars.OPENAI_IDENTITY_PROVIDER_ID }}
+          OPENAI_SERVICE_ACCOUNT_ID: ${{ vars.OPENAI_SERVICE_ACCOUNT_ID }}
+          OPENAI_WIF_AUDIENCE: ${{ vars.OPENAI_WIF_AUDIENCE }}
+          CODEX_SECURITY_EXPECTED_GIT_HEAD: ${{ needs.prepare.outputs.head-sha }}
+          TEMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
+          TMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
+          TMPDIR: ${{ steps.windows-temp.outputs.path || runner.temp }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=("$RUNNER_TEMP"/live-scan-candidate/*.tgz)
+
+          if [[ "${#archives[@]}" -ne 1 ]]; then
+            echo 'Expected exactly one downloaded candidate package.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${OPENAI_IDENTITY_PROVIDER_ID:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
+            echo 'Configure security-live-smoke workload identity variables OPENAI_IDENTITY_PROVIDER_ID and OPENAI_SERVICE_ACCOUNT_ID, or configure its protected CODEX_SECURITY_SMOKE_OPENAI_API_KEY secret.' >&2
+            exit 1
+          fi
+
+          node .github/scripts/live-scan-smoke.mjs \
+            --package "${archives[0]}" \
+            --model gpt-5.6-luna \
+            --effort low \
+            --max-cost 0.25 \
+            --timeout-seconds 240 \
+            --artifacts-dir "$RUNNER_TEMP/live-scan-results"
+
+      - name: Upload synthetic scan results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-scan-results-${{ matrix.platform }}-${{ needs.prepare.outputs.head-sha }}
+          path: ${{ runner.temp }}/live-scan-results
+          if-no-files-found: ignore
+          retention-days: 3
+
+  report:
+    name: Publish exact-commit smoke results
+    runs-on: ubuntu-latest
+    if: ${{ always() && needs.prepare.result == 'success' && needs.mark-pending.result == 'success' }}
+    needs: [prepare, mark-pending, build, smoke]
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      pull-requests: read
+      statuses: write
+    outputs:
+      all-passed: ${{ steps.report.outputs.all-passed }}
+
+    steps:
+      - name: Report Linux and Windows candidate results
+        id: report
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head-sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$BUILD_RESULT" == success ]]; then
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+              --jq '.jobs[] | {name, conclusion}' \
+              > "$RUNNER_TEMP/smoke-jobs.jsonl"
+          else
+            : > "$RUNNER_TEMP/smoke-jobs.jsonl"
+          fi
+
+          all_passed=true
+          for platform in linux windows; do
+            platform_result="$(node --input-type=module --eval '
+              import { readFileSync } from "node:fs";
+
+              const jobs = readFileSync(process.argv[1], "utf8")
+                .split("\n")
+                .filter(Boolean)
+                .map((line) => JSON.parse(line));
+              const expected = `Live scan (${process.argv[2]})`;
+              const matches = jobs.filter((job) => job.name === expected);
+
+              if (matches.length > 1) {
+                throw new Error(`Multiple jobs matched ${expected}.`);
+              }
+              process.stdout.write(matches[0]?.conclusion ?? "failure");
+            ' "$RUNNER_TEMP/smoke-jobs.jsonl" "$platform")"
+
+            if [[ "$BUILD_RESULT" == success && "$platform_result" == success ]]; then
+              state=success
+              description='Candidate completed a real model-backed scan'
+            else
+              state=failure
+              description="Candidate smoke failed: ${platform_result:-$BUILD_RESULT}"
+              all_passed=false
+            fi
+
+            gh api \
+              --method POST \
+              "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+              -f "state=$state" \
+              -f "context=codex-security/live-smoke-$platform" \
+              -f "description=$description" \
+              -f "target_url=$TARGET_URL" \
+              --silent
+
+            printf '%s: %s\n' "$platform" "$state" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+
+          printf 'all-passed=%s\n' "$all_passed" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh the pull request required CI gate
+        if: steps.report.outputs.all-passed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head-sha }}
+          PULL_REQUEST: ${{ needs.prepare.outputs.pull-request }}
+        run: |
+          set -euo pipefail
+
+          current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PULL_REQUEST" --jq '.head.sha')"
+          if [[ "$current_head" != "$HEAD_SHA" ]]; then
+            echo 'Pull request head changed; the new commit requires a fresh manual smoke test.' >&2
+            exit 1
+          fi
+
+          run_id=
+          run_conclusion=
+          for attempt in {1..13}; do
+            run="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/node-ci.yml/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=20" \
+              --jq '[.workflow_runs[] | select(.head_sha == env.HEAD_SHA)] | first | if . then [.id, .status, .conclusion // ""] | @tsv else "" end')"
+
+            if [[ -n "$run" ]]; then
+              IFS=$'\t' read -r candidate_id run_status run_conclusion <<< "$run"
+              if [[ "$run_status" == completed ]]; then
+                run_id="$candidate_id"
+                break
+              fi
+            fi
+
+            if [[ "$attempt" -eq 13 ]]; then
+              echo 'Timed out waiting two minutes for node-ci to complete. Manually rerun its failed jobs after it completes.' >&2
+              exit 1
+            fi
+
+            echo "Waiting for the node-ci run to complete before refreshing the required gate ($attempt/12)."
+            sleep 10
+          done
+
+          if [[ "$run_conclusion" == success ]]; then
+            echo 'The existing node-ci run already succeeded after observing both smoke statuses.' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/rerun-failed-jobs" \
+            --silent
+
+          echo "Re-running failed node-ci checks for exact pull request head $HEAD_SHA." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
