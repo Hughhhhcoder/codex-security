@@ -50,6 +50,7 @@ async function writeSession(
   parentThreadId?: string,
   workingDirectory?: string,
   timestamp?: string,
+  completed = false,
 ): Promise<string> {
   const directory = join(home, "sessions", "2026", "07", "26");
   await mkdir(directory, { recursive: true });
@@ -74,6 +75,7 @@ async function writeSession(
               }),
         },
       }),
+      ...(completed ? [taskEvent("task_started")] : []),
       ...(usage === null
         ? []
         : [
@@ -85,20 +87,38 @@ async function writeSession(
               },
             }),
           ]),
+      ...(completed ? [taskEvent("task_complete")] : []),
       "",
     ].join("\n"),
   );
   return path;
 }
 
+function taskEvent(
+  type: "task_started" | "task_complete" | "turn_complete" | "turn_aborted",
+): string {
+  return JSON.stringify({
+    type: "event_msg",
+    payload: {
+      type,
+      turn_id: "fixture-worker-turn",
+      started_at: 1_785_067_320,
+      ...(type === "task_started" ? {} : { completed_at: 1_785_067_321 }),
+      ...(type === "turn_aborted" ? { reason: "interrupted" } : {}),
+    },
+  });
+}
+
 async function workerScan({
   rootUsage = { input_tokens: 100, output_tokens: 10 },
   workerUsage = { input_tokens: 100, output_tokens: 10 },
+  workerCompleted = true,
   maxCostUsd,
   onCost,
 }: {
   rootUsage?: Record<string, number> | null;
   workerUsage?: Record<string, number> | null;
+  workerCompleted?: boolean;
   maxCostUsd?: number;
   onCost?: (cost: { estimatedUsd: number }) => void;
 } = {}): Promise<{
@@ -114,6 +134,9 @@ async function workerScan({
     "worker-thread",
     workerUsage,
     "scan-thread",
+    undefined,
+    undefined,
+    workerCompleted,
   );
   const tracker = new ScanCostTracker({
     codexHome: home,
@@ -610,6 +633,78 @@ describe("live scan cost tracking", () => {
       output_tokens: 14,
     });
   });
+
+  test.each([
+    ["root metadata is missing", "missing", "independent", 1, true],
+    ["root timing is missing", "untimed", "independent", 1, true],
+    ["worker timing is missing", "timed", "untimed", 1, true],
+    ["the worker parent is unobserved", "missing", "orphaned", 1, true],
+    ["the worker has a parent", "missing", "parented", 1, false],
+    ["the worker is unrelated", "missing", "unrelated", 1, false],
+    ["tracking is optional", "missing", "independent", undefined, false],
+    ["no worker needs attribution", "missing", "none", 1, false],
+  ] as const)(
+    "verifies independent Deep worker ownership when %s",
+    async (_scenario, rootState, workerState, maxCostUsd, shouldReject) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scans", "current");
+      if (rootState !== "missing") {
+        await writeSession(
+          home,
+          "scan-thread",
+          { input_tokens: 100, output_tokens: 10 },
+          undefined,
+          scanDirectory,
+          rootState === "timed" ? "2026-07-26T12:00:00Z" : undefined,
+        );
+      }
+      if (workerState !== "none") {
+        await writeSession(
+          home,
+          "deep-worker",
+          { input_tokens: 1_000, output_tokens: 100 },
+          workerState === "parented"
+            ? "scan-thread"
+            : workerState === "orphaned"
+              ? "unobserved-coordinator"
+              : undefined,
+          workerState === "unrelated"
+            ? join(home, "another-scan", "artifacts")
+            : join(
+                scanDirectory,
+                "artifacts",
+                "deep_discovery",
+                "workers",
+                "worker",
+                "output",
+              ),
+          workerState === "untimed" ? undefined : "2026-07-26T12:01:00Z",
+          true,
+        );
+      }
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-terra",
+        scanDirectory,
+        maxCostUsd,
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+
+      const completed = tracker.stop({ input_tokens: 100, output_tokens: 10 });
+      if (shouldReject) {
+        await expect(completed).rejects.toThrow(
+          "The scan cost limit could not be verified",
+        );
+      } else {
+        await expect(completed).resolves.toMatchObject({
+          cost: {
+            inputTokens: workerState === "parented" ? 1_100 : 100,
+          },
+        });
+      }
+    },
+  );
 
   test("ignores replayed parent history in forked worker sessions", async () => {
     const home = await codexHome();
@@ -1927,6 +2022,73 @@ describe("live scan cost tracking", () => {
           "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
         );
       }
+    },
+  );
+
+  test.each([
+    ["still-running worker", "running", 1, true],
+    ["completed worker", "task_complete", 1, false],
+    ["compatible completed worker", "turn_complete", 1, false],
+    ["canceled worker", "turn_aborted", 1, false],
+    ["worker restarted after completion", "task_started", 1, true],
+    ["optional still-running worker", "running", undefined, false],
+  ] as const)(
+    "verifies final delegated-worker completion for a %s",
+    async (_scenario, state, maxCostUsd, shouldReject) => {
+      const { worker, tracker } = await workerScan({
+        workerCompleted: false,
+        maxCostUsd,
+      });
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
+      if (state !== "running") {
+        if (state === "task_started") {
+          await appendFile(worker, `${taskEvent("task_complete")}\n`);
+        }
+        await appendFile(worker, `${taskEvent(state)}\n`);
+      }
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
+
+      const completed = tracker.stop({ input_tokens: 100, output_tokens: 10 });
+      if (shouldReject) {
+        await expect(completed).rejects.toThrow(
+          "The scan cost limit could not be verified",
+        );
+      } else {
+        await expect(completed).resolves.toMatchObject({
+          cost: { inputTokens: 200, outputTokens: 20 },
+        });
+      }
+    },
+  );
+
+  test("preserves observed active-worker costs during budget failure cleanup", async () => {
+    const { tracker } = await workerScan({
+      workerCompleted: false,
+      maxCostUsd: 1,
+    });
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
+
+    expect((await tracker.stop()).cost).toMatchObject({
+      inputTokens: 200,
+      outputTokens: 20,
+    });
+  });
+
+  test.each([
+    ["null", null],
+    ["undefined", undefined],
+  ] as const)(
+    "rejects an active worker when completed-turn usage is %s",
+    async (_description, usage) => {
+      const { tracker } = await workerScan({
+        workerCompleted: false,
+        maxCostUsd: 1,
+      });
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
+
+      await expect(tracker.stop(usage)).rejects.toThrow(
+        "The scan cost limit could not be verified",
+      );
     },
   );
 

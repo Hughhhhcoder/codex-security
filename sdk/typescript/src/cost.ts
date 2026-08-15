@@ -54,6 +54,7 @@ interface SessionUsage {
   inheritedUsage: ScanTokenUsage | null;
   replaying: boolean;
   usage: ScanTokenUsage | null;
+  taskCompleted: boolean;
   calls: Map<string, ScanActivity>;
   activities: ScanActivity[];
   progress: ScanProgress[];
@@ -108,6 +109,7 @@ export class ScanCostTracker {
   #failedSession: SessionUsage | null = null;
   #hasDelegatedWorkers = false;
   #hasUnverifiedSessionUsage = false;
+  #hasUnfinishedWorkers = false;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -166,6 +168,7 @@ export class ScanCostTracker {
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
+    const finalizing = arguments.length > 0;
     if (this.#finalSnapshot !== null) return this.#finalSnapshot;
     if (this.#timer !== null) {
       clearInterval(this.#timer);
@@ -223,6 +226,7 @@ export class ScanCostTracker {
       (rootUsage === null ||
         cost === null ||
         this.#hasUnverifiedSessionUsage ||
+        (finalizing && this.#hasUnfinishedWorkers) ||
         (this.#hasDelegatedWorkers && workerUsage === null))
     ) {
       throw (
@@ -270,6 +274,7 @@ export class ScanCostTracker {
           inheritedUsage: null,
           replaying: false,
           usage: null,
+          taskCompleted: false,
           calls: new Map(),
           activities: [],
           progress: [],
@@ -303,35 +308,34 @@ export class ScanCostTracker {
     }
 
     const included = new Set([this.#threadId]);
+    const ambiguousWorkers = new Set<string>();
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
           (session) => session.threadId === this.#threadId,
         )?.startedAt ?? null;
+      const artifactsDirectory = join(this.#options.scanDirectory, "artifacts");
       for (const session of this.#sessions.values()) {
-        if (
-          session.threadId === null ||
-          session.workingDirectory === null ||
-          scanStartedAt === null ||
-          session.startedAt === null ||
-          session.startedAt < scanStartedAt
-        ) {
+        if (session.threadId === null || session.workingDirectory === null) {
           continue;
         }
-        const artifactsDirectory = join(
-          this.#options.scanDirectory,
-          "artifacts",
-        );
         const workerDirectory = relative(
           join(artifactsDirectory, "deep_discovery", "workers"),
           session.workingDirectory,
         ).split(sep);
         if (
-          session.workingDirectory === artifactsDirectory ||
-          (workerDirectory.length === 2 && workerDirectory[1] === "output")
+          session.workingDirectory !== artifactsDirectory &&
+          !(workerDirectory.length === 2 && workerDirectory[1] === "output")
         ) {
-          included.add(session.threadId);
+          continue;
         }
+        if (scanStartedAt === null || session.startedAt === null) {
+          if (session.threadId !== this.#threadId) {
+            ambiguousWorkers.add(session.threadId);
+          }
+          continue;
+        }
+        if (session.startedAt >= scanStartedAt) included.add(session.threadId);
       }
     }
     let changed = true;
@@ -349,6 +353,9 @@ export class ScanCostTracker {
         }
       }
     }
+    const hasUnverifiedWorkerAttribution = [...ambiguousWorkers].some(
+      (threadId) => !included.has(threadId),
+    );
     if (included.size > 1) this.#hasDelegatedWorkers = true;
     if (this.#options.maxCostUsd !== undefined) {
       for (const [path, session] of this.#sessions) {
@@ -373,12 +380,14 @@ export class ScanCostTracker {
 
     let usage: ScanTokenUsage | null = null;
     let threadUsage: ScanTokenUsage | null = null;
-    let hasUnverifiedSessionUsage = false;
+    let hasUnverifiedSessionUsage = hasUnverifiedWorkerAttribution;
+    let hasUnfinishedWorkers = false;
     for (const session of this.#sessions.values()) {
       if (session.threadId !== null && included.has(session.threadId)) {
         if (session.pendingLineBytes > 0) hasUnverifiedSessionUsage = true;
         if (session.threadId !== this.#threadId) {
           if (session.usage === null) hasUnverifiedSessionUsage = true;
+          if (!session.taskCompleted) hasUnfinishedWorkers = true;
           this.#reportWorkerActivities(session);
           this.#reportWorkerProgress(session);
         }
@@ -389,6 +398,7 @@ export class ScanCostTracker {
       }
     }
     this.#hasUnverifiedSessionUsage = hasUnverifiedSessionUsage;
+    this.#hasUnfinishedWorkers = hasUnfinishedWorkers;
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
     this.#snapshot = { usage, cost };
@@ -582,6 +592,7 @@ function readSessionEvent(
   if (event["type"] === "session_meta") {
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
+      session.taskCompleted = false;
       return;
     }
     if (typeof payload["id"] === "string") {
@@ -615,8 +626,23 @@ function readSessionEvent(
       payload["started_at"] >= session.startedAt
     ) {
       session.replaying = false;
+      session.taskCompleted = false;
     }
     return;
+  }
+  if (event["type"] === "event_msg") {
+    if (payload["type"] === "task_started") {
+      session.taskCompleted = false;
+      return;
+    }
+    if (
+      payload["type"] === "task_complete" ||
+      payload["type"] === "turn_complete" ||
+      payload["type"] === "turn_aborted"
+    ) {
+      session.taskCompleted = true;
+      return;
+    }
   }
   if (event["type"] === "response_item") {
     session.progress.push(...sessionProgressUpdates(payload));
@@ -755,7 +781,10 @@ function readSessionEvent(
     session.inheritedUsage === null
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
-  if (ownUsage !== null) session.usage = ownUsage;
+  if (ownUsage !== null) {
+    session.usage = ownUsage;
+    session.taskCompleted = false;
+  }
 }
 
 function readSessionReasoning(
