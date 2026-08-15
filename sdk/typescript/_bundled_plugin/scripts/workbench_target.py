@@ -382,9 +382,16 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         directory = path.resolve() if stat.S_ISDIR(metadata.st_mode) else None
         if directory is not None and sys.platform == "darwin":
             directory = Path(unicodedata.normalize("NFC", os.fspath(directory)))
+        target_entry = directory is not None and directory.samefile(canonical_target)
         if (
-            path != target and not resolved_parents[parent].is_relative_to(canonical_target)
-        ) or (directory is not None and not directory.is_relative_to(canonical_target)):
+            not target_entry
+            and not _snapshot_directory_is_within_target(
+                resolved_parents[parent], canonical_target
+            )
+        ) or (
+            directory is not None
+            and not _snapshot_directory_is_within_target(directory, canonical_target)
+        ):
             raise SystemExit("Git working-tree paths must stay inside the selected target.")
         paths.append(path)
         if not stat.S_ISDIR(metadata.st_mode):
@@ -404,6 +411,15 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             if ".git" not in nested_path.relative_to(path).parts
         )
     return sorted(set(paths))
+
+
+def _snapshot_directory_is_within_target(directory: Path, target: Path) -> bool:
+    if directory.is_relative_to(target):
+        return True
+    try:
+        return any(candidate.samefile(target) for candidate in (directory, *directory.parents))
+    except OSError:
+        return False
 
 
 def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -> str:

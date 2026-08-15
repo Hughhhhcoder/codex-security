@@ -693,6 +693,13 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     for path, status in changed:
         rel = path.relative_to(repo)
 
+        if status != "D" and args.mode != "revisions":
+            try:
+                if not path.parent.resolve(strict=True).is_relative_to(repo):
+                    continue
+            except (OSError, RuntimeError):
+                continue
+
         if status == "D":
             preview = ""
         elif args.mode == "revisions":
