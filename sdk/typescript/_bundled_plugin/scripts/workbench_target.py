@@ -230,7 +230,9 @@ def worktree_content_digest_for_context(
             update_digest_field(
                 digest,
                 b"untracked-content",
-                directory_content_digest(path.resolve()).encode(),
+                directory_content_digest(
+                    path.resolve(), _selected_target=(work_tree or repository).resolve()
+                ).encode(),
             )
         elif stat.S_ISREG(metadata.st_mode):
             content_digest = hashlib.sha256()
@@ -422,14 +424,16 @@ def _snapshot_directory_is_within_target(directory: Path, target: Path) -> bool:
         return False
 
 
-def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -> str:
+def directory_content_digest(
+    target: Path, *, excluded: tuple[Path, ...] = (), _selected_target: Path | None = None
+) -> str:
     excluded_relative = []
     for path in excluded:
         try:
             excluded_relative.append(path.relative_to(target))
         except ValueError:
             continue
-    paths = git_directory_snapshot_paths(target)
+    paths = git_directory_snapshot_paths(target, _selected_target=_selected_target)
     if paths is None:
         paths = sorted(target.rglob("*"))
     digest = hashlib.sha256()

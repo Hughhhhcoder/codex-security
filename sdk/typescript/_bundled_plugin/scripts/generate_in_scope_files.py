@@ -199,6 +199,7 @@ def generate_diff_in_scope_files(
                     try:
                         parent = path.parent.resolve(strict=True)
                         if not _snapshot_directory_is_within_target(parent, repository):
+                            path.lstat()
                             raise InventoryError(
                                 "changed Git working-tree paths must stay inside the selected target"
                             )
