@@ -8,6 +8,7 @@ test("reuses reviewed feedback only across matching persisted repository identit
   const probe = `
 import json, os, sqlite3, sys, tempfile
 sys.path.insert(0, sys.argv[1])
+from filesystem_identity import serialize_filesystem_identity
 from workbench_feedback import get_scan_feedback
 
 scenario = sys.argv[2]
@@ -125,7 +126,12 @@ if scenario == "identities":
         )
         connection.execute(
             "UPDATE scans SET target_path = ?, target_device = ?, target_inode = ? WHERE target_id = ?",
-            (reused_path, metadata.st_dev, metadata.st_ino + 1, "primary"),
+            (
+                reused_path,
+                serialize_filesystem_identity(metadata.st_dev),
+                serialize_filesystem_identity(metadata.st_ino + 1),
+                "primary",
+            ),
         )
         result["reusedPath"] = feedback("primary")
         result["deletedAlias"] = feedback("linked")

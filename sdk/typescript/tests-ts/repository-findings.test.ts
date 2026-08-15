@@ -120,6 +120,7 @@ test("shares findings only between explicitly identified repository and scope al
   const probe = `
 import argparse, json, os, sqlite3, sys, tempfile
 sys.path.insert(0, sys.argv[1])
+from filesystem_identity import serialize_filesystem_identity
 import workbench_native_indexes as indexes
 
 connection = sqlite3.connect(":memory:")
@@ -234,7 +235,12 @@ with tempfile.TemporaryDirectory() as reused_path:
     )
     connection.execute(
         "UPDATE scans SET target_path = ?, target_device = ?, target_inode = ? WHERE target_id = ?",
-        (reused_path, metadata.st_dev, metadata.st_ino + 1, "primary"),
+        (
+            reused_path,
+            serialize_filesystem_identity(metadata.st_dev),
+            serialize_filesystem_identity(metadata.st_ino + 1),
+            "primary",
+        ),
     )
     result["reusedPath"] = findings("primary")
     result["deletedAlias"] = findings("linked")

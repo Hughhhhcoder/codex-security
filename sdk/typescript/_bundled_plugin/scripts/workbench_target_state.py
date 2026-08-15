@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import os
 import sqlite3
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,11 +69,20 @@ def repository_identity(target: Path | str) -> str | None:
     canonical_directory = os.path.normcase(os.path.realpath(common_directory))
     try:
         metadata = Path(canonical_directory).stat()
+        generation = (Path(canonical_directory) / "description").lstat()
     except OSError:
+        return None
+    if not stat.S_ISREG(generation.st_mode):
         return None
     device = serialize_filesystem_identity(metadata.st_dev)
     inode = serialize_filesystem_identity(metadata.st_ino)
-    material = f"git-common-dir\0{canonical_directory}\0{device}\0{inode}\0{relative}"
+    generation_device = serialize_filesystem_identity(generation.st_dev)
+    generation_inode = serialize_filesystem_identity(generation.st_ino)
+    material = (
+        f"git-common-dir\0{canonical_directory}\0{device}\0{inode}\0"
+        f"git-description\0{generation_device}\0{generation_inode}\0"
+        f"{generation.st_ctime_ns}\0{relative}"
+    )
     return f"repository_sha256_{hashlib.sha256(material.encode()).hexdigest()}"
 
 

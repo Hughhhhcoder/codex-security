@@ -98,7 +98,9 @@ describe("CLI workbench", () => {
     },
   ])(
     "combines open findings from the $name",
-    async ({ requested, related }) => {
+    async ({ requested: requestedPath, related: relatedPath }) => {
+      const requested = resolve(requestedPath);
+      const related = resolve(relatedPath);
       const calls: Array<readonly string[]> = [];
       const findingsByTarget: Record<string, JsonObject[]> = {
         requested: [

@@ -198,20 +198,53 @@ if scenario == "identity":
     metadata = Path(common).stat()
     device = serialize_filesystem_identity(metadata.st_dev)
     inode = serialize_filesystem_identity(metadata.st_ino)
+    marker = Path(common) / "description"
+    generation = marker.lstat()
+    generation_device = serialize_filesystem_identity(generation.st_dev)
+    generation_inode = serialize_filesystem_identity(generation.st_ino)
     expected = "repository_sha256_" + hashlib.sha256(
-        f"git-common-dir\0{common}\0{device}\0{inode}\0.".encode()
+        (
+            f"git-common-dir\0{common}\0{device}\0{inode}\0"
+            f"git-description\0{generation_device}\0{generation_inode}\0"
+            f"{generation.st_ctime_ns}\0."
+        ).encode()
     ).hexdigest()
     forged_identity = repository_identity(forged_worktree())
+    (repository / "service-a" / "service.py").write_text("value = 2\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "ordinary update")
+    commit_independent = repository_identity(repository) == identities["repository"]
+    additional_worktree = root / "additional-worktree"
+    git(repository, "worktree", "add", "--detach", "-q", str(additional_worktree), "HEAD")
+    worktree_independent = repository_identity(repository) == identities["repository"]
+    git(repository, "worktree", "remove", "--force", str(additional_worktree))
     git(
         repository,
         "remote", "set-url", "origin",
         "https://different-user:DIFFERENT_SYNTHETIC_PASSWORD@example.test/other/repo.git",
     )
+    remote_independent = repository_identity(repository) == identities["repository"]
+    saved_marker = root / "saved-description"
+    marker.rename(saved_marker)
+    missing_marker_identity = repository_identity(repository)
+    try:
+        marker.symlink_to(saved_marker)
+    except (NotImplementedError, OSError):
+        symlink_supported = False
+        symlink_marker_identity = None
+    else:
+        symlink_supported = True
+        symlink_marker_identity = repository_identity(repository)
     print(json.dumps({
         "identities": identities,
         "expected": expected,
         "forgedIdentity": forged_identity,
-        "remoteIndependent": repository_identity(repository) == identities["repository"],
+        "commitIndependent": commit_independent,
+        "worktreeIndependent": worktree_independent,
+        "remoteIndependent": remote_independent,
+        "missingMarkerIdentity": missing_marker_identity,
+        "symlinkSupported": symlink_supported,
+        "symlinkMarkerIdentity": symlink_marker_identity,
         "targetIdsPreserved": all(
             target_ids[name] == stable_target_id(target)
             for name, target in targets.items()
@@ -421,7 +454,12 @@ elif scenario == "git-replacement":
     add_scan("original-alias", worktree)
     original_identity = repository_identity(repository)
     original_metadata = repository.stat()
-    shutil.rmtree(repository / ".git")
+
+    def remove_read_only(operation, path, _error):
+        os.chmod(path, 0o700)
+        operation(path)
+
+    shutil.rmtree(repository / ".git", onerror=remove_read_only)
     git(repository, "init", "-q")
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "replacement")
@@ -532,7 +570,11 @@ describe("durable workbench repository identities", () => {
     expect(identities["serviceA"]).not.toBe(identities["serviceB"]);
     expect(identities["clone"]).not.toBe(identities["repository"]);
     expect(result["forgedIdentity"]).toBeNull();
+    expect(result["commitIndependent"]).toBe(true);
+    expect(result["worktreeIndependent"]).toBe(true);
     expect(result["remoteIndependent"]).toBe(true);
+    expect(result["missingMarkerIdentity"]).toBeNull();
+    expect(result["symlinkMarkerIdentity"]).toBeNull();
     expect(result["targetIdsPreserved"]).toBe(true);
     expect(JSON.stringify(result["stored"])).not.toContain(
       "SYNTHETIC_PASSWORD",
