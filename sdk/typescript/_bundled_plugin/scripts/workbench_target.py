@@ -10,6 +10,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -359,6 +360,10 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
     paths: list[Path] = []
+    canonical_target = target.resolve()
+    if sys.platform == "darwin":
+        canonical_target = Path(unicodedata.normalize("NFC", os.fspath(canonical_target)))
+    resolved_parents: dict[Path, Path] = {target: canonical_target}
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
         path = repository / os.fsdecode(raw_path)
         try:
@@ -366,12 +371,20 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         except FileNotFoundError:
             # The index can retain a path that was staged and then deleted.
             continue
+        parent = path.parent
+        if parent not in resolved_parents:
+            resolved_parent = parent.resolve()
+            if sys.platform == "darwin":
+                resolved_parent = Path(
+                    unicodedata.normalize("NFC", os.fspath(resolved_parent))
+                )
+            resolved_parents[parent] = resolved_parent
+        directory = path.resolve() if stat.S_ISDIR(metadata.st_mode) else None
+        if directory is not None and sys.platform == "darwin":
+            directory = Path(unicodedata.normalize("NFC", os.fspath(directory)))
         if (
-            path != target and not path.parent.resolve().is_relative_to(target)
-        ) or (
-            stat.S_ISDIR(metadata.st_mode)
-            and not path.resolve().is_relative_to(target)
-        ):
+            path != target and not resolved_parents[parent].is_relative_to(canonical_target)
+        ) or (directory is not None and not directory.is_relative_to(canonical_target)):
             raise SystemExit("Git working-tree paths must stay inside the selected target.")
         paths.append(path)
         if not stat.S_ISDIR(metadata.st_mode):
