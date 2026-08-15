@@ -205,6 +205,37 @@ def worktree_content_digest(target: Path) -> str:
     return worktree_content_digest_for_context(repository, pathspec)
 
 
+def committed_diff_arguments(base: str, head: str, pathspec: str) -> tuple[str, ...]:
+    return (
+        "-c",
+        "core.quotePath=true",
+        "-c",
+        f"diff.orderFile={os.devnull}",
+        "-c",
+        "diff.suppressBlankEmpty=false",
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--no-relative",
+        "--no-renames",
+        "--no-indent-heuristic",
+        "--diff-algorithm=myers",
+        "--unified=3",
+        "--inter-hunk-context=0",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--submodule=short",
+        "--ignore-submodules=none",
+        base,
+        head,
+        "--",
+        pathspec,
+    )
+
+
 def committed_diff_content_digest(target: Path, base: str, head: str) -> str:
     repository, pathspec = git_worktree_context(target)
     digest = hashlib.sha256()
@@ -213,16 +244,7 @@ def committed_diff_content_digest(target: Path, base: str, head: str) -> str:
         digest,
         b"tracked-diff",
         repository,
-        "diff",
-        "--binary",
-        "--full-index",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--ignore-submodules=none",
-        base,
-        head,
-        "--",
-        pathspec,
+        *committed_diff_arguments(base, head, pathspec),
     ):
         raise SystemExit("Could not snapshot the selected committed changes.")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"

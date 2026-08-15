@@ -599,6 +599,51 @@ describe("malformed scan artifact recovery", () => {
     expect(sealed.scan.target.snapshotDigest).toBe(selected.contentDigest);
   });
 
+  test("keeps committed snapshots stable when Git diff rendering settings change", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+
+    for (const [setting, value] of [
+      ["diff.noprefix", "true"],
+      ["diff.mnemonicprefix", "true"],
+      ["diff.relative", "true"],
+      ["diff.renames", "true"],
+      ["diff.algorithm", "histogram"],
+      ["diff.indentheuristic", "true"],
+      ["diff.context", "9"],
+      ["diff.interhunkcontext", "5"],
+      ["diff.suppressblankempty", "true"],
+      ["diff.submodule", "log"],
+      ["core.quotepath", "false"],
+      ["color.ui", "always"],
+    ] as const) {
+      fixtureGit(fixture.repository, "config", setting, value);
+    }
+
+    const inspected = await workbench(fixture, [
+      "inspect-setup",
+      "--target-path",
+      fixture.repository,
+      "--scope",
+      ".",
+      "--mode",
+      "diff",
+      "--diff-target-kind",
+      "range",
+      "--diff-base-revision",
+      selected.baseRevision,
+      "--diff-head-revision",
+      selected.headRevision,
+      "--diff-content-digest",
+      selected.contentDigest,
+    ]);
+
+    expect(inspected["diffTarget"]).toMatchObject({
+      contentDigest: selected.contentDigest,
+    });
+    expect((await completeScan(fixture)).warnings).toEqual([]);
+  });
+
   test("hashes committed diff output without buffering the Git patch", async () => {
     const fixture = await startDraftScan("committed");
     const selected = committedDiffTarget(fixture);
@@ -623,11 +668,11 @@ describe("malformed scan artifact recovery", () => {
           "streamed = target.committed_diff_content_digest(repository, base, head)",
           "target.git_bytes = original",
           "root, pathspec = target.git_worktree_context(repository)",
-          "patch = original(root, 'diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv', '--ignore-submodules=none', base, head, '--', pathspec)",
+          "patch = original(root, *target.committed_diff_arguments(base, head, pathspec))",
           "digest = hashlib.sha256()",
           "target.update_digest_field(digest, b'format', b'codex-security-snapshot/v1')",
           "target.update_digest_field(digest, b'tracked-diff', patch)",
-          "print(json.dumps({'streamed': streamed, 'buffered': 'codex-security-snapshot/v1:sha256:' + digest.hexdigest(), 'bufferedDiffCalls': [args for args in calls if args and args[0] == 'diff']}))",
+          "print(json.dumps({'streamed': streamed, 'buffered': 'codex-security-snapshot/v1:sha256:' + digest.hexdigest(), 'bufferedDiffCalls': [args for args in calls if 'diff' in args]}))",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
         fixture.repository,
