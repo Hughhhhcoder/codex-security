@@ -996,7 +996,7 @@ describe("plugin runtime preparation", () => {
       expect(migratedTarget.status, migratedTarget.stderr).toBe(0);
       expect(JSON.parse(migratedTarget.stdout)).toMatchObject({
         scan: {
-          targetId: legacyTarget.stdout.trim(),
+          contract: { target: { targetId: legacyTarget.stdout.trim() } },
           targetPath: longRepository,
         },
         workspace: { targetPath: longRepository },
