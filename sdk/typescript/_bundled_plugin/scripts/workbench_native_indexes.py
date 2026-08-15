@@ -307,16 +307,28 @@ def list_repositories(
     ):
         latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
 
-    open_findings_by_target = Counter(
-        row["target_id"] for row in _indexed_findings(connection) if row["status"] == "open"
-    )
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
+
+    def repository_group(target_id: str) -> tuple[str, str]:
+        target = targets[target_id]
+        identity = (
+            target["repository_identity"] if "repository_identity" in target.keys() else None
+        )
+        return ("target", target_id) if identity is None else ("repository", identity)
+
+    open_findings_by_repository = Counter(
+        repository_group(row["target_id"])
+        for row in _indexed_findings(connection)
+        if row["status"] == "open"
+    )
     repositories = [
         {
             "checkoutAvailable": Path(target["current_path"]).is_dir(),
             "displayName": target["display_name"],
             "latestScan": latest_scan,
-            "openFindingsCount": open_findings_by_target.get(target_id, 0),
+            "openFindingsCount": open_findings_by_repository.get(
+                repository_group(target_id), 0
+            ),
             "scanCount": scan_count_by_target[target_id],
             "targetId": target_id,
             "targetPath": target["current_path"],

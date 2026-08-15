@@ -50,7 +50,7 @@ function fixture(): {
   const clone = join(root, "same-origin-clone");
   mkdirSync(repository);
   git(repository, "init", "-q");
-  for (const service of ["service-a", "service-b"]) {
+  for (const service of ["service-a", "service-b", "MixedCase"]) {
     mkdirSync(join(repository, service));
     writeFileSync(join(repository, service, "service.py"), "value = 1\n");
   }
@@ -67,7 +67,6 @@ function fixture(): {
 
 const probe = String.raw`
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -75,6 +74,8 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, sys.argv[1])
 
@@ -82,10 +83,12 @@ import workbench_scan_history as history
 from filesystem_identity import serialize_filesystem_identity
 from workbench_schema import MIGRATIONS, apply_migrations
 from workbench_target_state import (
+    _repository_birth_time_ns,
     backfill_repository_identities,
     backfill_security_targets,
     ensure_security_target,
     repository_identity,
+    repository_relative_path,
     stable_target_id,
 )
 
@@ -152,10 +155,9 @@ def add_scan(scan_id, target, ownership="current", verify_ownership=True):
     return target_id
 
 
-def listed(target, strict=True):
+def listed(target):
     arguments = argparse.Namespace(
         repository=str(target),
-        worktrees_only=strict,
         scan_root=None,
         target_id=None,
         mode=None,
@@ -182,6 +184,8 @@ if scenario == "identity":
         "serviceA": repository / "service-a",
         "worktreeServiceA": worktree / "service-a",
         "serviceB": repository / "service-b",
+        "mixedCase": repository / "MixedCase",
+        "worktreeMixedCase": worktree / "MixedCase",
         "clone": clone,
     }
     target_ids = {
@@ -192,23 +196,9 @@ if scenario == "identity":
         name: repository_identity(target)
         for name, target in targets.items()
     }
-    common = os.path.normcase(os.path.realpath(git(
+    common = os.path.realpath(git(
         repository, "rev-parse", "--path-format=absolute", "--git-common-dir"
-    )))
-    metadata = Path(common).stat()
-    device = serialize_filesystem_identity(metadata.st_dev)
-    inode = serialize_filesystem_identity(metadata.st_ino)
-    marker = Path(common) / "description"
-    generation = marker.lstat()
-    generation_device = serialize_filesystem_identity(generation.st_dev)
-    generation_inode = serialize_filesystem_identity(generation.st_ino)
-    expected = "repository_sha256_" + hashlib.sha256(
-        (
-            f"git-common-dir\0{common}\0{device}\0{inode}\0"
-            f"git-description\0{generation_device}\0{generation_inode}\0"
-            f"{generation.st_ctime_ns}\0."
-        ).encode()
-    ).hexdigest()
+    ))
     forged_identity = repository_identity(forged_worktree())
     (repository / "service-a" / "service.py").write_text("value = 2\n")
     git(repository, "add", ".")
@@ -224,27 +214,68 @@ if scenario == "identity":
         "https://different-user:DIFFERENT_SYNTHETIC_PASSWORD@example.test/other/repo.git",
     )
     remote_independent = repository_identity(repository) == identities["repository"]
-    saved_marker = root / "saved-description"
-    marker.rename(saved_marker)
-    missing_marker_identity = repository_identity(repository)
+    description = Path(common) / "description"
+    description.write_text("An ordinary user-edited Git description.\n")
+    description_edit_independent = repository_identity(repository) == identities["repository"]
+    os.chmod(description, 0o400)
+    description_mode_independent = repository_identity(repository) == identities["repository"]
+    os.chmod(description, 0o600)
+    description.unlink()
+    description_absence_independent = repository_identity(repository) == identities["repository"]
+    custom_template = root / "custom-template"
+    custom_template.mkdir()
+    git(custom_template, "init", "-q", "--template=")
+    markerless_repository_identity = repository_identity(custom_template)
+    with patch("workbench_target_state._repository_birth_time_ns", side_effect=(41, 42)):
+        recycled_inode_distinguished = (
+            repository_identity(repository) != repository_identity(repository)
+        )
+    original_normcase = os.path.normcase
+    os.path.normcase = lambda path: os.fspath(path).lower()
     try:
-        marker.symlink_to(saved_marker)
-    except (NotImplementedError, OSError):
-        symlink_supported = False
-        symlink_marker_identity = None
-    else:
-        symlink_supported = True
-        symlink_marker_identity = repository_identity(repository)
+        case_preserved = (
+            repository_relative_path(repository / "MixedCase") == "MixedCase"
+            and repository_identity(repository / "MixedCase") == identities["mixedCase"]
+        )
+    finally:
+        os.path.normcase = original_normcase
+
+    legacy_metadata = SimpleNamespace(st_ctime_ns=41)
+    modern_metadata = SimpleNamespace(st_birthtime_ns=43, st_ctime_ns=41)
+    with patch.object(os, "name", "nt"):
+        windows_legacy_birth_time = _repository_birth_time_ns(common, legacy_metadata)
+        windows_modern_birth_time = _repository_birth_time_ns(common, modern_metadata)
+    linux_birth_times = {}
+    with patch.object(sys, "platform", "linux"), patch.object(os, "name", "posix"):
+        for label, output, status in (
+            ("valid", "42.000000123\n", 0),
+            ("unavailable", "0.000000000\n", 0),
+            ("malformed", "42.123\n", 0),
+            ("failed", "42.000000123\n", 1),
+        ):
+            with patch("workbench_target_state.subprocess.run") as stat_command:
+                stat_command.return_value = SimpleNamespace(stdout=output, returncode=status)
+                linux_birth_times[label] = _repository_birth_time_ns(common, legacy_metadata)
+                if label == "valid":
+                    linux_locale = stat_command.call_args.kwargs["env"]["LC_ALL"]
+        with patch("workbench_target_state.subprocess.run", side_effect=OSError("missing stat")):
+            linux_birth_times["missing"] = _repository_birth_time_ns(common, legacy_metadata)
     print(json.dumps({
         "identities": identities,
-        "expected": expected,
         "forgedIdentity": forged_identity,
         "commitIndependent": commit_independent,
         "worktreeIndependent": worktree_independent,
         "remoteIndependent": remote_independent,
-        "missingMarkerIdentity": missing_marker_identity,
-        "symlinkSupported": symlink_supported,
-        "symlinkMarkerIdentity": symlink_marker_identity,
+        "descriptionEditIndependent": description_edit_independent,
+        "descriptionModeIndependent": description_mode_independent,
+        "descriptionAbsenceIndependent": description_absence_independent,
+        "markerlessRepositoryIdentity": markerless_repository_identity,
+        "recycledInodeDistinguished": recycled_inode_distinguished,
+        "casePreserved": case_preserved,
+        "windowsLegacyBirthTime": windows_legacy_birth_time,
+        "windowsModernBirthTime": windows_modern_birth_time,
+        "linuxBirthTimes": linux_birth_times,
+        "linuxLocale": linux_locale,
         "targetIdsPreserved": all(
             target_ids[name] == stable_target_id(target)
             for name, target in targets.items()
@@ -267,17 +298,14 @@ elif scenario == "history":
     add_scan("spoof-a", clone / "service-a")
     add_scan("forged-root", forged_worktree())
     before = {
-        "strictRoot": listed(repository),
-        "legacyRoot": listed(repository, strict=False),
-        "strictServiceA": listed(repository / "service-a"),
-        "legacyServiceA": listed(repository / "service-a", strict=False),
-        "strictServiceB": listed(repository / "service-b"),
+        "root": listed(repository),
+        "serviceA": listed(repository / "service-a"),
+        "serviceB": listed(repository / "service-b"),
     }
     git(repository, "worktree", "remove", "--force", str(worktree))
     after = {
-        "strictRoot": listed(repository),
-        "legacyRoot": listed(repository, strict=False),
-        "strictServiceA": listed(repository / "service-a"),
+        "root": listed(repository),
+        "serviceA": listed(repository / "service-a"),
     }
     arguments = argparse.Namespace(repository=str(repository), force=False)
     matched = history.list_unmatched_scan_pairs(
@@ -382,7 +410,6 @@ elif scenario == "replacement":
     git(worktree, "commit", "-qm", "replacement")
     git(worktree, "remote", "add", "origin", sys.argv[7])
     before = listed(worktree)
-    regular_before = listed(worktree, strict=False)
     try:
         add_scan("replacement-owner", worktree)
     except SystemExit as error:
@@ -437,7 +464,6 @@ elif scenario == "replacement":
         unverified_owner_error = None
     print(json.dumps({
         "before": before,
-        "regularBefore": regular_before,
         "after": after,
         "registrationError": registration_error,
         "matchingError": matching_error,
@@ -479,7 +505,6 @@ elif scenario == "git-replacement":
             and original_metadata.st_ino == replacement_metadata.st_ino
         ),
         "visibleScans": listed(repository),
-        "regularScans": listed(repository, strict=False),
         "registrationError": registration_error,
     }))
 
@@ -488,15 +513,11 @@ elif scenario == "unverified-owner":
     add_scan("trusted-alias", worktree)
     git(repository, "worktree", "remove", "--force", str(worktree))
     before = listed(repository)
-    regular_before = listed(repository, strict=False)
     add_scan("unverified-owner", repository, "missing")
     after = listed(repository)
-    regular_after = listed(repository, strict=False)
     print(json.dumps({
         "before": before,
-        "regularBefore": regular_before,
         "after": after,
-        "regularAfter": regular_after,
     }))
 
 elif scenario == "nongit":
@@ -563,9 +584,12 @@ describe("durable workbench repository identities", () => {
     const result = runProbe("identity", repositories);
     const identities = result["identities"] as Record<string, string>;
 
-    expect(identities["repository"]).toBe(result["expected"] as string);
+    expect(identities["repository"]).toMatch(
+      /^repository_sha256_[a-f0-9]{64}$/,
+    );
     expect(identities["worktree"]).toBe(identities["repository"]);
     expect(identities["worktreeServiceA"]).toBe(identities["serviceA"]);
+    expect(identities["worktreeMixedCase"]).toBe(identities["mixedCase"]);
     expect(identities["serviceA"]).not.toBe(identities["repository"]);
     expect(identities["serviceA"]).not.toBe(identities["serviceB"]);
     expect(identities["clone"]).not.toBe(identities["repository"]);
@@ -573,8 +597,24 @@ describe("durable workbench repository identities", () => {
     expect(result["commitIndependent"]).toBe(true);
     expect(result["worktreeIndependent"]).toBe(true);
     expect(result["remoteIndependent"]).toBe(true);
-    expect(result["missingMarkerIdentity"]).toBeNull();
-    expect(result["symlinkMarkerIdentity"]).toBeNull();
+    expect(result["descriptionEditIndependent"]).toBe(true);
+    expect(result["descriptionModeIndependent"]).toBe(true);
+    expect(result["descriptionAbsenceIndependent"]).toBe(true);
+    expect(result["markerlessRepositoryIdentity"]).toMatch(
+      /^repository_sha256_[a-f0-9]{64}$/,
+    );
+    expect(result["recycledInodeDistinguished"]).toBe(true);
+    expect(result["casePreserved"]).toBe(true);
+    expect(result["windowsLegacyBirthTime"]).toBe(41);
+    expect(result["windowsModernBirthTime"]).toBe(43);
+    expect(result["linuxBirthTimes"]).toEqual({
+      valid: 42_000_000_123,
+      unavailable: null,
+      malformed: null,
+      failed: null,
+      missing: null,
+    });
+    expect(result["linuxLocale"]).toBe("C");
     expect(result["targetIdsPreserved"]).toBe(true);
     expect(JSON.stringify(result["stored"])).not.toContain(
       "SYNTHETIC_PASSWORD",
@@ -586,26 +626,11 @@ describe("durable workbench repository identities", () => {
     const before = result["before"] as Record<string, string[]>;
     const after = result["after"] as Record<string, string[]>;
 
-    expect(before["strictRoot"]).toEqual(["canonical-root", "linked-root"]);
-    expect(before["legacyRoot"]).toEqual([
-      "canonical-root",
-      "linked-root",
-      "spoof-root",
-    ]);
-    expect(before["strictServiceA"]).toEqual(["canonical-a", "linked-a"]);
-    expect(before["legacyServiceA"]).toEqual([
-      "canonical-a",
-      "linked-a",
-      "spoof-a",
-    ]);
-    expect(before["strictServiceB"]).toEqual(["canonical-b"]);
-    expect(after["strictRoot"]).toEqual(["canonical-root", "linked-root"]);
-    expect(after["legacyRoot"]).toEqual([
-      "canonical-root",
-      "linked-root",
-      "spoof-root",
-    ]);
-    expect(after["strictServiceA"]).toEqual(["canonical-a", "linked-a"]);
+    expect(before["root"]).toEqual(["canonical-root", "linked-root"]);
+    expect(before["serviceA"]).toEqual(["canonical-a", "linked-a"]);
+    expect(before["serviceB"]).toEqual(["canonical-b"]);
+    expect(after["root"]).toEqual(["canonical-root", "linked-root"]);
+    expect(after["serviceA"]).toEqual(["canonical-a", "linked-a"]);
     expect(result["matchedScanCount"]).toBe(3);
     expect(result["matchingBatches"]).toBe(2);
     expect(result["unavailableScans"]).toBe(1);
@@ -629,7 +654,6 @@ describe("durable workbench repository identities", () => {
     const result = runProbe("replacement", fixture());
 
     expect(result["before"]).toEqual([]);
-    expect(result["regularBefore"]).toEqual([]);
     expect(result["after"]).toEqual([]);
     expect(result["registrationError"]).toContain(
       "refusing to reuse its target",
@@ -653,7 +677,6 @@ describe("durable workbench repository identities", () => {
     expect(result["checkoutOwnerUnchanged"]).toBe(true);
     expect(result["replacementIdentity"]).not.toBe(result["originalIdentity"]);
     expect(result["visibleScans"]).toEqual([]);
-    expect(result["regularScans"]).toEqual([]);
     expect(result["registrationError"]).toContain(
       "refusing to reuse its target",
     );
@@ -663,9 +686,7 @@ describe("durable workbench repository identities", () => {
     const result = runProbe("unverified-owner", fixture());
 
     expect(result["before"]).toEqual(["trusted-alias"]);
-    expect(result["regularBefore"]).toEqual(["trusted-alias"]);
     expect(result["after"]).toEqual(["unverified-owner"]);
-    expect(result["regularAfter"]).toEqual(["unverified-owner"]);
   }, 30_000);
 
   test("keeps non-Git paths isolated and never equates unrelated null target IDs", () => {

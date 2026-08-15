@@ -29,14 +29,13 @@ def _same_repository(
     after: sqlite3.Row,
     *,
     after_identity: tuple[str | None, tuple[str, str] | None, str | None] | None = None,
-    worktrees_only: bool = False,
 ) -> bool:
     before_target_id = before["target_id"]
     if before_target_id and before_target_id == after["target_id"]:
         return True
     before_target = Path(before["target_path"])
     after_target = Path(after["target_path"])
-    if before_target.resolve() == after_target.resolve():
+    if str(before_target.resolve()) == str(after_target.resolve()):
         return True
     before_stored_identity = (
         before["repository_identity"] if "repository_identity" in before.keys() else None
@@ -60,14 +59,13 @@ def _same_repository(
     )
     if before_live_identity is not None and before_live_identity == after_live_identity:
         return True
-    if worktrees_only or before_live_identity is None or after_live_identity is None:
+    if before_live_identity is None or after_live_identity is None:
         return False
 
-    before_origin = _repository_origin(before_target)
     after_origin = (
         _repository_origin(after_target) if after_identity is None else after_identity[1]
     )
-    if before_origin is None or before_origin != after_origin:
+    if after_origin is None or _repository_origin(before_target) != after_origin:
         return False
     before_relative = repository_relative_path(before_target)
     after_relative = (
@@ -110,7 +108,6 @@ def list_scans(
     values: list[Any] = []
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
-        worktrees_only = bool(getattr(args, "worktrees_only", False))
         target_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(security_targets)")
         }
@@ -161,8 +158,8 @@ def list_scans(
                 )
                 else live_identity
             ),
-            None if worktrees_only else _repository_origin(repository),
-            None if worktrees_only else repository_relative_path(repository),
+            None,
+            None,
         )
         related_targets = (
             [
@@ -177,7 +174,6 @@ def list_scans(
                     target,
                     requested_repository,
                     after_identity=requested_identity,
-                    worktrees_only=worktrees_only,
                 )
             ]
             if ownership_matches
@@ -188,21 +184,15 @@ def list_scans(
             if identity_matches
             else ["0"]
         )
-        if worktrees_only:
-            for target in related_targets:
-                target_path = Path(target["target_path"])
-                repository_clauses.append(
-                    _owned_scan_clause(
-                        target_path,
-                        check_ownership,
-                        values,
-                        target_id=target["target_id"],
-                    )
+        for target in related_targets:
+            repository_clauses.append(
+                _owned_scan_clause(
+                    Path(target["target_path"]),
+                    check_ownership,
+                    values,
+                    target_id=target["target_id"],
                 )
-        elif related_targets:
-            placeholders = ", ".join("?" for _ in related_targets)
-            repository_clauses.append(f"scans.target_id IN ({placeholders})")
-            values.extend(target["target_id"] for target in related_targets)
+            )
         clauses.append(f"({' OR '.join(repository_clauses)})")
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
@@ -440,7 +430,7 @@ def list_unmatched_scan_pairs(
     selected = [
         scan
         for scan in connection.execute(scan_query)
-        if Path(scan["target_path"]).resolve() == repository
+        if str(Path(scan["target_path"]).resolve()) == str(repository)
         or _same_repository(
             scan,
             requested,

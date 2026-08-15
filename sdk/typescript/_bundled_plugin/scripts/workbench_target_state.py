@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import os
 import sqlite3
-import stat
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,7 +40,41 @@ def _repository_worktree(target: Path) -> tuple[Path, str] | None:
         relative = Path(os.path.realpath(target)).relative_to(canonical_root)
     except (OSError, ValueError):
         return None
-    return canonical_root, os.path.normcase(os.fspath(relative)).replace(os.sep, "/")
+    return canonical_root, relative.as_posix()
+
+
+def _repository_birth_time_ns(path: str, metadata: os.stat_result) -> int | None:
+    birth_time_ns = getattr(metadata, "st_birthtime_ns", None)
+    if birth_time_ns is not None:
+        return birth_time_ns if birth_time_ns > 0 else None
+    if os.name == "nt":
+        return metadata.st_ctime_ns if metadata.st_ctime_ns > 0 else None
+    birth_time = getattr(metadata, "st_birthtime", None)
+    if birth_time is not None:
+        return int(birth_time * 1_000_000_000) if birth_time > 0 else None
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        result = subprocess.run(
+            ["stat", "--format=%.9W", "--", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except OSError:
+        return None
+    seconds, separator, nanoseconds = result.stdout.strip().partition(".")
+    if (
+        result.returncode != 0
+        or separator != "."
+        or not seconds.isdecimal()
+        or len(nanoseconds) != 9
+        or not nanoseconds.isdecimal()
+    ):
+        return None
+    birth_time_ns = int(seconds) * 1_000_000_000 + int(nanoseconds)
+    return birth_time_ns if birth_time_ns > 0 else None
 
 
 def repository_identity(target: Path | str) -> str | None:
@@ -58,30 +92,26 @@ def repository_identity(target: Path | str) -> str | None:
     registered = git_output(target, "worktree", "list", "--porcelain", "-z")
     if registered is None:
         return None
-    canonical_root = os.path.normcase(os.fspath(worktree_root))
+    canonical_root = os.fspath(worktree_root)
     if not any(
-        os.path.normcase(os.path.realpath(record.removeprefix("worktree ")))
-        == canonical_root
+        os.path.realpath(record.removeprefix("worktree ")) == canonical_root
         for record in registered.split("\0")
         if record.startswith("worktree ")
     ):
         return None
-    canonical_directory = os.path.normcase(os.path.realpath(common_directory))
+    canonical_directory = os.path.realpath(common_directory)
     try:
         metadata = Path(canonical_directory).stat()
-        generation = (Path(canonical_directory) / "description").lstat()
     except OSError:
         return None
-    if not stat.S_ISREG(generation.st_mode):
+    birth_time_ns = _repository_birth_time_ns(canonical_directory, metadata)
+    if birth_time_ns is None:
         return None
     device = serialize_filesystem_identity(metadata.st_dev)
     inode = serialize_filesystem_identity(metadata.st_ino)
-    generation_device = serialize_filesystem_identity(generation.st_dev)
-    generation_inode = serialize_filesystem_identity(generation.st_ino)
     material = (
         f"git-common-dir\0{canonical_directory}\0{device}\0{inode}\0"
-        f"git-description\0{generation_device}\0{generation_inode}\0"
-        f"{generation.st_ctime_ns}\0{relative}"
+        f"{birth_time_ns}\0{relative}"
     )
     return f"repository_sha256_{hashlib.sha256(material.encode()).hexdigest()}"
 

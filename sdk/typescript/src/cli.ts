@@ -919,63 +919,20 @@ export async function main(
       );
       return presentHistory(
         await history(
-          ["list-scans", "--repository", repository, "--worktrees-only"],
+          ["list-scans", "--repository", repository],
           async (value): Promise<JsonObject> => {
-            const targetIds = new Set(
-              (value["scans"] as JsonObject[])
-                .map((scan) => scan["targetId"])
-                .filter(
-                  (targetId): targetId is string =>
-                    typeof targetId === "string",
-                ),
-            );
-            const occurrences = new Set<string>();
-            const findings: JsonObject[] = [];
-            for (const targetId of targetIds) {
-              const targetFindings = await listRepositoryFindings(
-                dependencies.runWorkbench,
-                targetId,
-              );
-              for (const finding of targetFindings ?? []) {
-                const occurrenceId = finding["occurrenceId"];
-                if (typeof occurrenceId === "string") {
-                  if (occurrences.has(occurrenceId)) continue;
-                  occurrences.add(occurrenceId);
-                }
-                findings.push(finding);
-              }
-            }
-            findings.sort((before, after) => {
-              const rank = (finding: JsonObject): number => {
-                const severity = (
-                  finding["severity"] as JsonObject | undefined
-                )?.["level"];
-                const index = DISPLAY_SEVERITIES.indexOf(
-                  severity as SeverityLevel,
-                );
-                return index === -1 ? DISPLAY_SEVERITIES.length : index;
-              };
-              const severity = rank(before) - rank(after);
-              if (severity !== 0) return severity;
-
-              const beforeCreated = before["createdAt"];
-              const afterCreated = after["createdAt"];
-              if (
-                typeof beforeCreated === "string" &&
-                typeof afterCreated === "string" &&
-                beforeCreated !== afterCreated
-              ) {
-                return beforeCreated < afterCreated ? 1 : -1;
-              }
-
-              const beforeId = before["occurrenceId"];
-              const afterId = after["occurrenceId"];
-              if (typeof beforeId !== "string" || typeof afterId !== "string") {
-                return 0;
-              }
-              return beforeId < afterId ? -1 : beforeId > afterId ? 1 : 0;
-            });
-            return { repository, findings };
+            const scans = value["scans"] as JsonObject[];
+            const target =
+              scans.find((scan) => scan["targetPath"] === repository) ??
+              scans[0];
+            const findings =
+              target === undefined
+                ? []
+                : await listRepositoryFindings(
+                    dependencies.runWorkbench,
+                    target["targetId"] as string,
+                  );
+            return { repository, findings: findings ?? [] };
           },
         ),
         "findings",

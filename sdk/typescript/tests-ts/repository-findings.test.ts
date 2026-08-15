@@ -137,6 +137,7 @@ origin = "https://example.invalid/synthetic/repository"
 connection.executemany("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)", [
     ("primary", "/primary", "Primary", "common-git-directory::.", origin),
     ("linked", "/linked", "Linked", "common-git-directory::.", origin),
+    ("empty-alias", "/empty-alias", "Empty alias", "common-git-directory::.", origin),
     ("same-origin-clone", "/clone", "Clone", "independent-git-directory::.", origin),
     ("different-scope", "/primary/packages/api", "Scoped", "common-git-directory::packages/api", origin),
     ("unknown-first", "/unknown-first", "Unknown first", None, origin),
@@ -154,6 +155,7 @@ def add_finding(occurrence, finding, scan, severity="high"):
 
 for scan_id, target, day in [
     ("primary-old", "primary", 1),
+    ("empty-alias-scan", "empty-alias", 1),
     ("linked-reviewed", "linked", 2),
     ("primary-open", "primary", 3),
     ("linked-latest", "linked", 4),
@@ -200,6 +202,15 @@ def findings(target, status="open", limit=20, offset=0):
     arguments = argparse.Namespace(limit=limit, offset=offset, query=None, severity=None, status=status, target_id=target)
     return indexes.list_global_findings(connection, arguments)
 
+indexes.scan_history.list_scans = lambda database: {
+    "scans": [
+        {"scanId": scan["id"], "targetId": scan["target_id"]}
+        for scan in database.execute("SELECT id, target_id FROM scans")
+    ]
+}
+repository_arguments = argparse.Namespace(
+    query=None, target_id=None, status="open_findings", limit=None, offset=0
+)
 result = {
     "primary": findings("primary"),
     "linked": findings("linked"),
@@ -212,6 +223,8 @@ result = {
     "firstPage": findings("primary", limit=2),
     "secondPage": findings("primary", limit=2, offset=2),
     "thirdPage": findings("primary", limit=2, offset=4),
+    "repositories": indexes.list_repositories(connection),
+    "openRepositories": indexes.list_repositories(connection, repository_arguments),
 }
 connection.execute(
     "INSERT INTO finding_triage VALUES (?, ?, ?, ?)",
@@ -259,6 +272,7 @@ print(json.dumps(result))
     {
       findings: Array<Record<string, unknown>>;
       nextOffset: number | null;
+      repositories?: Array<Record<string, unknown>>;
     }
   >;
   const primary = result["primary"]!.findings;
@@ -321,6 +335,27 @@ print(json.dumps(result))
   expect(result["unknownSecond"]!.findings).toMatchObject([
     { findingId: "unknown-second-only", targetId: "unknown-second" },
   ]);
+  expect(
+    Object.fromEntries(
+      result["repositories"]!.repositories!.map((repository) => [
+        repository["targetId"],
+        repository["openFindingsCount"],
+      ]),
+    ),
+  ).toEqual({
+    primary: 4,
+    linked: 4,
+    "empty-alias": 4,
+    "same-origin-clone": 1,
+    "different-scope": 1,
+    "unknown-first": 1,
+    "unknown-second": 1,
+  });
+  expect(
+    result["openRepositories"]!.repositories!.map(
+      (repository) => repository["targetId"],
+    ),
+  ).toContain("empty-alias");
   expect(result["firstPage"]!.nextOffset).toBe(2);
   expect(result["secondPage"]!.nextOffset).toBeNull();
   expect(result["thirdPage"]!.nextOffset).toBeNull();
