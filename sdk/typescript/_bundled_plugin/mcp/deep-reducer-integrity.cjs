@@ -2,7 +2,7 @@ const { constants: fileConstants, promises: fileSystem } = require("node:fs");
 const { dirname, join, posix, relative, resolve, sep } = require("node:path");
 const { isDeepStrictEqual } = require("node:util");
 
-const FINDING_TEXT_FIELDS = ["summary", "remediation", "rootCause"];
+const FINDING_TEXT_FIELDS = ["title", "summary", "remediation", "rootCause"];
 const FINDING_LIST_FIELDS = ["remediationTests", "preventiveControls"];
 const SEVERITY_LEVELS = ["informational", "low", "medium", "high", "critical"];
 const CONFIDENCE_LEVELS = ["low", "medium", "high"];
@@ -19,6 +19,7 @@ const ORDERED_EVIDENCE_FIELDS = new Set([
   "path",
 ]);
 const MERGEABLE_TEXT_FIELDS = new Set([
+  "title",
   "summary",
   "remediation",
   "rootCause",
@@ -221,7 +222,7 @@ function containsOnlyAcceptedFindingEvidence(
   );
   if (!supportedCodeEvidence) return false;
 
-  for (const field of ["summary", "remediation"]) {
+  for (const field of ["title", "summary", "remediation"]) {
     if (
       !containsOnlyAcceptedStructuredFields(
         retained[field],

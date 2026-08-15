@@ -439,6 +439,37 @@ describe("Deep scan reducer finding retention", () => {
     expect(result.message).toMatch(/duplicate.*finding identity/iu);
   });
 
+  test("rejects unsupported changes to accepted finding titles", async () => {
+    const accepted = finding("first", 10);
+    const changed = {
+      ...accepted,
+      title: "Invented production compromise and credential exfiltration",
+    };
+
+    const result = await recordReduction([draft([accepted])], draft([changed]));
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/unsupported|evidence/iu);
+  });
+
+  test("combines differing accepted titles without inventing finding claims", async () => {
+    const first = finding("first", 10);
+    const second = structuredClone(first);
+    second.title = "Missing administrator authorization";
+    const merged = {
+      ...first,
+      title: `${first.title}; ${second.title}`,
+    };
+
+    const result = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([merged]),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
+    expect(result.saved?.findings[0]?.title).toBe(merged.title);
+  });
+
   test("rejects one omitted finding from an accepted Standard scan", async () => {
     const first = finding("first", 10);
     const second = finding("second", 20);
@@ -617,7 +648,7 @@ describe("Deep scan reducer finding retention", () => {
 
     const result = await recordReduction(
       [draft([first]), draft([second])],
-      draft([first]),
+      draft([{ ...first, title: `${first.title}; ${second.title}` }]),
     );
 
     expect(result.accepted, result.message).toBe(true);
