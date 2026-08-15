@@ -3357,6 +3357,9 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("org-private");
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_KEY");
     expect(stderr.text()).not.toContain("SYNTHETIC_PROVIDER_SECRET");
+    expect(JSON.parse(stdout.text())).toMatchObject({ code: "SCAN_FAILED" });
+    expect(stdout.text()).not.toContain("org-private");
+    expect(stdout.text()).not.toContain("SYNTHETIC_PROVIDER_SECRET");
   });
 
   test("keeps unclassified provider context out of structured failure diagnostics", async () => {
@@ -3395,7 +3398,12 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Provider failed for");
     expect(stderr.text()).toContain("tenant-private");
     expect(stderr.text()).toContain("req-internal");
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message: "The scan failed. See stderr for details.",
+    });
+    expect(stdout.text()).not.toContain("tenant-private");
+    expect(stdout.text()).not.toContain("req-internal");
   });
 
   test("preserves provider identifier variants in scan failures", async () => {
@@ -3488,10 +3496,14 @@ describe("CLI", () => {
             deps,
           ),
         ).toBe(2);
-        expect(stdout.text()).toBe("");
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_FAILED",
+          message: "The scan failed. See stderr for details.",
+        });
         expect(stderr.text()).toContain("Provider failed for");
         for (const identifier of identifiers) {
           expect(stderr.text()).toContain(identifier);
+          expect(stdout.text()).not.toContain(identifier);
         }
       }
     }
@@ -3708,7 +3720,12 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("Cleanup failed for");
     expect(stderr.text()).toContain("tenant-private");
     expect(stderr.text()).toContain("req-internal");
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message: "The scan failed. See stderr for details.",
+    });
+    expect(stdout.text()).not.toContain("tenant-private");
+    expect(stdout.text()).not.toContain("req-internal");
   });
 
   test("reports reconnect progress on stderr and keeps JSON output clean", async () => {
@@ -3815,13 +3832,28 @@ describe("CLI", () => {
   });
 
   test("surfaces underlying scanner errors instead of inventing a model outage", async () => {
-    for (const message of [
-      "Could not save the Codex Security scan: UNIQUE constraint failed: scans.scan_dir",
-      "sandbox-exec: sandbox_apply: Operation not permitted during network setup.",
-      "network failure ECONNRESET while connecting to the model.",
-      "request timed out while reading the scanner response.",
-      "Local scan failed: project_directory=/tmp/project tenant_count=2 request_index=3.",
-    ]) {
+    for (const [message, safeMessage] of [
+      [
+        "Could not save the Codex Security scan: UNIQUE constraint failed: scans.scan_dir",
+        "The scan failed. See stderr for details.",
+      ],
+      [
+        "sandbox-exec: sandbox_apply: Operation not permitted during network setup.",
+        "The scan encountered a network or connection failure.",
+      ],
+      [
+        "network failure ECONNRESET while connecting to the model.",
+        "The scan encountered a network or connection failure.",
+      ],
+      [
+        "request timed out while reading the scanner response.",
+        "The scan timed out.",
+      ],
+      [
+        "Local scan failed: project_directory=/tmp/project tenant_count=2 request_index=3.",
+        "The scan failed. See stderr for details.",
+      ],
+    ] as const) {
       const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
@@ -3836,7 +3868,11 @@ describe("CLI", () => {
       expect(
         await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message: safeMessage,
+      });
+      expect(stdout.text()).not.toContain("/tmp/project");
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("codex-security:");
       expect(stderr.text()).not.toContain("model service could not be reached");
@@ -3960,7 +3996,11 @@ describe("CLI", () => {
     expect(
       await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message: "[redacted]",
+    });
+    expect(stdout.text()).not.toContain("SYNTHETIC_KEY_123");
     expect(stderr.text()).toContain(
       `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`,
     );
@@ -4607,7 +4647,11 @@ describe("CLI", () => {
         }),
       ),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message: "The scan exceeded its configured cost limit.",
+    });
+    expect(stdout.text()).not.toContain("/tmp/scan");
     expect(stderr.text()).toContain(
       "Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at /tmp/scan.",
     );
@@ -4959,6 +5003,129 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("CodexSecurityError");
   });
 
+  test("emits structured scan failures for JSON and JSONL output", async () => {
+    const message =
+      "This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber.";
+
+    for (const arguments_ of [["--json"], ["--format", "jsonl"]]) {
+      const stdout = capture();
+      const stderr = capture();
+      const failing = dependencies();
+      failing.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onOutputDirReady?.("/tmp/partial-scan");
+          throw new CodexSecurityError(message);
+        },
+        close: async () => {},
+        preflight: async () => fakePreflight(),
+      });
+
+      expect(
+        await main(
+          ["scan", ".", ...arguments_],
+          stdout.stream,
+          stderr.stream,
+          failing,
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message:
+          "The scan was blocked by a cybersecurity policy. Trusted Access for Cyber may be required.",
+      });
+      expect(stderr.text()).toContain(message);
+      expect(stderr.text()).toContain(
+        "Partial output was kept at /tmp/partial-scan.",
+      );
+    }
+  });
+
+  test("emits structured failures when a saved scan rerun fails", async () => {
+    const stdout = capture();
+    const stderr = capture();
+    const message = "The saved scan was blocked by the cybersecurity policy.";
+
+    expect(
+      await main(
+        ["scans", "rerun", "scan-original", "--format", "json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({
+          onWorkbench: () => ({
+            recipe: {
+              repository: "/original/repository",
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: {},
+            },
+          }),
+          onRun: () => {
+            throw new CodexSecurityError(message);
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message:
+        "The scan was blocked by a cybersecurity policy. Trusted Access for Cyber may be required.",
+    });
+    expect(stderr.text()).toContain(message);
+  });
+
+  test("keeps unavailable saved scan failures structured and private", async () => {
+    const sensitiveFailure =
+      "Workbench failed for customer-private org-private ACCOUNT_ID=account-private request_id=req-private /private/customer/repository token=sk-proj-SYNTHETIC_REPLAY_SECRET_123";
+    const cases = [
+      {
+        format: ["--json"],
+        onWorkbench: () => ({}),
+        detail: "This scan does not have a saved launch recipe.",
+      },
+      {
+        format: ["--format", "json"],
+        onWorkbench: () => ({ recipe: { repository: "" } }),
+        detail: "The saved scan recipe does not contain a repository.",
+      },
+      {
+        format: ["--format", "jsonl"],
+        onWorkbench: () => {
+          throw new Error(sensitiveFailure);
+        },
+        detail: sensitiveFailure,
+      },
+    ];
+
+    for (const scenario of cases) {
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          ["scans", "rerun", "scan-original", ...scenario.format],
+          stdout.stream,
+          stderr.stream,
+          dependencies({ onWorkbench: scenario.onWorkbench }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_REPLAY_UNAVAILABLE",
+        message: "The saved scan could not be replayed.",
+      });
+      expect(stderr.text()).toContain(scenario.detail);
+      for (const sensitive of [
+        "customer-private",
+        "org-private",
+        "account-private",
+        "req-private",
+        "/private/customer/repository",
+        "SYNTHETIC_REPLAY_SECRET",
+      ]) {
+        expect(stdout.text()).not.toContain(sensitive);
+      }
+    }
+  });
+
   test("does not emit a successful full-output envelope for a failed scan", async () => {
     const stdout = capture();
     const stderr = capture();
@@ -5026,7 +5193,13 @@ describe("CLI", () => {
           failing,
         ),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message:
+          "Scan output directory must be outside the scanned directory and any enclosing Git worktree. Scan artifacts cannot be written inside the protected scan root.",
+      });
+      expect(stdout.text()).not.toContain(output);
+      expect(stdout.text()).not.toContain(worktree);
       expect(stderr.text()).toContain(
         "Scan output directory must be outside the scanned directory and any enclosing Git worktree.",
       );
@@ -5133,7 +5306,13 @@ describe("CLI", () => {
         failing,
       ),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toEqual({
+      code: "SCAN_FAILED",
+      message:
+        "Scan output directory must be outside the scanned directory and any enclosing Git worktree. Scan artifacts cannot be written inside the protected scan root.",
+    });
+    expect(stdout.text()).not.toContain("SYNTHETIC_ROOT_KEY");
+    expect(stdout.text()).not.toContain("SYNTHETIC_OUTPUT_KEY");
     expect(stderr.text()).toContain(`Resolved path:  ${output}`);
     expect(stderr.text()).toContain(`Protected root: ${protectedRoot}`);
   });
@@ -5214,7 +5393,14 @@ describe("CLI", () => {
           }),
         ),
       ).toBe(2);
-      expect(stdout.text()).toBe("");
+      if (json) {
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_FAILED",
+          message: "The scan failed. See stderr for details.",
+        });
+      } else {
+        expect(stdout.text()).toBe("");
+      }
       expect(stderr.text()).toContain("SYNTHETIC_AUTH_HOME_CLEANUP_FAILED");
       expect(stderr.text()).toContain("Partial output was kept at /tmp/scan.");
     }

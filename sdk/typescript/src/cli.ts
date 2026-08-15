@@ -367,6 +367,7 @@ interface ScanOutcome {
   exitCode: number;
   data?: Record<string, unknown>;
   error?: string;
+  safeError?: string;
 }
 
 interface ExportArguments {
@@ -790,6 +791,7 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   let frameworkOutput = "";
+  let structuredScanFailure = false;
   let renderedHistory: string | undefined;
   const history = async (
     args: readonly string[],
@@ -1077,7 +1079,7 @@ export async function main(
           .describe("Print scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, error: incurError, options }) {
+      async run({ args, error: incurError, format, options }) {
         let scanArguments: ScanArguments;
         try {
           const { recipe } = await dependencies.runWorkbench([
@@ -1091,18 +1093,24 @@ export async function main(
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${message}\n`);
           exitCode = 2;
+          structuredScanFailure = format === "json" || format === "jsonl";
           return incurError({
             code: "SCAN_REPLAY_UNAVAILABLE",
-            message,
+            message: structuredScanFailure
+              ? "The saved scan could not be replayed."
+              : message,
             exitCode,
           });
         }
         const outcome = await runScan(scanArguments, errorOutput, dependencies);
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
+          structuredScanFailure = format === "json" || format === "jsonl";
           return incurError({
             code: "SCAN_FAILED",
-            message: outcome.error,
+            message: structuredScanFailure
+              ? safeErrorMessage(outcome.safeError ?? outcome.error)
+              : outcome.error,
             exitCode,
           });
         }
@@ -1388,9 +1396,12 @@ export async function main(
         );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
+          structuredScanFailure = format === "json" || format === "jsonl";
           return incurError({
             code: "SCAN_FAILED",
-            message: outcome.error,
+            message: structuredScanFailure
+              ? safeErrorMessage(outcome.safeError ?? outcome.error)
+              : outcome.error,
             exitCode,
           });
         }
@@ -1984,7 +1995,7 @@ export async function main(
     updateController.abort();
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
-  if (frameworkExit !== undefined) {
+  if (frameworkExit !== undefined && !structuredScanFailure) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
       `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
@@ -3328,6 +3339,7 @@ async function executeScan(
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
+    const safeFailure = structuredScanFailureMessage(failure, message);
     diagnostic("scan.failed", {
       classification:
         costLimitFailure !== undefined
@@ -3340,15 +3352,12 @@ async function executeScan(
       estimated_usd: costLimitFailure?.cost.estimatedUsd,
     });
     errorOutput.write(`${message}\n`);
-    if (failure instanceof ScanInterruptedError) {
-      return { exitCode: 2, error: message };
-    }
-    if (scanDir !== null) {
+    if (!(failure instanceof ScanInterruptedError) && scanDir !== null) {
       errorOutput.write(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );
     }
-    return { exitCode: 2, error: message };
+    return { exitCode: 2, error: message, safeError: safeFailure };
   }
   if (preflight !== null) {
     const effectivePreflight: ScanPreflight = {
@@ -3522,6 +3531,40 @@ function scanFailureMessage(
   }
 }
 
+function structuredScanFailureMessage(error: unknown, message: string): string {
+  if (error instanceof OutputInsideProtectedRootError) {
+    return protectedRootErrorMessage(error, false);
+  }
+  if (safeErrorMessage(message) === "[redacted]") return "[redacted]";
+  if (error instanceof ScanCostLimitExceededError) {
+    return "The scan exceeded its configured cost limit.";
+  }
+  if (
+    /flagged for possible cybersecurity risk|trusted access for cyber|cybersecurity policy/iu.test(
+      message,
+    )
+  ) {
+    return "The scan was blocked by a cybersecurity policy. Trusted Access for Cyber may be required.";
+  }
+  if (isLocalScanFailure(error)) {
+    return "The scan could not complete because a local input or filesystem operation failed.";
+  }
+  switch (classifyConnectionFailure(error)) {
+    case "unauthorized":
+      return "Authentication failed. Check the selected credentials.";
+    case "forbidden":
+      return "The selected credentials cannot access the configured model.";
+    case "rate_limited":
+      return "The configured account reached its rate limit. Wait and retry.";
+    case "network_error":
+      return "The scan encountered a network or connection failure.";
+    case "timeout":
+      return "The scan timed out.";
+    case "unknown":
+      return "The scan failed. See stderr for details.";
+  }
+}
+
 function scanScope(arguments_: ScanArguments): string | null {
   if (arguments_.paths.length > 0) {
     const displayed = arguments_.paths.slice(0, 3).map((path) => {
@@ -3652,6 +3695,7 @@ function formatTokenUsage(usage: unknown): string | null {
 
 function protectedRootErrorMessage(
   error: OutputInsideProtectedRootError,
+  includePaths = true,
 ): string {
   const description =
     error.pathKind === "output"
@@ -3663,6 +3707,9 @@ function protectedRootErrorMessage(
     error.pathKind === "output"
       ? "Scan artifacts cannot be written inside the protected scan root."
       : "Temporary and runtime files cannot be created inside the protected scan root.";
+  if (!includePaths) {
+    return `${description} must be outside the scanned directory and any enclosing Git worktree. ${reason}`;
+  }
   const suggestion = suggestedOutputDirectory(error.protectedRoot);
   const recovery =
     error.pathKind === "output"
