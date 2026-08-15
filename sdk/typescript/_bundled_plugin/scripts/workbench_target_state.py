@@ -186,25 +186,35 @@ def _require_current_target_owner(
         (target_id, target_path),
     )
     historical_scan = False
-    verified_owner = False
+    recorded_owner = False
+    malformed_owner = False
     mismatch = False
     for scan in scans:
         historical_scan = True
         device, inode = scan["target_device"], scan["target_inode"]
         if device is None and inode is None:
             continue
+        if device is None or inode is None:
+            malformed_owner = True
+            break
+        recorded_owner = True
         if not stored_filesystem_identity_matches(
             device, metadata.st_dev
         ) or not stored_filesystem_identity_matches(inode, metadata.st_ino):
             mismatch = True
-            break
-        verified_owner = True
+    verified_repository = (
+        stored_identity is not None and repository_identity(target) == stored_identity
+    )
     if (
-        mismatch
+        malformed_owner
+        or mismatch
+        and (
+            not verified_repository
+            or repository_relative_path(target) in (None, ".")
+        )
         or stored_identity is not None
         and (
-            repository_identity(target) != stored_identity
-            or historical_scan and not verified_owner
+            not verified_repository or historical_scan and not recorded_owner
         )
     ):
         raise SystemExit(

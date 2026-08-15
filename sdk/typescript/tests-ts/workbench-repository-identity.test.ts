@@ -81,6 +81,7 @@ sys.path.insert(0, sys.argv[1])
 
 import workbench_scan_history as history
 from filesystem_identity import serialize_filesystem_identity
+from workbench_native_indexes import repository_target_ids
 from workbench_schema import MIGRATIONS, apply_migrations
 from workbench_target_state import (
     _repository_birth_time_ns,
@@ -475,6 +476,95 @@ elif scenario == "replacement":
         ).fetchone() is not None,
     }))
 
+elif scenario == "recreated-directory":
+    target = repository / "service-a"
+    linked = worktree / "service-a"
+    target_id = add_scan("before-recreation", target)
+    linked_id = add_scan("linked-scope", linked)
+    original_metadata = target.stat()
+    original_identity = repository_identity(target)
+    original_scan = connection.execute(
+        "SELECT target_device, target_inode FROM scans WHERE id = 'before-recreation'"
+    ).fetchone()
+
+    shutil.rmtree(target)
+    (root / "retired-directory-inode").mkdir()
+    target.mkdir()
+    (target / "service.py").write_text("value = 2\n")
+    recreated_metadata = target.stat()
+    before_rescan = listed(target)
+    before_aliases = repository_target_ids(connection, target_id)
+    recreated_id = add_scan("after-recreation", target)
+    repeated_id = add_scan("repeated-rescan", target)
+    after_rescan = listed(target)
+    after_aliases = repository_target_ids(connection, target_id)
+
+    malformed_target = repository / "service-b"
+    add_scan("malformed-owner", malformed_target, "malformed")
+    try:
+        ensure_security_target(connection, str(malformed_target))
+    except SystemExit as error:
+        malformed_owner_error = str(error)
+    else:
+        malformed_owner_error = None
+
+    plain = root / "recreated-nongit"
+    plain.mkdir()
+    add_scan("plain-before-recreation", plain)
+    shutil.rmtree(plain)
+    (root / "retired-nongit-inode").mkdir()
+    plain.mkdir()
+    try:
+        ensure_security_target(connection, str(plain))
+    except SystemExit as error:
+        nongit_owner_error = str(error)
+    else:
+        nongit_owner_error = None
+
+    root_target_id = add_scan("linked-root-before", worktree)
+    add_scan("canonical-root-alias", repository)
+    root_identity = repository_identity(worktree)
+    root_metadata = worktree.stat()
+    git_pointer = (worktree / ".git").read_text()
+    shutil.rmtree(worktree)
+    (root / "retired-worktree-root-inode").mkdir()
+    worktree.mkdir()
+    (worktree / ".git").write_text(git_pointer)
+    try:
+        ensure_security_target(connection, str(worktree))
+    except SystemExit as error:
+        recreated_root_error = str(error)
+    else:
+        recreated_root_error = None
+
+    preserved_scan = connection.execute(
+        "SELECT target_device, target_inode FROM scans WHERE id = 'before-recreation'"
+    ).fetchone()
+    print(json.dumps({
+        "ownerChanged": (
+            original_metadata.st_dev != recreated_metadata.st_dev
+            or original_metadata.st_ino != recreated_metadata.st_ino
+        ),
+        "identityPreserved": repository_identity(target) == original_identity,
+        "targetIdPreserved": recreated_id == target_id and repeated_id == target_id,
+        "historicalOwnerPreserved": (
+            preserved_scan["target_device"] == original_scan["target_device"]
+            and preserved_scan["target_inode"] == original_scan["target_inode"]
+        ),
+        "beforeRescan": before_rescan,
+        "afterRescan": after_rescan,
+        "beforeAliases": sorted(before_aliases),
+        "afterAliases": sorted(after_aliases),
+        "expectedAliases": sorted((target_id, linked_id)),
+        "malformedOwnerError": malformed_owner_error,
+        "nongitOwnerError": nongit_owner_error,
+        "rootOwnerChanged": root_metadata.st_ino != worktree.stat().st_ino,
+        "rootIdentityPreserved": repository_identity(worktree) == root_identity,
+        "recreatedRootError": recreated_root_error,
+        "recreatedRootScans": listed(worktree),
+        "recreatedRootAliases": sorted(repository_target_ids(connection, root_target_id)),
+    }))
+
 elif scenario == "git-replacement":
     add_scan("original-repository", repository)
     add_scan("original-alias", worktree)
@@ -680,6 +770,40 @@ describe("durable workbench repository identities", () => {
     expect(result["registrationError"]).toContain(
       "refusing to reuse its target",
     );
+  }, 30_000);
+
+  test("rescans recreated directories when their Git repository and scope are unchanged", () => {
+    const result = runProbe("recreated-directory", fixture());
+
+    expect(result["ownerChanged"]).toBe(true);
+    expect(result["identityPreserved"]).toBe(true);
+    expect(result["targetIdPreserved"]).toBe(true);
+    expect(result["historicalOwnerPreserved"]).toBe(true);
+    expect(result["beforeRescan"]).toEqual([
+      "before-recreation",
+      "linked-scope",
+    ]);
+    expect(result["afterRescan"]).toEqual([
+      "after-recreation",
+      "before-recreation",
+      "linked-scope",
+      "repeated-rescan",
+    ]);
+    expect(result["beforeAliases"]).toEqual(result["expectedAliases"]);
+    expect(result["afterAliases"]).toEqual(result["expectedAliases"]);
+    expect(result["malformedOwnerError"]).toContain(
+      "refusing to reuse its target",
+    );
+    expect(result["nongitOwnerError"]).toContain(
+      "refusing to reuse its target",
+    );
+    expect(result["rootOwnerChanged"]).toBe(true);
+    expect(result["rootIdentityPreserved"]).toBe(true);
+    expect(result["recreatedRootError"]).toContain(
+      "refusing to reuse its target",
+    );
+    expect(result["recreatedRootScans"]).toEqual([]);
+    expect(result["recreatedRootAliases"]).toEqual([]);
   }, 30_000);
 
   test("does not expand trusted aliases when historical checkout ownership is unverified", () => {

@@ -180,15 +180,38 @@ def list_scans(
             else []
         )
         repository_clauses = (
-            [_owned_scan_clause(repository, check_ownership, values)]
+            [
+                _owned_scan_clause(
+                    repository,
+                    check_ownership
+                    and not (
+                        identity_column
+                        and requested_repository["repository_identity"] is not None
+                        and requested_repository["repository_identity"] == live_identity
+                        and ownership_matches
+                        and repository_relative_path(repository) not in (None, ".")
+                    ),
+                    values,
+                )
+            ]
             if identity_matches
             else ["0"]
         )
         for target in related_targets:
+            target_path = Path(target["target_path"])
+            target_identity = target["repository_identity"] if identity_column else None
+            verified_target = (
+                check_ownership
+                and target_identity is not None
+                and repository_relative_path(target_path) not in (None, ".")
+                and _repository_ownership_matches(
+                    connection, target_path, target["target_id"], target_identity
+                )
+            )
             repository_clauses.append(
                 _owned_scan_clause(
-                    Path(target["target_path"]),
-                    check_ownership,
+                    target_path,
+                    check_ownership and not verified_target,
                     values,
                     target_id=target["target_id"],
                 )
@@ -346,29 +369,11 @@ def _repository_ownership_matches(
     stored_identity: str | None = None,
 ) -> bool:
     try:
-        metadata = repository.stat()
-    except OSError:
+        repository.stat()
+        _require_current_target_owner(connection, target_id or "", str(repository), stored_identity)
+    except (OSError, SystemExit):
         return False
-    scans = connection.execute(
-        """
-        SELECT target_device, target_inode
-        FROM scans
-        WHERE target_path = ? OR target_id = ?
-        """,
-        (str(repository), target_id),
-    )
-    current_device = serialize_filesystem_identity(metadata.st_dev)
-    current_inode = serialize_filesystem_identity(metadata.st_ino)
-    historical_scan = False
-    verified_owner = False
-    for scan in scans:
-        historical_scan = True
-        if scan["target_device"] is None and scan["target_inode"] is None:
-            continue
-        if scan["target_device"] != current_device or scan["target_inode"] != current_inode:
-            return False
-        verified_owner = True
-    return not historical_scan or verified_owner or stored_identity is None
+    return True
 
 
 def list_unmatched_scan_pairs(
