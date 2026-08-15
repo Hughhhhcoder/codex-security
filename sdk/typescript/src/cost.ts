@@ -46,6 +46,7 @@ interface SessionUsage {
   pendingLine: Buffer[];
   pendingLineBytes: number;
   unreadable: boolean;
+  unreadableError: unknown;
   threadId: string | null;
   parentThreadId: string | null;
   workingDirectory: string | null;
@@ -101,7 +102,12 @@ export class ScanCostTracker {
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
+  #finalSnapshot: ScanCostSnapshot | null = null;
+  #snapshotThreadUsage: ScanTokenUsage | null = null;
   #lastCost: number | null = null;
+  #failedSession: SessionUsage | null = null;
+  #hasDelegatedWorkers = false;
+  #hasUnverifiedWorkerUsage = false;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -160,20 +166,91 @@ export class ScanCostTracker {
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
+    if (this.#finalSnapshot !== null) return this.#finalSnapshot;
     if (this.#timer !== null) {
       clearInterval(this.#timer);
       this.#timer = null;
     }
-    await this.refresh();
-    if (this.#snapshot.usage !== null) return this.#snapshot;
-    const cost = estimateScanCost(this.#options.model, fallbackUsage);
-    this.#snapshot = { usage: fallbackUsage ?? null, cost };
+    let refreshError: unknown;
+    try {
+      await this.refresh();
+    } catch (error) {
+      if (
+        fallbackUsage === undefined ||
+        (this.#options.maxCostUsd !== undefined &&
+          (this.#failedSession?.threadId !== this.#threadId ||
+            this.#hasDelegatedWorkers))
+      ) {
+        throw error;
+      }
+      refreshError = error;
+    }
+    const completedRoot = tokenUsage(fallbackUsage);
+    const observedRoot = this.#snapshotThreadUsage;
+    const completedRootCost = estimateScanCost(
+      this.#options.model,
+      completedRoot,
+    );
+    const observedRootCost = estimateScanCost(
+      this.#options.model,
+      observedRoot,
+    );
+    const rootUsage =
+      completedRoot === null ||
+      (observedRootCost !== null &&
+        completedRootCost !== null &&
+        observedRootCost.estimatedUsd >= completedRootCost.estimatedUsd)
+        ? observedRoot
+        : completedRoot;
+    let completedUsage: unknown =
+      rootUsage === completedRoot ? fallbackUsage : rootUsage;
+    let workerUsage: ScanTokenUsage | null = null;
+    if (this.#hasDelegatedWorkers && this.#snapshot.usage !== null) {
+      const previousUsage = tokenUsage(this.#snapshot.usage);
+      workerUsage =
+        previousUsage === null
+          ? null
+          : observedRoot === null
+            ? previousUsage
+            : subtractTokenUsage(previousUsage, observedRoot);
+      if (rootUsage !== null && workerUsage !== null) {
+        completedUsage = addTokenUsage(workerUsage, rootUsage);
+      }
+    }
+    const cost = estimateScanCost(this.#options.model, completedUsage);
+    if (
+      this.#options.maxCostUsd !== undefined &&
+      (rootUsage === null ||
+        cost === null ||
+        (this.#hasDelegatedWorkers &&
+          (workerUsage === null || this.#hasUnverifiedWorkerUsage)))
+    ) {
+      throw (
+        refreshError ??
+        new Error(
+          "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+        )
+      );
+    }
+    if (
+      this.#snapshot.usage !== null &&
+      (cost === null ||
+        (this.#snapshot.cost !== null &&
+          this.#snapshot.cost.estimatedUsd >= cost.estimatedUsd))
+    ) {
+      this.#finalSnapshot = this.#snapshot;
+      return this.#finalSnapshot;
+    }
+    this.#snapshot = { usage: completedUsage ?? null, cost };
     this.#reportCost(cost);
-    return this.#snapshot;
+    this.#finalSnapshot = this.#snapshot;
+    return this.#finalSnapshot;
   }
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
+    this.#failedSession = null;
+    const presentSessions = new Set<string>();
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
@@ -185,6 +262,7 @@ export class ScanCostTracker {
           pendingLine: [],
           pendingLineBytes: 0,
           unreadable: false,
+          unreadableError: null,
           threadId: null,
           parentThreadId: null,
           workingDirectory: null,
@@ -204,9 +282,22 @@ export class ScanCostTracker {
         this.#sessions.set(path, session);
       }
       try {
-        await readSessionUsage(path, session, this.#options.repository);
+        presentSessions.add(path);
+        if (
+          !(await readSessionUsage(
+            path,
+            session,
+            this.#options.repository,
+            this.#options.maxCostUsd !== undefined,
+          ))
+        ) {
+          presentSessions.delete(path);
+        }
       } catch (error) {
-        if (session.threadId === null) throw error;
+        if (session.threadId === null) {
+          this.#failedSession = session;
+          throw error;
+        }
         unreadable.push({ session, error });
       }
     }
@@ -258,25 +349,49 @@ export class ScanCostTracker {
         }
       }
     }
+    if (included.size > 1) this.#hasDelegatedWorkers = true;
+    if (this.#options.maxCostUsd !== undefined) {
+      for (const [path, session] of this.#sessions) {
+        if (
+          session.threadId !== null &&
+          included.has(session.threadId) &&
+          !presentSessions.has(path)
+        ) {
+          throw new Error(
+            "A tracked scan session disappeared before its cost could be verified.",
+          );
+        }
+      }
+    }
     for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
+      if (included.has(session.threadId!)) {
+        this.#failedSession = session;
+        throw error;
+      }
+      if (isSessionAccessDenied(error)) quarantineSession(session, error);
     }
 
     let usage: ScanTokenUsage | null = null;
+    let threadUsage: ScanTokenUsage | null = null;
+    let hasUnverifiedWorkerUsage = false;
     for (const session of this.#sessions.values()) {
       if (session.threadId !== null && included.has(session.threadId)) {
         if (session.threadId !== this.#threadId) {
+          if (session.usage === null) hasUnverifiedWorkerUsage = true;
           this.#reportWorkerActivities(session);
           this.#reportWorkerProgress(session);
         }
         if (session.usage !== null) {
+          if (session.threadId === this.#threadId) threadUsage = session.usage;
           usage = addTokenUsage(usage, session.usage);
         }
       }
     }
+    this.#hasUnverifiedWorkerUsage = hasUnverifiedWorkerUsage;
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
     this.#snapshot = { usage, cost };
+    this.#snapshotThreadUsage = threadUsage;
     this.#reportCost(cost);
   }
 
@@ -367,13 +482,20 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
-): Promise<void> {
-  if (session.unreadable) return;
+  requireReadableSessions = false,
+): Promise<boolean> {
+  if (session.unreadable) {
+    if (requireReadableSessions) throw session.unreadableError;
+    return true;
+  }
   let file;
   try {
     file = await open(path, "r");
   } catch (error) {
-    if (isMissingFile(error)) return;
+    if (isMissingFile(error)) return false;
+    if (session.threadId === null && isSessionAccessDenied(error)) {
+      quarantineSession(session, error);
+    }
     throw error;
   }
   try {
@@ -385,20 +507,25 @@ async function readSessionUsage(
         buffer.length,
         session.offset,
       );
-      if (bytesRead === 0) return;
+      if (bytesRead === 0) return true;
       session.offset += bytesRead;
       try {
         readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
       } catch (error) {
-        session.unreadable = true;
-        session.pendingLine = [];
-        session.pendingLineBytes = 0;
+        quarantineSession(session, error);
         throw error;
       }
     }
   } finally {
     await file.close();
   }
+}
+
+function quarantineSession(session: SessionUsage, error: unknown): void {
+  session.unreadable = true;
+  session.unreadableError = error;
+  session.pendingLine = [];
+  session.pendingLineBytes = 0;
 }
 
 function readSessionChunk(
@@ -829,6 +956,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
+}
+
+function isSessionAccessDenied(error: unknown): boolean {
+  return (
+    isRecord(error) && (error["code"] === "EACCES" || error["code"] === "EPERM")
+  );
 }
 
 export function estimateScanCost(

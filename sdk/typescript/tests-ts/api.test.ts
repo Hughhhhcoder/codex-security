@@ -3558,7 +3558,7 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("saves a budgeted scan with a warning when token usage is unavailable", async () => {
+  test("fails a budgeted scan when token usage cannot be verified", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3613,26 +3613,24 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
-    const result = await client.run(repository, {
-      maxCostUsd: 1,
-      onWarning: (warning) => {
-        warnings.push(warning);
-      },
-    });
-    expect(result.threadId).toBe("scan-thread");
-    expect(result.cost).toBeNull();
-    expect(warnings).toEqual([
-      "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
-    ]);
+    await expect(
+      client.run(repository, {
+        maxCostUsd: 1,
+        onWarning: (warning) => {
+          warnings.push(warning);
+        },
+      }),
+    ).rejects.toThrow(
+      "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+    );
+    expect(warnings).toEqual([]);
     expect(commands.map(([command]) => command)).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
       "set-scan-thread",
-      "prepare-scan-completion",
-      "complete-scan",
-      "list-global-findings",
+      "fail-scan",
     ]);
-    expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
+    expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
     await client.close();
   });
 

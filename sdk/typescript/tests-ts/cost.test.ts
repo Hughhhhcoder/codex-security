@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
@@ -15,6 +16,7 @@ import type { ScanActivity } from "../src/scan-activity.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 
 const temporaryDirectories: string[] = [];
+const testPosix = process.platform === "win32" ? test.skip : test;
 
 async function waitFor(check: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -43,7 +45,7 @@ async function codexHome(): Promise<string> {
 async function writeSession(
   home: string,
   threadId: string,
-  usage: Record<string, number>,
+  usage: Record<string, number> | null,
   parentThreadId?: string,
   workingDirectory?: string,
   timestamp?: string,
@@ -71,17 +73,54 @@ async function writeSession(
               }),
         },
       }),
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: { total_token_usage: usage },
-        },
-      }),
+      ...(usage === null
+        ? []
+        : [
+            JSON.stringify({
+              type: "event_msg",
+              payload: {
+                type: "token_count",
+                info: { total_token_usage: usage },
+              },
+            }),
+          ]),
       "",
     ].join("\n"),
   );
   return path;
+}
+
+async function workerScan({
+  rootUsage = { input_tokens: 100, output_tokens: 10 },
+  workerUsage = { input_tokens: 100, output_tokens: 10 },
+  maxCostUsd,
+  onCost,
+}: {
+  rootUsage?: Record<string, number> | null;
+  workerUsage?: Record<string, number> | null;
+  maxCostUsd?: number;
+  onCost?: (cost: { estimatedUsd: number }) => void;
+} = {}): Promise<{
+  root: string;
+  worker: string;
+  tracker: ScanCostTracker;
+}> {
+  const home = await codexHome();
+  const root = await writeSession(home, "scan-thread", rootUsage);
+  const worker = await writeSession(
+    home,
+    "worker-thread",
+    workerUsage,
+    "scan-thread",
+  );
+  const tracker = new ScanCostTracker({
+    codexHome: home,
+    model: "gpt-5.6-terra",
+    maxCostUsd,
+    onCost,
+  });
+  tracker.start("scan-thread");
+  return { root, worker, tracker };
 }
 
 async function appendSessionItem(
@@ -1566,6 +1605,183 @@ describe("live scan cost tracking", () => {
     expect((await tracker.stop()).cost?.inputTokens).toBe(250);
   });
 
+  testPosix(
+    "quarantines unreadable unrelated sessions after one failure",
+    async () => {
+      const home = await codexHome();
+      const unreadable = await writeSession(home, "unrelated-thread", {
+        input_tokens: 99,
+        output_tokens: 1,
+      });
+      await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        output_tokens: 10,
+      });
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-terra",
+      });
+      tracker.start("scan-thread");
+      await chmod(unreadable, 0o000);
+
+      try {
+        await expect(tracker.refresh()).rejects.toThrow();
+        expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+        expect((await tracker.stop()).cost?.inputTokens).toBe(100);
+      } finally {
+        await chmod(unreadable, 0o600);
+      }
+    },
+  );
+
+  testPosix(
+    "keeps budgeted worker sessions fail-closed after they become unreadable",
+    async () => {
+      const { worker, tracker } = await workerScan({
+        workerUsage: { input_tokens: 250, output_tokens: 20 },
+        maxCostUsd: 1,
+      });
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(350);
+      await chmod(worker, 0o000);
+
+      try {
+        await expect(tracker.refresh()).rejects.toThrow();
+        await expect(tracker.refresh()).rejects.toThrow();
+        await expect(
+          tracker.stop({ input_tokens: 100, output_tokens: 10 }),
+        ).rejects.toThrow();
+      } finally {
+        await chmod(worker, 0o600);
+      }
+    },
+  );
+
+  testPosix(
+    "rejects root-only budget fallback when the scan also has delegated workers",
+    async () => {
+      const { root, tracker } = await workerScan({
+        workerUsage: { input_tokens: 250, output_tokens: 20 },
+        maxCostUsd: 1,
+      });
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(350);
+      await chmod(root, 0o000);
+
+      try {
+        await expect(
+          tracker.stop({ input_tokens: 1_000, output_tokens: 100 }),
+        ).rejects.toThrow();
+      } finally {
+        await chmod(root, 0o600);
+      }
+    },
+  );
+
+  testPosix(
+    "rejects budget fallback when a worker first appears during a failed refresh",
+    async () => {
+      const home = await codexHome();
+      const active = await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        output_tokens: 10,
+      });
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-terra",
+        maxCostUsd: 0.001,
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      await writeSession(
+        home,
+        "worker-thread",
+        { input_tokens: 10_000, output_tokens: 1_000 },
+        "scan-thread",
+      );
+      await chmod(active, 0o000);
+
+      try {
+        await expect(
+          tracker.stop({ input_tokens: 100, output_tokens: 10 }),
+        ).rejects.toThrow();
+      } finally {
+        await chmod(active, 0o600);
+      }
+    },
+  );
+
+  testPosix(
+    "rejects budget fallback when an unreadable session cannot be attributed",
+    async () => {
+      const home = await codexHome();
+      const unreadable = await writeSession(home, "unidentified-thread", {
+        input_tokens: 100,
+        output_tokens: 10,
+      });
+      await chmod(unreadable, 0o000);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-terra",
+        maxCostUsd: 1,
+      });
+      tracker.start("scan-thread");
+
+      try {
+        await expect(
+          tracker.stop({ input_tokens: 1_000, output_tokens: 100 }),
+        ).rejects.toThrow();
+      } finally {
+        await chmod(unreadable, 0o600);
+      }
+    },
+  );
+
+  test.each(["scan-thread", "worker-thread"] as const)(
+    "rejects a budgeted scan when its tracked %s session disappears",
+    async (missingThread) => {
+      const { root, worker, tracker } = await workerScan({ maxCostUsd: 1 });
+      await tracker.refresh();
+      await rm(missingThread === "scan-thread" ? root : worker);
+
+      await expect(
+        tracker.stop({ input_tokens: 1_000, output_tokens: 100 }),
+      ).rejects.toThrow(
+        "A tracked scan session disappeared before its cost could be verified.",
+      );
+    },
+  );
+
+  test("ignores unrelated disappearing sessions when enforcing a budget", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const unrelated = await writeSession(home, "unrelated-thread", {
+      input_tokens: 1_000,
+      output_tokens: 100,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+      maxCostUsd: 1,
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    await rm(unrelated);
+
+    expect((await tracker.stop()).cost?.inputTokens).toBe(100);
+  });
+
+  test("preserves known usage when an optional worker session disappears", async () => {
+    const { worker, tracker } = await workerScan();
+    await tracker.refresh();
+    await rm(worker);
+
+    expect(
+      (await tracker.stop({ input_tokens: 1_000, output_tokens: 100 })).cost,
+    ).toMatchObject({ inputTokens: 1_100, outputTokens: 110 });
+  });
+
   test("reports a changed running cost only once", async () => {
     const home = await codexHome();
     await writeSession(home, "scan-thread", {
@@ -1607,4 +1823,248 @@ describe("live scan cost tracking", () => {
       },
     });
   });
+
+  test.each([
+    ["missing", undefined],
+    ["null", null],
+    ["malformed", {}],
+  ] as const)(
+    "rejects a budgeted scan when completed-turn usage is %s",
+    async (_description, usage) => {
+      const tracker = new ScanCostTracker({
+        codexHome: await codexHome(),
+        model: "gpt-5.6-terra",
+        maxCostUsd: 1,
+      });
+      tracker.start("scan-thread");
+
+      await expect(tracker.stop(usage)).rejects.toThrow(
+        "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+      );
+    },
+  );
+
+  test("rejects a budgeted scan when the completed model cannot be priced", async () => {
+    const tracker = new ScanCostTracker({
+      codexHome: await codexHome(),
+      model: "unknown-model",
+      maxCostUsd: 1,
+    });
+    tracker.start("scan-thread");
+
+    await expect(
+      tracker.stop({ input_tokens: 1_000, output_tokens: 100 }),
+    ).rejects.toThrow(
+      "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+    );
+  });
+
+  test("allows unavailable completed-turn usage without an explicit budget", async () => {
+    const tracker = new ScanCostTracker({
+      codexHome: await codexHome(),
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+
+    await expect(tracker.stop(null)).resolves.toEqual({
+      usage: null,
+      cost: null,
+    });
+  });
+
+  test.each([
+    ["missing", undefined],
+    ["malformed", {}],
+  ] as const)(
+    "rejects worker-only usage when the budgeted root completion is %s",
+    async (_description, completedRoot) => {
+      const { tracker } = await workerScan({
+        rootUsage: null,
+        maxCostUsd: 1,
+      });
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+
+      await expect(tracker.stop(completedRoot)).rejects.toThrow(
+        "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+      );
+    },
+  );
+
+  test.each([
+    ["rejects", 1],
+    ["allows", undefined],
+  ] as const)(
+    "%s incomplete delegated-worker usage according to the explicit budget",
+    async (_result, maxCostUsd) => {
+      const { tracker } = await workerScan({ workerUsage: null, maxCostUsd });
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+
+      const completed = tracker.stop({
+        input_tokens: 1_000,
+        output_tokens: 100,
+      });
+      if (maxCostUsd === undefined) {
+        await expect(completed).resolves.toMatchObject({
+          cost: { inputTokens: 1_000, outputTokens: 100 },
+        });
+      } else {
+        await expect(completed).rejects.toThrow(
+          "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+        );
+      }
+    },
+  );
+
+  test("keeps final budget enforcement stable when cleanup stops tracking twice", async () => {
+    const budget = 0.001;
+    const exceeded = new AbortController();
+    const reportedCosts: number[] = [];
+    const { tracker } = await workerScan({
+      maxCostUsd: budget,
+      onCost: (cost) => {
+        reportedCosts.push(cost.estimatedUsd);
+        if (cost.estimatedUsd > budget) exceeded.abort();
+      },
+    });
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
+
+    expect(
+      (await tracker.stop({ input_tokens: 1_000, output_tokens: 100 })).cost,
+    ).toMatchObject({ inputTokens: 1_100, outputTokens: 110 });
+    expect((await tracker.stop()).cost).toMatchObject({
+      inputTokens: 1_100,
+      outputTokens: 110,
+    });
+    expect(reportedCosts).toEqual([0.00064, 0.00352]);
+    expect(exceeded.signal.aborted).toBe(true);
+  });
+
+  test("preserves higher observed root usage when completed-turn usage is stale", async () => {
+    const { tracker } = await workerScan({
+      rootUsage: { input_tokens: 1_000, output_tokens: 100 },
+      maxCostUsd: 1,
+    });
+
+    expect(
+      (await tracker.stop({ input_tokens: 100, output_tokens: 10 })).cost,
+    ).toMatchObject({ inputTokens: 1_100, outputTokens: 110 });
+  });
+
+  test("combines worker-only observations with a valid completed root", async () => {
+    const budget = 0.001;
+    const exceeded = new AbortController();
+    const { tracker } = await workerScan({
+      rootUsage: null,
+      maxCostUsd: budget,
+      onCost: (cost) => {
+        if (cost.estimatedUsd > budget) exceeded.abort();
+      },
+    });
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+
+    expect(
+      (await tracker.stop({ input_tokens: 1_000, output_tokens: 100 })).cost,
+    ).toMatchObject({ inputTokens: 1_100, outputTokens: 110 });
+    expect(exceeded.signal.aborted).toBe(true);
+  });
+
+  test("uses completed-turn usage when the final session refresh fails", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const reportedCosts: number[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+      onCost: (cost) => reportedCosts.push(cost.estimatedUsd),
+    });
+    tracker.start("scan-thread");
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.00032);
+    tracker.refresh = async () => {
+      throw new Error("session read failed");
+    };
+    const usage = { input_tokens: 1_000, output_tokens: 100 };
+
+    expect(await tracker.stop(usage)).toMatchObject({
+      usage,
+      cost: { inputTokens: 1_000, estimatedUsd: 0.0032 },
+    });
+    expect(reportedCosts).toEqual([0.00032, 0.0032]);
+  });
+
+  test("adds observed worker usage to the completed root after a failed refresh", async () => {
+    const { tracker } = await workerScan();
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
+    tracker.refresh = async () => {
+      throw new Error("session read failed");
+    };
+
+    expect(
+      (await tracker.stop({ input_tokens: 1_000, output_tokens: 100 })).cost,
+    ).toMatchObject({ inputTokens: 1_100, outputTokens: 110 });
+  });
+
+  testPosix(
+    "enforces a budget with completed-turn usage when only its root session is unreadable",
+    async () => {
+      const home = await codexHome();
+      const active = await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        output_tokens: 10,
+      });
+      const budget = 0.001;
+      const exceeded = new AbortController();
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-terra",
+        maxCostUsd: budget,
+        onCost: (cost) => {
+          if (cost.estimatedUsd > budget) exceeded.abort();
+        },
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      await chmod(active, 0o000);
+
+      try {
+        await expect(tracker.refresh()).rejects.toThrow();
+        expect(
+          (await tracker.stop({ input_tokens: 1_000, output_tokens: 100 }))
+            .cost,
+        ).toMatchObject({ estimatedUsd: 0.0032 });
+        expect(exceeded.signal.aborted).toBe(true);
+      } finally {
+        await chmod(active, 0o600);
+      }
+    },
+  );
+
+  testPosix(
+    "uses completed-turn usage when an unrelated session cannot be opened",
+    async () => {
+      const home = await codexHome();
+      const unreadable = await writeSession(home, "unrelated-thread", {
+        input_tokens: 99,
+        output_tokens: 1,
+      });
+      await chmod(unreadable, 0o000);
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-luna",
+      });
+      tracker.start("scan-thread");
+      const usage = { input_tokens: 1_000, output_tokens: 20 };
+
+      try {
+        expect(await tracker.stop(usage)).toMatchObject({
+          usage,
+          cost: { inputTokens: 1_000, estimatedUsd: 0.000224 },
+        });
+      } finally {
+        await chmod(unreadable, 0o600);
+      }
+    },
+  );
 });
