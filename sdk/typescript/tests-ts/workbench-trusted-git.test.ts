@@ -14,7 +14,7 @@ import { delimiter, dirname, join } from "node:path";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CodexSecurity } from "../src/api.js";
-import { runWorkbench } from "../src/runtime.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { trustedExecutableEnvironment } from "../src/trusted-executable.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { preparedRuntime } from "./support/api-events.js";
@@ -197,14 +197,49 @@ describe("bundled workbench trusted Git", () => {
     expect(result.stderr).toContain(unsafeExecutable);
   });
 
+  testPosix("preserves trusted multicall Git symlink invocation", () => {
+    const target = fixture();
+    const trustedDirectory = join(target.root, "trusted-bin");
+    mkdirSync(trustedDirectory);
+    const multicall = join(trustedDirectory, "multicall");
+    const invocation = join(trustedDirectory, "git");
+    writeFileSync(
+      multicall,
+      '#!/bin/sh\ncase "$0" in */git) printf "%s" "$0";; *) exit 23;; esac\n',
+      { mode: 0o700 },
+    );
+    symlinkSync(multicall, invocation);
+
+    const result = probe(
+      target,
+      [
+        "result = git_command(Path(sys.argv[2]), 'status', text=True)",
+        "print(json.dumps({'git': result.args[0], 'invocation': result.stdout, 'status': result.returncode}))",
+      ],
+      { environment: { CODEX_SECURITY_GIT: invocation } },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      git: invocation,
+      invocation,
+      status: 0,
+    });
+  });
+
   testPosix("rejects repository symlinks and aliased parents", () => {
     const target = fixture();
     const linkedGit = join(target.repository, "safe-looking-git");
     const repositoryAlias = join(target.root, "repository-alias");
+    const externalAlias = join(target.root, "external-git");
     symlinkSync(target.git, linkedGit);
     symlinkSync(target.repository, repositoryAlias, "junction");
+    symlinkSync(target.shim, externalAlias);
 
-    const aliases = [linkedGit, join(repositoryAlias, "safe-looking-git")];
+    const aliases = [
+      linkedGit,
+      join(repositoryAlias, "safe-looking-git"),
+      externalAlias,
+    ];
     for (const executable of aliases) {
       const result = probe(target, statusProbe, {
         environment: { CODEX_SECURITY_GIT: executable },
@@ -305,6 +340,137 @@ describe("bundled workbench trusted Git", () => {
           inventoryPath,
         ],
         { encoding: "utf8", env: environment },
+      );
+      expect(inventory.status, inventory.stderr).toBe(0);
+      expect(readFileSync(inventoryPath, "utf8")).toBe("source.py\n");
+    },
+  );
+
+  testPosix(
+    "keeps core.worktree redirection from trusting scanned repository aliases",
+    async () => {
+      const target = fixture();
+      git(target, target.repository, "init", "-q");
+      const redirectedRoot = join(target.root, "redirected-worktree");
+      mkdirSync(redirectedRoot);
+      git(target, target.repository, "config", "core.worktree", redirectedRoot);
+      expect(
+        git(target, target.repository, "rev-parse", "--show-toplevel"),
+      ).toBe(redirectedRoot);
+      writeFileSync(join(target.repository, "source.py"), "value = 1\n");
+
+      const unsafeDirectory = dirname(target.shim);
+      const repositoryRipgrep = join(unsafeDirectory, "rg");
+      const repositoryPython = join(unsafeDirectory, "python");
+      writeFileSync(repositoryRipgrep, readFileSync(target.shim), {
+        mode: 0o700,
+      });
+      writeFileSync(repositoryPython, readFileSync(target.shim), {
+        mode: 0o700,
+      });
+      const gitAlias = join(target.root, "git-alias-bin");
+      const ripgrepAlias = join(target.root, "rg-alias-bin");
+      const safeRipgrep = join(target.root, "trusted-rg-bin");
+      const codexHome = join(target.root, "codex-home");
+      for (const directory of [
+        gitAlias,
+        ripgrepAlias,
+        safeRipgrep,
+        codexHome,
+      ]) {
+        mkdirSync(directory);
+      }
+      symlinkSync(target.shim, join(gitAlias, "git"));
+      symlinkSync(repositoryRipgrep, join(ripgrepAlias, "rg"));
+      writeFileSync(
+        join(safeRipgrep, "rg"),
+        '#!/bin/sh\nprintf "source.py\\n"\n',
+        { mode: 0o700 },
+      );
+      const environment = {
+        ...target.environment,
+        CODEX_SECURITY_STATE_DIR: join(target.root, "state"),
+        PATH: [
+          unsafeDirectory,
+          gitAlias,
+          ripgrepAlias,
+          safeRipgrep,
+          dirname(target.git),
+        ].join(delimiter),
+      };
+      const observed: Array<Record<string, string | undefined>> = [];
+      let pythonProtectedRoot: string | undefined;
+      const client = new TestClient(
+        {},
+        {
+          environment,
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            environment,
+          }),
+          resolvePluginPython: async (options: { protectedRoot?: string }) => {
+            pythonProtectedRoot = options.protectedRoot;
+            return target.python;
+          },
+          repositoryRevision: async () => null,
+          runWorkbench: async (...args: Parameters<typeof runWorkbench>) => {
+            observed.push(args[0].environment);
+            throw new Error("captured redirected-worktree environment");
+          },
+        },
+      );
+      try {
+        await expect(
+          client.preflight(target.repository, {
+            outputDir: join(target.repository, "scan-output"),
+          }),
+        ).rejects.toThrow("outside");
+        await expect(
+          client.run(target.repository, {
+            outputDir: join(target.root, "scan"),
+          }),
+        ).rejects.toThrow("captured redirected-worktree environment");
+      } finally {
+        await client.close();
+      }
+
+      expect(observed.length).toBe(1);
+      expect(pythonProtectedRoot).toBe(target.repository);
+      await expect(
+        resolvePluginPython({
+          configuredPath: repositoryPython,
+          environment,
+          protectedRoot: pythonProtectedRoot,
+        }),
+      ).rejects.toThrow();
+      for (const candidate of observed) {
+        expect(candidate["CODEX_SECURITY_GIT"]).toBe(target.git);
+        expect(candidate["PATH"]?.split(delimiter)).toEqual([
+          safeRipgrep,
+          dirname(target.git),
+        ]);
+      }
+      const trustedGit = spawnSync("git", ["--version"], {
+        encoding: "utf8",
+        env: observed[0],
+      });
+      expect(trustedGit.status, trustedGit.stderr).toBe(0);
+
+      const inventoryPath = join(target.root, "inventory.txt");
+      const inventory = spawnSync(
+        target.python,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
+          "--repo",
+          target.repository,
+          "--scope",
+          ".",
+          "--out",
+          inventoryPath,
+        ],
+        { encoding: "utf8", env: observed[0] },
       );
       expect(inventory.status, inventory.stderr).toBe(0);
       expect(readFileSync(inventoryPath, "utf8")).toBe("source.py\n");

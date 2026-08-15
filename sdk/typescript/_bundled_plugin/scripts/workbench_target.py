@@ -160,7 +160,7 @@ def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | 
             or not os.access(canonical, os.F_OK if windows else os.X_OK)
         ):
             raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.")
-        return str(canonical)
+        return configured
 
     entries: list[str] = []
     executable: str | None = None

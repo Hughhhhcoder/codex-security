@@ -645,10 +645,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
-      const protectedGitRoot = await outermostGitMarkerRoot(
-        protectedRoot,
-        signal,
-      );
+      const protectedGitRoot = await outermostGitMarkerRoot(repo, signal);
       const gitEnvironment = await trustedExecutableEnvironment(
         "git",
         pluginEnvironment,
@@ -1794,8 +1791,17 @@ export class CodexSecurity {
     validateMode(normalized, mode);
     await validateCommittedDiffCheckout(repo, normalized, signal);
     throwIfAborted(signal);
+    const enclosingRoot = await enclosingGitWorktreeRoot(repo, signal);
+    const repositoryRelative =
+      enclosingRoot === null ? null : relative(enclosingRoot, repo);
     const protectedRoot =
-      (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
+      enclosingRoot !== null &&
+      repositoryRelative !== null &&
+      repositoryRelative !== ".." &&
+      !repositoryRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(repositoryRelative)
+        ? enclosingRoot
+        : repo;
     const requestedOutput = await validateOutputDir(
       options.outputDir,
       options.archiveExisting,
