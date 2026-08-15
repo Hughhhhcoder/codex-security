@@ -212,9 +212,14 @@ def worktree_content_digest(target: Path) -> str:
     return worktree_content_digest_for_context(repository, pathspec)
 
 
-def committed_diff_arguments(base: str, head: str, pathspec: str) -> tuple[str, ...]:
+def committed_diff_arguments(
+    base: str,
+    head: str,
+    pathspec: str,
+    attribute_source: str,
+) -> tuple[str, ...]:
     return (
-        f"--attr-source={head}",
+        f"--attr-source={attribute_source}",
         "-c",
         f"core.attributesFile={os.devnull}",
         "-c",
@@ -254,7 +259,7 @@ def committed_diff_content_digest(target: Path, base: str, head: str) -> str:
         digest,
         b"tracked-diff",
         repository,
-        *committed_diff_arguments(base, head, pathspec),
+        *committed_diff_arguments(base, head, pathspec, empty_git_tree(repository)),
     ):
         raise SystemExit("Could not snapshot the selected committed changes.")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"

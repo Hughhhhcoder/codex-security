@@ -792,6 +792,55 @@ describe("malformed scan artifact recovery", () => {
     expect((await completeScan(fixture)).warnings).toEqual([]);
   });
 
+  test("keeps committed snapshots stable when named Git diff drivers change", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    await writeFile(
+      join(fixture.repository, ".gitattributes"),
+      "src/extract.py diff=special\n",
+    );
+    fixtureGit(fixture.repository, "add", "--", ".gitattributes");
+    fixtureGit(
+      fixture.repository,
+      "-c",
+      "user.name=Codex Security",
+      "-c",
+      "user.email=codex-security@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "versioned diff driver",
+    );
+    const headRevision = fixtureGit(fixture.repository, "rev-parse", "HEAD");
+    const arguments_ = [
+      "inspect-setup",
+      "--target-path",
+      fixture.repository,
+      "--scope",
+      ".",
+      "--mode",
+      "diff",
+      "--diff-target-kind",
+      "range",
+      "--diff-base-revision",
+      selected.baseRevision,
+      "--diff-head-revision",
+      headRevision,
+    ];
+    const original = await workbench(fixture, arguments_);
+    const contentDigest = (original["diffTarget"] as { contentDigest: string })
+      .contentDigest;
+
+    fixtureGit(fixture.repository, "config", "diff.special.binary", "true");
+    const inspected = await workbench(fixture, [
+      ...arguments_,
+      "--diff-content-digest",
+      contentDigest,
+    ]);
+
+    expect(inspected["diffTarget"]).toMatchObject({ contentDigest });
+  });
+
   test("hashes committed diff output without buffering the Git patch", async () => {
     const fixture = await startDraftScan("committed");
     const selected = committedDiffTarget(fixture);
@@ -816,7 +865,8 @@ describe("malformed scan artifact recovery", () => {
           "streamed = target.committed_diff_content_digest(repository, base, head)",
           "target.git_bytes = original",
           "root, pathspec = target.git_worktree_context(repository)",
-          "patch = original(root, *target.committed_diff_arguments(base, head, pathspec))",
+          "arguments = target.committed_diff_arguments(base, head, pathspec, target.empty_git_tree(root))",
+          "patch = original(root, *arguments)",
           "digest = hashlib.sha256()",
           "target.update_digest_field(digest, b'format', b'codex-security-snapshot/v1')",
           "target.update_digest_field(digest, b'tracked-diff', patch)",
