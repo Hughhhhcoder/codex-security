@@ -154,7 +154,7 @@ const findingsIndexProbe = [
   "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
   "finding_detail, overview_finding, scan_pages, rejected_previous_owner, rejected_previous_owner_list, rejected_legacy_owner, rejected_legacy_owner_list, rejected_legacy_descendant, rejected_legacy_descendant_list = None, None, None, None, None, None, None, None, None",
   "pending_remediation_error, pending_triage_rows = None, None",
-  "if settings.get('matchedTriage'):",
+  "if settings.get('matchedTriage') or settings.get('targetlessHistory'):",
   "    import workbench_db as workbench",
   "    if not settings.get('ownershipReuse'):",
   "        connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
@@ -196,11 +196,13 @@ const findingsIndexProbe = [
   "        workbench.scan_context = lambda *arguments: {}",
   "        workbench.set_finding_triage(connection, argparse.Namespace(occurrence_id='current-old-occurrence', status='closed', close_reason='already_fixed', note=None))",
   "        result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
-  "    scan = connection.execute(\"SELECT * FROM scans WHERE id = 'current-new'\").fetchone()",
-  "    occurrence = connection.execute(\"SELECT * FROM finding_occurrences WHERE id = 'current-new-occurrence'\").fetchone()",
+  "    selected_scan = 'orphan-new' if settings.get('targetlessHistory') else 'current-new'",
+  "    selected_occurrence = selected_scan + '-occurrence'",
+  "    scan = connection.execute('SELECT * FROM scans WHERE id = ?', (selected_scan,)).fetchone()",
+  "    occurrence = connection.execute('SELECT * FROM finding_occurrences WHERE id = ?', (selected_occurrence,)).fetchone()",
   "    finding_detail = workbench.finding_result(connection, scan, occurrence, full_details=True)",
   "    overview_finding = workbench.finding_result(connection, scan, occurrence, indexed_finding=workbench._indexed_scan_findings(connection, scan).get(occurrence['id']))",
-  "    scan_pages = {status: workbench.list_findings(connection, argparse.Namespace(scan_id='current-new', query=None, severity=None, status=status, offset=0, limit=20))['findingsPage'] for status in ('open', 'closed')}",
+  "    scan_pages = {status: workbench.list_findings(connection, argparse.Namespace(scan_id=selected_scan, query=None, severity=None, status=status, offset=0, limit=20))['findingsPage'] for status in ('open', 'closed')}",
   "    if settings.get('ownershipReuse'):",
   "        from contextlib import nullcontext, redirect_stdout",
   "        from io import StringIO",
@@ -979,6 +981,32 @@ describe("workbench findings index", () => {
           targetPath: "/orphan/repository",
         }),
       ]);
+      for (const finding of [result.findingDetail, result.overviewFinding]) {
+        expect(finding).toMatchObject({
+          occurrenceId: "orphan-new-occurrence",
+          status: "closed",
+          triage: { closeReason: "false_positive", status: "closed" },
+          knownSince: "2026-01-01",
+          knownScanIds: ["orphan-old", "orphan-new"],
+          occurrenceCount: 2,
+        });
+      }
+      expect(result.scanPages?.["closed"]).toMatchObject({
+        findings: [
+          {
+            occurrenceId: "orphan-new-occurrence",
+            status: "closed",
+            triage: { closeReason: "false_positive", status: "closed" },
+            knownScanIds: ["orphan-old", "orphan-new"],
+            occurrenceCount: 2,
+          },
+        ],
+        total: 1,
+      });
+      expect(result.scanPages?.["open"]).toMatchObject({
+        findings: [],
+        total: 0,
+      });
     },
   );
 

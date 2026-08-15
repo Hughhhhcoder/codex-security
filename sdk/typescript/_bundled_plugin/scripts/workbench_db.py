@@ -3009,15 +3009,16 @@ def _indexed_scan_findings(
     connection: sqlite3.Connection, scan: sqlite3.Row
 ) -> dict[str, dict[str, Any]]:
     if scan["target_id"] is None:
-        return {}
-    target = connection.execute(
-        "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
-    ).fetchone()
-    scope = (
-        {"repository": target["current_path"]}
-        if target is not None and Path(target["current_path"]).exists()
-        else {"target_ids": {scan["target_id"]}}
-    )
+        scope = {"target_paths": {scan["target_path"]}}
+    else:
+        target = connection.execute(
+            "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
+        ).fetchone()
+        scope = (
+            {"repository": target["current_path"]}
+            if target is not None and Path(target["current_path"]).exists()
+            else {"target_ids": {scan["target_id"]}}
+        )
     return {
         occurrence_id: finding
         for finding in native_indexes._indexed_active_findings(
@@ -3411,7 +3412,7 @@ def finding_result(
             )
         locations.append(location)
     triage = finding_triage_result(connection, occurrence["id"])
-    if full_details and scan["target_id"] is not None:
+    if full_details:
         indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
     if indexed_finding is not None and indexed_finding["decision_occurrence_id"] is not None:
         triage = finding_triage_result(connection, indexed_finding["decision_occurrence_id"])
