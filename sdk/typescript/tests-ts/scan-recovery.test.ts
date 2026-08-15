@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   cp,
   mkdir,
@@ -577,6 +578,113 @@ describe("malformed scan artifact recovery", () => {
       ]),
     ).rejects.toThrow("no longer produce the same diff");
   });
+
+  test.each(["workspace", "cli"] as const)(
+    "rejects committed diff replacements during %s scan registration",
+    async (scenario) => {
+      const fixture = await startDraftScan("committed");
+      const selected = committedDiffTarget(fixture);
+      await replaceCommittedDiffHead(fixture);
+      const replacement = fixtureGit(
+        fixture.repository,
+        "rev-parse",
+        `refs/replace/${selected.headRevision}`,
+      );
+      fixtureGit(fixture.repository, "replace", "-d", selected.headRevision);
+
+      const workspaceId = randomUUID();
+      const scanDirectory = join(fixture.stateDir, "registration-race-scan");
+      await mkdir(scanDirectory, { mode: 0o700 });
+      if (scenario === "workspace") {
+        await workbench(fixture, [
+          "create-workspace",
+          "--workspace-id",
+          workspaceId,
+        ]);
+        await workbench(fixture, [
+          "save-workspace",
+          "--workspace-id",
+          workspaceId,
+          "--target-path",
+          fixture.repository,
+          "--scope",
+          ".",
+          "--mode",
+          "diff",
+          "--diff-target-kind",
+          "range",
+          "--diff-base-revision",
+          selected.baseRevision,
+          "--diff-head-revision",
+          selected.headRevision,
+          "--diff-content-digest",
+          selected.contentDigest,
+        ]);
+      }
+
+      const probe = spawnSync(
+        fixture.python,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import argparse, json, subprocess, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "import workbench_db as workbench",
+            "repository = Path(sys.argv[2])",
+            "head, replacement, workspace_id = sys.argv[3:6]",
+            "scan_directory, scenario, base = sys.argv[6:9]",
+            "original_count = workbench.directory_snapshot_regular_file_count",
+            "def replace_during_count(path):",
+            "    count = original_count(path)",
+            "    subprocess.run(['git', '-C', str(repository), 'replace', '-f', head, replacement], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)",
+            "    return count",
+            "workbench.directory_snapshot_regular_file_count = replace_during_count",
+            "if scenario == 'workspace':",
+            "    arguments = argparse.Namespace(workspace_id=workspace_id, scan_root=None, model=None, reasoning_effort=None)",
+            "    start = workbench.start_scan",
+            "else:",
+            "    recipe = {'config': {}, 'mode': 'standard', 'repository': str(repository), 'target': {'kind': 'refs', 'paths': [], 'base': base, 'head': head}}",
+            "    arguments = argparse.Namespace(repository=str(repository), scan_dir=scan_directory, recipe_json=json.dumps(recipe), archive_existing=False, archived_scan_dir=None, parent_scan_id=None)",
+            "    start = workbench.register_cli_scan",
+            "with workbench.connect() as connection:",
+            "    previous = connection.execute('SELECT COUNT(*) FROM scans').fetchone()[0]",
+            "    try:",
+            "        start(connection, arguments)",
+            "    except SystemExit as exception:",
+            "        error = str(exception)",
+            "    else:",
+            "        error = None",
+            "    created = connection.execute('SELECT COUNT(*) FROM scans').fetchone()[0] - previous",
+            "print(json.dumps({'error': error, 'createdScans': created}))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          fixture.repository,
+          selected.headRevision,
+          replacement,
+          workspaceId,
+          scanDirectory,
+          scenario,
+          selected.baseRevision,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            PATH: process.env["PATH"],
+            CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+          },
+        },
+      );
+
+      expect(probe.status, probe.stderr).toBe(0);
+      expect(JSON.parse(probe.stdout)).toMatchObject({
+        error: expect.stringContaining("no longer produce the same diff"),
+        createdScans: 0,
+      });
+    },
+  );
 
   test("warns when committed diff contents change before scan completion", async () => {
     const fixture = await startDraftScan("committed");

@@ -299,6 +299,20 @@ def require_committed_diff_digest(
     return current_digest
 
 
+def revalidate_committed_diff_target(
+    target: Path,
+    diff_target: dict[str, str] | None,
+) -> None:
+    if diff_target is None or diff_target["kind"] == "working_tree":
+        return
+    require_committed_diff_digest(
+        target,
+        diff_target["baseRevision"],
+        diff_target["headRevision"],
+        diff_target.get("contentDigest"),
+    )
+
+
 def require_diff_target(
     target: Path,
     kind: str | None,
@@ -912,6 +926,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "This Codex thread already has an active Deep Scan for the selected "
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
+        revalidate_committed_diff_target(current_target, diff_target)
         insert_running_scan(
             connection,
             scan_id=scan_id,
@@ -1067,6 +1082,7 @@ def _start_prompt_driven_scan(
             ),
         )
         workspace = require_workspace(connection, workspace_id)
+        revalidate_committed_diff_target(target, diff_target)
         insert_running_scan(
             connection,
             scan_id=scan_id,
@@ -1702,6 +1718,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             ),
         )
         workspace = require_workspace(connection, workspace_id)
+        revalidate_committed_diff_target(repository, diff_target)
         insert_running_scan(
             connection,
             scan_id=scan_id,
