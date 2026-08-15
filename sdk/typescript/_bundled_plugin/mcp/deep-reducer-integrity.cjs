@@ -8,21 +8,13 @@ const MERGEABLE_TEXT_FIELDS = new Set([
   "rootCause",
   "reason",
   "rationale",
+  "changeConditions",
   "notes",
   "context",
   "runtimeStatus",
   "validationMode",
   "followUpPrompt",
 ]);
-const SEVERITY_LEVELS = [
-  "informational",
-  "low",
-  "medium",
-  "high",
-  "critical",
-];
-const CONFIDENCE_LEVELS = ["low", "medium", "high"];
-
 function validateDeepReduction(result, sources, previous, findingIdentity) {
   const currentFindingIds = new Set(result.findings.map(findingIdentity));
 
@@ -98,20 +90,16 @@ function retainsFindingEvidence(retained, source) {
     return false;
   }
 
-  for (const evidence of source.codeEvidence ?? []) {
-    if (
-      (retained.codeEvidence ?? []).some((candidate) =>
-        retainsStructuredValue(candidate, evidence),
-      )
-    ) {
-      continue;
-    }
-    return false;
-  }
+  const evidenceIdentifiers = matchCodeEvidence(retained, source);
+  if (evidenceIdentifiers === null) return false;
 
   for (const field of FINDING_TEXT_FIELDS) {
     if (source[field] === undefined || source[field] === null) continue;
-    if (!retainsStructuredValue(retained[field], source[field], field)) {
+    const expected = remapEvidenceReferences(
+      source[field],
+      evidenceIdentifiers,
+    );
+    if (!retainsStructuredValue(retained[field], expected, field)) {
       return false;
     }
   }
@@ -122,34 +110,63 @@ function retainsFindingEvidence(retained, source) {
     }
   }
 
-  for (const field of ["attackPath", "validation", "taxonomy", "provenance"]) {
+  for (const field of [
+    "attackPath",
+    "validation",
+    "taxonomy",
+    "provenance",
+    "extensions",
+  ]) {
     if (source[field] === undefined || source[field] === null) continue;
-    if (!retainsStructuredValue(retained[field], source[field])) return false;
+    const expected = remapEvidenceReferences(
+      source[field],
+      evidenceIdentifiers,
+    );
+    if (!retainsStructuredValue(retained[field], expected)) return false;
   }
 
-  if (
-    SEVERITY_LEVELS.indexOf(retained.severity.level) <
-    SEVERITY_LEVELS.indexOf(source.severity.level)
-  ) {
+  if (!retainsStructuredValue(retained.severity, source.severity)) {
     return false;
   }
-  if (
-    CONFIDENCE_LEVELS.indexOf(retained.confidence.level) <
-    CONFIDENCE_LEVELS.indexOf(source.confidence.level)
-  ) {
-    return false;
-  }
-  if (
-    !retainsStructuredValue(
-      retained.confidence.rationale,
-      source.confidence.rationale,
-      "rationale",
-    )
-  ) {
+  if (!retainsStructuredValue(retained.confidence, source.confidence)) {
     return false;
   }
 
   return true;
+}
+
+function matchCodeEvidence(retained, source) {
+  const identifiers = new Map();
+
+  for (const evidence of source.codeEvidence ?? []) {
+    const { id, ...details } = evidence;
+    const candidates = (retained.codeEvidence ?? []).filter((candidate) => {
+      const { id: _candidateId, ...candidateDetails } = candidate;
+      return retainsStructuredValue(candidateDetails, details);
+    });
+    const matching =
+      candidates.find((candidate) => candidate.id === id) ?? candidates[0];
+    if (matching === undefined) return null;
+    identifiers.set(id, matching.id);
+  }
+
+  return identifiers;
+}
+
+function remapEvidenceReferences(value, identifiers) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => remapEvidenceReferences(entry, identifiers));
+  }
+  if (typeof value !== "object" || value === null) return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      key === "evidenceRefs" && Array.isArray(entry)
+        ? entry.map((identifier) => identifiers.get(identifier) ?? identifier)
+        : remapEvidenceReferences(entry, identifiers),
+    ]),
+  );
 }
 
 function validateRetainedCoverage(result, inputs) {

@@ -25,9 +25,20 @@ type Finding = {
   ruleId: string;
   title: string;
   remediation: string;
+  severity: {
+    level: "critical" | "high" | "medium" | "low" | "informational";
+    score?: number;
+    scoringSystem?: string;
+    vector?: string;
+    rationale?: string;
+    changeConditions?: string;
+  };
+  confidence: { level: "high" | "medium" | "low"; rationale: string };
   identity: { anchor: string; instance?: string };
   locations: Location[];
   attackPath?: Record<string, unknown> | null;
+  rootCause?: string | { summary: string; evidenceRefs?: string[] };
+  validation?: Record<string, unknown> | null;
   codeEvidence?: Array<{
     id: string;
     label: string;
@@ -36,6 +47,7 @@ type Finding = {
     code: string;
     explanation: string;
   }>;
+  extensions?: Record<string, unknown>;
   findingId?: string;
   occurrenceId?: string;
   fingerprints?: unknown;
@@ -413,6 +425,142 @@ describe("Deep scan reducer finding retention", () => {
 
     expect(result.accepted).toBe(false);
     expect(result.message).toMatch(/evidence/iu);
+  });
+
+  test("rejects unsupported severity changes and discarded rating details", async () => {
+    const source = finding("first", 10);
+    source.severity = {
+      level: "medium",
+      score: 5,
+      scoringSystem: "CVSS:3.1",
+      vector: "CVSS:3.1/AV:N/AC:H",
+      rationale: "Exploitation requires an authenticated request.",
+      changeConditions: "Impact increases only if authentication is removed.",
+    };
+
+    for (const changed of [
+      { ...source.severity, level: "critical" as const },
+      { ...source.severity, score: 9 },
+      { ...source.severity, scoringSystem: "CVSS:4.0" },
+      { ...source.severity, vector: "CVSS:3.1/AV:N/AC:L" },
+      { ...source.severity, rationale: "No supporting rationale." },
+      { ...source.severity, changeConditions: "No relevant conditions." },
+    ]) {
+      const result = await recordReduction(
+        [draft([source])],
+        draft([{ ...source, severity: changed }]),
+      );
+      expect(result.accepted, result.message).toBe(false);
+      expect(result.message).toMatch(/evidence/iu);
+    }
+  });
+
+  test("rejects unsupported confidence promotion", async () => {
+    const source = finding("first", 10);
+    source.confidence = {
+      level: "low",
+      rationale: "Only incomplete static evidence is available.",
+    };
+    const changed: Finding = {
+      ...source,
+      confidence: { ...source.confidence, level: "high" },
+    };
+    const result = await recordReduction([draft([source])], draft([changed]));
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/evidence/iu);
+  });
+
+  test("remaps colliding code-evidence identifiers and every evidence reference", async () => {
+    const first = finding("first", 10);
+    const second = finding("first", 10);
+    const firstEvidence = {
+      id: "shared-evidence",
+      label: "Request source",
+      path: "src/first.ts",
+      startLine: 10,
+      code: "const request = readRequest();",
+      explanation: "An untrusted request supplies the input.",
+    };
+    const secondEvidence = {
+      id: "shared-evidence",
+      label: "Privileged sink",
+      path: "src/first.ts",
+      startLine: 20,
+      code: "runPrivilegedOperation(request);",
+      explanation: "The request reaches a privileged operation.",
+    };
+    first.codeEvidence = [firstEvidence];
+    second.codeEvidence = [secondEvidence];
+    first.rootCause = {
+      summary: "The source accepts untrusted requests.",
+      evidenceRefs: [firstEvidence.id],
+    };
+    second.rootCause = {
+      summary: "The sink omits its authorization guard.",
+      evidenceRefs: [secondEvidence.id],
+    };
+    first.attackPath = {
+      summary: "A request enters the application.",
+      evidenceRefs: [firstEvidence.id],
+    };
+    second.attackPath = {
+      summary: "The request reaches the privileged operation.",
+      evidenceRefs: [secondEvidence.id],
+    };
+
+    const renamedEvidence = {
+      ...secondEvidence,
+      id: "shared-evidence-sink",
+    };
+    const merged: Finding = {
+      ...first,
+      codeEvidence: [firstEvidence, renamedEvidence],
+      rootCause: {
+        summary: `${first.rootCause.summary} ${second.rootCause.summary}`,
+        evidenceRefs: [firstEvidence.id, renamedEvidence.id],
+      },
+      attackPath: {
+        summary: `${first.attackPath["summary"]} ${second.attackPath["summary"]}`,
+        evidenceRefs: [firstEvidence.id, renamedEvidence.id],
+      },
+    };
+
+    const missingReference: Finding = {
+      ...merged,
+      attackPath: {
+        ...merged.attackPath,
+        evidenceRefs: [firstEvidence.id],
+      },
+    };
+    const rejected = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([missingReference]),
+    );
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.message).toMatch(/evidence/iu);
+
+    const accepted = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([merged]),
+    );
+    expect(accepted.accepted, accepted.message).toBe(true);
+    expect(accepted.saved?.findings[0]?.codeEvidence).toHaveLength(2);
+  });
+
+  test("retains canonical finding identities carried in extensions", async () => {
+    const source = finding("first", 10);
+    delete (source as { identity?: Finding["identity"] }).identity;
+    source.extensions = { candidateId: "candidate-external-admin" };
+    const changed: Finding = { ...source, extensions: {} };
+    const rejected = await recordReduction([draft([source])], draft([changed]));
+
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.message).toMatch(/evidence/iu);
+
+    const accepted = await recordReduction([draft([source])], draft([source]));
+    expect(accepted.accepted, accepted.message).toBe(true);
+    expect(accepted.saved?.findings[0]?.extensions).toEqual(source.extensions);
   });
 
   test("accepts a semantic merge with the same broken root control", async () => {
