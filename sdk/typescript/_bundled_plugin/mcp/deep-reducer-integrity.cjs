@@ -94,16 +94,22 @@ function validateDeepReduction(result, sources, previous, findingIdentity) {
   const acceptedFindings = inputs.flatMap((input) => input.findings);
 
   for (const retained of result.findings) {
-    const supported = acceptedFindings.some(
-      (finding) =>
-        representsFinding(retained, finding, findingIdentity) &&
-        retainsFindingEvidence(
-          retained,
-          finding,
-          acceptedFindings,
-          findingIdentity,
-        ),
-    );
+    const supported =
+      containsOnlyAcceptedFindingEvidence(
+        retained,
+        acceptedFindings,
+        findingIdentity,
+      ) &&
+      acceptedFindings.some(
+        (finding) =>
+          representsFinding(retained, finding, findingIdentity) &&
+          retainsFindingEvidence(
+            retained,
+            finding,
+            acceptedFindings,
+            findingIdentity,
+          ),
+      );
     if (supported) continue;
     throw Object.assign(
       new Error(
@@ -170,6 +176,40 @@ function representsFinding(retained, source, findingIdentity) {
   );
 }
 
+function containsOnlyAcceptedFindingEvidence(
+  retained,
+  acceptedFindings,
+  findingIdentity,
+) {
+  const matching = acceptedFindings.filter((source) =>
+    representsFinding(retained, source, findingIdentity),
+  );
+  if (matching.length === 0) return false;
+
+  const supportedLocations = retained.locations.every((location) =>
+    matching.some((source) =>
+      source.locations.some((accepted) =>
+        retainsStructuredValue(location, accepted),
+      ),
+    ),
+  );
+  if (!supportedLocations) return false;
+
+  return (retained.codeEvidence ?? []).every((evidence) => {
+    const { id: _retainedIdentifier, ...retainedDetails } = evidence;
+    return matching.some((source) =>
+      (source.codeEvidence ?? []).some((accepted) => {
+        const { id: _acceptedIdentifier, ...acceptedDetails } = accepted;
+        return retainsStructuredValue(
+          retainedDetails,
+          acceptedDetails,
+          "codeEvidence",
+        );
+      }),
+    );
+  });
+}
+
 function retainsFindingEvidence(
   retained,
   source,
@@ -191,7 +231,15 @@ function retainsFindingEvidence(
   if (evidenceIdentifiers === null) return false;
 
   for (const field of FINDING_TEXT_FIELDS) {
-    if (source[field] === undefined || source[field] === null) continue;
+    if (source[field] === undefined || source[field] === null) {
+      if (retained[field] === source[field]) continue;
+      if (
+        hasAcceptedEvidence(retained, field, acceptedFindings, findingIdentity)
+      ) {
+        continue;
+      }
+      return false;
+    }
     const expected = remapEvidenceReferences(
       source[field],
       evidenceIdentifiers,
@@ -222,7 +270,15 @@ function retainsFindingEvidence(
     "extensions",
     "writeup",
   ]) {
-    if (source[field] === undefined) continue;
+    if (source[field] === undefined) {
+      if (retained[field] === undefined) continue;
+      if (
+        hasAcceptedEvidence(retained, field, acceptedFindings, findingIdentity)
+      ) {
+        continue;
+      }
+      return false;
+    }
     if (source[field] === null) {
       if (retained[field] === null) continue;
       if (
@@ -307,13 +363,20 @@ function hasAcceptedEvidence(
   findingIdentity,
 ) {
   return acceptedFindings.some((candidate) => {
-    if (candidate[field] === undefined || candidate[field] === null)
-      return false;
     if (!representsFinding(retained, candidate, findingIdentity)) return false;
+    if (candidate[field] === undefined) return false;
+    if (candidate[field] === null) return retained[field] === null;
     const identifiers = matchCodeEvidence(retained, candidate);
     if (identifiers === null) return false;
     const expected = remapEvidenceReferences(candidate[field], identifiers);
-    return retainsStructuredValue(retained[field], expected, field);
+    const retainedValue =
+      field === "rootCause" &&
+      typeof expected === "string" &&
+      typeof retained[field] === "object" &&
+      retained[field] !== null
+        ? retained[field].summary
+        : retained[field];
+    return retainsStructuredValue(retainedValue, expected, field);
   });
 }
 

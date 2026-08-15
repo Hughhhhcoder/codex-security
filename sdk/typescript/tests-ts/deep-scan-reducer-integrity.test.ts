@@ -881,6 +881,94 @@ describe("Deep scan reducer finding retention", () => {
     }
   });
 
+  test("rejects invented finding proof omitted by every accepted worker", async () => {
+    const source = finding("first", 10);
+    delete source.validation;
+    delete source.attackPath;
+    delete source.rootCause;
+
+    for (const changed of [
+      {
+        ...source,
+        validation: { summary: "Invented dynamic validation." },
+      },
+      {
+        ...source,
+        attackPath: { summary: "Invented attacker reachability." },
+      },
+      {
+        ...source,
+        rootCause: "Invented root-cause evidence.",
+      },
+      {
+        ...source,
+        writeup: { reportPath: "findings/invented/invented.md" },
+      },
+    ]) {
+      const result = await recordReduction([draft([source])], draft([changed]));
+      expect(result.accepted).toBe(false);
+      expect(result.message).toMatch(/unsupported|evidence/iu);
+    }
+  });
+
+  test("accepts omitted proof when another matching worker established it", async () => {
+    const incomplete = finding("first", 10);
+    delete incomplete.validation;
+    delete incomplete.attackPath;
+    delete incomplete.rootCause;
+    const validated = structuredClone(incomplete);
+    validated.validation = {
+      method: "Static source trace.",
+      summary: "The privileged request reaches the unchecked handler.",
+    };
+    validated.attackPath = {
+      summary: "An external request reaches the privileged handler.",
+    };
+    validated.rootCause =
+      "The privileged handler does not check authorization.";
+
+    const result = await recordReduction(
+      [draft([incomplete]), draft([validated])],
+      draft([validated]),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
+    expect(result.saved?.findings[0]?.validation).toEqual(validated.validation);
+    expect(result.saved?.findings[0]?.attackPath).toEqual(validated.attackPath);
+    expect(result.saved?.findings[0]?.rootCause).toEqual(validated.rootCause);
+  });
+
+  test("rejects unaccepted locations and code-evidence records", async () => {
+    const source = finding("first", 10);
+
+    for (const changed of [
+      {
+        ...source,
+        locations: [
+          ...source.locations,
+          { path: "src/invented.ts", startLine: 90, role: "sink" },
+        ],
+      },
+      {
+        ...source,
+        codeEvidence: [
+          {
+            id: "invented-code-evidence",
+            label: "Invented privileged operation",
+            path: "src/invented.ts",
+            startLine: 90,
+            code: "performInventedOperation(request)",
+            explanation: "This operation was not accepted by any worker.",
+          },
+        ],
+      },
+    ]) {
+      const result = await recordReduction([draft([source])], draft([changed]));
+      expect(result.accepted).toBe(false);
+      expect(result.message).toMatch(/unsupported|evidence/iu);
+    }
+  });
+
   test("accepts validation already established by another matching worker", async () => {
     const unvalidated = finding("first", 10);
     unvalidated.validation = null;
