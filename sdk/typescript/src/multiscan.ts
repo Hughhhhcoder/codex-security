@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -58,6 +58,7 @@ interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "completed_with_incomplete_coverage" | "failed";
   attempt: number;
   outputDir: string;
+  targetId?: string;
   resolvedScope?: string;
   snapshotDigest?: string;
   coverage?: CoverageDocument["completeness"];
@@ -198,6 +199,10 @@ async function runCampaign(
         artifactOutput,
         await resolveResumePluginRoot(),
         task,
+        receipt.targetId ??
+          `target_sha256_${createHash("sha256")
+            .update(`local-workspace\0${join(output, "checkouts", task.id)}`)
+            .digest("hex")}`,
         receipt.resolvedScope,
         receipt.snapshotDigest,
         options.signal,
@@ -281,6 +286,7 @@ async function runCampaign(
         notifyProgress(options, { ...progress, status: "started" });
         let failure: string | undefined;
         let warning: string | undefined;
+        let targetId: string | undefined;
         let resolvedScope: string | undefined;
         let snapshotDigest: string | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
@@ -341,6 +347,7 @@ async function runCampaign(
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
+          targetId = result.manifest.scan.target.targetId;
           snapshotDigest = result.manifest.scan.target.snapshotDigest;
           coverage = result.coverage.completeness;
           if (coverage !== "complete") {
@@ -380,6 +387,7 @@ async function runCampaign(
             status,
             attempt,
             outputDir: scanDir,
+            ...(targetId === undefined ? {} : { targetId }),
             ...(resolvedScope === undefined ? {} : { resolvedScope }),
             ...(snapshotDigest === undefined ? {} : { snapshotDigest }),
             ...(coverage === undefined ? {} : { coverage }),
@@ -768,6 +776,7 @@ async function loadResumableContract(
   path: string,
   pluginRoot: string,
   task: MultiscanTask,
+  targetId: string,
   resolvedScope: string | undefined,
   snapshotDigest: string | undefined,
   signal?: AbortSignal,
@@ -786,6 +795,8 @@ async function loadResumableContract(
           ? "deep_repository"
           : "repository";
     if (
+      contract.manifest.scan.producer.name !== "codex-security-plugin" ||
+      target.targetId !== targetId ||
       (target.kind !== "git_revision" && target.kind !== "git_worktree") ||
       (target.kind === "git_worktree" &&
         (snapshotDigest === undefined ||
@@ -796,8 +807,10 @@ async function loadResumableContract(
       target.displayName !== task.id ||
       target.revision !== task.revision ||
       contract.coverage.mode !== expectedMode ||
+      contract.coverage.excludePaths.length !== 0 ||
       contract.manifest.scan.scope.includePaths.length !== 1 ||
-      contract.manifest.scan.scope.includePaths[0] !== expectedScope
+      contract.manifest.scan.scope.includePaths[0] !== expectedScope ||
+      contract.manifest.scan.scope.excludePaths.length !== 0
     ) {
       return undefined;
     }
