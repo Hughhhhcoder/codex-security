@@ -643,6 +643,17 @@ MIGRATIONS = (
         ADD COLUMN max_time_hours REAL NOT NULL DEFAULT 96;
         """,
     ),
+    (
+        30,
+        "persist repository identities",
+        """
+        ALTER TABLE security_targets
+        ADD COLUMN repository_identity TEXT;
+
+        CREATE INDEX security_targets_by_repository_identity
+        ON security_targets(repository_identity);
+        """,
+    ),
 )
 
 
@@ -704,11 +715,19 @@ def apply_migrations(
                         "max_time_hours",
                         "REAL NOT NULL DEFAULT 96",
                     )
+                elif version == 30:
+                    should_backfill_targets = (
+                        repair_repository_identity_migration(connection)
+                        or should_backfill_targets
+                    )
                 continue
             if version == 6:
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
+            elif version == 30:
+                repair_repository_identity_migration(connection)
+                should_backfill_targets = True
             else:
                 for statement in sql_statements(sql):
                     connection.execute(statement)
@@ -1154,38 +1173,85 @@ def repair_stable_targets_migration(connection: sqlite3.Connection) -> bool:
         and "target_id" in scan_columns
         and existing_objects == {"security_targets", "scans_by_target"}
     ):
+        needs_backfill = bool(
+            connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM workspaces AS workspace
+                    WHERE (workspace.target_id IS NULL AND workspace.target_path IS NOT NULL)
+                        OR (
+                            workspace.target_id IS NOT NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM security_targets
+                                WHERE security_targets.id = workspace.target_id
+                            )
+                        )
+                ) OR EXISTS (
+                    SELECT 1 FROM scans AS scan
+                    WHERE scan.target_id IS NULL
+                        OR NOT EXISTS (
+                            SELECT 1 FROM security_targets
+                            WHERE security_targets.id = scan.target_id
+                        )
+                )
+                """
+            ).fetchone()[0]
+        )
+        if not needs_backfill:
+            return False
+    else:
+        migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 16)
+        for statement in sql_statements(migration_sql):
+            if statement.startswith("ALTER TABLE workspaces"):
+                add_column_if_missing(
+                    connection,
+                    "workspaces",
+                    "target_id",
+                    "TEXT REFERENCES security_targets(id)",
+                )
+                continue
+            if statement.startswith("ALTER TABLE scans"):
+                add_column_if_missing(
+                    connection,
+                    "scans",
+                    "target_id",
+                    "TEXT REFERENCES security_targets(id)",
+                )
+                continue
+            statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
+            statement = statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+            connection.execute(statement)
+
+    for table in ("workspaces", "scans"):
+        connection.execute(
+            f"""
+            UPDATE {table}
+            SET target_id = NULL
+            WHERE target_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM security_targets
+                    WHERE security_targets.id = {table}.target_id
+                )
+            """
+        )
+    return True
+
+
+def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool:
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(security_targets)")
+    }
+    index_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'security_targets_by_repository_identity'"
+    ).fetchone()
+    if "repository_identity" in columns and index_exists is not None:
         return False
 
-    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 16)
-    for statement in sql_statements(migration_sql):
-        if statement.startswith("ALTER TABLE workspaces"):
-            add_column_if_missing(
-                connection,
-                "workspaces",
-                "target_id",
-                "TEXT REFERENCES security_targets(id)",
-            )
-            continue
-        if statement.startswith("ALTER TABLE scans"):
-            add_column_if_missing(
-                connection,
-                "scans",
-                "target_id",
-                "TEXT REFERENCES security_targets(id)",
-            )
-            continue
-        statement = statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
-        statement = statement.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
-        connection.execute(statement)
+    add_column_if_missing(connection, "security_targets", "repository_identity", "TEXT")
     connection.execute(
-        """
-        UPDATE scans
-        SET target_id = NULL
-        WHERE target_id IS NOT NULL
-            AND NOT EXISTS (
-                SELECT 1 FROM security_targets WHERE security_targets.id = scans.target_id
-            )
-        """
+        "CREATE INDEX IF NOT EXISTS security_targets_by_repository_identity "
+        "ON security_targets(repository_identity)"
     )
     return True
 

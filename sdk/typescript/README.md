@@ -426,7 +426,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
-| `CODEX_SECURITY_STATE_DIR`                                                  | Override the private scan-history, workbench, and default artifact directory.                 |
+| `CODEX_SECURITY_STATE_DIR`                                                  | Select the history database, artifact directory, and dedicated Codex credential home.         |
 | `CODEX_HOME`                                                                | Set the ambient Codex home for file-backed sign-in and default state; defaults to `~/.codex`. |
 | `CODEX_CLI_PATH`                                                            | Use another Codex executable for authentication, plugin setup, scans, and nested workers.     |
 | `PYTHON`                                                                    | Select a Python interpreter when `--python` or SDK `pythonPath` is not set.                   |
@@ -538,11 +538,15 @@ same command to resume.
 
 ### Scan history and reruns
 
-`npx @openai/codex-security scans list` lists scans for the current repository. Pass a
-repository path to inspect another checkout, `--scan-root DIR` to list scans
-whose artifacts are under a particular root. `scans show SCAN_ID` includes the
-scan configuration, results, coverage, and artifact locations. Add
-`--show-linked-findings` to include finding links from previous scans.
+`npx @openai/codex-security scans list` lists scans for the current repository.
+Linked Git worktrees are discovered automatically and grouped when they share
+the selected state database. Findings indicate whether they were confirmed in
+the repository's latest completed scan across those linked worktrees. Pass a
+repository path to inspect another checkout. `--scan-root DIR` only filters
+scans already recorded in that database by their artifact directory; it never
+imports scan results from another state directory. `scans show SCAN_ID`
+includes the scan configuration, results, coverage, and artifact locations.
+Add `--show-linked-findings` to include finding links from previous scans.
 
 `scans logs SCAN_ID` shows complete session events from the scan and its
 workers, which can include source code and credentials.
@@ -553,9 +557,27 @@ least eight characters.
 Scan history uses `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3` when
 `CODEX_SECURITY_STATE_DIR` is set. Otherwise, it uses
 `$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`; `CODEX_HOME`
-defaults to `~/.codex`. Scan credentials are never stored in the scan
-configuration. Recorded failure summaries and bulk-scan receipts omit messages
-that contain recognizable credentials.
+defaults to `~/.codex`. Saved findings use the same selected database.
+Changing or unsetting `CODEX_SECURITY_STATE_DIR` selects separate scan history
+and an isolated Codex credential home and sign-in scope; scans from the
+previous state remain hidden until you select that state again. Keep the
+setting stable across linked worktrees to share scans and findings
+automatically.
+
+```bash
+# Inspect shared history from another linked Git worktree:
+npx @openai/codex-security scans list
+npx @openai/codex-security findings list
+
+# Reopen an existing state directory and its sign-in:
+export CODEX_SECURITY_STATE_DIR=/path/to/existing/codex-security-state
+npx @openai/codex-security scans list
+npx @openai/codex-security findings list
+```
+
+Scan credentials are never stored in the scan configuration. Recorded failure
+summaries and bulk-scan receipts omit messages that contain recognizable
+credentials.
 
 The scan sandbox permits writes to the selected state directory so SQLite can
 maintain its database and journal files. If the host itself cannot write to the

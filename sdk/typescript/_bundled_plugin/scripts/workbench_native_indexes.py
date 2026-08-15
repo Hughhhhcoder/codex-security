@@ -13,7 +13,50 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
 from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
+from workbench_target_state import _require_current_target_owner
 from workbench_validation import bounded_output_text
+
+
+def repository_target_ids(connection: sqlite3.Connection, target_id: str) -> set[str]:
+    if not _has_repository_identities(connection):
+        return {target_id}
+
+    requested_target = connection.execute(
+        "SELECT current_path, repository_identity FROM security_targets WHERE id = ?",
+        (target_id,),
+    ).fetchone()
+    if requested_target is None:
+        return {target_id}
+    try:
+        _require_current_target_owner(
+            connection,
+            target_id,
+            requested_target["current_path"],
+            requested_target["repository_identity"],
+        )
+    except SystemExit:
+        return set()
+
+    rows = connection.execute(
+        """
+        SELECT id
+        FROM security_targets
+        WHERE id = ?
+            OR (
+                repository_identity IS NOT NULL
+                AND repository_identity = ?
+            )
+        """,
+        (target_id, requested_target["repository_identity"]),
+    )
+    return {row["id"] for row in rows} or {target_id}
+
+
+def _has_repository_identities(connection: sqlite3.Connection) -> bool:
+    return any(
+        column["name"] == "repository_identity"
+        for column in connection.execute("PRAGMA table_info(security_targets)")
+    )
 
 
 def list_global_findings(
@@ -22,10 +65,13 @@ def list_global_findings(
 ) -> dict[str, Any]:
     limit = min(args.limit, FINDINGS_PAGE_MAX)
     query = args.query.strip().casefold() if args.query else ""
+    target_ids = (
+        None if args.target_id is None else repository_target_ids(connection, args.target_id)
+    )
     findings = (
         row
         for row in _indexed_findings(connection)
-        if (args.target_id is None or row["target_id"] == args.target_id)
+        if (target_ids is None or row["target_id"] in target_ids)
         and (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
         and (
@@ -75,40 +121,85 @@ def list_global_findings(
 
 
 def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]]:
-    parents: dict[tuple[str, str], tuple[str, str]] = {}
+    parents: dict[
+        tuple[tuple[str, str], str], tuple[tuple[str, str], str]
+    ] = {}
+    has_repository_identities = _has_repository_identities(connection)
+    identity_column = "targets.repository_identity" if has_repository_identities else "NULL"
+    before_identity_column = (
+        "before_targets.repository_identity" if has_repository_identities else "NULL"
+    )
+    after_identity_column = (
+        "after_targets.repository_identity" if has_repository_identities else "NULL"
+    )
+    alias_condition = (
+        "before_targets.repository_identity IS NOT NULL "
+        "AND before_targets.repository_identity = after_targets.repository_identity"
+        if has_repository_identities
+        else "0"
+    )
 
-    def group(identity: tuple[str, str]) -> tuple[str, str]:
+    def repository_identity(target_id: str, identity: str | None) -> tuple[str, str]:
+        return ("target", target_id) if identity is None else ("repository", identity)
+
+    def group(identity: tuple[tuple[str, str], str]) -> tuple[tuple[str, str], str]:
         while identity in parents:
             identity = parents[identity]
         return identity
 
     for match in connection.execute(
-        """
-        SELECT before_scans.target_id, before.finding_id AS before_finding_id,
+        f"""
+        SELECT before_scans.target_id AS before_target_id,
+            after_scans.target_id AS after_target_id,
+            {before_identity_column} AS before_repository_identity,
+            {after_identity_column} AS after_repository_identity,
+            before.finding_id AS before_finding_id,
             after.finding_id AS after_finding_id
         FROM scan_comparison_matches AS matches
         JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
         JOIN scans AS before_scans ON before_scans.id = before.scan_id
+        JOIN security_targets AS before_targets ON before_targets.id = before_scans.target_id
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
-        WHERE before_scans.target_id = after_scans.target_id
+        JOIN security_targets AS after_targets ON after_targets.id = after_scans.target_id
+        WHERE before_scans.target_id = after_scans.target_id OR ({alias_condition})
         """
     ):
-        before = group((match["target_id"], match["before_finding_id"]))
-        after = group((match["target_id"], match["after_finding_id"]))
+        before = group(
+            (
+                repository_identity(
+                    match["before_target_id"], match["before_repository_identity"]
+                ),
+                match["before_finding_id"],
+            )
+        )
+        after = group(
+            (
+                repository_identity(
+                    match["after_target_id"], match["after_repository_identity"]
+                ),
+                match["after_finding_id"],
+            )
+        )
         if before != after:
             parents[after] = before
 
-    latest_scan_by_target = dict(
-        connection.execute(
-            "SELECT target_id, id FROM scans "
-            "WHERE status = 'complete' ORDER BY started_at, id"
+    latest_scan_by_repository = {
+        repository_identity(row["target_id"], row["repository_identity"]): row["id"]
+        for row in connection.execute(
+            f"""
+            SELECT scans.target_id, scans.id, {identity_column} AS repository_identity
+            FROM scans
+            JOIN security_targets AS targets ON targets.id = scans.target_id
+            WHERE scans.status = 'complete'
+            ORDER BY scans.started_at, scans.id
+            """
         )
-    )
+    }
 
-    grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    grouped: dict[tuple[tuple[str, str], str], list[sqlite3.Row]] = {}
     for row in connection.execute(
-        """
+        f"""
         SELECT
             occurrences.id AS occurrence_id,
             occurrences.finding_id,
@@ -118,6 +209,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
             scans.started_at AS scan_started_at,
             scans.target_id,
             targets.current_path AS target_path,
+            {identity_column} AS repository_identity,
             scans.scope,
             MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
             triage.status AS decision_status,
@@ -140,7 +232,15 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         """,
     ):
-        grouped.setdefault(group((row["target_id"], row["finding_id"])), []).append(row)
+        grouped.setdefault(
+            group(
+                (
+                    repository_identity(row["target_id"], row["repository_identity"]),
+                    row["finding_id"],
+                )
+            ),
+            [],
+        ).append(row)
 
     findings = []
     for occurrences in grouped.values():
@@ -161,7 +261,10 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
         findings.append(
             {
                 **dict(latest),
-                "confirmed_in_latest_scan": latest_scan_by_target.get(latest["target_id"])
+                "close_reason": decision["close_reason"] if decision is not None else None,
+                "confirmed_in_latest_scan": latest_scan_by_repository.get(
+                    repository_identity(latest["target_id"], latest["repository_identity"])
+                )
                 == latest["scan_id"],
                 "known_since": scans[0][0],
                 "known_scan_ids": [scan_id for _, scan_id in scans],

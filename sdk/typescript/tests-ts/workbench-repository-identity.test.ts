@@ -1,0 +1,639 @@
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, test } from "bun:test";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+
+const temporaryRoots: string[] = [];
+const remote =
+  "https://fixture-user:SYNTHETIC_PASSWORD@example.test/acme/project.git";
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function git(repository: string, ...args: string[]): string {
+  return execFileSync(
+    "git",
+    [
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      ...args,
+    ],
+    { cwd: repository, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ).trim();
+}
+
+function fixture(): {
+  root: string;
+  repository: string;
+  worktree: string;
+  clone: string;
+} {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "codex-security-repository-identity-")),
+  );
+  temporaryRoots.push(root);
+  const repository = join(root, "repository");
+  const worktree = join(root, "linked-worktree");
+  const clone = join(root, "same-origin-clone");
+  mkdirSync(repository);
+  git(repository, "init", "-q");
+  for (const service of ["service-a", "service-b"]) {
+    mkdirSync(join(repository, service));
+    writeFileSync(join(repository, service, "service.py"), "value = 1\n");
+  }
+  git(repository, "add", ".");
+  git(repository, "commit", "-qm", "fixture");
+  git(repository, "remote", "add", "origin", remote);
+  git(repository, "worktree", "add", "--detach", "-q", worktree, "HEAD");
+  execFileSync("git", ["clone", "-q", repository, clone], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  git(clone, "remote", "set-url", "origin", remote);
+  return { root, repository, worktree, clone };
+}
+
+const probe = String.raw`
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+
+import workbench_scan_history as history
+from filesystem_identity import serialize_filesystem_identity
+from workbench_schema import MIGRATIONS, apply_migrations
+from workbench_target_state import (
+    backfill_repository_identities,
+    backfill_security_targets,
+    ensure_security_target,
+    repository_identity,
+    stable_target_id,
+)
+
+scenario = sys.argv[2]
+root, repository, worktree, clone = map(Path, sys.argv[3:7])
+timestamp = "2026-08-01T00:00:00Z"
+connection = sqlite3.connect(":memory:")
+connection.row_factory = sqlite3.Row
+connection.execute("PRAGMA foreign_keys = ON")
+apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill_security_targets)
+
+
+def git(target, *args):
+    return subprocess.run(
+        [
+            "git",
+            "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.test",
+            "-C", str(target),
+            *args,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def add_scan(scan_id, target, ownership="current", verify_ownership=True):
+    target = Path(target)
+    target_id = ensure_security_target(
+        connection, str(target), verify_ownership=verify_ownership
+    )
+    metadata = target.stat()
+    device = serialize_filesystem_identity(metadata.st_dev)
+    inode = serialize_filesystem_identity(metadata.st_ino)
+    if ownership == "missing":
+        device, inode = None, None
+    elif ownership == "malformed":
+        inode = None
+    elif ownership == "mismatch":
+        inode = serialize_filesystem_identity(metadata.st_ino + 1)
+
+    workspace_id = f"workspace-{scan_id}"
+    connection.execute(
+        "INSERT INTO workspaces (id, target_path, target_id, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (workspace_id, str(target), target_id, timestamp, timestamp),
+    )
+    connection.execute(
+        "INSERT INTO scans (id, workspace_id, target_path, target_id, target_device, "
+        "target_inode, target_revision, scope, mode, scan_dir, status, phase, "
+        "started_at, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            scan_id, workspace_id, str(target), target_id, device, inode,
+            "synthetic-revision", ".", "standard", str(root / "scans" / scan_id),
+            "complete", "reporting", timestamp, timestamp, timestamp,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
+        (scan_id, timestamp),
+    )
+    return target_id
+
+
+def listed(target, strict=True):
+    arguments = argparse.Namespace(
+        repository=str(target),
+        worktrees_only=strict,
+        scan_root=None,
+        target_id=None,
+        mode=None,
+        status=None,
+        query=None,
+        limit=None,
+        offset=0,
+    )
+    return sorted(scan["scanId"] for scan in history.list_scans(connection, arguments)["scans"])
+
+
+def forged_worktree():
+    forged = root / "forged-git-pointer"
+    forged.mkdir()
+    common = git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    (forged / ".git").write_text(f"gitdir: {common}\n")
+    return forged
+
+
+if scenario == "identity":
+    targets = {
+        "repository": repository,
+        "worktree": worktree,
+        "serviceA": repository / "service-a",
+        "worktreeServiceA": worktree / "service-a",
+        "serviceB": repository / "service-b",
+        "clone": clone,
+    }
+    target_ids = {
+        name: ensure_security_target(connection, str(target))
+        for name, target in targets.items()
+    }
+    identities = {
+        name: repository_identity(target)
+        for name, target in targets.items()
+    }
+    common = os.path.normcase(os.path.realpath(git(
+        repository, "rev-parse", "--path-format=absolute", "--git-common-dir"
+    )))
+    metadata = Path(common).stat()
+    device = serialize_filesystem_identity(metadata.st_dev)
+    inode = serialize_filesystem_identity(metadata.st_ino)
+    expected = "repository_sha256_" + hashlib.sha256(
+        f"git-common-dir\0{common}\0{device}\0{inode}\0.".encode()
+    ).hexdigest()
+    forged_identity = repository_identity(forged_worktree())
+    git(
+        repository,
+        "remote", "set-url", "origin",
+        "https://different-user:DIFFERENT_SYNTHETIC_PASSWORD@example.test/other/repo.git",
+    )
+    print(json.dumps({
+        "identities": identities,
+        "expected": expected,
+        "forgedIdentity": forged_identity,
+        "remoteIndependent": repository_identity(repository) == identities["repository"],
+        "targetIdsPreserved": all(
+            target_ids[name] == stable_target_id(target)
+            for name, target in targets.items()
+        ),
+        "stored": {
+            row["current_path"]: row["repository_identity"]
+            for row in connection.execute(
+                "SELECT current_path, repository_identity FROM security_targets"
+            )
+        },
+    }))
+
+elif scenario == "history":
+    add_scan("canonical-root", repository)
+    add_scan("linked-root", worktree)
+    add_scan("spoof-root", clone)
+    add_scan("canonical-a", repository / "service-a")
+    add_scan("linked-a", worktree / "service-a")
+    add_scan("canonical-b", repository / "service-b")
+    add_scan("spoof-a", clone / "service-a")
+    add_scan("forged-root", forged_worktree())
+    before = {
+        "strictRoot": listed(repository),
+        "legacyRoot": listed(repository, strict=False),
+        "strictServiceA": listed(repository / "service-a"),
+        "legacyServiceA": listed(repository / "service-a", strict=False),
+        "strictServiceB": listed(repository / "service-b"),
+    }
+    git(repository, "worktree", "remove", "--force", str(worktree))
+    after = {
+        "strictRoot": listed(repository),
+        "legacyRoot": listed(repository, strict=False),
+        "strictServiceA": listed(repository / "service-a"),
+    }
+    arguments = argparse.Namespace(repository=str(repository), force=False)
+    matched = history.list_unmatched_scan_pairs(
+        connection,
+        arguments,
+        backfill_finding_details=lambda _connection, _scan: None,
+        read_coverage=lambda _scan: {},
+    )
+
+    def unavailable(scan):
+        if scan["id"] == "linked-root":
+            raise SystemExit("Saved scan artifacts are unavailable.")
+        return {}
+
+    unavailable_matches = history.list_unmatched_scan_pairs(
+        connection,
+        arguments,
+        backfill_finding_details=lambda _connection, _scan: None,
+        read_coverage=unavailable,
+    )
+
+    def require_scan(database, scan_id):
+        return database.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+
+    comparison_args = argparse.Namespace(
+        before_scan_id="canonical-root",
+        after_scan_id="linked-root",
+        matches_json=json.dumps({"matches": [], "uncertain": []}),
+    )
+    compared = history.compare_scans(
+        connection,
+        comparison_args,
+        require_scan=require_scan,
+        read_coverage=lambda _scan: {"completeness": "complete"},
+    )
+    connection.commit()
+    saved = history.save_scan_comparison(
+        connection,
+        comparison_args,
+        now=lambda: timestamp,
+        require_scan=require_scan,
+        read_coverage=lambda _scan: {"completeness": "complete"},
+    )
+    explicit_clone = history.compare_scans(
+        connection,
+        argparse.Namespace(before_scan_id="canonical-root", after_scan_id="spoof-root"),
+        require_scan=require_scan,
+        read_coverage=lambda _scan: {"completeness": "complete"},
+    )
+
+    print(json.dumps({
+        "before": before,
+        "after": after,
+        "matchedScanCount": matched["scanCount"],
+        "matchingBatches": len(matched["batches"]),
+        "unavailableScans": unavailable_matches["unavailableScans"],
+        "compared": compared["beforeScanId"] == "canonical-root"
+            and compared["afterScanId"] == "linked-root",
+        "saved": saved["beforeScanId"] == "canonical-root"
+            and saved["afterScanId"] == "linked-root",
+        "explicitCloneCompared": explicit_clone["afterScanId"] == "spoof-root",
+    }))
+
+elif scenario == "backfill":
+    add_scan("valid", repository)
+    add_scan("reused", clone, "mismatch")
+    add_scan("mixed-current", repository / "service-a")
+    add_scan("mixed-previous", repository / "service-a", "mismatch")
+    add_scan("malformed", repository / "service-b", "malformed")
+    add_scan("missing", worktree)
+    missing_path = str(worktree)
+    git(repository, "worktree", "remove", "--force", missing_path)
+    connection.execute("UPDATE security_targets SET repository_identity = NULL")
+    before_ids = {
+        row["current_path"]: row["id"]
+        for row in connection.execute("SELECT id, current_path FROM security_targets")
+    }
+    backfill_repository_identities(connection)
+    rows = {
+        row["current_path"]: {"id": row["id"], "identity": row["repository_identity"]}
+        for row in connection.execute(
+            "SELECT id, current_path, repository_identity FROM security_targets"
+        )
+    }
+    print(json.dumps({
+        "valid": rows[str(repository)]["identity"],
+        "reused": rows[str(clone)]["identity"],
+        "mixed": rows[str(repository / "service-a")]["identity"],
+        "malformed": rows[str(repository / "service-b")]["identity"],
+        "missing": rows[missing_path]["identity"],
+        "idsPreserved": all(rows[path]["id"] == target_id for path, target_id in before_ids.items()),
+    }))
+
+elif scenario == "replacement":
+    add_scan("previous-owner", worktree)
+    add_scan("trusted-alias", repository)
+    git(repository, "worktree", "remove", "--force", str(worktree))
+    worktree.mkdir()
+    git(worktree, "init", "-q")
+    (worktree / "replacement.py").write_text("value = 2\n")
+    git(worktree, "add", ".")
+    git(worktree, "commit", "-qm", "replacement")
+    git(worktree, "remote", "add", "origin", sys.argv[7])
+    before = listed(worktree)
+    regular_before = listed(worktree, strict=False)
+    try:
+        add_scan("replacement-owner", worktree)
+    except SystemExit as error:
+        registration_error = str(error)
+    else:
+        registration_error = None
+    try:
+        history.list_unmatched_scan_pairs(
+            connection,
+            argparse.Namespace(repository=str(worktree), force=False),
+            backfill_finding_details=lambda _connection, _scan: None,
+            read_coverage=lambda _scan: {},
+        )
+    except SystemExit as error:
+        matching_error = str(error)
+    else:
+        matching_error = None
+    after = listed(worktree)
+
+    empty_target = clone / "service-a"
+    ensure_security_target(connection, str(empty_target))
+    connection.execute(
+        "UPDATE security_targets SET repository_identity = ? WHERE current_path = ?",
+        (repository_identity(repository), str(empty_target)),
+    )
+    try:
+        ensure_security_target(connection, str(empty_target))
+    except SystemExit as error:
+        empty_target_error = str(error)
+    else:
+        empty_target_error = None
+
+    explicit_clone_id = add_scan("explicit-clone", clone)
+    connection.execute(
+        "UPDATE security_targets SET repository_identity = ? WHERE id = ?",
+        (repository_identity(repository), explicit_clone_id),
+    )
+    try:
+        ensure_security_target(connection, str(clone))
+    except SystemExit as error:
+        explicit_clone_error = str(error)
+    else:
+        explicit_clone_error = None
+
+    unverified_target = clone / "service-b"
+    add_scan("unverified-owner", unverified_target, "missing")
+    try:
+        ensure_security_target(connection, str(unverified_target))
+    except SystemExit as error:
+        unverified_owner_error = str(error)
+    else:
+        unverified_owner_error = None
+    print(json.dumps({
+        "before": before,
+        "regularBefore": regular_before,
+        "after": after,
+        "registrationError": registration_error,
+        "matchingError": matching_error,
+        "emptyTargetError": empty_target_error,
+        "explicitCloneError": explicit_clone_error,
+        "unverifiedOwnerError": unverified_owner_error,
+        "replacementScanCreated": connection.execute(
+            "SELECT 1 FROM scans WHERE id = 'replacement-owner'"
+        ).fetchone() is not None,
+    }))
+
+elif scenario == "git-replacement":
+    add_scan("original-repository", repository)
+    add_scan("original-alias", worktree)
+    original_identity = repository_identity(repository)
+    original_metadata = repository.stat()
+    shutil.rmtree(repository / ".git")
+    git(repository, "init", "-q")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "replacement")
+    replacement_identity = repository_identity(repository)
+    try:
+        ensure_security_target(connection, str(repository))
+    except SystemExit as error:
+        registration_error = str(error)
+    else:
+        registration_error = None
+    replacement_metadata = repository.stat()
+    print(json.dumps({
+        "originalIdentity": original_identity,
+        "replacementIdentity": replacement_identity,
+        "checkoutOwnerUnchanged": (
+            original_metadata.st_dev == replacement_metadata.st_dev
+            and original_metadata.st_ino == replacement_metadata.st_ino
+        ),
+        "visibleScans": listed(repository),
+        "regularScans": listed(repository, strict=False),
+        "registrationError": registration_error,
+    }))
+
+elif scenario == "unverified-owner":
+    ensure_security_target(connection, str(repository))
+    add_scan("trusted-alias", worktree)
+    git(repository, "worktree", "remove", "--force", str(worktree))
+    before = listed(repository)
+    regular_before = listed(repository, strict=False)
+    add_scan("unverified-owner", repository, "missing")
+    after = listed(repository)
+    regular_after = listed(repository, strict=False)
+    print(json.dumps({
+        "before": before,
+        "regularBefore": regular_before,
+        "after": after,
+        "regularAfter": regular_after,
+    }))
+
+elif scenario == "nongit":
+    first = root / "plain-a"
+    second = root / "plain-b"
+    first.mkdir()
+    second.mkdir()
+    add_scan("plain-a", first)
+    add_scan("legacy-a", first, "missing")
+    add_scan("malformed-a", first, "malformed", verify_ownership=False)
+    add_scan("mismatched-a", first, "mismatch", verify_ownership=False)
+    add_scan("plain-b", second)
+    before = connection.execute(
+        "SELECT NULL AS target_id, ? AS target_path", (str(first),)
+    ).fetchone()
+    after = connection.execute(
+        "SELECT NULL AS target_id, ? AS target_path", (str(second),)
+    ).fetchone()
+    same = connection.execute(
+        "SELECT NULL AS target_id, ? AS target_path", (str(first),)
+    ).fetchone()
+    print(json.dumps({
+        "firstIdentity": repository_identity(first),
+        "secondIdentity": repository_identity(second),
+        "differentNullIdsMatch": history._same_repository(before, after),
+        "sameNullPathMatches": history._same_repository(before, same),
+        "firstScans": listed(first),
+        "secondScans": listed(second),
+    }))
+`;
+
+function runProbe(
+  scenario: string,
+  repositories: ReturnType<typeof fixture>,
+): Record<string, unknown> {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  expect(python).not.toBeNull();
+  if (python === null) throw new Error("A Python interpreter is required.");
+  const execution = spawnSync(
+    python,
+    [
+      "-I",
+      "-B",
+      "-c",
+      probe,
+      join(PLUGIN_ROOT, "scripts"),
+      scenario,
+      repositories.root,
+      repositories.repository,
+      repositories.worktree,
+      repositories.clone,
+      remote,
+    ],
+    { encoding: "utf8", timeout: 20_000 },
+  );
+  expect(execution.status, execution.stderr).toBe(0);
+  expect(execution.stderr).toBe("");
+  return JSON.parse(execution.stdout) as Record<string, unknown>;
+}
+
+describe("durable workbench repository identities", () => {
+  test("hashes Git common directories and repository-relative target scopes", () => {
+    const repositories = fixture();
+    const result = runProbe("identity", repositories);
+    const identities = result["identities"] as Record<string, string>;
+
+    expect(identities["repository"]).toBe(result["expected"] as string);
+    expect(identities["worktree"]).toBe(identities["repository"]);
+    expect(identities["worktreeServiceA"]).toBe(identities["serviceA"]);
+    expect(identities["serviceA"]).not.toBe(identities["repository"]);
+    expect(identities["serviceA"]).not.toBe(identities["serviceB"]);
+    expect(identities["clone"]).not.toBe(identities["repository"]);
+    expect(result["forgedIdentity"]).toBeNull();
+    expect(result["remoteIndependent"]).toBe(true);
+    expect(result["targetIdsPreserved"]).toBe(true);
+    expect(JSON.stringify(result["stored"])).not.toContain(
+      "SYNTHETIC_PASSWORD",
+    );
+  }, 30_000);
+
+  test("retains removed worktrees while excluding spoofed origins and unrelated scopes", () => {
+    const result = runProbe("history", fixture());
+    const before = result["before"] as Record<string, string[]>;
+    const after = result["after"] as Record<string, string[]>;
+
+    expect(before["strictRoot"]).toEqual(["canonical-root", "linked-root"]);
+    expect(before["legacyRoot"]).toEqual([
+      "canonical-root",
+      "linked-root",
+      "spoof-root",
+    ]);
+    expect(before["strictServiceA"]).toEqual(["canonical-a", "linked-a"]);
+    expect(before["legacyServiceA"]).toEqual([
+      "canonical-a",
+      "linked-a",
+      "spoof-a",
+    ]);
+    expect(before["strictServiceB"]).toEqual(["canonical-b"]);
+    expect(after["strictRoot"]).toEqual(["canonical-root", "linked-root"]);
+    expect(after["legacyRoot"]).toEqual([
+      "canonical-root",
+      "linked-root",
+      "spoof-root",
+    ]);
+    expect(after["strictServiceA"]).toEqual(["canonical-a", "linked-a"]);
+    expect(result["matchedScanCount"]).toBe(3);
+    expect(result["matchingBatches"]).toBe(2);
+    expect(result["unavailableScans"]).toBe(1);
+    expect(result["compared"]).toBe(true);
+    expect(result["saved"]).toBe(true);
+    expect(result["explicitCloneCompared"]).toBe(true);
+  }, 30_000);
+
+  test("backfills only current owners and preserves every existing target ID", () => {
+    const result = runProbe("backfill", fixture());
+
+    expect(result["valid"]).toMatch(/^repository_sha256_[a-f0-9]{64}$/);
+    expect(result["reused"]).toBeNull();
+    expect(result["mixed"]).toBeNull();
+    expect(result["malformed"]).toBeNull();
+    expect(result["missing"]).toBeNull();
+    expect(result["idsPreserved"]).toBe(true);
+  }, 30_000);
+
+  test("does not expose a previous checkout owner or its trusted aliases", () => {
+    const result = runProbe("replacement", fixture());
+
+    expect(result["before"]).toEqual([]);
+    expect(result["regularBefore"]).toEqual([]);
+    expect(result["after"]).toEqual([]);
+    expect(result["registrationError"]).toContain(
+      "refusing to reuse its target",
+    );
+    expect(result["matchingError"]).toContain("refusing to reuse its target");
+    expect(result["emptyTargetError"]).toContain(
+      "refusing to reuse its target",
+    );
+    expect(result["replacementScanCreated"]).toBe(false);
+    expect(result["explicitCloneError"]).toContain(
+      "refusing to reuse its target",
+    );
+    expect(result["unverifiedOwnerError"]).toContain(
+      "refusing to reuse its target",
+    );
+  }, 30_000);
+
+  test("rejects an in-place Git directory replacement under the same checkout", () => {
+    const result = runProbe("git-replacement", fixture());
+
+    expect(result["checkoutOwnerUnchanged"]).toBe(true);
+    expect(result["replacementIdentity"]).not.toBe(result["originalIdentity"]);
+    expect(result["visibleScans"]).toEqual([]);
+    expect(result["regularScans"]).toEqual([]);
+    expect(result["registrationError"]).toContain(
+      "refusing to reuse its target",
+    );
+  }, 30_000);
+
+  test("does not expand trusted aliases when historical checkout ownership is unverified", () => {
+    const result = runProbe("unverified-owner", fixture());
+
+    expect(result["before"]).toEqual(["trusted-alias"]);
+    expect(result["regularBefore"]).toEqual(["trusted-alias"]);
+    expect(result["after"]).toEqual(["unverified-owner"]);
+    expect(result["regularAfter"]).toEqual(["unverified-owner"]);
+  }, 30_000);
+
+  test("keeps non-Git paths isolated and never equates unrelated null target IDs", () => {
+    const result = runProbe("nongit", fixture());
+
+    expect(result["firstIdentity"]).toBeNull();
+    expect(result["secondIdentity"]).toBeNull();
+    expect(result["differentNullIdsMatch"]).toBe(false);
+    expect(result["sameNullPathMatches"]).toBe(true);
+    expect(result["firstScans"]).toEqual(["legacy-a", "plain-a"]);
+    expect(result["secondScans"]).toEqual(["plain-b"]);
+  }, 30_000);
+});

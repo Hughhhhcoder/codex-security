@@ -1286,9 +1286,7 @@ export class CodexSecurity {
             scanId,
             repository: repo,
             previousFindings: previousFindings.filter(
-              (finding) =>
-                finding["scanId"] !== scanId &&
-                finding["targetId"] === targetId,
+              (finding) => finding["scanId"] !== scanId,
             ),
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,

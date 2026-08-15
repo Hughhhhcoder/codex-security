@@ -1,0 +1,389 @@
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, test } from "bun:test";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+
+const migrationProbe = String.raw`
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+
+from workbench_schema import MIGRATIONS, apply_migrations
+from workbench_target_state import backfill_security_targets, stable_target_id
+
+scenario = sys.argv[2]
+root = Path(sys.argv[3])
+timestamp = "2026-08-01T00:00:00Z"
+backfill_calls = []
+
+def backfill(connection):
+    backfill_calls.append(True)
+    backfill_security_targets(connection)
+
+connection = sqlite3.connect(":memory:")
+connection.row_factory = sqlite3.Row
+connection.execute("PRAGMA foreign_keys = ON")
+apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
+backfill_calls.clear()
+
+existing_path = str(root / "existing-repository")
+missing_path = str(root / "deleted-repository")
+connection.execute(
+    "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ("target-existing", existing_path, "existing-repository", timestamp, timestamp),
+)
+connection.executemany(
+    "INSERT INTO workspaces (id, target_path, target_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    [
+        ("workspace-existing", existing_path, "target-existing", timestamp, timestamp),
+        ("workspace-empty", None, None, timestamp, timestamp),
+    ],
+)
+
+def insert_scan(scan_id, workspace_id, target_path, target_id):
+    connection.execute(
+        "INSERT INTO scans (id, workspace_id, target_path, target_id, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            scan_id,
+            workspace_id,
+            target_path,
+            target_id,
+            "synthetic-revision",
+            ".",
+            "standard",
+            str(root / scan_id),
+            "complete",
+            "reporting",
+            timestamp,
+            timestamp,
+            timestamp,
+        ),
+    )
+
+insert_scan("scan-existing", "workspace-existing", existing_path, "target-existing")
+
+if scenario == "orphan-scan":
+    insert_scan("scan-orphan", "workspace-existing", existing_path, None)
+    expected_target_id = "target-existing"
+    orphan_path = existing_path
+elif scenario in ("dangling-scan", "dangling-workspace", "dangling-targets"):
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    if scenario != "dangling-scan":
+        connection.execute(
+            "INSERT INTO workspaces (id, target_path, target_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("workspace-orphan", missing_path, "target-dangling", timestamp, timestamp),
+        )
+    if scenario != "dangling-workspace":
+        workspace = (
+            "workspace-existing" if scenario == "dangling-scan" else "workspace-orphan"
+        )
+        insert_scan("scan-orphan", workspace, missing_path, "target-dangling")
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = ON")
+    expected_target_id = stable_target_id(Path(missing_path))
+    orphan_path = missing_path
+else:
+    connection.execute(
+        "INSERT INTO workspaces (id, target_path, target_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        ("workspace-orphan", missing_path, None, timestamp, timestamp),
+    )
+    expected_target_id = stable_target_id(Path(missing_path))
+    orphan_path = missing_path
+    if scenario == "orphan-workspace-and-scan":
+        insert_scan("scan-orphan", "workspace-orphan", missing_path, None)
+
+connection.commit()
+violations_before_repair = len(connection.execute("PRAGMA foreign_key_check").fetchall())
+apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
+apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
+
+def target_id(table, row_id):
+    row = connection.execute(
+        f"SELECT target_id FROM {table} WHERE id = ?", (row_id,)
+    ).fetchone()
+    return row["target_id"] if row is not None else None
+
+print(json.dumps({
+    "backfillCalls": len(backfill_calls),
+    "emptyWorkspaceTargetId": target_id("workspaces", "workspace-empty"),
+    "existingScanTargetId": target_id("scans", "scan-existing"),
+    "existingWorkspaceTargetId": target_id("workspaces", "workspace-existing"),
+    "expectedTargetId": expected_target_id,
+    "foreignKeysEnforced": bool(connection.execute("PRAGMA foreign_keys").fetchone()[0]),
+    "foreignKeyViolationsBeforeRepair": violations_before_repair,
+    "foreignKeyViolationsAfterRepair": len(
+        connection.execute("PRAGMA foreign_key_check").fetchall()
+    ),
+    "migrationRecorded": connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = 16"
+    ).fetchone()[0] == "stable repository targets",
+    "orphanPathExists": Path(orphan_path).exists(),
+    "orphanScanTargetId": target_id("scans", "scan-orphan"),
+    "orphanWorkspaceTargetId": target_id("workspaces", "workspace-orphan"),
+    "targetCount": connection.execute(
+        "SELECT count(*) FROM security_targets"
+    ).fetchone()[0],
+}))
+`;
+
+const repositoryIdentityMigrationProbe = String.raw`
+import json
+import sqlite3
+import sys
+
+sys.path.insert(0, sys.argv[1])
+
+from workbench_schema import MIGRATIONS, apply_migrations
+from workbench_target_state import backfill_security_targets
+
+scenario = sys.argv[2]
+timestamp = "2026-08-01T00:00:00Z"
+backfill_calls = []
+
+def backfill(connection):
+    backfill_calls.append(True)
+    backfill_security_targets(connection)
+
+connection = sqlite3.connect(":memory:")
+connection.row_factory = sqlite3.Row
+historical_migration = next(
+    (migration for migration in MIGRATIONS if migration[0] == 29), None
+)
+historical = tuple(
+    migration for migration in MIGRATIONS if migration[0] < 30 and migration[0] != 29
+)
+apply_migrations(connection, historical, lambda: timestamp, backfill)
+backfill_calls.clear()
+connection.execute(
+    "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ("target-existing", "/synthetic/deleted-repository", "repository", timestamp, timestamp),
+)
+
+if scenario == "recorded-without-column":
+    connection.execute(
+        "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+        (30, "persist repository identities", timestamp),
+    )
+elif scenario == "recorded-without-index":
+    connection.execute(
+        "ALTER TABLE security_targets ADD COLUMN repository_identity TEXT"
+    )
+    connection.execute(
+        "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+        (30, "persist repository identities", timestamp),
+    )
+
+connection.commit()
+migrations = MIGRATIONS
+if scenario == "out-of-order-historical-migration":
+    without_historical = tuple(
+        migration for migration in MIGRATIONS if migration[0] != 29
+    )
+    apply_migrations(connection, without_historical, lambda: timestamp, backfill)
+    migrations = tuple(sorted(
+        (
+            *without_historical,
+            historical_migration or (
+                29,
+                "synthetic historical migration",
+                """
+                CREATE TABLE historical_migration_fixture (
+                    id INTEGER PRIMARY KEY,
+                    value TEXT
+                );
+
+                CREATE INDEX historical_migration_fixture_by_value
+                ON historical_migration_fixture(value);
+                """,
+            ),
+        ),
+        key=lambda migration: migration[0],
+    ))
+apply_migrations(connection, migrations, lambda: timestamp, backfill)
+apply_migrations(connection, migrations, lambda: timestamp, backfill)
+
+columns = {
+    row["name"]: row
+    for row in connection.execute("PRAGMA table_info(security_targets)")
+}
+indexes = {
+    row["name"]: row
+    for row in connection.execute("PRAGMA index_list(security_targets)")
+}
+print(json.dumps({
+    "backfillCalls": len(backfill_calls),
+    "hasRepositoryIdentityColumn": "repository_identity" in columns,
+    "hasRepositoryIdentityIndex": "security_targets_by_repository_identity" in indexes,
+    "historicalMigrationApplied": connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version = 29"
+    ).fetchone() is not None,
+    "historicalMigrationInSource": historical_migration is not None,
+    "repositoryIdentityColumnIsNullable": not bool(
+        columns["repository_identity"]["notnull"]
+    ),
+    "repositoryIdentityIndexIsUnique": bool(
+        indexes["security_targets_by_repository_identity"]["unique"]
+    ),
+    "migrationName": connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = 30"
+    ).fetchone()[0],
+    "targetId": connection.execute(
+        "SELECT id FROM security_targets"
+    ).fetchone()[0],
+}))
+`;
+
+describe("stable workbench target migration", () => {
+  test.each([
+    ["orphan-scan", "reuses an existing target for an orphaned scan"],
+    ["orphan-workspace", "repairs a workspace without an orphaned scan"],
+    ["dangling-scan", "repairs a dangling scan foreign key independently"],
+    [
+      "dangling-workspace",
+      "repairs a dangling workspace foreign key independently",
+    ],
+    [
+      "dangling-targets",
+      "repairs dangling workspace and scan foreign keys atomically",
+    ],
+    [
+      "orphan-workspace-and-scan",
+      "repairs a workspace and scan after their repository is deleted",
+    ],
+  ] as const)("%s: %s", (scenario) => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    if (python === null) throw new Error("A Python interpreter is required.");
+
+    const execution = spawnSync(
+      python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        migrationProbe,
+        join(PLUGIN_ROOT, "scripts"),
+        scenario,
+        join(tmpdir(), "codex-security-stable-target-migration", scenario),
+      ],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+
+    expect(execution.status, execution.stderr).toBe(0);
+    expect(execution.stderr).toBe("");
+
+    const result = JSON.parse(execution.stdout) as {
+      backfillCalls: number;
+      emptyWorkspaceTargetId: string | null;
+      existingScanTargetId: string;
+      existingWorkspaceTargetId: string;
+      expectedTargetId: string;
+      foreignKeysEnforced: boolean;
+      foreignKeyViolationsBeforeRepair: number;
+      foreignKeyViolationsAfterRepair: number;
+      migrationRecorded: boolean;
+      orphanPathExists: boolean;
+      orphanScanTargetId: string | null;
+      orphanWorkspaceTargetId: string | null;
+      targetCount: number;
+    };
+
+    expect(result).toMatchObject({
+      backfillCalls: 1,
+      emptyWorkspaceTargetId: null,
+      existingScanTargetId: "target-existing",
+      existingWorkspaceTargetId: "target-existing",
+      foreignKeysEnforced: true,
+      foreignKeyViolationsBeforeRepair:
+        scenario === "dangling-targets"
+          ? 2
+          : scenario.startsWith("dangling-")
+            ? 1
+            : 0,
+      foreignKeyViolationsAfterRepair: 0,
+      migrationRecorded: true,
+      orphanPathExists: false,
+      targetCount: scenario === "orphan-scan" ? 1 : 2,
+    });
+    expect(result.orphanScanTargetId).toBe(
+      scenario === "orphan-workspace" || scenario === "dangling-workspace"
+        ? null
+        : result.expectedTargetId,
+    );
+    expect(result.orphanWorkspaceTargetId).toBe(
+      scenario === "orphan-scan" || scenario === "dangling-scan"
+        ? null
+        : result.expectedTargetId,
+    );
+  });
+
+  test.each([
+    [
+      "unapplied",
+      "applies and backfills the new repository-identity migration",
+    ],
+    [
+      "recorded-without-column",
+      "repairs a recorded migration missing its column and index",
+    ],
+    [
+      "recorded-without-index",
+      "repairs a recorded migration missing only its index",
+    ],
+    [
+      "out-of-order-historical-migration",
+      "applies an unavailable migration after a newer migration is recorded",
+    ],
+  ] as const)("%s: %s", (scenario) => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    if (python === null) throw new Error("A Python interpreter is required.");
+
+    const execution = spawnSync(
+      python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        repositoryIdentityMigrationProbe,
+        join(PLUGIN_ROOT, "scripts"),
+        scenario,
+      ],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+
+    expect(execution.status, execution.stderr).toBe(0);
+    expect(execution.stderr).toBe("");
+    const result = JSON.parse(execution.stdout) as {
+      backfillCalls: number;
+      hasRepositoryIdentityColumn: boolean;
+      hasRepositoryIdentityIndex: boolean;
+      historicalMigrationApplied: boolean;
+      historicalMigrationInSource: boolean;
+      migrationName: string;
+      repositoryIdentityColumnIsNullable: boolean;
+      repositoryIdentityIndexIsUnique: boolean;
+      targetId: string;
+    };
+    expect(result).toEqual({
+      backfillCalls: 1,
+      hasRepositoryIdentityColumn: true,
+      hasRepositoryIdentityIndex: true,
+      historicalMigrationApplied:
+        scenario === "out-of-order-historical-migration" ||
+        result.historicalMigrationInSource,
+      historicalMigrationInSource: result.historicalMigrationInSource,
+      migrationName: "persist repository identities",
+      repositoryIdentityColumnIsNullable: true,
+      repositoryIdentityIndexIsUnique: false,
+      targetId: "target-existing",
+    });
+  });
+});

@@ -19,8 +19,8 @@ describe("CLI workbench", () => {
     const calls: Array<readonly string[]> = [];
     const responses: JsonObject[] = [
       {
-        repositories: [
-          { targetId: "other", targetPath: `${repository}-clone` },
+        scans: [
+          { targetId: "selected", targetPath: repository },
           { targetId: "selected", targetPath: repository },
         ],
       },
@@ -37,7 +37,12 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(calls[0]).toEqual(["list-repositories"]);
+    expect(calls[0]).toEqual([
+      "list-scans",
+      "--repository",
+      repository,
+      "--worktrees-only",
+    ]);
     expect(calls[1]).toEqual([
       "list-global-findings",
       "--target-id",
@@ -73,6 +78,193 @@ describe("CLI workbench", () => {
           : "FINDINGS  0\n",
       );
     }
+  });
+
+  test.each([
+    {
+      name: "canonical checkout and linked worktree",
+      requested: "/repositories/project",
+      related: "/repositories/project-worktree",
+    },
+    {
+      name: "linked worktree and canonical checkout",
+      requested: "/repositories/project-worktree",
+      related: "/repositories/project",
+    },
+    {
+      name: "explicitly linked repository alias",
+      requested: "/repositories/project",
+      related: "/repositories/linked-alias",
+    },
+  ])(
+    "combines open findings from the $name",
+    async ({ requested, related }) => {
+      const calls: Array<readonly string[]> = [];
+      const findingsByTarget: Record<string, JsonObject[]> = {
+        requested: [
+          {
+            occurrenceId: "requested-medium",
+            title: "Requested checkout finding",
+            severity: { level: "medium" },
+            createdAt: "2026-08-13T12:00:00Z",
+            status: "open",
+          },
+          {
+            occurrenceId: "duplicate-high",
+            title: "Duplicated finding",
+            severity: { level: "high" },
+            createdAt: "2026-08-12T12:00:00Z",
+            status: "open",
+          },
+        ],
+        related: [
+          {
+            occurrenceId: "related-high",
+            title: "Related checkout finding",
+            severity: { level: "high" },
+            createdAt: "2026-08-14T12:00:00Z",
+            status: "open",
+          },
+          {
+            occurrenceId: "duplicate-high",
+            title: "Duplicated finding",
+            severity: { level: "high" },
+            createdAt: "2026-08-12T12:00:00Z",
+            status: "open",
+          },
+          {
+            occurrenceId: "closed-critical",
+            title: "Closed finding",
+            severity: { level: "critical" },
+            createdAt: "2026-08-15T12:00:00Z",
+            status: "closed",
+          },
+        ],
+      };
+      const stdout = capture();
+      expect(
+        await main(
+          ["findings", "list", requested, "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              if (args[0] === "list-scans") {
+                return {
+                  scans: [
+                    { targetId: "requested", targetPath: requested },
+                    { targetId: "related", targetPath: related },
+                    { targetId: "requested", targetPath: requested },
+                  ],
+                };
+              }
+              const targetId = args[args.indexOf("--target-id") + 1]!;
+              const requestedStatus = args[args.indexOf("--status") + 1];
+              return {
+                findings: findingsByTarget[targetId]!.filter(
+                  (finding) => finding["status"] === requestedStatus,
+                ),
+                nextOffset: null,
+              };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(calls).toEqual([
+        ["list-scans", "--repository", requested, "--worktrees-only"],
+        [
+          "list-global-findings",
+          "--target-id",
+          "requested",
+          "--status",
+          "open",
+        ],
+        ["list-global-findings", "--target-id", "related", "--status", "open"],
+      ]);
+      expect(JSON.parse(stdout.text())).toEqual({
+        repository: requested,
+        findings: [
+          findingsByTarget["related"]![0],
+          findingsByTarget["requested"]![1],
+          findingsByTarget["requested"]![0],
+        ],
+      });
+    },
+  );
+
+  test("does not query findings for same-origin-only clones", async () => {
+    const repository = resolve("/current/repository");
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    const safeFinding: JsonObject = {
+      occurrenceId: "requested-finding",
+      title: "Finding in the requested worktree",
+      status: "open",
+    };
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            if (args[0] === "list-scans") {
+              const scans: JsonObject[] = [
+                { targetId: "requested", targetPath: repository },
+              ];
+              if (!args.includes("--worktrees-only")) {
+                scans.push({
+                  targetId: "same-origin-clone",
+                  targetPath: `${repository}-clone`,
+                });
+              }
+              return { scans };
+            }
+            const targetId = args[args.indexOf("--target-id") + 1];
+            return {
+              findings:
+                targetId === "requested"
+                  ? [safeFinding]
+                  : [{ occurrenceId: "private-clone-finding", status: "open" }],
+              nextOffset: null,
+            };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      ["list-scans", "--repository", repository, "--worktrees-only"],
+      ["list-global-findings", "--target-id", "requested", "--status", "open"],
+    ]);
+    expect(JSON.parse(stdout.text())).toEqual({
+      repository,
+      findings: [safeFinding],
+    });
+  });
+
+  test("returns no findings when no related repository has been scanned", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    const repository = resolve("/current/repository");
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args) => {
+            calls.push(args);
+            return { scans: [] };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      ["list-scans", "--repository", repository, "--worktrees-only"],
+    ]);
+    expect(JSON.parse(stdout.text())).toEqual({ repository, findings: [] });
   });
 
   test("lists repository and scan-root history without starting Codex", async () => {

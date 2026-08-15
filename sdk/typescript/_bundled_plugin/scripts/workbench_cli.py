@@ -131,6 +131,7 @@ def parse_args(description: str) -> argparse.Namespace:
     list_scans.add_argument("--status", choices=("running", "complete", "failed", "canceled"))
     list_scans.add_argument("--mode", choices=MODES)
     list_scans.add_argument("--repository")
+    list_scans.add_argument("--worktrees-only", action="store_true", help=argparse.SUPPRESS)
     list_scans.add_argument("--scan-root")
     list_scans.add_argument("--offset", type=non_negative_int, default=0)
     list_scans.add_argument("--limit", type=positive_int)

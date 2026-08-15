@@ -12,40 +12,68 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from filesystem_identity import serialize_filesystem_identity
 from report_projection import SEVERITY_ORDER
 from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output
+from workbench_target_state import (
+    _require_current_target_owner,
+    repository_identity,
+    repository_relative_path,
+)
 
 
 def _same_repository(
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
+    after_identity: tuple[str | None, tuple[str, str] | None, str | None] | None = None,
+    worktrees_only: bool = False,
 ) -> bool:
-    if before["target_id"] == after["target_id"]:
+    before_target_id = before["target_id"]
+    if before_target_id and before_target_id == after["target_id"]:
         return True
     before_target = Path(before["target_path"])
     after_target = Path(after["target_path"])
-    before_git_dir = git_output(
-        before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
-    )
-    after_git_dir = (
-        git_output(after_target, "rev-parse", "--path-format=absolute", "--git-common-dir")
-        if after_identity is None
-        else after_identity[0]
-    )
-    if (
-        before_git_dir is not None
-        and after_git_dir is not None
-        and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
-    ):
+    if before_target.resolve() == after_target.resolve():
         return True
+    before_stored_identity = (
+        before["repository_identity"] if "repository_identity" in before.keys() else None
+    )
+    after_stored_identity = (
+        after["repository_identity"] if "repository_identity" in after.keys() else None
+    )
+    after_grouping_identity = (
+        after_stored_identity
+        if after_stored_identity is not None
+        else after_identity[0]
+        if after_identity is not None
+        else None
+    )
+    if before_stored_identity and before_stored_identity == after_grouping_identity:
+        return True
+
+    before_live_identity = repository_identity(before_target)
+    after_live_identity = (
+        repository_identity(after_target) if after_identity is None else after_identity[0]
+    )
+    if before_live_identity is not None and before_live_identity == after_live_identity:
+        return True
+    if worktrees_only or before_live_identity is None or after_live_identity is None:
+        return False
+
     before_origin = _repository_origin(before_target)
-    return before_origin is not None and before_origin == (
+    after_origin = (
         _repository_origin(after_target) if after_identity is None else after_identity[1]
     )
+    if before_origin is None or before_origin != after_origin:
+        return False
+    before_relative = repository_relative_path(before_target)
+    after_relative = (
+        repository_relative_path(after_target) if after_identity is None else after_identity[2]
+    )
+    return before_relative is not None and before_relative == after_relative
 
 
 def _repository_origin(target: Path) -> tuple[str, str] | None:
@@ -82,30 +110,99 @@ def list_scans(
     values: list[Any] = []
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
+        worktrees_only = bool(getattr(args, "worktrees_only", False))
+        target_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(security_targets)")
+        }
+        identity_column = "repository_identity" in target_columns
+        requested_identity_column = (
+            ", (SELECT repository_identity FROM security_targets "
+            "WHERE current_path = ?) AS repository_identity"
+            if identity_column
+            else ""
+        )
+        requested_values = (
+            (str(repository), str(repository), str(repository))
+            if identity_column
+            else (str(repository), str(repository))
+        )
         requested_repository = connection.execute(
-            """
+            f"""
             SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
                 ? AS target_path
+                {requested_identity_column}
             """,
-            (str(repository), str(repository)),
+            requested_values,
         ).fetchone()
-        requested_identity = (
-            git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-            _repository_origin(repository),
+        scan_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(scans)")
+        }
+        check_ownership = {"target_device", "target_inode"} <= scan_columns
+        ownership_matches = not check_ownership or _repository_ownership_matches(
+            connection,
+            repository,
+            requested_repository["target_id"],
+            requested_repository["repository_identity"] if identity_column else None,
         )
-        related_target_ids = [
-            target["target_id"]
-            for target in connection.execute(
-                "SELECT id AS target_id, current_path AS target_path FROM security_targets"
-            )
-            if _same_repository(target, requested_repository, after_identity=requested_identity)
-        ]
-        repository_clauses = ["scans.target_path = ?"]
-        values.append(str(repository))
-        if related_target_ids:
-            placeholders = ", ".join("?" for _ in related_target_ids)
+        live_identity = repository_identity(repository)
+        identity_matches = (
+            not identity_column
+            or requested_repository["repository_identity"] is None
+            or requested_repository["repository_identity"] == live_identity
+        )
+        ownership_matches = ownership_matches and identity_matches
+        requested_identity = (
+            (
+                requested_repository["repository_identity"]
+                if (
+                    identity_column
+                    and ownership_matches
+                    and requested_repository["repository_identity"] is not None
+                )
+                else live_identity
+            ),
+            None if worktrees_only else _repository_origin(repository),
+            None if worktrees_only else repository_relative_path(repository),
+        )
+        related_targets = (
+            [
+                target
+                for target in connection.execute(
+                    "SELECT id AS target_id, current_path AS target_path, repository_identity "
+                    "FROM security_targets"
+                    if identity_column
+                    else "SELECT id AS target_id, current_path AS target_path FROM security_targets"
+                )
+                if _same_repository(
+                    target,
+                    requested_repository,
+                    after_identity=requested_identity,
+                    worktrees_only=worktrees_only,
+                )
+            ]
+            if ownership_matches
+            else []
+        )
+        repository_clauses = (
+            [_owned_scan_clause(repository, check_ownership, values)]
+            if identity_matches
+            else ["0"]
+        )
+        if worktrees_only:
+            for target in related_targets:
+                target_path = Path(target["target_path"])
+                repository_clauses.append(
+                    _owned_scan_clause(
+                        target_path,
+                        check_ownership,
+                        values,
+                        target_id=target["target_id"],
+                    )
+                )
+        elif related_targets:
+            placeholders = ", ".join("?" for _ in related_targets)
             repository_clauses.append(f"scans.target_id IN ({placeholders})")
-            values.extend(related_target_ids)
+            values.extend(target["target_id"] for target in related_targets)
         clauses.append(f"({' OR '.join(repository_clauses)})")
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
@@ -219,6 +316,71 @@ def list_scans(
     return result
 
 
+def _owned_scan_clause(
+    target: Path,
+    check_ownership: bool,
+    values: list[Any],
+    *,
+    target_id: str | None = None,
+) -> str:
+    if target_id is None:
+        values.append(str(target))
+        target_clause = "scans.target_path = ?"
+    else:
+        values.append(target_id)
+        target_clause = "scans.target_id = ?"
+    if not check_ownership:
+        return target_clause
+    try:
+        metadata = target.stat()
+    except OSError:
+        return target_clause
+    values.extend(
+        (
+            serialize_filesystem_identity(metadata.st_dev),
+            serialize_filesystem_identity(metadata.st_ino),
+        )
+    )
+    return (
+        f"({target_clause} AND ("
+        "(scans.target_device IS NULL AND scans.target_inode IS NULL) "
+        "OR (scans.target_device = ? AND scans.target_inode = ?)"
+        "))"
+    )
+
+
+def _repository_ownership_matches(
+    connection: sqlite3.Connection,
+    repository: Path,
+    target_id: str | None,
+    stored_identity: str | None = None,
+) -> bool:
+    try:
+        metadata = repository.stat()
+    except OSError:
+        return False
+    scans = connection.execute(
+        """
+        SELECT target_device, target_inode
+        FROM scans
+        WHERE target_path = ? OR target_id = ?
+        """,
+        (str(repository), target_id),
+    )
+    current_device = serialize_filesystem_identity(metadata.st_dev)
+    current_inode = serialize_filesystem_identity(metadata.st_ino)
+    historical_scan = False
+    verified_owner = False
+    for scan in scans:
+        historical_scan = True
+        if scan["target_device"] is None and scan["target_inode"] is None:
+            continue
+        if scan["target_device"] != current_device or scan["target_inode"] != current_inode:
+            return False
+        verified_owner = True
+    return not historical_scan or verified_owner or stored_identity is None
+
+
 def list_unmatched_scan_pairs(
     connection: sqlite3.Connection,
     args: argparse.Namespace,
@@ -227,19 +389,63 @@ def list_unmatched_scan_pairs(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
+    identity_column = any(
+        row["name"] == "repository_identity"
+        for row in connection.execute("PRAGMA table_info(security_targets)")
+    )
+    requested_identity_column = (
+        ", (SELECT repository_identity FROM security_targets "
+        "WHERE current_path = ?) AS repository_identity"
+        if identity_column
+        else ""
+    )
+    requested_values = (
+        (str(repository), str(repository), str(repository))
+        if identity_column
+        else (str(repository), str(repository))
+    )
     requested = connection.execute(
-        """
+        f"""
         SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
             ? AS target_path
+            {requested_identity_column}
         """,
-        (str(repository), str(repository)),
+        requested_values,
     ).fetchone()
+    if identity_column and requested["target_id"]:
+        _require_current_target_owner(
+            connection,
+            requested["target_id"],
+            str(repository),
+            requested["repository_identity"],
+        )
+    scan_query = (
+        "SELECT scans.*, targets.repository_identity "
+        "FROM scans LEFT JOIN security_targets AS targets ON targets.id = scans.target_id "
+        "WHERE scans.status = 'complete' ORDER BY scans.started_at, scans.id"
+        if identity_column
+        else "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
+    )
+    live_identity = repository_identity(repository)
+    requested_identity = (
+        requested["repository_identity"]
+        if identity_column and requested["repository_identity"] is not None
+        else live_identity
+    )
+    requested_group = (
+        requested_identity,
+        _repository_origin(repository),
+        repository_relative_path(repository),
+    )
     selected = [
         scan
-        for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
+        for scan in connection.execute(scan_query)
+        if Path(scan["target_path"]).resolve() == repository
+        or _same_repository(
+            scan,
+            requested,
+            after_identity=requested_group,
         )
-        if Path(scan["target_path"]).resolve() == repository or _same_repository(scan, requested)
     ]
 
     available = []
@@ -305,8 +511,12 @@ def compare_scans(
     include_matching_inputs: bool = False,
     require_matches: bool = False,
 ) -> dict[str, Any]:
-    before = require_scan(connection, args.before_scan_id)
-    after = require_scan(connection, args.after_scan_id)
+    before = _scan_with_repository_identity(
+        connection, require_scan(connection, args.before_scan_id)
+    )
+    after = _scan_with_repository_identity(
+        connection, require_scan(connection, args.after_scan_id)
+    )
     if before["id"] == after["id"]:
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
@@ -445,8 +655,12 @@ def save_scan_comparison(
     require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    before = require_scan(connection, args.before_scan_id)
-    after = require_scan(connection, args.after_scan_id)
+    before = _scan_with_repository_identity(
+        connection, require_scan(connection, args.before_scan_id)
+    )
+    after = _scan_with_repository_identity(
+        connection, require_scan(connection, args.after_scan_id)
+    )
     if before["id"] == after["id"]:
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
@@ -526,6 +740,28 @@ def save_scan_comparison(
             ),
         )
     return compare_scans(connection, args, require_scan=require_scan, read_coverage=read_coverage)
+
+
+def _scan_with_repository_identity(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> sqlite3.Row:
+    if "repository_identity" in scan.keys():
+        return scan
+    if not any(
+        row["name"] == "repository_identity"
+        for row in connection.execute("PRAGMA table_info(security_targets)")
+    ):
+        return scan
+    enriched = connection.execute(
+        """
+        SELECT scans.*, targets.repository_identity
+        FROM scans
+        LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
+        WHERE scans.id = ?
+        """,
+        (scan["id"],),
+    ).fetchone()
+    return enriched if enriched is not None else scan
 
 
 def finding_matches(
