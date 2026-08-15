@@ -149,6 +149,7 @@ export function renderScanHistory(
           : clean(status);
       const scanId = entry["scanId"];
       const occurrenceCount = entry["occurrenceCount"];
+      const scanCount = knownScanIds?.length;
       const details = [
         ...(occurrenceId ? [`${strong("ID")} ${clean(occurrenceId)}`] : []),
         ...(status ? [strong(statusLabel.toUpperCase())] : []),
@@ -161,7 +162,11 @@ export function renderScanHistory(
           ? [`${strong("REPOSITORY")} ${clean(entry["targetPath"])}`]
           : []),
         ...(typeof occurrenceCount === "number" && occurrenceCount > 1
-          ? [`${clean(occurrenceCount)} scans`]
+          ? [
+              scanCount
+                ? `${clean(scanCount)} ${scanCount === 1 ? "scan" : "scans"}`
+                : `${clean(occurrenceCount)} occurrences`,
+            ]
           : []),
       ];
       if (details.length > 0) {

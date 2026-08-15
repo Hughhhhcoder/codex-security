@@ -438,6 +438,34 @@ describe("scan history renderer", () => {
   });
 
   test.each([
+    [["latest-scan"], "1 scan"],
+    [undefined, "2 occurrences"],
+  ] as const)(
+    "reports the distinct scan count for repeated finding occurrences",
+    (knownScanIds, expected) => {
+      const output = stripVTControlCharacters(
+        renderScanHistory(
+          {
+            occurrenceId: "saved-occurrence",
+            scanId: "latest-scan",
+            targetPath: "/demo/repository",
+            severity: { level: "high" },
+            title: "Missing authorization",
+            locations: [{ path: "routes/login.ts", startLine: 34 }],
+            ...(knownScanIds ? { knownScanIds: [...knownScanIds] } : {}),
+            occurrenceCount: 2,
+            triage: { status: "open" },
+          },
+          "finding",
+        ),
+      );
+
+      expect(output).toContain(expected);
+      expect(output).not.toContain("2 scans");
+    },
+  );
+
+  test.each([
     ["already_fixed", "FIXED", "Fixed"],
     ["false_positive", "FALSE POSITIVE", "False Positive"],
     ["wont_fix", "IGNORED", "Ignored"],

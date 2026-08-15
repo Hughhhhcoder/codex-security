@@ -3124,7 +3124,7 @@ def scan_result(
         occurrence_rows.append(occurrence)
     indexed_findings = (
         _indexed_scan_findings(connection, scan)
-        if occurrence_rows and scan["target_id"] is not None and scan["status"] == "complete"
+        if occurrence_rows and scan["status"] == "complete"
         else {}
     )
     finding_count = connection.execute(
