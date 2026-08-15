@@ -308,6 +308,37 @@ async function recordReduction(
 }
 
 describe("Deep scan reducer finding retention", () => {
+  test("rejects findings never accepted by a Standard scan worker", async () => {
+    const accepted = finding("first", 10);
+    const invented = finding("invented", 20);
+    const result = await recordReduction(
+      [draft([accepted])],
+      draft([accepted, invented]),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/unsupported.*finding/iu);
+  });
+
+  test("rejects invented findings when every worker returned a clean result", async () => {
+    const invented = finding("invented", 20);
+    const result = await recordReduction([draft([])], draft([invented]));
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/unsupported.*finding/iu);
+  });
+
+  test("rejects duplicate aggregate finding identities", async () => {
+    const accepted = finding("first", 10);
+    const result = await recordReduction(
+      [draft([accepted])],
+      draft([accepted, structuredClone(accepted)]),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/duplicate.*finding identity/iu);
+  });
+
   test("rejects one omitted finding from an accepted Standard scan", async () => {
     const first = finding("first", 10);
     const second = finding("second", 20);
@@ -648,6 +679,40 @@ describe("Deep scan reducer finding retention", () => {
     );
     expect(rejected.accepted).toBe(false);
     expect(rejected.message).toMatch(/evidence/iu);
+  });
+
+  test("combines plain-text and structured root-cause representations", async () => {
+    const plain = finding("first", 10);
+    plain.rootCause = "The external request reaches a privileged handler.";
+    const structured = finding("first", 10);
+    structured.codeEvidence = [
+      {
+        id: "administrator-control",
+        label: "Administrator control",
+        path: "src/first.ts",
+        startLine: 10,
+        code: "handleAdministratorRequest(request)",
+        explanation: "The handler omits its authorization check.",
+      },
+    ];
+    structured.rootCause = {
+      summary: "The privileged handler omits its authorization check.",
+      evidenceRefs: ["administrator-control"],
+    };
+    const merged: Finding = {
+      ...structured,
+      rootCause: {
+        summary: `${plain.rootCause} ${structured.rootCause.summary}`,
+        evidenceRefs: ["administrator-control"],
+      },
+    };
+    const result = await recordReduction(
+      [draft([plain]), draft([structured])],
+      draft([merged]),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
+    expect(result.saved?.findings[0]?.rootCause).toEqual(merged.rootCause);
   });
 
   test("remaps colliding code-evidence identifiers and every evidence reference", async () => {

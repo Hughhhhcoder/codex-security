@@ -55,6 +55,12 @@ const NARRATIVE_SECTIONS = new Set([
 ]);
 function validateDeepReduction(result, sources, previous, findingIdentity) {
   const currentFindingIds = new Set(result.findings.map(findingIdentity));
+  if (currentFindingIds.size !== result.findings.length) {
+    throw Object.assign(
+      new Error("Deep reduction returned a duplicate accepted finding identity."),
+      { code: "merge_traceability_duplicate_candidate_id" },
+    );
+  }
 
   for (const finding of previous?.findings ?? []) {
     if (currentFindingIds.has(findingIdentity(finding))) continue;
@@ -68,6 +74,26 @@ function validateDeepReduction(result, sources, previous, findingIdentity) {
 
   const inputs = previous === undefined ? sources : [...sources, previous];
   const acceptedFindings = inputs.flatMap((input) => input.findings);
+
+  for (const retained of result.findings) {
+    const supported = acceptedFindings.some(
+      (finding) =>
+        representsFinding(retained, finding, findingIdentity) &&
+        retainsFindingEvidence(
+          retained,
+          finding,
+          acceptedFindings,
+          findingIdentity,
+        ),
+    );
+    if (supported) continue;
+    throw Object.assign(
+      new Error(
+        `Deep reduction returned an unsupported finding (${retained.ruleId}) without complete evidence from an accepted Standard worker.`,
+      ),
+      { code: "merge_traceability_invented_candidate" },
+    );
+  }
 
   for (const source of inputs) {
     for (const finding of source.findings) {
@@ -152,7 +178,14 @@ function retainsFindingEvidence(
       source[field],
       evidenceIdentifiers,
     );
-    if (!retainsStructuredValue(retained[field], expected, field)) {
+    const retainedValue =
+      field === "rootCause" &&
+      typeof expected === "string" &&
+      typeof retained[field] === "object" &&
+      retained[field] !== null
+        ? retained[field].summary
+        : retained[field];
+    if (!retainsStructuredValue(retainedValue, expected, field)) {
       return false;
     }
   }
