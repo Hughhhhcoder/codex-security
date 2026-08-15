@@ -297,6 +297,56 @@ describe("CLI findings history", () => {
     });
   });
 
+  test("rejects repository arguments with conflicting findings scopes", async () => {
+    for (const [arguments_, conflictingOption] of [
+      [
+        [resolve("/requested/repository"), "--scan", "other-repository-scan"],
+        "--scan",
+      ],
+      [
+        ["--scan", "other-repository-scan", resolve("/requested/repository")],
+        "--scan",
+      ],
+      [[".", "--scan=other-repository-scan"], "--scan"],
+      [
+        [resolve("/requested/repository"), "--all-repositories"],
+        "--all-repositories",
+      ],
+      [
+        ["--all-repositories", resolve("/requested/repository")],
+        "--all-repositories",
+      ],
+      [[".", "--all-repositories"], "--all-repositories"],
+    ] as const) {
+      const calls: Array<readonly string[]> = [];
+      const stdout = capture();
+      const stderr = capture();
+
+      expect(
+        await main(
+          ["findings", "list", ...arguments_, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onWorkbench: (args) => {
+              calls.push(args);
+              return {
+                findingsPage: {
+                  findings: [{ occurrenceId: "other-repository-occurrence" }],
+                },
+              };
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(
+        `${conflictingOption} cannot be combined with a repository argument.`,
+      );
+      expect(stdout.text()).toBe("");
+      expect(calls).toEqual([]);
+    }
+  });
+
   test("shows a historical occurrence without exposing unrelated findings", async () => {
     const calls: Array<readonly string[]> = [];
     const stdout = capture();

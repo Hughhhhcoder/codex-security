@@ -858,6 +858,18 @@ export async function main(
         }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
+        if (
+          args.repository !== undefined &&
+          (options.scan !== undefined || options.allRepositories)
+        ) {
+          const conflictingOption =
+            options.scan === undefined ? "--all-repositories" : "--scan";
+          errorOutput.write(
+            `codex-security: ${conflictingOption} cannot be combined with a repository argument.\n`,
+          );
+          exitCode = 2;
+          return undefined;
+        }
         const repository = options.allRepositories
           ? undefined
           : resolve(
