@@ -140,7 +140,7 @@ const findingsIndexProbe = [
   "    if scan['id'] == 'orphan-new':",
   "        return {'completeness': 'partial', 'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    return {'completeness': 'complete', 'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
-  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), repository='/current/repository' if settings.get('linkedWorktree') else None, include_resolved=settings.get('includeResolved', False), offset=0, limit=20)",
+  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), repository=os.path.join(sys.argv[1], 'nested') if settings.get('scopedLegacyDescendant') else '/current/repository' if settings.get('linkedWorktree') else None, include_resolved=settings.get('includeResolved', False), offset=0, limit=20)",
   "if settings.get('repositories'):",
   "    indexes.scan_history.list_scans = lambda connection: {'scans': [{'scanId': row['id'], 'targetId': row['target_id']} for row in connection.execute('SELECT id, target_id FROM scans')]}",
   "    result = indexes.list_repositories(connection, read_coverage=coverage)",
@@ -239,7 +239,7 @@ const findingsIndexProbe = [
   "matching_scan_count = None",
   "old_owner_matches = None",
   "if settings.get('ownershipTransition') or settings.get('ownershipReuse'):",
-  "    clauses, values, _, _ = indexes.scan_history.repository_scan_scope(connection, sys.argv[1])",
+  "    clauses, values, _, _ = indexes.scan_history.repository_scan_scope(connection, args.repository or sys.argv[1])",
   "    scoped_scan_ids = [row['id'] for row in connection.execute('SELECT scans.id FROM scans WHERE ' + ' AND '.join(clauses), values)]",
   "if settings.get('ownershipReuse'):",
   "    connection.execute('CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT)')",
@@ -280,6 +280,7 @@ function runFindingsIndex(
     repeatedStableFinding?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
+    scopedLegacyDescendant?: boolean;
     targetlessHistory?: "stable" | "matched";
     triageClockRollback?: boolean;
     unsealedScans?: boolean;
@@ -336,6 +337,7 @@ function probeFindingsIndex(
     repeatedStableFinding?: boolean;
     replacedCheckout?: boolean;
     repositories?: boolean;
+    scopedLegacyDescendant?: boolean;
     targetlessHistory?: "stable" | "matched";
     triageClockRollback?: boolean;
     unsealedScans?: boolean;
@@ -692,6 +694,23 @@ describe("workbench findings index", () => {
     expect(result.findings).not.toContainEqual(
       expect.objectContaining({ occurrenceId: "reused-legacy-occurrence" }),
     );
+  });
+
+  test("finds the registered owner from an exact targetless descendant", () => {
+    const result = probeFindingsIndex(null, {
+      legacyDescendant: true,
+      ownershipReuse: true,
+      scopedLegacyDescendant: true,
+    });
+
+    expect(result.scopedScanIds).toContain("current-new");
+    expect(result.scopedScanIds).not.toContain("current-old");
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        occurrenceId: "current-new-occurrence",
+        targetId: "current-target",
+      }),
+    ]);
   });
 
   test("retains covered same-owner findings while preparing semantic matching", () => {

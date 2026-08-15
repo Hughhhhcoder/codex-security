@@ -215,6 +215,77 @@ test("compares registered scan history after its checkout moves", () => {
   expect(JSON.parse(result.stdout)).toBe(true);
 });
 
+test("finds registered ancestors beyond isolated targetless child scans", () => {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  if (python === null) throw new Error("A Python interpreter is required.");
+
+  const probe = [
+    "import argparse, json, os, pathlib, sqlite3, subprocess, sys, tempfile",
+    "sys.path.insert(0, sys.argv[1])",
+    "import workbench_scan_history as history",
+    "import workbench_schema as schema",
+    "from filesystem_identity import serialize_filesystem_identity",
+    "temporary = tempfile.TemporaryDirectory()",
+    "temporary_root = pathlib.Path(temporary.name).resolve()",
+    "child = pathlib.Path(sys.argv[1]).resolve()",
+    "intermediate = child.parent",
+    "owner = intermediate.parent",
+    "sibling = owner / 'src'",
+    "git_root = temporary_root / 'git-repository'",
+    "subprocess.run(['git', 'init', '-q', str(git_root)], check=True)",
+    "git_parent = git_root / 'legacy'",
+    "git_child = git_parent / 'nested'",
+    "git_child.mkdir(parents=True)",
+    "directory_parent = temporary_root / 'directory'",
+    "directory_child = directory_parent / 'nested'",
+    "directory_child.mkdir(parents=True)",
+    "connection = sqlite3.connect(':memory:')",
+    "connection.row_factory = sqlite3.Row",
+    "schema.apply_migrations(connection, schema.MIGRATIONS, lambda: '2026-01-01', lambda _connection: None)",
+    "connection.execute(\"INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', '2026-01-01', '2026-01-01')\")",
+    "for target_id, path in [('registered-owner', owner), ('independent-sibling', sibling)]:",
+    "    connection.execute('INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', (target_id, str(path), target_id, '2026-01-01', '2026-01-01'))",
+    "def identity(path):",
+    "    metadata = path.stat()",
+    "    return (serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino))",
+    "scans = [",
+    "    ('recycled-owner', 'registered-owner', owner, identity(owner)),",
+    "    ('previous-owner', 'registered-owner', owner, (-1, -1)),",
+    "    ('current-owner', 'registered-owner', owner, identity(owner)),",
+    "    ('sibling-scan', 'independent-sibling', sibling, identity(sibling)),",
+    "    ('legacy-intermediate', None, intermediate, (None, None)),",
+    "    ('legacy-child', None, child, (None, None)),",
+    "    ('legacy-git-parent', None, git_parent, (None, None)),",
+    "    ('legacy-git-child', None, git_child, (None, None)),",
+    "    ('legacy-directory-parent', None, directory_parent, (None, None)),",
+    "    ('legacy-directory-child', None, directory_child, (None, None)),",
+    "]",
+    "for scan, target_id, path, filesystem in scans:",
+    "    connection.execute('INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at, target_id, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan, 'workspace', str(path), 'revision', '.', 'standard', '/scans/' + scan, 'complete', 'reporting', '2026-01-01', '2026-01-01', '2026-01-01', target_id, *filesystem))",
+    "    connection.execute('INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)', (scan, '2026-01-01'))",
+    "def listed(path):",
+    "    args = argparse.Namespace(repository=str(path), scan_root=None, target_id=None, mode=None, status=None, query=None, limit=None, offset=0)",
+    "    return [scan['scanId'] for scan in history.list_scans(connection, args)['scans']]",
+    "result = {'direct': listed(intermediate), 'nested': listed(child), 'standaloneGit': listed(git_child), 'standaloneDirectory': listed(directory_child)}",
+    "temporary.cleanup()",
+    "print(json.dumps(result))",
+  ].join("\n");
+
+  const result = spawnSync(
+    python,
+    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    direct: ["legacy-intermediate", "current-owner"],
+    nested: ["legacy-child", "current-owner"],
+    standaloneGit: ["legacy-git-child"],
+    standaloneDirectory: ["legacy-directory-child"],
+  });
+});
+
 test("includes linked worktrees and recognizes separately verified clones", () => {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   if (python === null) throw new Error("A Python interpreter is required.");

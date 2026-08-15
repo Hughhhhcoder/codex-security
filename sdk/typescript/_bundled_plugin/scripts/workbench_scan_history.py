@@ -320,6 +320,31 @@ def repository_scan_scope(
             ).fetchone()
         )
         registered_parent = None
+        if registered_repository is not None and not requested_target_id:
+            for parent in repository.parents:
+                if checkout_boundary is not None and not parent.is_relative_to(
+                    checkout_boundary
+                ):
+                    break
+                owner = connection.execute(
+                    """
+                    SELECT owner.id
+                    FROM security_targets AS owner
+                    JOIN scans ON scans.target_id = owner.id
+                    WHERE owner.current_path = ?
+                    LIMIT 1
+                    """,
+                    (str(parent),),
+                ).fetchone()
+                if owner is None:
+                    continue
+                metadata = _verified_target_metadata(connection, owner["id"], parent)
+                if metadata is None:
+                    continue
+                repository_paths.append(str(parent))
+                related_target_ids.append(owner["id"])
+                verified_targets[owner["id"]] = metadata
+                break
         if registered_repository is None:
             for parent in repository.parents:
                 if checkout_boundary is not None and not parent.is_relative_to(checkout_boundary):
