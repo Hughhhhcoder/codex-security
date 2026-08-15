@@ -1997,10 +1997,14 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
 
 
 def require_finding_open(connection: sqlite3.Connection, occurrence_id: str) -> None:
-    triage = connection.execute(
-        "SELECT status FROM finding_triage WHERE occurrence_id = ?",
-        (occurrence_id,),
-    ).fetchone()
+    occurrence = require_occurrence(connection, occurrence_id)
+    scan = require_scan(connection, occurrence["scan_id"])
+    triage = _indexed_scan_findings(connection, scan).get(occurrence_id)
+    if triage is None:
+        triage = connection.execute(
+            "SELECT status FROM finding_triage WHERE occurrence_id = ?",
+            (occurrence_id,),
+        ).fetchone()
     if triage is not None and triage["status"] == "closed":
         raise SystemExit("Reopen this finding before requesting remediation.")
 

@@ -153,7 +153,7 @@ const findingsIndexProbe = [
   "else:",
   "    result = indexes.list_global_findings(connection, args, read_coverage=coverage)",
   "finding_detail, overview_finding, scan_pages, rejected_previous_owner, rejected_previous_owner_list, rejected_legacy_owner, rejected_legacy_owner_list, rejected_legacy_descendant, rejected_legacy_descendant_list = None, None, None, None, None, None, None, None, None",
-  "pending_remediation_error, pending_triage_rows = None, None",
+  "pending_remediation_error, pending_triage_rows, remediation_guard_error = None, None, None",
   "if settings.get('matchedTriage') or settings.get('targetlessHistory'):",
   "    import workbench_db as workbench",
   "    if not settings.get('ownershipReuse'):",
@@ -203,6 +203,10 @@ const findingsIndexProbe = [
   "    finding_detail = workbench.finding_result(connection, scan, occurrence, full_details=True)",
   "    overview_finding = workbench.finding_result(connection, scan, occurrence, indexed_finding=workbench._indexed_scan_findings(connection, scan).get(occurrence['id']))",
   "    scan_pages = {status: workbench.list_findings(connection, argparse.Namespace(scan_id=selected_scan, query=None, severity=None, status=status, offset=0, limit=20))['findingsPage'] for status in ('open', 'closed')}",
+  "    try:",
+  "        workbench.require_finding_open(connection, selected_occurrence)",
+  "    except SystemExit as error:",
+  "        remediation_guard_error = str(error)",
   "    if settings.get('ownershipReuse'):",
   "        from contextlib import nullcontext, redirect_stdout",
   "        from io import StringIO",
@@ -239,7 +243,7 @@ const findingsIndexProbe = [
   "    matching_scan_count = matching['scanCount']",
   "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
   "    old_owner_matches = indexes.scan_history._same_registered_repository(connection, *scans)",
-  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'overviewFinding': overview_finding, 'scanPages': scan_pages, 'rejectedPreviousOwner': rejected_previous_owner, 'rejectedPreviousOwnerList': rejected_previous_owner_list, 'rejectedLegacyOwner': rejected_legacy_owner, 'rejectedLegacyOwnerList': rejected_legacy_owner_list, 'rejectedLegacyDescendant': rejected_legacy_descendant, 'rejectedLegacyDescendantList': rejected_legacy_descendant_list, 'pendingRemediationError': pending_remediation_error, 'pendingTriageRows': pending_triage_rows, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
+  "print(json.dumps({'findings': result.get('findings', []), 'findingDetail': finding_detail, 'overviewFinding': overview_finding, 'scanPages': scan_pages, 'rejectedPreviousOwner': rejected_previous_owner, 'rejectedPreviousOwnerList': rejected_previous_owner_list, 'rejectedLegacyOwner': rejected_legacy_owner, 'rejectedLegacyOwnerList': rejected_legacy_owner_list, 'rejectedLegacyDescendant': rejected_legacy_descendant, 'rejectedLegacyDescendantList': rejected_legacy_descendant_list, 'pendingRemediationError': pending_remediation_error, 'pendingTriageRows': pending_triage_rows, 'remediationGuardError': remediation_guard_error, 'repositories': result.get('repositories', []), 'coverageReads': coverage_reads, 'scopedScanIds': scoped_scan_ids, 'matchingScanCount': matching_scan_count, 'oldOwnerMatches': old_owner_matches}))",
 ].join("\n");
 
 function runFindingsIndex(
@@ -353,6 +357,7 @@ function probeFindingsIndex(
   rejectedLegacyDescendantList: string | null;
   pendingRemediationError: string | null;
   pendingTriageRows: number | null;
+  remediationGuardError: string | null;
   repositories: Array<{ targetId: string; openFindingsCount: number }>;
   coverageReads: string[];
   matchingScanCount: number | null;
@@ -480,6 +485,9 @@ describe("workbench findings index", () => {
       findings: [],
       total: 0,
     });
+    expect(result.remediationGuardError).toBe(
+      "Reopen this finding before requesting remediation.",
+    );
   });
 
   test("shows finding history when stable identifiers recur without saved matches", () => {
@@ -536,6 +544,7 @@ describe("workbench findings index", () => {
       triage: { status: "open" },
     });
     expect(result.findingDetail?.["triage"]).not.toHaveProperty("closeReason");
+    expect(result.remediationGuardError).toBeNull();
     expect(result.scanPages?.["open"]).toMatchObject({
       findings: [{ occurrenceId: "current-new-occurrence", status: "open" }],
       total: 1,
@@ -1007,6 +1016,9 @@ describe("workbench findings index", () => {
         findings: [],
         total: 0,
       });
+      expect(result.remediationGuardError).toBe(
+        "Reopen this finding before requesting remediation.",
+      );
     },
   );
 
