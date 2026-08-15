@@ -10,13 +10,14 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
+from workbench_constants import EMPTY_GIT_TREE, EMPTY_GIT_TREES, GIT_REPOSITORY_ENVIRONMENT
 
 
 def git_output(
@@ -38,6 +39,35 @@ def git_bytes(
 ) -> bytes | None:
     completed = git_command(target, *args, text=False, git_dir=git_dir, work_tree=work_tree)
     return completed.stdout if completed.returncode == 0 else None
+
+
+def git_digest_field(
+    digest: Any,
+    label: bytes,
+    target: Path,
+    *args: str,
+    git_dir: Path | None = None,
+    work_tree: Path | None = None,
+) -> bool:
+    """Hash length-framed Git output without buffering the entire output."""
+    with tempfile.TemporaryFile() as spool:
+        completed = git_command(
+            target,
+            *args,
+            text=False,
+            git_dir=git_dir,
+            work_tree=work_tree,
+            stdout=spool,
+        )
+        if completed.returncode != 0:
+            return False
+        digest.update(len(label).to_bytes(4, "big"))
+        digest.update(label)
+        digest.update(os.fstat(spool.fileno()).st_size.to_bytes(8, "big"))
+        spool.seek(0)
+        for chunk in iter(lambda: spool.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return True
 
 
 def git_blob_bytes(
@@ -127,6 +157,7 @@ def git_command(
     input_data: str | bytes | None = None,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    stdout: IO[bytes] | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
         raise ValueError("git_dir and work_tree must be provided together")
@@ -143,7 +174,8 @@ def git_command(
         return subprocess.run(
             full_command,
             check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE if stdout is None else stdout,
+            stderr=subprocess.PIPE,
             env=environment,
             text=text,
             input=input_data,
@@ -153,6 +185,11 @@ def git_command(
         # any other failed Git probe so the target falls back to a directory snapshot.
         empty_output = "" if text else b""
         return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
+
+
+def empty_git_tree(target: Path) -> str:
+    object_format = git_output(target, "rev-parse", "--show-object-format")
+    return EMPTY_GIT_TREES.get(object_format or "", EMPTY_GIT_TREE)
 
 
 def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
@@ -166,6 +203,29 @@ def worktree_content_digest(target: Path) -> str:
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
     return worktree_content_digest_for_context(repository, pathspec)
+
+
+def committed_diff_content_digest(target: Path, base: str, head: str) -> str:
+    repository, pathspec = git_worktree_context(target)
+    digest = hashlib.sha256()
+    update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
+    if not git_digest_field(
+        digest,
+        b"tracked-diff",
+        repository,
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        base,
+        head,
+        "--",
+        pathspec,
+    ):
+        raise SystemExit("Could not snapshot the selected committed changes.")
+    return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
 def worktree_content_digest_for_context(
@@ -605,10 +665,30 @@ def require_git_worktree_head(target: Path) -> str:
 
 
 def scan_target_warning(scan: sqlite3.Row) -> str | None:
-    if scan["diff_target_kind"] != "working_tree" and not scan["target_snapshot_digest"]:
+    committed_diff = scan["diff_target_kind"] in {"commit", "range"}
+    if (
+        not committed_diff
+        and scan["diff_target_kind"] != "working_tree"
+        and not scan["target_snapshot_digest"]
+    ):
+        return None
+    if committed_diff and not scan["diff_content_digest"]:
         return None
     try:
         target = require_scan_target_identity(scan)
+        if committed_diff:
+            expected_digest = scan["diff_content_digest"]
+            current_digest = committed_diff_content_digest(
+                target,
+                scan["diff_base_revision"],
+                scan["diff_head_revision"],
+            )
+            if current_digest != expected_digest:
+                return (
+                    "Committed changes changed while the scan was running; "
+                    "results were saved for the original snapshot."
+                )
+            return None
         if scan["target_revision"] == "unversioned":
             if (
                 directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
