@@ -131,6 +131,128 @@ describe("security scan file inventory", () => {
     ]);
   });
 
+  test.each(["XDG default", "HOME default", "configured", "conditional"])(
+    "honors %s global Git excludes across scoped nested checkouts",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const home = join(dirname(checkout), "home");
+      const configuration = join(dirname(checkout), "configuration");
+      const excludes =
+        kind === "HOME default"
+          ? join(home, ".config", "git", "ignore")
+          : kind === "configured" || kind === "conditional"
+            ? join(home, "custom-excludes")
+            : join(configuration, "git", "ignore");
+      const nested = join(checkout, "nested");
+      await Promise.all([
+        mkdir(dirname(excludes), { recursive: true }),
+        mkdir(home, { recursive: true }),
+        mkdir(nested),
+      ]);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(excludes, "*.ts\n!visible.ts\n"),
+        writeFile(join(checkout, "private.ts"), "private\n"),
+        writeFile(join(checkout, "visible.ts"), "visible\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+        writeFile(join(nested, "tracked.ts"), "tracked\n"),
+      ]);
+      execFileSync("git", ["add", "--force", "tracked.ts"], { cwd: nested });
+      const environment = {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        XDG_CONFIG_HOME: kind === "HOME default" ? "" : configuration,
+        GIT_CONFIG_GLOBAL: join(home, ".gitconfig"),
+        GIT_CONFIG_NOSYSTEM: "1",
+      };
+      if (kind === "configured") {
+        execFileSync(
+          "git",
+          ["config", "--global", "core.excludesFile", excludes],
+          {
+            cwd: checkout,
+            env: environment,
+          },
+        );
+      } else if (kind === "conditional") {
+        const included = join(home, "included.gitconfig");
+        await Promise.all([
+          writeFile(
+            included,
+            `[core]\n\texcludesFile = ${JSON.stringify(excludes)}\n`,
+          ),
+          writeFile(
+            join(home, ".gitconfig"),
+            `[includeIf "gitdir:${checkout.replaceAll("\\", "/")}/.git"]\n\tpath = ${JSON.stringify(included)}\n`,
+          ),
+        ]);
+      }
+
+      expect(await inventory(checkout, ".", environment)).toEqual([
+        "./nested/tracked.ts",
+        "./visible.ts",
+      ]);
+      expect(await inventory(checkout, "nested", environment)).toEqual([
+        "nested/tracked.ts",
+      ]);
+    },
+  );
+
+  test("honors trusted system excludes and user-global precedence", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository();
+    const home = join(dirname(checkout), "home");
+    await mkdir(home);
+    const system = join(home, "system.gitconfig");
+    const systemExcludes = join(home, "system-excludes");
+    const globalExcludes = join(home, "global-excludes");
+    await Promise.all([
+      writeFile(
+        system,
+        `[core]\n\texcludesFile = ${JSON.stringify(systemExcludes)}\n`,
+      ),
+      writeFile(systemExcludes, "system-private.ts\n"),
+      writeFile(globalExcludes, "global-private.ts\n"),
+      writeFile(join(checkout, "system-private.ts"), "private\n"),
+      writeFile(join(checkout, "global-private.ts"), "private\n"),
+      writeFile(join(checkout, "visible.ts"), "visible\n"),
+    ]);
+    const environment = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      XDG_CONFIG_HOME: join(home, "configuration"),
+      GIT_CONFIG_SYSTEM: system,
+      GIT_CONFIG_GLOBAL: join(home, ".gitconfig"),
+      GIT_CONFIG_NOSYSTEM: "0",
+    };
+
+    expect(await inventory(checkout, ".", environment)).toEqual([
+      "./global-private.ts",
+      "./visible.ts",
+    ]);
+    execFileSync(
+      "git",
+      ["config", "--global", "core.excludesFile", globalExcludes],
+      { cwd: checkout, env: environment },
+    );
+    expect(await inventory(checkout, ".", environment)).toEqual([
+      "./system-private.ts",
+      "./visible.ts",
+    ]);
+    await rm(join(home, ".gitconfig"));
+    expect(
+      await inventory(checkout, ".", {
+        ...environment,
+        GIT_CONFIG_NOSYSTEM: "1",
+      }),
+    ).toEqual(["./global-private.ts", "./system-private.ts", "./visible.ts"]);
+  });
+
   test.each([".gitignore", ".ignore", ".rgignore"])(
     "inventories ordinary directories named %s",
     async (name) => {
@@ -1353,6 +1475,15 @@ describe("security scan file inventory", () => {
     [".gitignore", "!/README.md"],
     [".ignore", "!/README.md"],
     [".rgignore", "!/README.md"],
+    [".gitignore", "!**/unrelated/public.ts"],
+    [".ignore", "!**/unrelated/public.ts"],
+    [".rgignore", "!**/unrelated/public.ts"],
+    [".gitignore", "!ignored/"],
+    [".ignore", "!ignored/"],
+    [".rgignore", "!ignored/"],
+    [".gitignore", "!/ignored/"],
+    [".ignore", "!/ignored/"],
+    [".rgignore", "!/ignored/"],
     [".gitignore", "!/ignored\\ "],
     [".ignore", "!/ignored\\ "],
     [".rgignore", "!/ignored\\ "],
@@ -1612,6 +1743,10 @@ describe("security scan file inventory", () => {
     "!{ignored/public.ts,other/private.ts}",
     "!{other/private.ts,ignored/public.ts}",
     "!{other/{private.ts,details.ts},ignored/public.ts}",
+    "!**/public.ts",
+    "!**/**/public.ts",
+    "!**/{public.ts,other/private.ts}",
+    "!**/{other/private.ts,public.ts}",
     "!public.ts",
     "\ufeff!ignored/public.ts",
     "\ufeff\ufeff!ignored/public.ts",
@@ -1648,6 +1783,10 @@ describe("security scan file inventory", () => {
   test.each([
     "!{ignored/public.ts,other/private.ts}",
     "!{other/{private.ts,details.ts},ignored/public.ts}",
+    "!**/public.ts",
+    "!**/**/public.ts",
+    "!**/{public.ts,other/private.ts}",
+    "!**/{other/private.ts,public.ts}",
     "!public.ts",
     "!public.*",
     "!ignored[^x]public.ts",
@@ -1677,6 +1816,104 @@ describe("security scan file inventory", () => {
 
     expect(await inventory(checkout, "ignored")).toEqual([]);
   });
+
+  test.each(["present", "missing"])(
+    "keeps private files hidden when a directory allowlist reopens a %s descendant",
+    async (state) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const nested = join(checkout, "ignored");
+      const descendant = join(nested, "unrelated");
+      await mkdir(descendant, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(
+          join(checkout, ".ignore"),
+          "ignored/**\n!ignored/unrelated/\n!**/unrelated/public.ts\n",
+        ),
+        writeFile(join(nested, ".ignore"), "*\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+        ...(state === "present"
+          ? [writeFile(join(descendant, "public.ts"), "tracked\n")]
+          : []),
+      ]);
+      execFileSync(
+        "git",
+        [
+          "add",
+          "--force",
+          "private.ts",
+          ...(state === "present" ? ["unrelated/public.ts"] : []),
+        ],
+        { cwd: nested },
+      );
+
+      expect(await inventory(checkout, "ignored")).toEqual(
+        state === "present" ? ["ignored/unrelated/public.ts"] : [],
+      );
+    },
+  );
+
+  test("does not treat the selected directory as an allowlisted descendant", async () => {
+    if (Bun.which("rg") === null) return;
+
+    const checkout = await repository(false);
+    const nested = join(checkout, "ignored");
+    await mkdir(nested);
+    execFileSync("git", ["init", "-q"], { cwd: nested });
+    await Promise.all([
+      writeFile(
+        join(checkout, ".ignore"),
+        "ignored/**\n!ignored/\n!**/unrelated/public.ts\nignored/private.ts\n",
+      ),
+      writeFile(join(nested, ".ignore"), "*\n"),
+      writeFile(join(nested, "visible.ts"), "visible\n"),
+      writeFile(join(nested, "private.ts"), "private\n"),
+    ]);
+    execFileSync("git", ["add", "--force", "visible.ts", "private.ts"], {
+      cwd: nested,
+    });
+
+    expect(await inventory(checkout, "ignored")).toEqual([
+      "ignored/visible.ts",
+    ]);
+  });
+
+  test.each(["present", "missing"])(
+    "keeps a revoked %s file allowlist from exposing excluded tracked files",
+    async (state) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      const nested = join(checkout, "ignored");
+      await mkdir(nested);
+      execFileSync("git", ["init", "-q"], { cwd: nested });
+      await Promise.all([
+        writeFile(
+          join(checkout, ".ignore"),
+          "ignored/**\n!ignored/public.ts\nignored/public.ts\n",
+        ),
+        writeFile(join(nested, ".ignore"), "*\n"),
+        writeFile(join(nested, "private.ts"), "private\n"),
+        ...(state === "present"
+          ? [writeFile(join(nested, "public.ts"), "tracked\n")]
+          : []),
+      ]);
+      execFileSync(
+        "git",
+        [
+          "add",
+          "--force",
+          "private.ts",
+          ...(state === "present" ? ["public.ts"] : []),
+        ],
+        { cwd: nested },
+      );
+
+      expect(await inventory(checkout, "ignored")).toEqual([]);
+    },
+  );
 
   test.each([
     [".ignore", "ignored/", "ignored/"],
@@ -2411,6 +2648,181 @@ describe("security scan file inventory", () => {
           "--scope: Git metadata paths are not supported",
         );
       }
+    },
+  );
+
+  test.each([
+    "config",
+    "HEAD",
+    "index",
+    "packed-refs",
+    "info/exclude",
+    "refs/heads",
+    "refs/tags",
+    "refs/remotes",
+    "refs/notes",
+    "refs/custom",
+    "refs/custom trailing data",
+    "refs/replace bare",
+    "refs/bisect bare",
+    "refs/worktree bare",
+    "refs/rewritten bare",
+    "refs/bisect",
+    "refs/worktree",
+    "refs/rewritten",
+  ])(
+    "excludes force-tracked aliases of active Git %s metadata",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const alias = join(checkout, "metadata-copy.txt");
+      await Promise.all([
+        writeFile(join(checkout, ".gitignore"), "metadata-copy.txt\n"),
+        writeFile(join(checkout, "visible.ts"), "visible\n"),
+      ]);
+      execFileSync("git", ["add", "visible.ts"], { cwd: checkout });
+      commit(checkout);
+      let relative: string = kind;
+      if (kind === "refs/heads") {
+        relative = execFileSync("git", ["symbolic-ref", "HEAD"], {
+          cwd: checkout,
+          encoding: "utf8",
+        }).trim();
+      } else if (kind.startsWith("refs/")) {
+        relative = kind.endsWith(" bare")
+          ? kind.slice(0, -" bare".length)
+          : `${kind === "refs/custom trailing data" ? "refs/custom" : kind}/inventory`;
+        execFileSync("git", ["update-ref", relative, "HEAD"], {
+          cwd: checkout,
+        });
+        if (kind === "refs/custom trailing data") {
+          const object = execFileSync("git", ["rev-parse", "HEAD"], {
+            cwd: checkout,
+            encoding: "utf8",
+          }).trim();
+          await writeFile(
+            join(checkout, ".git", relative),
+            `${object} arbitrary trailer\n`,
+          );
+        }
+      } else if (kind === "packed-refs") {
+        execFileSync("git", ["pack-refs", "--all"], { cwd: checkout });
+      }
+      await writeFile(alias, "placeholder\n");
+      execFileSync("git", ["add", "--force", "metadata-copy.txt"], {
+        cwd: checkout,
+      });
+      await rm(alias);
+      await hardlink(join(checkout, ".git", relative), alias);
+
+      const rows = await inventory(checkout);
+      expect(rows).toContain("./visible.ts");
+      expect(rows).not.toContain("./metadata-copy.txt");
+      await expect(inventory(checkout, "metadata-copy.txt")).rejects.toThrow(
+        "--scope: Git metadata paths are not supported",
+      );
+    },
+  );
+
+  test.each(["shared", "private"])(
+    "excludes aliases of %s linked-worktree references",
+    async (ownership) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+      execFileSync("git", ["add", "visible.ts"], { cwd: checkout });
+      commit(checkout);
+      const linked = join(dirname(checkout), "linked-worktree");
+      execFileSync("git", ["worktree", "add", "--detach", linked, "HEAD"], {
+        cwd: checkout,
+        stdio: "ignore",
+      });
+
+      const reference =
+        ownership === "shared" ? "refs/bisect" : "refs/bisect/inventory";
+      execFileSync("git", ["update-ref", reference, "HEAD"], { cwd: linked });
+      const gitdir =
+        ownership === "shared"
+          ? join(checkout, ".git")
+          : (await readFile(join(linked, ".git"), "utf8"))
+              .replace(/^gitdir: /, "")
+              .trim();
+      const alias = join(linked, "metadata-copy.txt");
+      await Promise.all([
+        writeFile(join(linked, ".gitignore"), "metadata-copy.txt\n"),
+        writeFile(alias, "placeholder\n"),
+      ]);
+      execFileSync("git", ["add", "--force", "metadata-copy.txt"], {
+        cwd: linked,
+      });
+      await rm(alias);
+      await hardlink(join(gitdir, reference), alias);
+
+      const rows = await inventory(linked);
+      expect(rows).toContain("./visible.ts");
+      expect(rows).not.toContain("./metadata-copy.txt");
+      await expect(inventory(linked, "metadata-copy.txt")).rejects.toThrow(
+        "--scope: Git metadata paths are not supported",
+      );
+    },
+  );
+
+  test.each([
+    ["ordinary source", 'eval(request.args["payload"])\n'],
+    [
+      "a forged symbolic reference",
+      "ref: refs/heads/main if False else None\ndef vulnerable(command):\n    return __import__('os').system(command)\n",
+    ],
+  ])(
+    "does not hide %s hardlinked to an invalid Git reference",
+    async (_, contents) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const source = join(checkout, "vulnerable.py");
+      const reference = join(checkout, ".git", "refs", "custom", "source");
+      await Promise.all([
+        writeFile(source, contents),
+        mkdir(dirname(reference), { recursive: true }),
+      ]);
+      execFileSync("git", ["add", "vulnerable.py"], { cwd: checkout });
+      await hardlink(source, reference);
+
+      expect(await inventory(checkout)).toContain("./vulnerable.py");
+      expect(await inventory(checkout, "vulnerable.py")).toEqual([
+        "vulnerable.py",
+      ]);
+    },
+  );
+
+  test.each(["sha1", "sha256"])(
+    "does not hide source with an invalid %s reference hash width",
+    async (format) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository(false);
+      execFileSync("git", ["init", "-q", `--object-format=${format}`], {
+        cwd: checkout,
+      });
+      const source = join(checkout, "vulnerable.py");
+      const reference = join(checkout, ".git", "refs", "custom", "source");
+      const incorrectWidth = format === "sha1" ? 64 : 40;
+      await Promise.all([
+        writeFile(
+          source,
+          `${"1".repeat(incorrectWidth)}\ndef vulnerable(command):\n    return __import__('os').system(command)\n`,
+        ),
+        mkdir(dirname(reference), { recursive: true }),
+      ]);
+      execFileSync("git", ["add", "vulnerable.py"], { cwd: checkout });
+      await hardlink(source, reference);
+
+      expect(await inventory(checkout)).toContain("./vulnerable.py");
+      expect(await inventory(checkout, "vulnerable.py")).toEqual([
+        "vulnerable.py",
+      ]);
     },
   );
 
@@ -4237,6 +4649,28 @@ describe("security scan file inventory", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "ignores case-aliased inactive Git replacement metadata",
+    async () => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const replacement = join(checkout, ".git", "refs", "REPLACE");
+      const canonical = join(checkout, ".git", "refs", "replace");
+      const external = join(dirname(checkout), "external-replacement");
+      await writeFile(external, `${"0".repeat(40)}\n`);
+      await symlink(external, replacement);
+      const equivalent = await realpath(canonical).then(
+        async (resolved) => resolved === (await realpath(replacement)),
+        () => false,
+      );
+      if (!equivalent) return;
+      await writeFile(join(checkout, "visible.ts"), "visible\n");
+
+      expect(await inventory(checkout)).toContain("./visible.ts");
+    },
+  );
+
   test("inventories linked worktrees with regular Git metadata", async () => {
     if (Bun.which("rg") === null) return;
 
@@ -4629,7 +5063,10 @@ describe("security scan file inventory", () => {
           GIT_TRACE: trace,
         }),
       ).rejects.toThrow("symbolic ignore files are not supported");
-      await expect(readFile(trace, "utf8")).rejects.toThrow();
+      const commands = await readFile(trace, "utf8");
+      expect(commands).toContain("git config --global");
+      expect(commands).not.toContain("rev-parse");
+      expect(commands).not.toContain(parent);
     },
   );
 });
