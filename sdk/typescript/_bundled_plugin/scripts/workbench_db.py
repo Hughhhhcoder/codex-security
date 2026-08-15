@@ -156,14 +156,14 @@ def state_dir() -> Path:
 
 
 def database_path() -> Path:
-    return state_dir() / "workbench.sqlite3"
+    return filesystem_path(state_dir() / "workbench.sqlite3")
 
 
 @contextmanager
 def scan_completion_lock(scan_id: str) -> Any:
-    lock_dir = state_dir() / "completion-locks"
+    lock_dir = filesystem_path(state_dir() / "completion-locks")
     lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
+    lock_path = filesystem_path(lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock")
     descriptor = os.open(
         lock_path,
         os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0),
@@ -3750,7 +3750,7 @@ def main() -> None:
         elif args.command == "export-findings":
             result = export_findings(connection, args)
         elif args.command == "database-info":
-            result = {"databasePath": str(database_path())}
+            result = {"databasePath": str(portable_path(database_path()))}
         else:
             raise SystemExit(f"Unknown command: {args.command}")
     print(json.dumps(result, allow_nan=False, sort_keys=True))

@@ -25,10 +25,13 @@ import importlib
 import ntpath
 import os
 import secrets
+import sys
 from collections.abc import Iterator
 from ctypes import wintypes
 from pathlib import Path, PurePosixPath
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from windows_paths import filesystem_path
 
 _msvcrt = importlib.import_module("msvcrt") if os.name == "nt" else None

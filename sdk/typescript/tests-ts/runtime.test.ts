@@ -370,6 +370,17 @@ describe("plugin runtime preparation", () => {
 
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();
+    const isolatedWindowsHelper = spawnSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "windows_scan_local_files.py"),
+        "--help",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(isolatedWindowsHelper.status, isolatedWindowsHelper.stderr).toBe(0);
     const output = join(root, "inventory.txt");
     const repeatedOutput = join(root, "inventory-repeated.txt");
     const generatorArguments = (
@@ -561,6 +572,26 @@ describe("plugin runtime preparation", () => {
           .split("\n")
           .map((line) => JSON.parse(line)),
       ).toEqual([{ path: "SECURITY.md" }, { path: "app.ts" }]);
+
+      const emojiCount = Math.ceil(
+        (248 - root.length - "unicode-".length - 1) / 2,
+      );
+      const unicodeRepository = join(
+        root,
+        `unicode-${"😀".repeat(emojiCount)}`,
+      );
+      expect(unicodeRepository.length).toBeGreaterThanOrEqual(248);
+      expect(Array.from(unicodeRepository).length).toBeLessThan(248);
+      await mkdir(unicodeRepository);
+      await writeFile(join(unicodeRepository, "app.ts"), "export {};\n");
+      const unicodeOutput = join(root, "inventory-unicode-long-path.txt");
+      const unicodeInventory = spawnSync(
+        python!,
+        generatorArguments(unicodeOutput, unicodeRepository),
+        inventoryOptions,
+      );
+      expect(unicodeInventory.status, unicodeInventory.stderr).toBe(0);
+      expect(await readFile(unicodeOutput, "utf8")).toBe("./app.ts\n");
 
       const policy = spawnSync(
         python!,
@@ -762,6 +793,21 @@ describe("plugin runtime preparation", () => {
         join(longScanDirectory, "scan-manifest.json"),
         join(nearLimitScanDirectory, "scan-manifest.json"),
       );
+      const nearLimitDatabase = spawnSync(
+        python!,
+        ["-I", "-B", workbench, "database-info"],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: nearLimitScanDirectory,
+          },
+        },
+      );
+      expect(nearLimitDatabase.status, nearLimitDatabase.stderr).toBe(0);
+      expect(JSON.parse(nearLimitDatabase.stdout)).toEqual({
+        databasePath: join(nearLimitScanDirectory, "workbench.sqlite3"),
+      });
       const artifactProbe = spawnSync(
         python!,
         [
@@ -891,6 +937,68 @@ describe("plugin runtime preparation", () => {
       expect(started.status, started.stderr).toBe(0);
       expect(JSON.parse(started.stdout)).toMatchObject({
         scan: { targetPath: longRepository },
+        workspace: { targetPath: longRepository },
+      });
+
+      const legacyTarget = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "from windows_paths import extended_path, filesystem_path",
+            "database = filesystem_path(Path(sys.argv[2]) / 'workbench.sqlite3')",
+            "connection = sqlite3.connect(database)",
+            "target_path = sys.argv[3]",
+            "target_id = connection.execute('SELECT id FROM security_targets WHERE current_path = ?', (target_path,)).fetchone()[0]",
+            "legacy_path = str(extended_path(Path(target_path)))",
+            "connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (legacy_path, target_id))",
+            "for table in ('workspaces', 'scans'):",
+            "    connection.execute(f'UPDATE {table} SET target_path = ? WHERE target_id = ?', (legacy_path, target_id))",
+            "connection.commit()",
+            "print(target_id)",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          stateDirectory,
+          longRepository,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(legacyTarget.status, legacyTarget.stderr).toBe(0);
+      const migratedTarget = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          workbench,
+          "start-headless-standard-scan",
+          "--thread-id",
+          "migrated-long-path-test",
+          "--target-path",
+          longRepository,
+          "--scope",
+          ".",
+          "--scan-root",
+          scanRoot,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(migratedTarget.status, migratedTarget.stderr).toBe(0);
+      expect(JSON.parse(migratedTarget.stdout)).toMatchObject({
+        scan: {
+          targetId: legacyTarget.stdout.trim(),
+          targetPath: longRepository,
+        },
         workspace: { targetPath: longRepository },
       });
 

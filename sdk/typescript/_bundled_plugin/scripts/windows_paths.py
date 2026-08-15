@@ -26,7 +26,8 @@ def filesystem_path(path: Path) -> Path:
     if os.name != "nt":
         return path
     value = os.path.abspath(path)
-    if value.startswith("\\\\?\\") or len(value) >= WINDOWS_DIRECTORY_PATH_LIMIT:
+    path_length = len(value.encode("utf-16-le")) // 2
+    if value.startswith("\\\\?\\") or path_length >= WINDOWS_DIRECTORY_PATH_LIMIT:
         return extended_path(Path(value))
     return Path(value)
 
