@@ -146,6 +146,22 @@ describe("bundled workbench canonical paths", () => {
       join(repository, "linked"),
       process.platform === "win32" ? "junction" : "dir",
     );
+    await mkdir(join(repository, "nested-checkout"));
+    await mkdir(join(repository, "internal-source"));
+    await writeFile(
+      join(repository, "internal-source", "public.py"),
+      "public = True\n",
+    );
+    await symlink(
+      outside,
+      join(repository, "nested-checkout", "linked"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await symlink(
+      join(repository, "internal-source"),
+      join(repository, "nested-checkout", "safe-linked"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
 
     const result = runPythonProbe(
       [
@@ -217,12 +233,12 @@ describe("bundled workbench canonical paths", () => {
         "    snapshot_rejected = False",
         "unsafe_progress_count = workbench.directory_snapshot_regular_file_count(repository)",
         "nested_repository = repository / 'nested-checkout'",
-        "nested_repository.mkdir()",
-        "(nested_repository / 'linked').symlink_to(candidate.parent.resolve(), target_is_directory=True)",
         "workbench.git_worktree_context = lambda target: (target, '.')",
         "workbench.git_output = lambda target, *_: str(target)",
         "workbench.git_bytes = lambda target, *_: b'nested-checkout\\0' if target == repository else b'linked/private.py\\0'",
         "nested_unsafe_progress_count = workbench.directory_snapshot_regular_file_count(repository)",
+        "workbench.git_bytes = lambda target, *_: b'nested-checkout\\0' if target == repository else b'safe-linked/public.py\\0'",
+        "nested_safe_paths = [path.relative_to(repository).as_posix() for path in workbench.git_directory_snapshot_paths(repository)]",
         "workbench.git_worktree_context = lambda _: (repository, '.')",
         "workbench.git_output = lambda *_: str(repository)",
         "workbench.git_bytes = lambda *_: b'linked/missing.py\\0'",
@@ -274,7 +290,7 @@ describe("bundled workbench canonical paths", () => {
         "    direct_link_rejected = True",
         "else:",
         "    direct_link_rejected = False",
-        "print(json.dumps({'inventories': inventories, 'rankings': rankings, 'externalReads': reads, 'snapshotRejected': snapshot_rejected, 'unsafeProgressCount': unsafe_progress_count, 'nestedUnsafeProgressCount': nested_unsafe_progress_count, 'missingSkipped': missing_skipped, 'selectedPaths': selected_paths, 'parentResolutions': len(parent_resolutions), 'unicodeAccepted': unicode_accepted, 'caseAliasAccepted': case_alias_accepted, 'caseAliasChangesAccepted': case_alias_changes_accepted, 'directLinkRejected': direct_link_rejected}))",
+        "print(json.dumps({'inventories': inventories, 'rankings': rankings, 'externalReads': reads, 'snapshotRejected': snapshot_rejected, 'unsafeProgressCount': unsafe_progress_count, 'nestedUnsafeProgressCount': nested_unsafe_progress_count, 'nestedSafePaths': nested_safe_paths, 'missingSkipped': missing_skipped, 'selectedPaths': selected_paths, 'parentResolutions': len(parent_resolutions), 'unicodeAccepted': unicode_accepted, 'caseAliasAccepted': case_alias_accepted, 'caseAliasChangesAccepted': case_alias_changes_accepted, 'directLinkRejected': direct_link_rejected}))",
       ].join("\n"),
       repository,
       join(root, "inventory.txt"),
@@ -297,6 +313,10 @@ describe("bundled workbench canonical paths", () => {
       snapshotRejected: true,
       unsafeProgressCount: 0,
       nestedUnsafeProgressCount: 0,
+      nestedSafePaths: [
+        "nested-checkout",
+        "nested-checkout/safe-linked/public.py",
+      ],
       missingSkipped: true,
       selectedPaths: [".", "public.py"],
       parentResolutions: 1,

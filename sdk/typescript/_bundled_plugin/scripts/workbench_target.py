@@ -342,7 +342,7 @@ def clean_worktree_content_digest() -> str:
 
 
 def git_directory_snapshot_paths(
-    target: Path, *, skip_unsafe_paths: bool = False
+    target: Path, *, skip_unsafe_paths: bool = False, _selected_target: Path | None = None
 ) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
@@ -361,8 +361,9 @@ def git_directory_snapshot_paths(
     if listed is None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
     paths: list[Path] = []
-    canonical_target = target.resolve()
-    resolved_parents: dict[Path, Path] = {target: canonical_target}
+    resolved_target = target.resolve()
+    canonical_target = _selected_target.resolve() if _selected_target is not None else resolved_target
+    resolved_parents: dict[Path, Path] = {target: resolved_target}
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
         path = repository / os.fsdecode(raw_path)
         try:
@@ -398,7 +399,9 @@ def git_directory_snapshot_paths(
             nested_repository_root is not None
             and Path(nested_repository_root).resolve() == path.resolve()
         ):
-            nested_paths = git_directory_snapshot_paths(path, skip_unsafe_paths=skip_unsafe_paths)
+            nested_paths = git_directory_snapshot_paths(
+                path, skip_unsafe_paths=skip_unsafe_paths, _selected_target=canonical_target
+            )
             if nested_paths is not None:
                 paths.extend(nested_paths)
                 continue
