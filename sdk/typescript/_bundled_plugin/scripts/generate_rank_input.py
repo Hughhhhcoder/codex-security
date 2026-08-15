@@ -337,6 +337,7 @@ def resolve_scope(
 
 
 def write_jsonl(output: Path, rows: list[JsonRow]) -> None:
+    output = filesystem_path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -367,11 +368,12 @@ def load_scopes_file(scopes_file: Path) -> list[str]:
 
 
 def load_jsonl(path: Path, label: str, validator: RowValidator) -> list[JsonRow]:
-    if not path.exists():
+    input_path = filesystem_path(path)
+    if not input_path.exists():
         raise SystemExit(f"{label} missing: {path}")
 
     rows: list[JsonRow] = []
-    with path.open(encoding="utf-8") as handle:
+    with input_path.open(encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             if not raw_line.strip():
                 raise SystemExit(f"{path}:{line_number}: blank JSONL rows are not allowed")

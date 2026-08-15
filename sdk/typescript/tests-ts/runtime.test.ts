@@ -613,6 +613,34 @@ describe("plugin runtime preparation", () => {
         },
       );
 
+      const longRankInput = join(longScanDirectory, "rank_input.jsonl");
+      const longReviewInput = join(
+        longScanDirectory,
+        "deep_review_input.jsonl",
+      );
+      await writeFile(
+        longRankInput,
+        `${JSON.stringify({ path: "app.ts", area: "diff", preview: "export {};" })}\n`,
+      );
+      const copiedReview = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "copy-deep-review-input",
+          "--rank-input",
+          longRankInput,
+          "--out",
+          longReviewInput,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(copiedReview.status, copiedReview.stderr).toBe(0);
+      expect(
+        JSON.parse((await readFile(longReviewInput, "utf8")).trim()),
+      ).toEqual({ path: "app.ts", area: "diff" });
+
       const candidates = join(root, "long-path-candidates.jsonl");
       const normalized = join(root, "long-path-normalized.jsonl");
       await writeFile(
@@ -682,6 +710,31 @@ describe("plugin runtime preparation", () => {
       });
       const scanRoot = join(root, "long-path-scans");
       const workbench = join(PLUGIN_ROOT, "scripts", "workbench_db.py");
+      const artifactProbe = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "module = runpy.run_path(sys.argv[1])",
+            "scan_dir = Path(sys.argv[2])",
+            "names = ('report.md', 'findings.json', 'exports/results.sarif')",
+            "print(json.dumps({name: module['available_artifact_path'](scan_dir, scan_dir / name) is not None for name in names}))",
+          ].join("\n"),
+          workbench,
+          longScanDirectory,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(artifactProbe.status, artifactProbe.stderr).toBe(0);
+      expect(JSON.parse(artifactProbe.stdout)).toEqual({
+        "report.md": true,
+        "findings.json": true,
+        "exports/results.sarif": true,
+      });
       const mixedStarted = spawnSync(
         python!,
         [
@@ -780,6 +833,27 @@ describe("plugin runtime preparation", () => {
       expect(JSON.parse(started.stdout)).toMatchObject({
         scan: { targetPath: longRepository },
         workspace: { targetPath: longRepository },
+      });
+
+      const repositories = spawnSync(
+        python!,
+        ["-I", "-B", workbench, "list-repositories"],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+          },
+        },
+      );
+      expect(repositories.status, repositories.stderr).toBe(0);
+      expect(JSON.parse(repositories.stdout)).toMatchObject({
+        repositories: expect.arrayContaining([
+          expect.objectContaining({
+            checkoutAvailable: true,
+            targetPath: longRepository,
+          }),
+        ]),
       });
 
       const longDeepScanRoot = join(

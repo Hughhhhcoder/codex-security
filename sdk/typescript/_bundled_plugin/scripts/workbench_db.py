@@ -3491,7 +3491,10 @@ def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
         resolved.relative_to(resolved_scan_dir)
     except (FileNotFoundError, RuntimeError, SystemExit, ValueError):
         return None
-    if os.path.normcase(resolved) != os.path.normcase(candidate) or not candidate.is_file():
+    if (
+        os.path.normcase(portable_path(resolved)) != os.path.normcase(portable_path(candidate))
+        or not resolved.is_file()
+    ):
         return None
     return resolved
 
