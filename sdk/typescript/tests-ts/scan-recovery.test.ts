@@ -787,7 +787,13 @@ describe("malformed scan artifact recovery", () => {
         selected.baseRevision,
         selected.headRevision,
       ],
-      { encoding: "utf8" },
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
     );
 
     expect(probe.status, probe.stderr).toBe(0);
@@ -795,6 +801,56 @@ describe("malformed scan artifact recovery", () => {
       streamed: selected.contentDigest,
       buffered: selected.contentDigest,
       bufferedDiffCalls: [],
+    });
+  });
+
+  test("keeps committed diff spooling in the approved workbench state directory", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    const probe = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "repository, base, head = Path(sys.argv[2]), sys.argv[3], sys.argv[4]",
+          "approved = Path(sys.argv[5]).resolve()",
+          "directories = []",
+          "original = target.tempfile.TemporaryFile",
+          "def restricted_temporary(*args, **options):",
+          "    directory = options.get('dir')",
+          "    if directory is None or Path(directory).resolve() != approved:",
+          "        raise PermissionError('temporary files outside the workbench state directory are denied')",
+          "    directories.append(str(Path(directory).resolve()))",
+          "    return original(*args, **options)",
+          "target.tempfile.TemporaryFile = restricted_temporary",
+          "digest = target.committed_diff_content_digest(repository, base, head)",
+          "print(json.dumps({'digest': digest, 'spoolDirectories': directories}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        selected.baseRevision,
+        selected.headRevision,
+        fixture.stateDir,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(JSON.parse(probe.stdout)).toEqual({
+      digest: selected.contentDigest,
+      spoolDirectories: [fixture.stateDir],
     });
   });
 

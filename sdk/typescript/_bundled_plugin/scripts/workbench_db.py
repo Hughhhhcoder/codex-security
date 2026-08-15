@@ -76,6 +76,7 @@ from workbench_constants import (
     FINDINGS_RESULT_LIMIT,
     PATCH_PREVIEW_BYTES,
     SQLITE_RETRY_ATTEMPTS,
+    workbench_state_directory,
 )
 from workbench_feedback import get_scan_feedback
 from workbench_remediation import remediation_claim_is_active
@@ -149,11 +150,7 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
 
 
 def state_dir() -> Path:
-    state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
-    if state_dir:
-        return Path(state_dir).expanduser().resolve()
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return (codex_home / "state" / "plugins" / "codex-security").resolve()
+    return workbench_state_directory()
 
 
 def database_path() -> Path:

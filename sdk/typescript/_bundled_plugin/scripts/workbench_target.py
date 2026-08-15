@@ -17,7 +17,12 @@ from typing import IO, Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import stored_filesystem_identity_matches
-from workbench_constants import EMPTY_GIT_TREE, EMPTY_GIT_TREES, GIT_REPOSITORY_ENVIRONMENT
+from workbench_constants import (
+    EMPTY_GIT_TREE,
+    EMPTY_GIT_TREES,
+    GIT_REPOSITORY_ENVIRONMENT,
+    workbench_state_directory,
+)
 
 
 def git_output(
@@ -50,7 +55,9 @@ def git_digest_field(
     work_tree: Path | None = None,
 ) -> bool:
     """Hash length-framed Git output without buffering the entire output."""
-    with tempfile.TemporaryFile() as spool:
+    state_directory = workbench_state_directory()
+    state_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryFile(dir=state_directory) as spool:
         completed = git_command(
             target,
             *args,
