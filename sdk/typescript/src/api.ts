@@ -649,15 +649,20 @@ export class CodexSecurity {
         protectedRoot,
         signal,
       );
-      const git = await resolveTrustedExecutable(
+      const gitEnvironment = await trustedExecutableEnvironment(
         "git",
         pluginEnvironment,
+        protectedGitRoot,
+      );
+      const git = await resolveTrustedExecutable(
+        "git",
+        gitEnvironment,
         protectedGitRoot,
       );
       const trustedPluginEnvironment = {
         ...(await trustedExecutableEnvironment(
           "rg",
-          git?.environment ?? pluginEnvironment,
+          git?.environment ?? gitEnvironment,
           protectedGitRoot,
         )),
         CODEX_SECURITY_GIT: git?.executable ?? "",

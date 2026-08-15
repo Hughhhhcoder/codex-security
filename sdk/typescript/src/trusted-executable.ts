@@ -98,12 +98,14 @@ async function inspectTrustedExecutable(
     }
   }
   const sanitizedEnvironment = { ...environment };
-  for (const name of Object.keys(sanitizedEnvironment)) {
-    if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
+  if (path !== undefined) {
+    for (const name of Object.keys(sanitizedEnvironment)) {
+      if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
+    }
+    sanitizedEnvironment["PATH"] = entries
+      .filter((entry) => !unsafeEntries.has(entry))
+      .join(delimiter);
   }
-  sanitizedEnvironment["PATH"] = entries
-    .filter((entry) => !unsafeEntries.has(entry))
-    .join(delimiter);
   return { executable, environment: sanitizedEnvironment };
 }
 

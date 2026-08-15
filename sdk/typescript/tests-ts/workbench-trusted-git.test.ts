@@ -15,6 +15,7 @@ import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CodexSecurity } from "../src/api.js";
 import { runWorkbench } from "../src/runtime.js";
+import { trustedExecutableEnvironment } from "../src/trusted-executable.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { preparedRuntime } from "./support/api-events.js";
 
@@ -163,6 +164,30 @@ describe("bundled workbench trusted Git", () => {
     expect(JSON.parse(result.stdout)).toEqual({ status: 127, output: "" });
   });
 
+  test("preserves absent PATH while clearing explicitly unsafe PATH", async () => {
+    const target = fixture();
+    const missing = await trustedExecutableEnvironment(
+      "git",
+      { HOME: target.root },
+      target.repository,
+    );
+    expect(missing).not.toHaveProperty("PATH");
+
+    const undefinedPath = await trustedExecutableEnvironment(
+      "git",
+      { HOME: target.root, PATH: undefined },
+      target.repository,
+    );
+    expect(undefinedPath["PATH"]).toBeUndefined();
+
+    const unsafe = await trustedExecutableEnvironment(
+      "git",
+      { HOME: target.root, PATH: dirname(target.shim) },
+      target.repository,
+    );
+    expect(unsafe["PATH"]).toBe("");
+  });
+
   test("rejects explicitly selected repository-controlled Git", () => {
     const target = fixture();
     const result = probe(target, statusProbe, {
@@ -287,7 +312,7 @@ describe("bundled workbench trusted Git", () => {
   );
 
   testPosix(
-    "keeps optional-Git scans and real inventory safe from repository ripgrep",
+    "keeps optional-Git scans safe from repository Git and ripgrep aliases",
     async () => {
       const target = fixture();
       writeFileSync(join(target.repository, "source.py"), "value = 1\n");
@@ -296,12 +321,19 @@ describe("bundled workbench trusted Git", () => {
       writeFileSync(repositoryRipgrep, readFileSync(target.shim), {
         mode: 0o700,
       });
+      const gitAliasDirectory = join(target.root, "git-alias-bin");
       const aliasDirectory = join(target.root, "alias-bin");
       const safeDirectory = join(target.root, "trusted-bin");
       const codexHome = join(target.root, "codex-home");
-      for (const directory of [aliasDirectory, safeDirectory, codexHome]) {
+      for (const directory of [
+        gitAliasDirectory,
+        aliasDirectory,
+        safeDirectory,
+        codexHome,
+      ]) {
         mkdirSync(directory);
       }
+      symlinkSync(target.shim, join(gitAliasDirectory, "git"));
       symlinkSync(repositoryRipgrep, join(aliasDirectory, "rg"));
       writeFileSync(
         join(safeDirectory, "rg"),
@@ -311,7 +343,12 @@ describe("bundled workbench trusted Git", () => {
       const environment = {
         ...target.environment,
         CODEX_SECURITY_STATE_DIR: join(target.root, "state"),
-        PATH: [unsafeDirectory, aliasDirectory, safeDirectory].join(delimiter),
+        PATH: [
+          unsafeDirectory,
+          gitAliasDirectory,
+          aliasDirectory,
+          safeDirectory,
+        ].join(delimiter),
       };
       const observed: Array<Record<string, string | undefined>> = [];
       const client = new TestClient(
@@ -345,6 +382,11 @@ describe("bundled workbench trusted Git", () => {
       }
 
       expect(observed.length).toBeGreaterThan(1);
+      const unexpectedGit = spawnSync("git", ["--version"], {
+        encoding: "utf8",
+        env: observed[0],
+      });
+      expect(unexpectedGit.error).toMatchObject({ code: "ENOENT" });
       for (const candidate of observed) {
         expect(candidate["CODEX_SECURITY_GIT"]).toBe("");
         expect(candidate["PATH"]?.split(delimiter)).toEqual([safeDirectory]);
