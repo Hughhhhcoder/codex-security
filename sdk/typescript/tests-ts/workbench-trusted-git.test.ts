@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -148,6 +149,51 @@ describe("bundled workbench trusted Git", () => {
         realpathSync(target.git),
       );
     }
+
+    const uppercaseRepository = join(target.root, "REPOSITORY");
+    if (existsSync(uppercaseRepository)) {
+      const repositoryIdentity = statSync(target.repository);
+      const uppercaseIdentity = statSync(uppercaseRepository);
+      if (
+        repositoryIdentity.dev === uppercaseIdentity.dev &&
+        repositoryIdentity.ino === uppercaseIdentity.ino
+      ) {
+        const unsafeDirectory = join(
+          uppercaseRepository,
+          "node_modules",
+          ".bin",
+        );
+        const externalAlias = join(target.root, "casefold-alias-bin");
+        mkdirSync(externalAlias);
+        symlinkSync(join(unsafeDirectory, "git"), join(externalAlias, "git"));
+        const result = probe(
+          target,
+          [
+            "import os, workbench_target",
+            "environment = dict(os.environ)",
+            "selected = workbench_target._trusted_git_executable(Path(sys.argv[2]), environment)",
+            "result = git_command(Path(sys.argv[2]), 'config', '--get', 'codexsecurity.synthetic', text=True)",
+            "print(json.dumps({'configured': 'CODEX_SECURITY_GIT' in os.environ, 'git': result.args[0], 'selected': selected, 'path': environment['PATH'], 'status': result.returncode, 'value': result.stdout.strip()}))",
+          ],
+          {
+            environment: {
+              PATH: [unsafeDirectory, externalAlias, dirname(target.git)].join(
+                delimiter,
+              ),
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({
+          configured: false,
+          git: target.git,
+          selected: target.git,
+          path: dirname(target.git),
+          status: 0,
+          value: "operator-config-preserved",
+        });
+      }
+    }
   });
 
   test("keeps Git optional when no trusted executable exists", () => {
@@ -231,15 +277,60 @@ describe("bundled workbench trusted Git", () => {
     const linkedGit = join(target.repository, "safe-looking-git");
     const repositoryAlias = join(target.root, "repository-alias");
     const externalAlias = join(target.root, "external-git");
+    const repositoryOwnedLink = join(target.repository, "trusted-link");
+    const outside = join(target.root, "outside");
+    mkdirSync(outside);
     symlinkSync(target.git, linkedGit);
     symlinkSync(target.repository, repositoryAlias, "junction");
     symlinkSync(target.shim, externalAlias);
+    symlinkSync(dirname(target.git), repositoryOwnedLink, "junction");
+    const rawRepositoryAlias = join(outside, "repo-alias");
+    symlinkSync(target.repository, rawRepositoryAlias, "junction");
+    for (const directory of [target.root, outside]) {
+      symlinkSync(
+        dirname(target.git),
+        join(directory, "escaped-bin"),
+        "junction",
+      );
+    }
 
     const aliases = [
       linkedGit,
       join(repositoryAlias, "safe-looking-git"),
       externalAlias,
+      join(repositoryOwnedLink, "git"),
+      join(repositoryAlias, "trusted-link", "git"),
+      `${outside}/../repository/trusted-link/git`,
+      `${rawRepositoryAlias}/../escaped-bin/git`,
     ];
+    const mixedCaseAlias = join(
+      target.root,
+      "REPOSITORY",
+      "trusted-link",
+      "git",
+    );
+    if (existsSync(mixedCaseAlias)) {
+      const repositoryIdentity = statSync(target.repository);
+      const aliasIdentity = statSync(join(target.root, "REPOSITORY"));
+      if (
+        repositoryIdentity.dev === aliasIdentity.dev &&
+        repositoryIdentity.ino === aliasIdentity.ino
+      ) {
+        aliases.push(mixedCaseAlias);
+        const mixedCaseExternal = join(outside, "case-git");
+        symlinkSync(
+          join(target.root, "REPOSITORY", "node_modules", ".bin", "git"),
+          mixedCaseExternal,
+        );
+        aliases.push(mixedCaseExternal);
+        const nested = join(target.repository, "nested");
+        mkdirSync(nested);
+        symlinkSync(dirname(target.git), join(nested, "escape"), "junction");
+        const nestedAlias = join(outside, "nested-alias");
+        symlinkSync(join(target.root, "REPOSITORY", "nested"), nestedAlias);
+        aliases.push(join(nestedAlias, "escape", "git"));
+      }
+    }
     for (const executable of aliases) {
       const result = probe(target, statusProbe, {
         environment: { CODEX_SECURITY_GIT: executable },
@@ -280,6 +371,45 @@ describe("bundled workbench trusted Git", () => {
       batchRejected: true,
     });
   });
+
+  testPosix(
+    "accepts Windows Git aliases to extensionless executables, not batch files",
+    () => {
+      const target = fixture();
+      const trustedDirectory = join(target.root, "trusted-bin");
+      mkdirSync(trustedDirectory);
+      const multicall = join(trustedDirectory, "multicall");
+      const executable = join(trustedDirectory, "git.exe");
+      const batch = join(trustedDirectory, "git.cmd");
+      const batchAlias = join(trustedDirectory, "batch.exe");
+      writeFileSync(multicall, "synthetic native executable\n");
+      writeFileSync(batch, "synthetic batch shim\n");
+      symlinkSync(multicall, executable);
+      symlinkSync(batch, batchAlias);
+
+      const result = probe(
+        target,
+        [
+          "import os, workbench_target",
+          "workbench_target.sys.platform = 'win32'",
+          "root = Path(sys.argv[2]).parent / 'trusted-bin'",
+          "selected = workbench_target._trusted_git_executable(Path(sys.argv[2]), dict(os.environ))",
+          "configured = workbench_target._trusted_git_executable(Path(sys.argv[2]), {**os.environ, 'CODEX_SECURITY_GIT': str(root / 'git.exe')})",
+          "try: workbench_target._trusted_git_executable(Path(sys.argv[2]), {**os.environ, 'CODEX_SECURITY_GIT': str(root / 'batch.exe')})",
+          "except SystemExit: batch_rejected = True",
+          "else: batch_rejected = False",
+          "print(json.dumps({'executable': selected, 'configured': configured, 'batchRejected': batch_rejected}))",
+        ],
+        { environment: { PATH: trustedDirectory } },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        executable,
+        configured: executable,
+        batchRejected: true,
+      });
+    },
+  );
 
   testPosix(
     "uses trusted Git for real diff ranking and committed inventory",

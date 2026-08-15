@@ -131,6 +131,13 @@ def _protected_git_root(target: Path) -> Path:
     return root
 
 
+def _inside_protected_git_root(candidate: Path, root: Path) -> bool:
+    return candidate.is_relative_to(root) or (
+        len(candidate.parts) >= len(root.parts)
+        and Path(*candidate.parts[: len(root.parts)]).samefile(root)
+    )
+
+
 def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | None:
     root = _protected_git_root(target)
     configured = environment.get("CODEX_SECURITY_GIT")
@@ -141,20 +148,25 @@ def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | 
         windows = sys.platform == "win32"
         if not candidate.is_absolute():
             raise SystemExit("CODEX_SECURITY_GIT must name an absolute trusted executable.")
+        invocation = Path(os.path.abspath(configured))
+        if invocation.is_relative_to(root):
+            raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
         try:
-            parent = candidate.parent.resolve(strict=True)
+            for ancestor in (candidate, *candidate.parents, invocation, *invocation.parents):
+                if _inside_protected_git_root(ancestor.resolve(strict=True), root):
+                    raise SystemExit(
+                        "CODEX_SECURITY_GIT must stay outside the protected repository."
+                    )
             canonical = candidate.resolve(strict=True)
         except OSError as error:
             raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.") from error
-        if parent.is_relative_to(root) or canonical.is_relative_to(root):
-            raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
         if (
             not canonical.is_file()
             or (
                 windows
                 and (
                     candidate.suffix.lower() not in {".exe", ".com"}
-                    or canonical.suffix.lower() not in {".exe", ".com"}
+                    or canonical.suffix.lower() in {".bat", ".cmd"}
                 )
             )
             or not os.access(canonical, os.F_OK if windows else os.X_OK)
@@ -170,9 +182,9 @@ def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | 
             continue
         try:
             directory = Path(entry).resolve(strict=True)
+            if _inside_protected_git_root(directory, root):
+                continue
         except OSError:
-            continue
-        if directory.is_relative_to(root):
             continue
         candidate: str | None = None
         safe = True
@@ -180,11 +192,11 @@ def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | 
             path = directory / name
             try:
                 canonical = path.resolve(strict=True)
+                if _inside_protected_git_root(canonical, root):
+                    safe = False
+                    break
             except OSError:
                 continue
-            if canonical.is_relative_to(root):
-                safe = False
-                break
             if canonical.is_file() and os.access(
                 canonical, os.F_OK if sys.platform == "win32" else os.X_OK
             ):
