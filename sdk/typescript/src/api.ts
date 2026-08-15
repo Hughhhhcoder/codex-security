@@ -1238,6 +1238,17 @@ export class CodexSecurity {
           if (signal.aborted || this.#closed) throw error;
           for (const artifact of completedArtifacts) {
             const path = join(scanDir, artifact.name);
+            const parent = await realpath(dirname(path));
+            const relativeParent = relative(scanDir, parent);
+            if (
+              relativeParent === ".." ||
+              relativeParent.startsWith(`..${sep}`) ||
+              isAbsolute(relativeParent)
+            ) {
+              throw new OutputDirectoryError(
+                "Cannot restore an artifact outside the scan directory.",
+              );
+            }
             const current = await readFile(path, { signal }).catch(
               (readError: NodeJS.ErrnoException) => {
                 if (readError.code !== "ENOENT") throw readError;

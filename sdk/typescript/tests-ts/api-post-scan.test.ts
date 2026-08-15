@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -46,13 +46,15 @@ describe("completed scan follow-up instructions", () => {
     ["partial report", "report.md", "# Incomplete draft\n"],
     ["invalid findings", "findings.json", "{invalid"],
     ["sealed nested artifact", "artifacts/worker.json", '{"partial":true}'],
+    ["replaced artifact parent", "artifacts/worker.json", null],
   ] as const)(
-    "restores completed scan artifacts damaged by post-scan instructions: %s",
+    "handles completed scan artifacts after post-scan instructions: %s",
     async (_scenario, artifact, replacement) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
       const scanDir = join(root, "scan");
+      const outside = join(root, "outside");
       await mkdir(repository);
       await mkdir(codexHome);
       await mkdir(scanDir, { mode: 0o700 });
@@ -95,7 +97,16 @@ describe("completed scan follow-up instructions", () => {
                   return { events: completedEvents() };
                 }
                 const artifactPath = join(scanDir, artifact);
-                if (replacement === undefined) await rm(artifactPath);
+                if (replacement === null) {
+                  await mkdir(outside);
+                  await writeFile(join(outside, "worker.json"), "untouched\n");
+                  await rm(dirname(artifactPath), { recursive: true });
+                  await symlink(
+                    outside,
+                    dirname(artifactPath),
+                    process.platform === "win32" ? "junction" : "dir",
+                  );
+                } else if (replacement === undefined) await rm(artifactPath);
                 else await writeFile(artifactPath, replacement);
                 async function* failedEvents(): AsyncGenerator<ThreadEvent> {
                   yield {
@@ -110,11 +121,18 @@ describe("completed scan follow-up instructions", () => {
         },
       );
 
-      const result = await client.run(repository, {
+      const scan = client.run(repository, {
         postScanPrompt: "Draft confirmed fixes.",
       });
-      expect(result).toMatchObject({ scanDir });
-      expect(await readFile(join(scanDir, artifact))).toEqual(original);
+      if (replacement === null) {
+        await expect(scan).rejects.toThrow("scan directory");
+        expect(await readFile(join(outside, "worker.json"), "utf8")).toBe(
+          "untouched\n",
+        );
+      } else {
+        expect(await scan).toMatchObject({ scanDir });
+        expect(await readFile(join(scanDir, artifact))).toEqual(original);
+      }
       await client.close();
     },
   );
