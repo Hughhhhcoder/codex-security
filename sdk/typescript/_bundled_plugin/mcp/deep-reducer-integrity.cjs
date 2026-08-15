@@ -15,6 +15,44 @@ const MERGEABLE_TEXT_FIELDS = new Set([
   "validationMode",
   "followUpPrompt",
 ]);
+const NARRATIVE_TEXT_FIELDS = new Set([
+  "access",
+  "accessRequirements",
+  "assumptions",
+  "attacker",
+  "boundary",
+  "consequence",
+  "constraints",
+  "control",
+  "description",
+  "entrypoint",
+  "evidence",
+  "explanation",
+  "impact",
+  "label",
+  "limitation",
+  "limitations",
+  "method",
+  "outcome",
+  "precondition",
+  "preconditions",
+  "requirements",
+  "risk",
+  "sink",
+  "source",
+  "steps",
+  "threat",
+  "transformation",
+  "transformations",
+  "trigger",
+  "why",
+]);
+const NARRATIVE_SECTIONS = new Set([
+  "attackPath",
+  "codeEvidence",
+  "rootCause",
+  "validation",
+]);
 function validateDeepReduction(result, sources, previous, findingIdentity) {
   const currentFindingIds = new Set(result.findings.map(findingIdentity));
 
@@ -29,6 +67,7 @@ function validateDeepReduction(result, sources, previous, findingIdentity) {
   }
 
   const inputs = previous === undefined ? sources : [...sources, previous];
+  const acceptedFindings = inputs.flatMap((input) => input.findings);
 
   for (const source of inputs) {
     for (const finding of source.findings) {
@@ -43,7 +82,16 @@ function validateDeepReduction(result, sources, previous, findingIdentity) {
           { code: "merge_traceability_omitted_source_candidates" },
         );
       }
-      if (matches.some((retained) => retainsFindingEvidence(retained, finding))) {
+      if (
+        matches.some((retained) =>
+          retainsFindingEvidence(
+            retained,
+            finding,
+            acceptedFindings,
+            findingIdentity,
+          ),
+        )
+      ) {
         continue;
       }
       throw Object.assign(
@@ -78,7 +126,12 @@ function representsFinding(retained, source, findingIdentity) {
   );
 }
 
-function retainsFindingEvidence(retained, source) {
+function retainsFindingEvidence(
+  retained,
+  source,
+  acceptedFindings,
+  findingIdentity,
+) {
   for (const location of source.locations) {
     if (
       retained.locations.some((candidate) =>
@@ -116,13 +169,28 @@ function retainsFindingEvidence(retained, source) {
     "taxonomy",
     "provenance",
     "extensions",
+    "writeup",
   ]) {
-    if (source[field] === undefined || source[field] === null) continue;
+    if (source[field] === undefined) continue;
+    if (source[field] === null) {
+      if (retained[field] === null) continue;
+      if (
+        hasAcceptedEvidence(
+          retained,
+          field,
+          acceptedFindings,
+          findingIdentity,
+        )
+      ) {
+        continue;
+      }
+      return false;
+    }
     const expected = remapEvidenceReferences(
       source[field],
       evidenceIdentifiers,
     );
-    if (!retainsStructuredValue(retained[field], expected)) return false;
+    if (!retainsStructuredValue(retained[field], expected, field)) return false;
   }
 
   if (!retainsStructuredValue(retained.severity, source.severity)) {
@@ -135,6 +203,17 @@ function retainsFindingEvidence(retained, source) {
   return true;
 }
 
+function hasAcceptedEvidence(retained, field, acceptedFindings, findingIdentity) {
+  return acceptedFindings.some((candidate) => {
+    if (candidate[field] === undefined || candidate[field] === null) return false;
+    if (!representsFinding(retained, candidate, findingIdentity)) return false;
+    const identifiers = matchCodeEvidence(retained, candidate);
+    if (identifiers === null) return false;
+    const expected = remapEvidenceReferences(candidate[field], identifiers);
+    return retainsStructuredValue(retained[field], expected, field);
+  });
+}
+
 function matchCodeEvidence(retained, source) {
   const identifiers = new Map();
 
@@ -142,7 +221,7 @@ function matchCodeEvidence(retained, source) {
     const { id, ...details } = evidence;
     const candidates = (retained.codeEvidence ?? []).filter((candidate) => {
       const { id: _candidateId, ...candidateDetails } = candidate;
-      return retainsStructuredValue(candidateDetails, details);
+      return retainsStructuredValue(candidateDetails, details, "codeEvidence");
     });
     const matching =
       candidates.find((candidate) => candidate.id === id) ?? candidates[0];
@@ -170,19 +249,23 @@ function remapEvidenceReferences(value, identifiers) {
 }
 
 function validateRetainedCoverage(result, inputs) {
-  for (const input of inputs) {
-    const coverage = input.coverage;
-    if (
-      (coverage.completeness === "partial" &&
-        result.completeness !== "partial") ||
-      (coverage.completeness === "unknown" &&
-        result.completeness === "complete")
-    ) {
+  if (inputs.length > 0) {
+    const expected = inputs.some(
+      (input) => input.coverage.completeness === "partial",
+    )
+      ? "partial"
+      : inputs.some((input) => input.coverage.completeness === "unknown")
+        ? "unknown"
+        : "complete";
+    if (result.completeness !== expected) {
       throw new Error(
-        `Deep reduction changed ${coverage.completeness} Standard scan coverage to ${result.completeness}.`,
+        `Deep reduction changed ${expected} Standard scan coverage to ${result.completeness}.`,
       );
     }
+  }
 
+  for (const input of inputs) {
+    const coverage = input.coverage;
     for (const source of coverage.deferred) {
       if (result.deferred.some((retained) => sameDeferred(retained, source))) {
         continue;
@@ -278,27 +361,50 @@ function validateRetainedScope(result, inputs) {
   }
 }
 
-function retainsStructuredValue(retained, source, field) {
+function retainsStructuredValue(retained, source, field, section = field) {
   if (source === null) return retained === null;
   if (typeof source === "string") {
     return (
       typeof retained === "string" &&
       (retained === source ||
-        (MERGEABLE_TEXT_FIELDS.has(field) && retained.includes(source)))
+        ((MERGEABLE_TEXT_FIELDS.has(field) ||
+          (NARRATIVE_SECTIONS.has(section) &&
+            NARRATIVE_TEXT_FIELDS.has(field))) &&
+          retained.includes(source)))
     );
   }
   if (Array.isArray(source)) {
+    if (!Array.isArray(retained)) return false;
+    if (field === "evidenceRefs") {
+      let nextIndex = 0;
+      return source.every((entry) => {
+        while (nextIndex < retained.length) {
+          if (
+            retainsStructuredValue(
+              retained[nextIndex++],
+              entry,
+              undefined,
+              section,
+            )
+          ) {
+            return true;
+          }
+        }
+        return false;
+      });
+    }
     return (
-      Array.isArray(retained) &&
       source.every((entry) =>
-        retained.some((candidate) => retainsStructuredValue(candidate, entry)),
+        retained.some((candidate) =>
+          retainsStructuredValue(candidate, entry, undefined, section),
+        ),
       )
     );
   }
   if (typeof source === "object") {
     if (typeof retained !== "object" || retained === null) return false;
     return Object.entries(source).every(([key, value]) =>
-      retainsStructuredValue(retained[key], value, key),
+      retainsStructuredValue(retained[key], value, key, section),
     );
   }
   return Object.is(retained, source);

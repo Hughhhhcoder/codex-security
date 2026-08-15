@@ -39,6 +39,7 @@ type Finding = {
   attackPath?: Record<string, unknown> | null;
   rootCause?: string | { summary: string; evidenceRefs?: string[] };
   validation?: Record<string, unknown> | null;
+  writeup?: { reportPath: string };
   codeEvidence?: Array<{
     id: string;
     label: string;
@@ -427,6 +428,60 @@ describe("Deep scan reducer finding retention", () => {
     expect(result.message).toMatch(/evidence/iu);
   });
 
+  test("retains validated scan-local finding writeups", async () => {
+    const source = finding("first", 10);
+    source.writeup = {
+      reportPath: "findings/first-finding/first-finding.md",
+    };
+    const changed = structuredClone(source);
+    delete changed.writeup;
+    const result = await recordReduction([draft([source])], draft([changed]));
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/evidence/iu);
+  });
+
+  test("combines explanations for the same canonical source evidence", async () => {
+    const first = finding("first", 10);
+    const second = finding("first", 10);
+    const baseEvidence = {
+      id: "administrator-control",
+      path: "src/first.ts",
+      startLine: 10,
+      code: "handleAdministratorRequest(request)",
+    };
+    first.codeEvidence = [
+      {
+        ...baseEvidence,
+        label: "Unchecked administrator operation",
+        explanation: "The request reaches an administrator operation.",
+      },
+    ];
+    second.codeEvidence = [
+      {
+        ...baseEvidence,
+        label: "Missing authorization guard",
+        explanation: "The operation does not check authorization.",
+      },
+    ];
+    const merged: Finding = {
+      ...first,
+      codeEvidence: [
+        {
+          ...baseEvidence,
+          label: `${first.codeEvidence[0]!.label}; ${second.codeEvidence[0]!.label}`,
+          explanation: `${first.codeEvidence[0]!.explanation} ${second.codeEvidence[0]!.explanation}`,
+        },
+      ],
+    };
+    const result = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([merged]),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
+  });
+
   test("rejects unsupported severity changes and discarded rating details", async () => {
     const source = finding("first", 10);
     source.severity = {
@@ -469,6 +524,130 @@ describe("Deep scan reducer finding retention", () => {
 
     expect(result.accepted).toBe(false);
     expect(result.message).toMatch(/evidence/iu);
+  });
+
+  test("rejects invented validation and attack paths for explicit null evidence", async () => {
+    const source = finding("first", 10);
+    source.validation = null;
+    source.attackPath = null;
+
+    for (const changed of [
+      {
+        ...source,
+        validation: { summary: "Invented dynamic validation." },
+      },
+      {
+        ...source,
+        attackPath: { summary: "Invented attacker reachability." },
+      },
+    ]) {
+      const result = await recordReduction([draft([source])], draft([changed]));
+      expect(result.accepted, result.message).toBe(false);
+      expect(result.message).toMatch(/evidence/iu);
+    }
+  });
+
+  test("accepts validation already established by another matching worker", async () => {
+    const unvalidated = finding("first", 10);
+    unvalidated.validation = null;
+    const validated = structuredClone(unvalidated);
+    validated.validation = {
+      method: "Static source trace.",
+      summary: "The privileged request reaches the unchecked handler.",
+    };
+
+    const result = await recordReduction(
+      [draft([unvalidated]), draft([validated])],
+      draft([validated]),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
+    expect(result.saved?.findings[0]?.validation).toEqual(validated.validation);
+  });
+
+  test("merges distinct canonical attack-path narratives without changing decisions", async () => {
+    const first = finding("first", 10);
+    const second = finding("first", 10);
+    first.attackPath = {
+      summary: "The public request reaches the administrator route.",
+      dataflow: {
+        source: "An untrusted request parameter.",
+        sink: "The administrator operation.",
+      },
+      reachability: {
+        attacker: "An external unauthenticated caller.",
+        entrypoint: "The public request endpoint.",
+      },
+      impact: { level: "high", why: "The account record is modified." },
+    };
+    second.attackPath = {
+      summary: "A crafted request reaches the privileged operation.",
+      dataflow: {
+        source: "A crafted administrator request.",
+        sink: "The privileged account update.",
+      },
+      reachability: {
+        attacker: "A caller outside the administrator trust boundary.",
+        entrypoint: "The externally reachable administrator route.",
+      },
+      impact: { level: "high", why: "Administrator state is overwritten." },
+    };
+    const firstDataflow = first.attackPath["dataflow"] as Record<
+      string,
+      string
+    >;
+    const secondDataflow = second.attackPath["dataflow"] as Record<
+      string,
+      string
+    >;
+    const firstReachability = first.attackPath["reachability"] as Record<
+      string,
+      string
+    >;
+    const secondReachability = second.attackPath["reachability"] as Record<
+      string,
+      string
+    >;
+    const firstImpact = first.attackPath["impact"] as Record<string, string>;
+    const secondImpact = second.attackPath["impact"] as Record<string, string>;
+    const merged: Finding = {
+      ...first,
+      attackPath: {
+        summary: `${first.attackPath["summary"]} ${second.attackPath["summary"]}`,
+        dataflow: {
+          source: `${firstDataflow["source"]} ${secondDataflow["source"]}`,
+          sink: `${firstDataflow["sink"]} ${secondDataflow["sink"]}`,
+        },
+        reachability: {
+          attacker: `${firstReachability["attacker"]} ${secondReachability["attacker"]}`,
+          entrypoint: `${firstReachability["entrypoint"]} ${secondReachability["entrypoint"]}`,
+        },
+        impact: {
+          level: "high",
+          why: `${firstImpact["why"]} ${secondImpact["why"]}`,
+        },
+      },
+    };
+
+    const accepted = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([merged]),
+    );
+    expect(accepted.accepted, accepted.message).toBe(true);
+
+    const changedDecision: Finding = {
+      ...merged,
+      attackPath: {
+        ...merged.attackPath,
+        impact: { ...(merged.attackPath!["impact"] as object), level: "low" },
+      },
+    };
+    const rejected = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([changedDecision]),
+    );
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.message).toMatch(/evidence/iu);
   });
 
   test("remaps colliding code-evidence identifiers and every evidence reference", async () => {
@@ -546,6 +725,43 @@ describe("Deep scan reducer finding retention", () => {
     );
     expect(accepted.accepted, accepted.message).toBe(true);
     expect(accepted.saved?.findings[0]?.codeEvidence).toHaveLength(2);
+  });
+
+  test("preserves the ordered source-to-sink evidence trace", async () => {
+    const source = finding("first", 10);
+    source.codeEvidence = [
+      {
+        id: "request-source",
+        label: "Request source",
+        path: "src/first.ts",
+        startLine: 10,
+        code: "const request = readRequest();",
+        explanation: "The request comes from an external caller.",
+      },
+      {
+        id: "privileged-sink",
+        label: "Privileged sink",
+        path: "src/first.ts",
+        startLine: 20,
+        code: "runPrivilegedOperation(request);",
+        explanation: "The request reaches the privileged operation.",
+      },
+    ];
+    source.rootCause = {
+      summary: "The external request reaches a privileged operation.",
+      evidenceRefs: ["request-source", "privileged-sink"],
+    };
+    const reversed: Finding = {
+      ...source,
+      rootCause: {
+        ...source.rootCause,
+        evidenceRefs: ["privileged-sink", "request-source"],
+      },
+    };
+    const result = await recordReduction([draft([source])], draft([reversed]));
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/evidence/iu);
   });
 
   test("retains canonical finding identities carried in extensions", async () => {
@@ -655,6 +871,29 @@ describe("Deep scan reducer coverage integrity", () => {
 
     expect(result.accepted).toBe(false);
     expect(result.message).toMatch(/unknown.*complete/iu);
+  });
+
+  test("does not invent partial coverage when only unknown coverage exists", async () => {
+    const unknown = coverage({ completeness: "unknown" });
+    const partial = coverage({ completeness: "partial" });
+    const result = await recordReduction(
+      [draft([], unknown)],
+      draft([], partial),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/unknown.*partial/iu);
+  });
+
+  test("keeps fully reviewed worker coverage complete", async () => {
+    for (const completeness of ["partial", "unknown"] as const) {
+      const result = await recordReduction(
+        [draft([])],
+        draft([], coverage({ completeness })),
+      );
+      expect(result.accepted, result.message).toBe(false);
+      expect(result.message).toMatch(/complete/iu);
+    }
   });
 
   test("retains every deferred proof gap from accepted worker results", async () => {
