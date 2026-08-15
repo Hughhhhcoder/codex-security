@@ -1254,36 +1254,68 @@ describe("plugin runtime preparation", () => {
         },
       });
 
-      const listed = spawnSync(
+      const expectListed = (scanRoot: string) => {
+        const listed = spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            workbench,
+            "list-scans",
+            "--repository",
+            longRepository,
+            "--scan-root",
+            scanRoot,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+            },
+          },
+        );
+        expect(listed.status, listed.stderr).toBe(0);
+        expect(JSON.parse(listed.stdout)).toMatchObject({
+          scans: [
+            {
+              scanDir: deepScan.scanDir,
+              scanId: deepScan.scanId,
+              targetPath: longRepository,
+            },
+          ],
+        });
+      };
+      expectListed(longDeepScanRoot);
+
+      const legacyScan = spawnSync(
         python!,
         [
           "-I",
           "-B",
-          workbench,
-          "list-scans",
-          "--repository",
-          longRepository,
-          "--scan-root",
+          "-c",
+          [
+            "import sqlite3, sys",
+            "from pathlib import Path",
+            "sys.path.insert(0, sys.argv[1])",
+            "from windows_paths import extended_path, filesystem_path",
+            "database = filesystem_path(Path(sys.argv[2]) / 'workbench.sqlite3')",
+            "connection = sqlite3.connect(database)",
+            "connection.execute('UPDATE scans SET scan_dir = ? WHERE id = ?', (str(extended_path(Path(sys.argv[3]))), sys.argv[4]))",
+            "connection.commit()",
+            "print(extended_path(Path(sys.argv[5])))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts"),
+          stateDirectory,
+          deepScan.scanDir,
+          deepScan.scanId,
           longDeepScanRoot,
         ],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: stateDirectory,
-          },
-        },
+        { encoding: "utf8" },
       );
-      expect(listed.status, listed.stderr).toBe(0);
-      expect(JSON.parse(listed.stdout)).toMatchObject({
-        scans: [
-          {
-            scanDir: deepScan.scanDir,
-            scanId: deepScan.scanId,
-            targetPath: longRepository,
-          },
-        ],
-      });
+      expect(legacyScan.status, legacyScan.stderr).toBe(0);
+      expectListed(longDeepScanRoot);
+      expectListed(legacyScan.stdout.trim());
     }
   });
 

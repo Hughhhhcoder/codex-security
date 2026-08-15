@@ -16,7 +16,7 @@ from report_projection import SEVERITY_ORDER
 from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output
-from windows_paths import filesystem_path, portable_path
+from windows_paths import extended_path, filesystem_path, portable_path
 
 
 def _same_repository(
@@ -115,8 +115,15 @@ def list_scans(
             portable_path(filesystem_path(Path(args.scan_root).expanduser()).resolve())
         )
         prefix = scan_root.rstrip(os.sep) + os.sep
-        clauses.append("(scans.scan_dir = ? OR substr(scans.scan_dir, 1, ?) = ?)")
-        values.extend((scan_root, len(prefix), prefix))
+        extended_root = str(extended_path(Path(scan_root)))
+        extended_prefix = extended_root.rstrip(os.sep) + os.sep
+        clauses.append(
+            "(scans.scan_dir IN (?, ?) OR substr(scans.scan_dir, 1, ?) = ? "
+            "OR substr(scans.scan_dir, 1, ?) = ?)"
+        )
+        values.extend(
+            (scan_root, extended_root, len(prefix), prefix, len(extended_prefix), extended_prefix)
+        )
     if args is not None and args.target_id:
         clauses.append("scans.target_id = ?")
         values.append(args.target_id)
@@ -195,7 +202,7 @@ def list_scans(
                 },
                 "recipeAvailable": row["recipe_json"] is not None,
                 "reasoningEffort": row["reasoning_effort"],
-                "scanDir": row["scan_dir"],
+                "scanDir": str(portable_path(Path(row["scan_dir"]))),
                 "scanId": row["id"],
                 "scope": row["scope"],
                 "startedAt": row["started_at"],
