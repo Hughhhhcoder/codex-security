@@ -14,15 +14,24 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  posix,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
+import { loadContract, type LoadedContract } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
-import { requireSecureOutputAncestry } from "./runtime.js";
+import { requireSecureOutputAncestry, resolvePluginPath } from "./runtime.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -49,10 +58,13 @@ interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "completed_with_incomplete_coverage" | "failed";
   attempt: number;
   outputDir: string;
+  resolvedScope?: string;
+  snapshotDigest?: string;
   coverage?: CoverageDocument["completeness"];
   cost?: ScanCost;
   error?: string;
   warning?: string;
+  warnings?: string[];
 }
 
 export interface MultiscanOptions {
@@ -89,6 +101,7 @@ export interface MultiscanResult {
   completed: number;
   incomplete: number;
   failed: number;
+  warned: number;
   skipped: number;
   resultsPath: string;
 }
@@ -112,12 +125,36 @@ export async function runMultiscan(
   const output = await ensureOutputDirectory(requestedOutput);
   await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
+  let pluginWorkspace: string | undefined;
+  let pluginRoot: Promise<string> | undefined;
+  const resolveResumePluginRoot = (): Promise<string> =>
+    (pluginRoot ??= (async () => {
+      if (options.config.pluginPath !== undefined) {
+        pluginWorkspace = join(output, `.resume-plugin-${randomUUID()}`);
+        await mkdir(pluginWorkspace, { mode: 0o700 });
+      }
+      return await resolvePluginPath(
+        options.config.pluginPath,
+        pluginWorkspace ?? output,
+        options.signal,
+      );
+    })());
   try {
-    const result = await runCampaign(options, tasks, output);
+    const result = await runCampaign(
+      options,
+      tasks,
+      output,
+      resolveResumePluginRoot,
+    );
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
       : result;
   } finally {
+    if (pluginWorkspace !== undefined) {
+      await rm(pluginWorkspace, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
+    }
     await unlock();
   }
 }
@@ -126,18 +163,19 @@ async function runCampaign(
   options: MultiscanOptions,
   tasks: MultiscanTask[],
   output: string,
+  resolveResumePluginRoot: () => Promise<string>,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   await ensureManifest(join(output, "manifest.json"), tasks, options);
-  const receipts = await readReceipts(ledger);
+  const { receipts, warnedIds } = await readReceipts(ledger, tasks);
   const pending: MultiscanTask[] = [];
   let completed = 0;
   let incomplete = 0;
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
-    if (receipt === undefined) {
+    if (receipt === undefined || !matchesTask(receipt, task)) {
       pending.push(task);
       continue;
     }
@@ -156,18 +194,41 @@ async function runCampaign(
         receipt.outputDir === selectedArtifactOutput) &&
       (await hasArtifacts(artifactOutput))
     ) {
-      if (receipt.status === "completed") {
+      const contract = await loadResumableContract(
+        artifactOutput,
+        await resolveResumePluginRoot(),
+        task,
+        receipt.resolvedScope,
+        receipt.snapshotDigest,
+        options.signal,
+      );
+      if (
+        receipt.status === "completed" &&
+        contract?.coverage.completeness === "complete"
+      ) {
+        await rm(join(output, "checkouts", task.id), {
+          recursive: true,
+          force: true,
+        }).catch(() => undefined);
         completed += 1;
         continue;
       }
       const coverage =
         receipt.status === "completed_with_incomplete_coverage"
-          ? receipt.coverage ?? "unknown"
-          : await legacyIncompleteCoverage({
-              ...receipt,
-              outputDir: artifactOutput,
-            });
-      if (coverage !== undefined) {
+          ? receipt.coverage ?? contract?.coverage.completeness
+          : receipt.status === "failed" &&
+              receipt.error === "Multiscan repository coverage is incomplete."
+            ? contract?.coverage.completeness
+            : undefined;
+      if (
+        coverage !== undefined &&
+        coverage !== "complete" &&
+        coverage === contract?.coverage.completeness
+      ) {
+        await rm(join(output, "checkouts", task.id), {
+          recursive: true,
+          force: true,
+        }).catch(() => undefined);
         incomplete += 1;
         notifyProgress(options, {
           repository: task.id,
@@ -189,6 +250,7 @@ async function runCampaign(
       completed,
       incomplete,
       failed: 0,
+      warned: warnedIds.size,
       skipped,
       resultsPath: ledger,
     };
@@ -203,7 +265,8 @@ async function runCampaign(
       options.signal?.throwIfAborted();
       const task = pending[next++];
       if (task === undefined) return;
-      let attempt = receipts.get(task.id.toLowerCase())?.attempt ?? 0;
+      const taskId = task.id.toLowerCase();
+      let attempt = receipts.get(taskId)?.attempt ?? 0;
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
         attempt += 1;
@@ -218,9 +281,22 @@ async function runCampaign(
         notifyProgress(options, { ...progress, status: "started" });
         let failure: string | undefined;
         let warning: string | undefined;
+        let resolvedScope: string | undefined;
+        let snapshotDigest: string | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         let exhaustedBudget = false;
+        const warnings: string[] = [];
+        const recordWarning = (message: unknown): void => {
+          const safeWarning = safeErrorMessage(message);
+          warnings.push(safeWarning);
+          warnedIds.add(taskId);
+          notifyProgress(options, {
+            ...progress,
+            status: "started",
+            warning: safeWarning,
+          });
+        };
         try {
           await ensureOutputDirectory(dirname(scanDir));
           await rm(checkout, { recursive: true, force: true });
@@ -233,7 +309,8 @@ async function runCampaign(
           );
           if (task.scope !== undefined) {
             const scoped = await realpath(join(checkout, task.scope));
-            const outside = relative(await realpath(checkout), scoped);
+            const canonicalCheckout = await realpath(checkout);
+            const outside = relative(canonicalCheckout, scoped);
             if (
               outside === ".." ||
               outside.startsWith(`..${sep}`) ||
@@ -241,6 +318,7 @@ async function runCampaign(
             ) {
               throw new Error("Multiscan scope escapes its repository.");
             }
+            resolvedScope = outside.split(sep).join("/") || ".";
           }
           const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
             .filter(Boolean)
@@ -259,15 +337,11 @@ async function runCampaign(
             ...(options.maxCostUsd === undefined
               ? {}
               : { maxCostUsd: options.maxCostUsd }),
-            onWarning: (warning) =>
-              notifyProgress(options, {
-                ...progress,
-                status: "started",
-                warning,
-              }),
+            onWarning: recordWarning,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
           cost = result.cost;
+          snapshotDigest = result.manifest.scan.target.snapshotDigest;
           coverage = result.coverage.completeness;
           if (coverage !== "complete") {
             if (!(await hasArtifacts(scanDir))) {
@@ -285,7 +359,13 @@ async function runCampaign(
           }
           failure = safeErrorMessage(error);
         } finally {
-          await rm(checkout, { recursive: true, force: true });
+          await rm(checkout, { recursive: true, force: true }).catch(
+            (error: unknown) => {
+              recordWarning(
+                `Multiscan checkout cleanup failed: ${safeErrorMessage(error)}`,
+              );
+            },
+          );
         }
         const status =
           failure !== undefined
@@ -300,10 +380,13 @@ async function runCampaign(
             status,
             attempt,
             outputDir: scanDir,
+            ...(resolvedScope === undefined ? {} : { resolvedScope }),
+            ...(snapshotDigest === undefined ? {} : { snapshotDigest }),
             ...(coverage === undefined ? {} : { coverage }),
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(warning === undefined ? {} : { warning }),
+            ...(warnings.length === 0 ? {} : { warnings }),
           })}\n`,
         );
         notifyProgress(options, {
@@ -345,6 +428,7 @@ async function runCampaign(
     completed,
     incomplete,
     failed,
+    warned: warnedIds.size,
     skipped,
     resultsPath: ledger,
   };
@@ -623,14 +707,31 @@ async function ensureManifest(
   }
 }
 
+function matchesTask(receipt: MultiscanReceipt, task: MultiscanTask): boolean {
+  return (
+    receipt.id === task.id &&
+    receipt.repository === task.repository &&
+    receipt.revision === task.revision &&
+    receipt.mode === task.mode &&
+    receipt.scope === task.scope &&
+    receipt.prompt === task.prompt
+  );
+}
+
 async function readReceipts(
   path: string,
-): Promise<Map<string, MultiscanReceipt>> {
+  tasks: readonly MultiscanTask[],
+): Promise<{
+  receipts: Map<string, MultiscanReceipt>;
+  warnedIds: Set<string>;
+}> {
   let contents: string;
   try {
     contents = await readFile(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return new Map();
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { receipts: new Map(), warnedIds: new Set() };
+    }
     throw error;
   }
   const lines = contents.split("\n");
@@ -641,12 +742,70 @@ async function readReceipts(
       Buffer.byteLength(contents) - Buffer.byteLength(partial),
     );
   }
-  return new Map(
-    lines.filter(Boolean).map((line): [string, MultiscanReceipt] => {
-      const receipt = JSON.parse(line) as MultiscanReceipt;
-      return [receipt.id.toLowerCase(), receipt];
-    }),
+  const receipts = new Map<string, MultiscanReceipt>();
+  const warnedIds = new Set<string>();
+  const indexedTasks = new Map(
+    tasks.map((task) => [task.id.toLowerCase(), task]),
   );
+  for (const line of lines.filter(Boolean)) {
+    const receipt = JSON.parse(line) as MultiscanReceipt;
+    const id = receipt.id.toLowerCase();
+    receipts.set(id, receipt);
+    const task = indexedTasks.get(id);
+    if (
+      task !== undefined &&
+      matchesTask(receipt, task) &&
+      Array.isArray(receipt.warnings) &&
+      receipt.warnings.length > 0
+    ) {
+      warnedIds.add(id);
+    }
+  }
+  return { receipts, warnedIds };
+}
+
+async function loadResumableContract(
+  path: string,
+  pluginRoot: string,
+  task: MultiscanTask,
+  resolvedScope: string | undefined,
+  snapshotDigest: string | undefined,
+  signal?: AbortSignal,
+): Promise<LoadedContract | undefined> {
+  try {
+    const contract = await loadContract(path, { pluginRoot, signal });
+    const target = contract.manifest.scan.target;
+    const expectedScope =
+      task.scope === undefined
+        ? "."
+        : resolvedScope ?? posix.normalize(task.scope);
+    const expectedMode =
+      task.scope !== undefined
+        ? "scoped_path"
+        : task.mode === "deep"
+          ? "deep_repository"
+          : "repository";
+    if (
+      (target.kind !== "git_revision" && target.kind !== "git_worktree") ||
+      (target.kind === "git_worktree" &&
+        (snapshotDigest === undefined ||
+          target.snapshotDigest !== snapshotDigest)) ||
+      (target.kind === "git_revision" &&
+        (target.snapshotDigest !== undefined ||
+          snapshotDigest !== undefined)) ||
+      target.displayName !== task.id ||
+      target.revision !== task.revision ||
+      contract.coverage.mode !== expectedMode ||
+      contract.manifest.scan.scope.includePaths.length !== 1 ||
+      contract.manifest.scan.scope.includePaths[0] !== expectedScope
+    ) {
+      return undefined;
+    }
+    return contract;
+  } catch {
+    if (signal?.aborted === true) signal.throwIfAborted();
+    return undefined;
+  }
 }
 
 async function hasArtifacts(path: string): Promise<boolean> {
@@ -658,28 +817,6 @@ async function hasArtifacts(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
-  }
-}
-
-async function legacyIncompleteCoverage(
-  receipt: MultiscanReceipt,
-): Promise<Exclude<CoverageDocument["completeness"], "complete"> | undefined> {
-  if (
-    receipt.status !== "failed" ||
-    receipt.error !== "Multiscan repository coverage is incomplete."
-  ) {
-    return undefined;
-  }
-  try {
-    const coverage = JSON.parse(
-      await readFile(join(receipt.outputDir, "coverage.json"), "utf8"),
-    ) as { completeness?: unknown };
-    return coverage.completeness === "partial" ||
-      coverage.completeness === "unknown"
-      ? coverage.completeness
-      : undefined;
-  } catch {
-    return undefined;
   }
 }
 
