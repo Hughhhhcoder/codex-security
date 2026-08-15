@@ -472,7 +472,7 @@ def _active_findings(
         target_values,
     ):
         completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
-        if allowed_scan_ids is not None and scan["seal_manifest_digest"] is not None:
+        if allowed_scan_ids is not None:
             allowed_scan_ids.add(scan["id"])
 
     coverage_by_scan_id: dict[str, dict[str, Any] | None] = {}

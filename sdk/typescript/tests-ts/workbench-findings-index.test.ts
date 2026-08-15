@@ -31,7 +31,7 @@ const findingsIndexProbe = [
   "    ('orphan-new', None, '/orphan/repository', 'complete', 'sealed', '2026-02-01', '2026-02-01', '.', '/private/tmp/orphan-new'),",
   "])",
   "if settings.get('unsealedScans'):",
-  "    connection.execute(\"UPDATE scans SET seal_manifest_digest = NULL WHERE target_id = 'stale-target'\")",
+  "    connection.execute(\"UPDATE scans SET seal_manifest_digest = NULL WHERE target_id = 'stale-target' OR target_id IS NULL\")",
   "if settings.get('inactiveRepresentative'):",
   "    connection.execute(\"INSERT INTO scans VALUES ('current-followup', 'current-target', '/current/repository', 'complete', 'sealed', '2026-03-01', '2026-03-01', '.', '/private/tmp/current-followup')\")",
   "if settings.get('clockRollback'):",
@@ -121,15 +121,9 @@ const findingsIndexProbe = [
   "    connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('current-new-occurrence', 'stale-old-occurrence')\")",
   "    indexes.scan_history.repository_scan_scope = lambda _connection, _repository: (['scans.target_id IN (?, ?)'], ['current-target', 'linked-target'], ['current-target', 'linked-target'], ['/current/repository', '/linked/repository'])",
   "    indexes.scan_history._same_registered_repository = lambda _connection, _before, _after: not settings.get('incompatibleSibling', False)",
-  "if settings.get('unsealedScans'):",
-  "    original_indexed_findings = indexes._indexed_findings",
-  "    def sealed_indexed_findings(connection, allowed_scan_ids=None, **options):",
-  "        if allowed_scan_ids is not None:",
-  "            assert all(connection.execute('SELECT seal_manifest_digest FROM scans WHERE id = ?', (scan_id,)).fetchone()[0] is not None for scan_id in allowed_scan_ids), 'Unsealed scan entered aggregate finding history.'",
-  "        return original_indexed_findings(connection, allowed_scan_ids, **options)",
-  "    indexes._indexed_findings = sealed_indexed_findings",
   "coverage_reads = []",
   "def coverage(scan):",
+  "    assert scan['seal_manifest_digest'] is not None, 'Unsealed scan coverage was read.'",
   "    coverage_reads.append(scan['id'])",
   "    if settings.get('inactiveRepresentative') and scan['id'] == 'current-followup':",
   "        return {'completeness': 'complete', 'includePaths': ['src/new.py'], 'excludePaths': [], 'explicitExclusions': []}",
@@ -972,12 +966,18 @@ describe("workbench findings index", () => {
     expect(result.coverageReads).toEqual(["orphan-new"]);
   });
 
-  test.each(["stable", "matched"] as const)(
-    "preserves targetless finding history and triage through %s identifiers",
-    (targetlessHistory) => {
+  test.each([
+    ["stable", false],
+    ["stable", true],
+    ["matched", false],
+    ["matched", true],
+  ] as const)(
+    "preserves targetless finding history and triage through %s identifiers (unsealed: %s)",
+    (targetlessHistory, unsealedScans) => {
       const result = probeFindingsIndex(null, {
         targetlessHistory,
         targetPath: "/orphan/repository",
+        unsealedScans,
       });
 
       expect(result.findings).toEqual([
@@ -1018,6 +1018,9 @@ describe("workbench findings index", () => {
       });
       expect(result.remediationGuardError).toBe(
         "Reopen this finding before requesting remediation.",
+      );
+      expect(result.coverageReads).toEqual(
+        unsealedScans || targetlessHistory === "stable" ? [] : ["orphan-new"],
       );
     },
   );
