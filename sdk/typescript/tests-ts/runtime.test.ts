@@ -892,6 +892,67 @@ describe("plugin runtime preparation", () => {
       expect(JSON.parse(nearLimitDatabase.stdout)).toEqual({
         databasePath: join(nearLimitScanDirectory, "workbench.sqlite3"),
       });
+      const nearLimitDiscovery = join(
+        nearLimitScanDirectory,
+        "artifacts",
+        "02_discovery",
+      );
+      const nearLimitWorkers = join(
+        nearLimitScanDirectory,
+        "artifacts",
+        "deep_discovery",
+      );
+      const nearLimitReducer = join(nearLimitWorkers, "reducer");
+      await mkdir(nearLimitDiscovery, { recursive: true });
+      await mkdir(join(nearLimitReducer, "canonical"), { recursive: true });
+      await writeFile(
+        join(nearLimitWorkers, "coordinator-heartbeat-2.json"),
+        JSON.stringify({
+          coordinatorGeneration: 2,
+          updatedAt: "2026-01-01T00:00:10+00:00",
+        }),
+      );
+      await writeFile(
+        join(nearLimitDiscovery, ".candidate_ledger.jsonl.synthetic.backup"),
+        "restored\n",
+      );
+      await writeFile(
+        join(nearLimitReducer, "canonical", "candidate_ledger.jsonl"),
+        "pending\n",
+      );
+      const nearLimitDeepScan = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sqlite3, sys",
+            "from types import SimpleNamespace",
+            "module = runpy.run_path(sys.argv[1])",
+            "scan = {'scan_dir': sys.argv[2]}",
+            "module['configure'](SimpleNamespace(require_scan=lambda _connection, _scan_id: scan))",
+            "connection = sqlite3.connect(':memory:')",
+            "connection.row_factory = sqlite3.Row",
+            "connection.execute('CREATE TABLE deep_scan_workers (scan_id TEXT, status TEXT, artifact_dir TEXT, kind TEXT, updated_at TEXT)')",
+            "connection.execute('INSERT INTO deep_scan_workers VALUES (?, ?, ?, ?, ?)', ('scan', 'running', sys.argv[3], 'dedup', '2026-01-01T00:00:00+00:00'))",
+            "run = {'coordinator_generation': 2, 'updated_at': '2000-01-01T00:00:00+00:00'}",
+            "live = module['coordinator_lease_is_live'](connection, run, scan, '2026-01-01T00:00:20+00:00')",
+            "module['recover_candidate_ledger_publication'](connection, 'scan')",
+            "ledger = module['scan_directory_path'](scan, 'artifacts', '02_discovery', 'candidate_ledger.jsonl')",
+            "print(json.dumps({'heartbeatLive': live, 'recoveredLedger': ledger.read_text(encoding='utf-8')}))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "deep_scan_workbench.py"),
+          nearLimitScanDirectory,
+          nearLimitReducer,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(nearLimitDeepScan.status, nearLimitDeepScan.stderr).toBe(0);
+      expect(JSON.parse(nearLimitDeepScan.stdout)).toEqual({
+        heartbeatLive: true,
+        recoveredLedger: "restored\n",
+      });
       const findingDirectory = join(
         longScanDirectory,
         "findings",
@@ -1074,6 +1135,31 @@ describe("plugin runtime preparation", () => {
         { encoding: "utf8" },
       );
       expect(legacyTarget.status, legacyTarget.stderr).toBe(0);
+      for (const repositoryPath of [
+        longRepository,
+        `\\\\?\\${longRepository}`,
+      ]) {
+        const legacyHistory = spawnSync(
+          python!,
+          ["-I", "-B", workbench, "list-scans", "--repository", repositoryPath],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+            },
+          },
+        );
+        expect(legacyHistory.status, legacyHistory.stderr).toBe(0);
+        expect(JSON.parse(legacyHistory.stdout)).toMatchObject({
+          scans: [
+            {
+              targetId: legacyTarget.stdout.trim(),
+              targetPath: longRepository,
+            },
+          ],
+        });
+      }
       const migratedTarget = spawnSync(
         python!,
         [

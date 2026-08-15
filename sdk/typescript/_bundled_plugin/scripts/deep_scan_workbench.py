@@ -197,8 +197,8 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
     return dependencies().require_canonical_scan_directory(scan_dir)
 
 
-def scan_directory_path(scan: sqlite3.Row) -> Path:
-    return filesystem_path(Path(scan["scan_dir"]))
+def scan_directory_path(scan: sqlite3.Row, *parts: str) -> Path:
+    return filesystem_path(Path(scan["scan_dir"]).joinpath(*parts))
 
 
 def safe_segment(value: str) -> str:
@@ -304,7 +304,11 @@ def promote_staged_file(staged_path: str, output_path: str) -> tuple[Path, Path,
     output = filesystem_path(Path(output_path))
     if staged == output:
         raise SystemExit("A staged Deep Scan artifact must not be its published output path.")
-    backup = output.with_name(f".{output.name}.{uuid.uuid4()}.backup") if output.exists() else None
+    backup = (
+        filesystem_path(output.with_name(f".{output.name}.{uuid.uuid4()}.backup"))
+        if output.exists()
+        else None
+    )
     if backup is not None:
         os.replace(output, backup)
     try:
@@ -331,10 +335,13 @@ def finish_staged_file(promotion: tuple[Path, Path, Path | None]) -> None:
 
 
 def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
-    discovery_dir = scan_directory_path(scan) / "artifacts" / "02_discovery"
     artifacts = {
-        "inScopeFilesPath": discovery_dir / "in_scope_files.txt",
-        "candidateLedgerPath": discovery_dir / "candidate_ledger.jsonl",
+        "inScopeFilesPath": scan_directory_path(
+            scan, "artifacts", "02_discovery", "in_scope_files.txt"
+        ),
+        "candidateLedgerPath": scan_directory_path(
+            scan, "artifacts", "02_discovery", "candidate_ledger.jsonl"
+        ),
     }
     labels = {
         "inScopeFilesPath": "Canonical in-scope inventory path",
@@ -373,13 +380,8 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         and run["status"] == "succeeded"
         and run["manifest_path"] is not None
         and run["manifest_path"]
-        != str(portable_path(scan_directory_path(scan) / "scan-manifest.json"))
-        and (
-            scan_directory_path(scan)
-            / "artifacts"
-            / "02_discovery"
-            / "in_scope_files.txt"
-        ).exists()
+        != str(portable_path(scan_directory_path(scan, "scan-manifest.json")))
+        and scan_directory_path(scan, "artifacts", "02_discovery", "in_scope_files.txt").exists()
     ):
         canonical_artifacts = canonical_discovery_artifacts(scan)
         if (
@@ -912,11 +914,11 @@ def coordinator_lease_is_live(
             seconds=DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS
         )
     heartbeat_time = datetime.fromisoformat(str(run["updated_at"]))
-    heartbeat_path = (
-        scan_directory_path(scan)
-        / "artifacts"
-        / "deep_discovery"
-        / f"coordinator-heartbeat-{run['coordinator_generation']}.json"
+    heartbeat_path = scan_directory_path(
+        scan,
+        "artifacts",
+        "deep_discovery",
+        f"coordinator-heartbeat-{run['coordinator_generation']}.json",
     )
     try:
         heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
@@ -1073,7 +1075,7 @@ def recover_expired_coordinator(
 
 def recover_candidate_ledger_publication(connection: sqlite3.Connection, scan_id: str) -> None:
     scan = require_scan(connection, scan_id)
-    ledger = scan_directory_path(scan) / "artifacts" / "02_discovery" / "candidate_ledger.jsonl"
+    ledger = scan_directory_path(scan, "artifacts", "02_discovery", "candidate_ledger.jsonl")
     backups = sorted(
         ledger.parent.glob(f".{ledger.name}.*.backup"),
         key=lambda backup: backup.stat().st_mtime_ns,
@@ -1092,7 +1094,7 @@ def recover_candidate_ledger_publication(connection: sqlite3.Connection, scan_id
         (scan_id,),
     )
     for reducer in reducers:
-        snapshot = filesystem_path(Path(reducer["artifact_dir"])) / "canonical" / ledger.name
+        snapshot = filesystem_path(Path(reducer["artifact_dir"]) / "canonical" / ledger.name)
         if not snapshot.exists():
             continue
         published = ledger.exists() and ledger.samefile(snapshot)
@@ -1557,7 +1559,7 @@ def commit_deep_scan_dedup_locked(
                 "Staged candidate ledger path",
                 kind="file",
             )
-            discovery_dir = scan_directory_path(scan) / "artifacts" / "02_discovery"
+            discovery_dir = scan_directory_path(scan, "artifacts", "02_discovery")
             deep_scan_path(
                 scan,
                 str(discovery_dir / "in_scope_files.txt"),
@@ -1678,7 +1680,7 @@ def finish_deep_scan_locked(
             )
         )
         standard_scan_manifest = manifest_path == str(
-            portable_path(scan_directory_path(scan) / "scan-manifest.json")
+            portable_path(scan_directory_path(scan, "scan-manifest.json"))
         )
 
         failure_capped = False
@@ -1690,7 +1692,7 @@ def finish_deep_scan_locked(
             for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
                 deep_scan_path(
                     scan,
-                    str(scan_directory_path(scan) / artifact_name),
+                    str(scan_directory_path(scan, artifact_name)),
                     f"Canonical parent {artifact_name}",
                     kind="file",
                 )
@@ -1794,7 +1796,7 @@ def finish_deep_scan_locked(
             for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
                 deep_scan_path(
                     scan,
-                    str(scan_directory_path(scan) / artifact_name),
+                    str(scan_directory_path(scan, artifact_name)),
                     f"Canonical parent {artifact_name}",
                     kind="file",
                 )
