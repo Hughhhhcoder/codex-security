@@ -1476,7 +1476,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 character_class = False
                             continue
                         if character == ord("/"):
-                            return True
+                            if not braces:
+                                return True
+                            opening, separators, _ = braces[-1]
+                            braces[-1] = (opening, separators, True)
                         if first_class_character and character in (ord("!"), ord("^")):
                             continue
                         first_class_character = False
