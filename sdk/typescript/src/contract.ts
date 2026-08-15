@@ -831,6 +831,7 @@ async function openCheckedScanFile(
     throwIfAborted(signal);
     if (
       !opened.isFile() ||
+      opened.ino !== checked.metadata.ino ||
       !(await sameCheckedFileDevice(file, checked, opened))
     ) {
       throw new ContractValidationError(
@@ -880,27 +881,39 @@ export async function sameCheckedFileDevice(
   checked: CheckedScanFile,
   opened: Stats,
   platform: NodeJS.Platform = process.platform,
+  openReference: (path: string, flags: number) => Promise<FileHandle> = open,
 ): Promise<boolean> {
-  if (
-    opened.dev === checked.metadata.dev &&
-    opened.ino === checked.metadata.ino
-  ) {
-    return true;
-  }
+  if (opened.ino !== checked.metadata.ino) return false;
+  if (opened.dev === checked.metadata.dev) return true;
   if (platform !== "win32") return false;
 
   const [openedIdentity, checkedIdentity] = await Promise.all([
     file.stat({ bigint: true }),
     lstat(checked.path, { bigint: true }),
   ]);
-  return (
-    openedIdentity.isFile() &&
-    checkedIdentity.isFile() &&
-    !checkedIdentity.isSymbolicLink() &&
-    openedIdentity.ino === checkedIdentity.ino &&
-    BigInt.asUintN(32, openedIdentity.dev) ===
-      BigInt.asUintN(32, checkedIdentity.dev)
+  if (
+    !openedIdentity.isFile() ||
+    !checkedIdentity.isFile() ||
+    checkedIdentity.isSymbolicLink() ||
+    openedIdentity.ino !== checkedIdentity.ino
+  ) {
+    return false;
+  }
+
+  const reference = await openReference(
+    checked.path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
+  try {
+    const referenceIdentity = await reference.stat({ bigint: true });
+    return (
+      referenceIdentity.isFile() &&
+      openedIdentity.dev === referenceIdentity.dev &&
+      openedIdentity.ino === referenceIdentity.ino
+    );
+  } finally {
+    await reference.close();
+  }
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

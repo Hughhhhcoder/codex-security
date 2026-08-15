@@ -118,6 +118,10 @@ describe("canonical scan contract", () => {
     let inode = identity.ino;
     let regular = true;
     let inspected = 0;
+    let referenceDevice = highDevice;
+    let referenceInode = identity.ino;
+    let referenceRegular = true;
+    let referenceClosed = 0;
     const file = {
       stat: async () => {
         inspected += 1;
@@ -128,44 +132,79 @@ describe("canonical scan contract", () => {
         };
       },
     } as unknown as FileHandle;
+    const reference = {
+      stat: async () => ({
+        dev: referenceDevice,
+        ino: referenceInode,
+        isFile: () => referenceRegular,
+      }),
+      close: async () => {
+        referenceClosed += 1;
+      },
+    } as unknown as FileHandle;
+    const openReference = async () => reference;
     const checked = { path, metadata, parents: [] };
     const opened = { dev: Number(highDevice), ino: metadata.ino } as Stats;
 
     await expect(
-      sameCheckedFileDevice(file, checked, opened, "win32"),
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
     ).resolves.toBe(true);
+    expect(referenceClosed).toBe(1);
 
     const inconsistentNumberInode = {
       dev: metadata.dev,
       ino: metadata.ino + 1024,
     } as Stats;
     await expect(
-      sameCheckedFileDevice(file, checked, inconsistentNumberInode, "win32"),
-    ).resolves.toBe(true);
-    await expect(
-      sameCheckedFileDevice(file, checked, inconsistentNumberInode, "linux"),
+      sameCheckedFileDevice(
+        file,
+        checked,
+        inconsistentNumberInode,
+        "win32",
+        openReference,
+      ),
     ).resolves.toBe(false);
 
     device = highDevice ^ 1n;
     await expect(
-      sameCheckedFileDevice(file, checked, opened, "win32"),
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
     ).resolves.toBe(false);
+    expect(referenceClosed).toBe(2);
+
+    referenceDevice = device;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(true);
+    expect(referenceClosed).toBe(3);
 
     device = highDevice;
+    referenceDevice = highDevice;
     inode = identity.ino + 1n;
     await expect(
-      sameCheckedFileDevice(file, checked, opened, "win32"),
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
     ).resolves.toBe(false);
 
     inode = identity.ino;
     regular = false;
     await expect(
-      sameCheckedFileDevice(file, checked, opened, "win32"),
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(false);
+
+    regular = true;
+    referenceInode = identity.ino + 1n;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
+    ).resolves.toBe(false);
+
+    referenceInode = identity.ino;
+    referenceRegular = false;
+    await expect(
+      sameCheckedFileDevice(file, checked, opened, "win32", openReference),
     ).resolves.toBe(false);
 
     const windowsInspections = inspected;
     await expect(
-      sameCheckedFileDevice(file, checked, opened, "linux"),
+      sameCheckedFileDevice(file, checked, opened, "linux", openReference),
     ).resolves.toBe(false);
     expect(inspected).toBe(windowsInspections);
   });
