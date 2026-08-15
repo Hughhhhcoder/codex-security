@@ -26,7 +26,7 @@ from workbench_target import (
     worktree_content_digest,
 )
 from workbench_validation import optional_text, require_uuid, user_text
-from windows_paths import filesystem_path, portable_path
+from windows_paths import extended_path, filesystem_path, portable_path
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
 DEEP_SCAN_WORKER_STATUSES = ("queued", "running", "succeeded", "failed", "canceled")
@@ -299,16 +299,16 @@ def deep_scan_output_path(scan: sqlite3.Row, value: str, label: str) -> str:
     return str(output)
 
 
+def temporary_artifact_path(path: Path, suffix: str) -> Path:
+    return filesystem_path(path.with_name(f".{path.name}.{uuid.uuid4()}.{suffix}"))
+
+
 def promote_staged_file(staged_path: str, output_path: str) -> tuple[Path, Path, Path | None]:
     staged = filesystem_path(Path(staged_path))
     output = filesystem_path(Path(output_path))
     if staged == output:
         raise SystemExit("A staged Deep Scan artifact must not be its published output path.")
-    backup = (
-        filesystem_path(output.with_name(f".{output.name}.{uuid.uuid4()}.backup"))
-        if output.exists()
-        else None
-    )
+    backup = temporary_artifact_path(output, "backup") if output.exists() else None
     if backup is not None:
         os.replace(output, backup)
     try:
@@ -800,7 +800,7 @@ def begin_deep_scan_for_target(
             Path(
                 tempfile.mkdtemp(
                     prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-                    dir=target_root,
+                    dir=extended_path(target_root),
                 )
             )
         ).resolve()
@@ -1596,9 +1596,7 @@ def commit_deep_scan_dedup_locked(
             raise SystemExit("Dedup inputs are not in the claimed merging state.")
         if candidate_ledger_path and canonical_candidate_ledger_path:
             canonical_path = filesystem_path(Path(canonical_candidate_ledger_path))
-            publication_copy = canonical_path.with_name(
-                f".{canonical_path.name}.{uuid.uuid4()}.publish"
-            )
+            publication_copy = temporary_artifact_path(canonical_path, "publish")
             os.link(filesystem_path(Path(candidate_ledger_path)), publication_copy)
             promotion = promote_staged_file(
                 str(publication_copy),

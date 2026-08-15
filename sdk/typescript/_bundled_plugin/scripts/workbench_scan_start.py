@@ -130,7 +130,9 @@ def archive_scan(
                 "The archived scan directory is required to preserve existing scan artifacts."
             )
         archived_scan_dir = Path(
-            tempfile.mkdtemp(prefix=f"{scan_dir.name}.previous-", dir=scan_dir.parent)
+            tempfile.mkdtemp(
+                prefix=f"{scan_dir.name}.previous-", dir=extended_path(scan_dir.parent)
+            )
         ).resolve()
     connection.execute(
         "UPDATE scans SET scan_dir = ?, updated_at = ? WHERE id = ?",
@@ -176,7 +178,7 @@ def insert_running_scan(
         scan_dir = Path(
             tempfile.mkdtemp(
                 prefix=f"{safe_segment(revision)}_{compact_timestamp()}_",
-                dir=target_root,
+                dir=extended_path(target_root),
             )
         ).resolve()
     connection.execute(

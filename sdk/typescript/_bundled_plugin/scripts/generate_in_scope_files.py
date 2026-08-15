@@ -12,7 +12,7 @@ from pathlib import Path
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from windows_paths import filesystem_path, portable_path
+from windows_paths import extended_path, filesystem_path, portable_path
 
 
 class InventoryError(ValueError):
@@ -248,7 +248,7 @@ def write_inventory(output: Path, rows: list[bytes]) -> int:
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
-            dir=output.parent,
+            dir=extended_path(output.parent),
             prefix=f".{output.name}.",
             suffix=".tmp",
             delete=False,

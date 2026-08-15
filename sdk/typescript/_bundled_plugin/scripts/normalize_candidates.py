@@ -14,7 +14,7 @@ from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from windows_paths import filesystem_path, portable_path
+from windows_paths import extended_path, filesystem_path, portable_path
 
 CWE = re.compile(r"(?i)CWE-(\d+)")
 ROLES = {
@@ -326,7 +326,7 @@ def main() -> None:
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
-                dir=output.parent,
+                dir=extended_path(output.parent),
                 prefix=f".{output.name}.",
                 suffix=".tmp",
                 delete=False,

@@ -782,23 +782,25 @@ describe("plugin runtime preparation", () => {
           evidence: "evidence",
         })}\n`,
       );
-      const normalization = spawnSync(
-        python!,
-        [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
-          "--input",
-          candidates,
-          "--out",
-          normalized,
-          "--repo-root",
-          longRepository,
-          "--in-scope-files",
-          longOutput,
-        ],
-        { encoding: "utf8" },
-      );
+      const normalizeCandidates = (output: string) =>
+        spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "normalize_candidates.py"),
+            "--input",
+            candidates,
+            "--out",
+            output,
+            "--repo-root",
+            longRepository,
+            "--in-scope-files",
+            longOutput,
+          ],
+          { encoding: "utf8" },
+        );
+      const normalization = normalizeCandidates(normalized);
       expect(normalization.status, normalization.stderr).toBe(0);
       expect(
         JSON.parse((await readFile(normalized, "utf8")).trim()),
@@ -806,6 +808,26 @@ describe("plugin runtime preparation", () => {
         cwe_ids: ["CWE-20"],
         locations: [{ path: "app.ts", start_line: 1, role: "sink" }],
       });
+      const atomicDirectory = join(root, "t".repeat(224 - root.length - 1));
+      await mkdir(atomicDirectory);
+      const atomicInventory = join(atomicDirectory, "inventory-output.jsonl");
+      const atomicNormalized = join(atomicDirectory, "normalize-output.jsonl");
+      expect(atomicInventory.length).toBe(247);
+      expect(atomicNormalized.length).toBe(247);
+      const atomicInventoryResult = spawnSync(
+        python!,
+        generatorArguments(atomicInventory, longRepository),
+        inventoryOptions,
+      );
+      expect(atomicInventoryResult.status, atomicInventoryResult.stderr).toBe(
+        0,
+      );
+      expect(await readFile(atomicInventory, "utf8")).toContain("./app.ts\n");
+      const atomicNormalization = normalizeCandidates(atomicNormalized);
+      expect(atomicNormalization.status, atomicNormalization.stderr).toBe(0);
+      expect(
+        JSON.parse((await readFile(atomicNormalized, "utf8")).trim()),
+      ).toMatchObject({ cwe_ids: ["CWE-20"] });
 
       const stateDirectory = join(
         root,
@@ -920,6 +942,10 @@ describe("plugin runtime preparation", () => {
         join(nearLimitReducer, "canonical", "candidate_ledger.jsonl"),
         "pending\n",
       );
+      const atomicLedger = join(atomicDirectory, "candidate_ledger.json");
+      const atomicStagedLedger = join(atomicDirectory, "staged.json");
+      await writeFile(atomicLedger, "previous\n");
+      await writeFile(atomicStagedLedger, "published\n");
       const nearLimitDeepScan = spawnSync(
         python!,
         [
@@ -927,7 +953,8 @@ describe("plugin runtime preparation", () => {
           "-B",
           "-c",
           [
-            "import json, runpy, sqlite3, sys",
+            "import json, os, runpy, sqlite3, sys",
+            "from pathlib import Path",
             "from types import SimpleNamespace",
             "module = runpy.run_path(sys.argv[1])",
             "scan = {'scan_dir': sys.argv[2]}",
@@ -940,11 +967,18 @@ describe("plugin runtime preparation", () => {
             "live = module['coordinator_lease_is_live'](connection, run, scan, '2026-01-01T00:00:20+00:00')",
             "module['recover_candidate_ledger_publication'](connection, 'scan')",
             "ledger = module['scan_directory_path'](scan, 'artifacts', '02_discovery', 'candidate_ledger.jsonl')",
-            "print(json.dumps({'heartbeatLive': live, 'recoveredLedger': ledger.read_text(encoding='utf-8')}))",
+            "canonical = module['filesystem_path'](Path(sys.argv[4]))",
+            "publication = module['temporary_artifact_path'](canonical, 'publish')",
+            "os.link(module['filesystem_path'](Path(sys.argv[5])), publication)",
+            "promotion = module['promote_staged_file'](str(publication), str(canonical))",
+            "module['finish_staged_file'](promotion)",
+            "print(json.dumps({'heartbeatLive': live, 'recoveredLedger': ledger.read_text(encoding='utf-8'), 'publishedLedger': canonical.read_text(encoding='utf-8')}))",
           ].join("\n"),
           join(PLUGIN_ROOT, "scripts", "deep_scan_workbench.py"),
           nearLimitScanDirectory,
           nearLimitReducer,
+          atomicLedger,
+          atomicStagedLedger,
         ],
         { encoding: "utf8" },
       );
@@ -952,6 +986,7 @@ describe("plugin runtime preparation", () => {
       expect(JSON.parse(nearLimitDeepScan.stdout)).toEqual({
         heartbeatLive: true,
         recoveredLedger: "restored\n",
+        publishedLedger: "published\n",
       });
       const findingDirectory = join(
         longScanDirectory,
@@ -1213,6 +1248,44 @@ describe("plugin runtime preparation", () => {
           }),
         ]),
       });
+
+      const nearLimitScanRoot = join(root, "r".repeat(215 - root.length - 1));
+      await mkdir(nearLimitScanRoot);
+      for (const [command, threadId] of [
+        ["start-headless-standard-scan", "near-limit-standard-root"],
+        ["begin-deep-scan", "near-limit-deep-root"],
+      ] as const) {
+        const nearLimitStarted = spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            workbench,
+            command,
+            "--thread-id",
+            threadId,
+            "--target-path",
+            longRepository,
+            "--scope",
+            ".",
+            "--scan-root",
+            nearLimitScanRoot,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+            },
+          },
+        );
+        expect(nearLimitStarted.status, nearLimitStarted.stderr).toBe(0);
+        const scan = JSON.parse(nearLimitStarted.stdout)[
+          command === "begin-deep-scan" ? "deepScan" : "scan"
+        ] as { scanDir: string };
+        expect(scan.scanDir.length).toBeGreaterThan(260);
+        expect(scan.scanDir).not.toStartWith("\\\\?\\");
+      }
 
       const longDeepScanRoot = join(
         root,
