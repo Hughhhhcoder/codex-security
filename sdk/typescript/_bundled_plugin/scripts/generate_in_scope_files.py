@@ -197,6 +197,7 @@ def generate_diff_in_scope_files(
                         continue
                 elif (
                     path.is_symlink()
+                    or not path.parent.resolve().is_relative_to(repository)
                     or not path.is_file()
                     or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
                 ):

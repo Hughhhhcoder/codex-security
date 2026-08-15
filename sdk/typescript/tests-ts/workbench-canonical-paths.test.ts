@@ -129,6 +129,60 @@ function runPythonProbe(
 }
 
 describe("bundled workbench canonical paths", () => {
+  test("does not follow repository parent symlinks during inventory or snapshots", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const outside = join(root, "outside");
+    await mkdir(repository);
+    await mkdir(outside);
+    await writeFile(join(outside, "private.py"), "private = True\n");
+    await symlink(
+      outside,
+      join(repository, "linked"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    const result = runPythonProbe(
+      [
+        "import json, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, sys.argv[1])",
+        "import generate_in_scope_files as inventory",
+        "import generate_rank_input as ranking",
+        "import rank_preview as previews",
+        "import workbench_target as workbench",
+        "repository = Path(sys.argv[2])",
+        "output = Path(sys.argv[3])",
+        "candidate = repository / 'linked' / 'private.py'",
+        "ranking.git_changed_paths = lambda *_: [(candidate, 'M')]",
+        "reads = []",
+        "def preview(path, *_):",
+        "    reads.append(path.read_text())",
+        "    return '', False",
+        "previews.preview_for = preview",
+        "inventory.generate_diff_in_scope_files(repository, 'base', 'head', 'local-patch', output)",
+        "workbench.git_output = lambda *_: str(repository)",
+        "workbench.git_worktree_context = lambda _: (repository, '.')",
+        "workbench.git_bytes = lambda *_: b'linked/private.py\\0'",
+        "try:",
+        "    workbench.git_directory_snapshot_paths(repository)",
+        "except SystemExit:",
+        "    snapshot_rejected = True",
+        "else:",
+        "    snapshot_rejected = False",
+        "print(json.dumps({'inventory': output.read_text(), 'externalReads': reads, 'snapshotRejected': snapshot_rejected}))",
+      ].join("\n"),
+      repository,
+      join(root, "inventory.txt"),
+    );
+
+    expect(result).toEqual({
+      inventory: "",
+      externalReads: [],
+      snapshotRejected: true,
+    });
+  });
+
   testPosix(
     "rejects private scan directories under insecure shared parents",
     async () => {
