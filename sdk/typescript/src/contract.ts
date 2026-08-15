@@ -831,7 +831,6 @@ async function openCheckedScanFile(
     throwIfAborted(signal);
     if (
       !opened.isFile() ||
-      opened.ino !== checked.metadata.ino ||
       !(await sameCheckedFileDevice(file, checked, opened))
     ) {
       throw new ContractValidationError(
@@ -882,7 +881,12 @@ export async function sameCheckedFileDevice(
   opened: Stats,
   platform: NodeJS.Platform = process.platform,
 ): Promise<boolean> {
-  if (opened.dev === checked.metadata.dev) return true;
+  if (
+    opened.dev === checked.metadata.dev &&
+    opened.ino === checked.metadata.ino
+  ) {
+    return true;
+  }
   if (platform !== "win32") return false;
 
   const [openedIdentity, checkedIdentity] = await Promise.all([

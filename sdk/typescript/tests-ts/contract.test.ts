@@ -129,11 +129,22 @@ describe("canonical scan contract", () => {
       },
     } as unknown as FileHandle;
     const checked = { path, metadata, parents: [] };
-    const opened = { dev: Number(highDevice) } as Stats;
+    const opened = { dev: Number(highDevice), ino: metadata.ino } as Stats;
 
     await expect(
       sameCheckedFileDevice(file, checked, opened, "win32"),
     ).resolves.toBe(true);
+
+    const inconsistentNumberInode = {
+      dev: metadata.dev,
+      ino: metadata.ino + 1024,
+    } as Stats;
+    await expect(
+      sameCheckedFileDevice(file, checked, inconsistentNumberInode, "win32"),
+    ).resolves.toBe(true);
+    await expect(
+      sameCheckedFileDevice(file, checked, inconsistentNumberInode, "linux"),
+    ).resolves.toBe(false);
 
     device = highDevice ^ 1n;
     await expect(
