@@ -321,15 +321,23 @@ describe("plugin runtime preparation", () => {
   });
 
   test("generates canonical scoped security inventory paths", async () => {
-    if (Bun.which("rg") === null) {
-      const generator = await readFile(
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "utf8",
+    const ripgrep =
+      Bun.which("rg") ??
+      join(
+        dirname(dirname(resolveCodexCommand().command)),
+        "codex-path",
+        process.platform === "win32" ? "rg.exe" : "rg",
       );
-      expect(generator).toContain('"--no-ignore"');
-      expect(generator).toContain('"--path-separator"');
-      return;
-    }
+    expect(existsSync(ripgrep)).toBe(true);
+    const inventoryOptions = {
+      encoding: "utf8" as const,
+      env: {
+        ...process.env,
+        PATH: [dirname(ripgrep), process.env["PATH"]]
+          .filter(Boolean)
+          .join(delimiter),
+      },
+    };
 
     const root = await temporaryDirectory("codex-security-scan-inventory-");
     const repository = join(root, "repository");
@@ -377,9 +385,11 @@ describe("plugin runtime preparation", () => {
         destination,
       ] as const;
     for (const destination of [output, repeatedOutput]) {
-      const inventory = spawnSync(python!, generatorArguments(destination), {
-        encoding: "utf8",
-      });
+      const inventory = spawnSync(
+        python!,
+        generatorArguments(destination),
+        inventoryOptions,
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
     }
 
@@ -405,9 +415,11 @@ describe("plugin runtime preparation", () => {
       );
       await writeFile(join(repository, "literal:colon.txt"), "colon\n");
       const posixOutput = join(root, "inventory-posix-filenames.txt");
-      const inventory = spawnSync(python!, generatorArguments(posixOutput), {
-        encoding: "utf8",
-      });
+      const inventory = spawnSync(
+        python!,
+        generatorArguments(posixOutput),
+        inventoryOptions,
+      );
       expect(inventory.status, inventory.stderr).toBe(0);
       const posixRows = (await readFile(posixOutput, "utf8"))
         .trimEnd()
@@ -449,7 +461,7 @@ describe("plugin runtime preparation", () => {
           "--out",
           mixedScopeOutput,
         ],
-        { encoding: "utf8" },
+        inventoryOptions,
       );
       expect(mixedScopeInventory.status, mixedScopeInventory.stderr).toBe(0);
       expect(await readFile(mixedScopeOutput, "utf8")).toBe(
@@ -513,7 +525,7 @@ describe("plugin runtime preparation", () => {
       const inventory = spawnSync(
         python!,
         generatorArguments(longOutput, longRepository),
-        { encoding: "utf8" },
+        inventoryOptions,
       );
       expect(inventory.status, inventory.stderr).toBe(0);
       expect(await readFile(longOutput, "utf8")).toBe(
