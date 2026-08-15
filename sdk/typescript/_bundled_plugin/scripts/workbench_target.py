@@ -341,7 +341,9 @@ def clean_worktree_content_digest() -> str:
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
+def git_directory_snapshot_paths(
+    target: Path, *, skip_unsafe_paths: bool = False
+) -> list[Path] | None:
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None:
         return None
@@ -385,6 +387,8 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             directory is not None
             and not _snapshot_directory_is_within_target(directory, canonical_target)
         ):
+            if skip_unsafe_paths:
+                continue
             raise SystemExit("Git working-tree paths must stay inside the selected target.")
         paths.append(path)
         if not stat.S_ISDIR(metadata.st_mode):
@@ -465,7 +469,7 @@ def directory_content_digest(target: Path, *, excluded: tuple[Path, ...] = ()) -
 
 
 def directory_snapshot_regular_file_count(target: Path) -> int:
-    paths = git_directory_snapshot_paths(target)
+    paths = git_directory_snapshot_paths(target, skip_unsafe_paths=True)
     if paths is None:
         paths = sorted(target.rglob("*"))
     count = 0
