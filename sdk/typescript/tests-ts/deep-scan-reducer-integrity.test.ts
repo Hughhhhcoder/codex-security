@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -106,6 +107,7 @@ type ReducerResponse = {
   accepted: boolean;
   message: string;
   saved?: ScanDraft;
+  writeups?: Record<string, string>;
 };
 
 const scanId = randomUUID();
@@ -169,6 +171,10 @@ async function recordReduction(
   sources: ScanDraft[],
   reduction: ScanDraft,
   previous?: ScanDraft,
+  prepare?: (context: {
+    scanRoot: string;
+    claimedWorkers: Array<{ id: string; resultPath: string }>;
+  }) => void,
 ): Promise<ReducerResponse> {
   const node = Bun.which("node");
   expect(node).not.toBeNull();
@@ -194,6 +200,15 @@ async function recordReduction(
         "output/result.json",
       );
       writeJson(resultPath, source);
+      for (const sourceFinding of source.findings) {
+        if (sourceFinding.writeup === undefined) continue;
+        const reportPath = join(
+          dirname(resultPath),
+          sourceFinding.writeup.reportPath,
+        );
+        mkdirSync(dirname(reportPath), { recursive: true });
+        writeFileSync(reportPath, `# ${sourceFinding.title}\n`);
+      }
       return { id, resultPath };
     });
     const reducerContext: {
@@ -207,7 +222,14 @@ async function recordReduction(
         "artifacts/deep_discovery/dedup/previous/output/result.json",
       );
       writeJson(reducerContext.previousReducerResultPath, previous);
+      for (const previousFinding of previous.findings) {
+        if (previousFinding.writeup === undefined) continue;
+        const reportPath = join(scanRoot, previousFinding.writeup.reportPath);
+        mkdirSync(dirname(reportPath), { recursive: true });
+        writeFileSync(reportPath, `# ${previousFinding.title}\n`);
+      }
     }
+    prepare?.({ scanRoot, claimedWorkers });
 
     const child = spawn(
       node!,
@@ -293,6 +315,21 @@ async function recordReduction(
               saved: JSON.parse(
                 readFileSync(join(reducerRoot, "result.json"), "utf8"),
               ) as ScanDraft,
+              writeups: Object.fromEntries(
+                reduction.findings.flatMap((sourceFinding) =>
+                  sourceFinding.writeup === undefined
+                    ? []
+                    : [
+                        [
+                          sourceFinding.writeup.reportPath,
+                          readFileSync(
+                            join(scanRoot, sourceFinding.writeup.reportPath),
+                            "utf8",
+                          ),
+                        ],
+                      ],
+                ),
+              ),
             }
           : {}),
       };
@@ -472,6 +509,135 @@ describe("Deep scan reducer finding retention", () => {
     expect(result.message).toMatch(/evidence/iu);
   });
 
+  test("relocates accepted worker finding writeups into the parent scan", async () => {
+    const source = finding("first", 10);
+    source.writeup = {
+      reportPath: "findings/first-finding/first-finding.md",
+    };
+
+    const result = await recordReduction([draft([source])], draft([source]));
+
+    expect(result.accepted, result.message).toBe(true);
+    expect(result.writeups?.[source.writeup.reportPath]).toBe(
+      `# ${source.title}\n`,
+    );
+    expect(result.saved?.findings[0]?.writeup).toEqual(source.writeup);
+  });
+
+  test("retains writeups copied by a previous accepted Deep reduction", async () => {
+    const previous = finding("first", 10);
+    previous.writeup = {
+      reportPath: "findings/first-finding/first-finding.md",
+    };
+    const current = structuredClone(previous);
+    delete current.writeup;
+
+    const result = await recordReduction(
+      [draft([current])],
+      draft([previous]),
+      draft([previous]),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
+    expect(result.writeups?.[previous.writeup.reportPath]).toBe(
+      `# ${previous.title}\n`,
+    );
+  });
+
+  test("does not overwrite conflicting accepted worker finding writeups", async () => {
+    const first = finding("first", 10);
+    first.writeup = {
+      reportPath: "findings/first-finding/first-finding.md",
+    };
+    const second = structuredClone(first);
+    second.title = "A different accepted writeup for the same finding";
+
+    const result = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([first]),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/conflicting.*writeup/iu);
+  });
+
+  test("rejects a writeup path shared by distinct accepted findings", async () => {
+    const first = finding("first", 10);
+    first.writeup = {
+      reportPath: "findings/shared-finding/shared-finding.md",
+    };
+    const second = finding("second", 20);
+    second.writeup = structuredClone(first.writeup);
+
+    const result = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([first, second]),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/duplicate.*writeup/iu);
+  });
+
+  test("rejects accepted worker writeups that escape their worker directory", async () => {
+    const source = finding("first", 10);
+    source.writeup = {
+      reportPath: "findings/first-finding/first-finding.md",
+    };
+
+    const result = await recordReduction(
+      [draft([source])],
+      draft([source]),
+      undefined,
+      ({ scanRoot, claimedWorkers }) => {
+        const workerFindings = join(
+          dirname(claimedWorkers[0]!.resultPath),
+          "findings",
+        );
+        const outsideWorker = join(scanRoot, "outside-worker");
+        const redirectedFinding = join(outsideWorker, "first-finding");
+        mkdirSync(redirectedFinding, { recursive: true });
+        writeFileSync(
+          join(redirectedFinding, "first-finding.md"),
+          "# Outside the accepted worker\n",
+        );
+        rmSync(workerFindings, { recursive: true });
+        symlinkSync(
+          outsideWorker,
+          workerFindings,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      },
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/escaped|symlink|canonical/iu);
+  });
+
+  test("rejects parent finding directories that redirect writeups outside the scan", async () => {
+    const source = finding("first", 10);
+    source.writeup = {
+      reportPath: "findings/first-finding/first-finding.md",
+    };
+
+    const result = await recordReduction(
+      [draft([source])],
+      draft([source]),
+      undefined,
+      ({ scanRoot }) => {
+        const outsideScan = join(dirname(scanRoot), "outside-scan");
+        mkdirSync(outsideScan);
+        symlinkSync(
+          outsideScan,
+          join(scanRoot, "findings"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      },
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/escaped|symlink|canonical/iu);
+  });
+
   test("combines explanations for the same canonical source evidence", async () => {
     const first = finding("first", 10);
     const second = finding("first", 10);
@@ -555,6 +721,143 @@ describe("Deep scan reducer finding retention", () => {
 
     expect(result.accepted).toBe(false);
     expect(result.message).toMatch(/evidence/iu);
+  });
+
+  test("reconciles conflicting accepted severity and confidence ratings", async () => {
+    const lower = finding("first", 10);
+    lower.severity = {
+      level: "medium",
+      score: 5,
+      scoringSystem: "CVSS:3.1",
+      rationale: "The initial worker observed a limited security impact.",
+      changeConditions: "Impact increases if privileged input is reachable.",
+    };
+    lower.confidence = {
+      level: "low",
+      rationale: "The initial worker had incomplete reachability evidence.",
+    };
+    const higher = structuredClone(lower);
+    higher.severity = {
+      level: "high",
+      score: 8,
+      scoringSystem: "CVSS:3.1",
+      vector: "CVSS:3.1/AV:N/AC:L",
+      rationale: "The second worker confirmed privileged account impact.",
+      changeConditions: "The vulnerable route is reachable without login.",
+    };
+    higher.confidence = {
+      level: "high",
+      rationale: "The second worker verified the complete source-to-sink path.",
+    };
+    const merged: Finding = {
+      ...higher,
+      severity: {
+        ...higher.severity,
+        rationale: `${lower.severity.rationale} ${higher.severity.rationale}`,
+        changeConditions: `${lower.severity.changeConditions} ${higher.severity.changeConditions}`,
+      },
+      confidence: {
+        ...higher.confidence,
+        rationale: `${lower.confidence.rationale} ${higher.confidence.rationale}`,
+      },
+    };
+
+    for (const sources of [
+      [draft([lower]), draft([higher])],
+      [draft([higher]), draft([lower])],
+    ]) {
+      const result = await recordReduction(sources, draft([merged]));
+      expect(result.accepted, result.message).toBe(true);
+      expect(result.saved?.findings[0]?.severity.level).toBe("high");
+      expect(result.saved?.findings[0]?.confidence.level).toBe("high");
+    }
+  });
+
+  test("rejects weaker duplicate ratings after a stronger worker result", async () => {
+    const lower = finding("first", 10);
+    lower.severity = { level: "medium", rationale: "Limited initial impact." };
+    lower.confidence = {
+      level: "low",
+      rationale: "Initial validation was incomplete.",
+    };
+    const higher = structuredClone(lower);
+    higher.severity = {
+      level: "high",
+      rationale: "Confirmed privileged impact.",
+    };
+    higher.confidence = {
+      level: "high",
+      rationale: "The vulnerable request was validated.",
+    };
+
+    for (const changed of [
+      {
+        ...higher,
+        severity: {
+          ...lower.severity,
+          rationale: `${lower.severity.rationale} ${higher.severity.rationale}`,
+        },
+        confidence: {
+          ...higher.confidence,
+          rationale: `${lower.confidence.rationale} ${higher.confidence.rationale}`,
+        },
+      },
+      {
+        ...higher,
+        severity: {
+          ...higher.severity,
+          rationale: `${lower.severity.rationale} ${higher.severity.rationale}`,
+        },
+        confidence: {
+          ...lower.confidence,
+          rationale: `${lower.confidence.rationale} ${higher.confidence.rationale}`,
+        },
+      },
+    ]) {
+      const result = await recordReduction(
+        [draft([lower]), draft([higher])],
+        draft([changed]),
+      );
+      expect(result.accepted).toBe(false);
+      expect(result.message).toMatch(/evidence/iu);
+    }
+  });
+
+  test("retains the strongest accepted score when duplicate severity levels match", async () => {
+    const lower = finding("first", 10);
+    lower.severity = {
+      level: "high",
+      score: 7,
+      scoringSystem: "CVSS:3.1",
+      rationale: "The first worker calculated a lower score.",
+    };
+    const higher = structuredClone(lower);
+    higher.severity = {
+      level: "high",
+      score: 8,
+      scoringSystem: "CVSS:3.1",
+      rationale: "The second worker identified additional impact.",
+    };
+    const merged: Finding = {
+      ...higher,
+      severity: {
+        ...higher.severity,
+        rationale: `${lower.severity.rationale} ${higher.severity.rationale}`,
+      },
+    };
+
+    const accepted = await recordReduction(
+      [draft([lower]), draft([higher])],
+      draft([merged]),
+    );
+    expect(accepted.accepted, accepted.message).toBe(true);
+
+    const rejected = await recordReduction(
+      [draft([lower]), draft([higher])],
+      draft([{ ...merged, severity: { ...merged.severity, score: 7 } }]),
+    );
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.message).toMatch(/evidence/iu);
   });
 
   test("rejects invented validation and attack paths for explicit null evidence", async () => {
@@ -679,6 +982,69 @@ describe("Deep scan reducer finding retention", () => {
     );
     expect(rejected.accepted).toBe(false);
     expect(rejected.message).toMatch(/evidence/iu);
+  });
+
+  test("preserves the accepted source-to-sink order in attack-path steps", async () => {
+    const source = finding("first", 10);
+    source.attackPath = {
+      summary: "An external request reaches the privileged handler.",
+      steps: [
+        { description: "Read the untrusted request parameter." },
+        {
+          description: "Forward the parameter into the administrator handler.",
+        },
+        { description: "Perform the privileged account operation." },
+      ],
+    };
+
+    const reversed: Finding = {
+      ...source,
+      attackPath: {
+        ...source.attackPath,
+        steps: [...(source.attackPath["steps"] as object[])].reverse(),
+      },
+    };
+    const result = await recordReduction([draft([source])], draft([reversed]));
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/evidence/iu);
+  });
+
+  test("merges ordered worker attack-path steps without reversing either trace", async () => {
+    const first = finding("first", 10);
+    first.attackPath = {
+      summary: "The request reaches a privileged account operation.",
+      steps: [
+        "Read the external request.",
+        "Perform the privileged operation.",
+      ],
+    };
+    const second = structuredClone(first);
+    second.attackPath = {
+      summary: first.attackPath["summary"],
+      steps: [
+        "Validate the request shape.",
+        "Perform the privileged operation.",
+      ],
+    };
+    const merged: Finding = {
+      ...first,
+      attackPath: {
+        ...first.attackPath,
+        steps: [
+          "Read the external request.",
+          "Validate the request shape.",
+          "Perform the privileged operation.",
+        ],
+      },
+    };
+
+    const result = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([merged]),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
   });
 
   test("combines plain-text and structured root-cause representations", async () => {
