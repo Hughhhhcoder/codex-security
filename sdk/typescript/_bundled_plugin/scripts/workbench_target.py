@@ -53,6 +53,8 @@ def git_digest_field(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    stdin: IO[bytes] | None = None,
+    object_requests: IO[bytes] | None = None,
 ) -> bool:
     """Hash length-framed Git output without buffering the entire output."""
     state_directory = workbench_state_directory()
@@ -64,10 +66,18 @@ def git_digest_field(
             text=False,
             git_dir=git_dir,
             work_tree=work_tree,
+            stdin=stdin,
             stdout=spool,
         )
         if completed.returncode != 0:
             return False
+        if object_requests is not None:
+            spool.seek(0)
+            try:
+                write_committed_diff_object_requests(spool, object_requests)
+            except ValueError:
+                return False
+            object_requests.seek(0)
         digest.update(len(label).to_bytes(4, "big"))
         digest.update(label)
         digest.update(os.fstat(spool.fileno()).st_size.to_bytes(8, "big"))
@@ -75,6 +85,37 @@ def git_digest_field(
         for chunk in iter(lambda: spool.read(1024 * 1024), b""):
             digest.update(chunk)
     return True
+
+
+def read_stream_nul_field(stream: IO[bytes]) -> bytes | None:
+    """Read one NUL-framed Git record without buffering the complete output."""
+    field = bytearray()
+    while character := stream.read(1):
+        if character == b"\0":
+            return bytes(field)
+        field.extend(character)
+    if field:
+        raise ValueError("missing NUL terminator")
+    return None
+
+
+def write_committed_diff_object_requests(
+    metadata: IO[bytes],
+    requests: IO[bytes],
+) -> None:
+    """Collect changed blob objects from NUL-framed raw Git diff records."""
+    while (header := read_stream_nul_field(metadata)) is not None:
+        if read_stream_nul_field(metadata) is None:
+            raise ValueError("missing raw diff path")
+        fields = header.split()
+        if len(fields) != 5 or not fields[0].startswith(b":"):
+            raise ValueError("invalid raw Git diff record")
+        for mode, object_name in (
+            (fields[0][1:], fields[2]),
+            (fields[1], fields[3]),
+        ):
+            if mode not in {b"000000", b"160000"}:
+                requests.write(object_name + b"\n")
 
 
 def git_blob_bytes(
@@ -164,6 +205,7 @@ def git_command(
     input_data: str | bytes | None = None,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    stdin: IO[bytes] | None = None,
     stdout: IO[bytes] | None = None,
 ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if (git_dir is None) != (work_tree is None):
@@ -182,6 +224,7 @@ def git_command(
             full_command,
             check=False,
             stdout=subprocess.PIPE if stdout is None else stdout,
+            stdin=stdin,
             stderr=subprocess.PIPE,
             env=environment,
             text=text,
@@ -212,37 +255,19 @@ def worktree_content_digest(target: Path) -> str:
     return worktree_content_digest_for_context(repository, pathspec)
 
 
-def committed_diff_arguments(
-    base: str,
-    head: str,
-    pathspec: str,
-    attribute_source: str,
-) -> tuple[str, ...]:
+def committed_diff_arguments(base: str, head: str, pathspec: str) -> tuple[str, ...]:
     return (
-        f"--attr-source={attribute_source}",
-        "-c",
-        f"core.attributesFile={os.devnull}",
-        "-c",
-        "core.quotePath=true",
         "-c",
         f"diff.orderFile={os.devnull}",
-        "-c",
-        "diff.suppressBlankEmpty=false",
         "diff",
-        "--binary",
-        "--full-index",
+        "--raw",
+        "-z",
+        "--no-abbrev",
         "--no-ext-diff",
         "--no-textconv",
         "--no-color",
         "--no-relative",
         "--no-renames",
-        "--no-indent-heuristic",
-        "--diff-algorithm=myers",
-        "--unified=3",
-        "--inter-hunk-context=0",
-        "--src-prefix=a/",
-        "--dst-prefix=b/",
-        "--submodule=short",
         "--ignore-submodules=none",
         base,
         head,
@@ -255,13 +280,24 @@ def committed_diff_content_digest(target: Path, base: str, head: str) -> str:
     repository, pathspec = git_worktree_context(target)
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
-    if not git_digest_field(
-        digest,
-        b"tracked-diff",
-        repository,
-        *committed_diff_arguments(base, head, pathspec, empty_git_tree(repository)),
-    ):
-        raise SystemExit("Could not snapshot the selected committed changes.")
+    state_directory = workbench_state_directory()
+    state_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryFile(dir=state_directory) as object_requests:
+        if not git_digest_field(
+            digest,
+            b"tracked-diff",
+            repository,
+            *committed_diff_arguments(base, head, pathspec),
+            object_requests=object_requests,
+        ) or not git_digest_field(
+            digest,
+            b"tracked-objects",
+            repository,
+            "cat-file",
+            "--batch",
+            stdin=object_requests,
+        ):
+            raise SystemExit("Could not snapshot the selected committed changes.")
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 

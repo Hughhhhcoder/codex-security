@@ -579,6 +579,49 @@ describe("malformed scan artifact recovery", () => {
     ).rejects.toThrow("no longer produce the same diff");
   });
 
+  test("rejects replaced Git blob contents in a committed diff", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    const original = fixtureGit(
+      fixture.repository,
+      "rev-parse",
+      `${selected.headRevision}:src/extract.py`,
+    );
+    const replacement = spawnSync(
+      "git",
+      ["-C", fixture.repository, "hash-object", "-w", "--stdin"],
+      { encoding: "utf8", input: "# replaced blob contents\n" },
+    );
+    expect(replacement.status, replacement.stderr).toBe(0);
+    fixtureGit(
+      fixture.repository,
+      "replace",
+      "-f",
+      original,
+      replacement.stdout.trim(),
+    );
+
+    await expect(
+      workbench(fixture, [
+        "inspect-setup",
+        "--target-path",
+        fixture.repository,
+        "--scope",
+        ".",
+        "--mode",
+        "diff",
+        "--diff-target-kind",
+        "range",
+        "--diff-base-revision",
+        selected.baseRevision,
+        "--diff-head-revision",
+        selected.headRevision,
+        "--diff-content-digest",
+        selected.contentDigest,
+      ]),
+    ).rejects.toThrow("no longer produce the same diff");
+  });
+
   test.each(["workspace", "cli"] as const)(
     "rejects committed diff replacements during %s scan registration",
     async (scenario) => {
@@ -752,7 +795,7 @@ describe("malformed scan artifact recovery", () => {
     expect((await completeScan(fixture)).warnings).toEqual([]);
   });
 
-  test("keeps committed snapshots stable when checkout attributes change", async () => {
+  test("keeps committed snapshots stable when Git attribute sources change", async () => {
     const fixture = await startDraftScan("committed");
     const selected = committedDiffTarget(fixture);
     await writeFile(
@@ -766,6 +809,10 @@ describe("malformed scan artifact recovery", () => {
       "config",
       "core.attributesFile",
       globalAttributes,
+    );
+    await writeFile(
+      join(fixture.repository, ".git", "info", "attributes"),
+      "src/extract.py binary\n",
     );
 
     const inspected = await workbench(fixture, [
@@ -790,6 +837,57 @@ describe("malformed scan artifact recovery", () => {
       contentDigest: selected.contentDigest,
     });
     expect((await completeScan(fixture)).warnings).toEqual([]);
+  });
+
+  test("hashes committed diffs without newer Git attribute-source options", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    const probe = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import json, sys",
+          "from pathlib import Path",
+          "sys.path.insert(0, sys.argv[1])",
+          "import workbench_target as target",
+          "repository, base, head = Path(sys.argv[2]), sys.argv[3], sys.argv[4]",
+          "commands = []",
+          "original = target.git_command",
+          "def supported_git(where, *args, **options):",
+          "    if any(argument.startswith('--attr-source') for argument in args):",
+          "        raise AssertionError('Git 2.39 does not support --attr-source')",
+          "    commands.append(args)",
+          "    return original(where, *args, **options)",
+          "target.git_command = supported_git",
+          "digest = target.committed_diff_content_digest(repository, base, head)",
+          "print(json.dumps({'digest': digest, 'commands': commands}))",
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts"),
+        fixture.repository,
+        selected.baseRevision,
+        selected.headRevision,
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: fixture.stateDir,
+        },
+      },
+    );
+
+    expect(probe.status, probe.stderr).toBe(0);
+    const result = JSON.parse(probe.stdout) as {
+      digest: string;
+      commands: string[][];
+    };
+    expect(result.digest).toBe(selected.contentDigest);
+    expect(result.commands.some((command) => command.includes("diff"))).toBe(
+      true,
+    );
   });
 
   test("keeps committed snapshots stable when named Git diff drivers change", async () => {
@@ -851,7 +949,7 @@ describe("malformed scan artifact recovery", () => {
         "-B",
         "-c",
         [
-          "import hashlib, json, sys",
+          "import hashlib, io, json, sys",
           "from pathlib import Path",
           "sys.path.insert(0, sys.argv[1])",
           "import workbench_target as target",
@@ -865,11 +963,14 @@ describe("malformed scan artifact recovery", () => {
           "streamed = target.committed_diff_content_digest(repository, base, head)",
           "target.git_bytes = original",
           "root, pathspec = target.git_worktree_context(repository)",
-          "arguments = target.committed_diff_arguments(base, head, pathspec, target.empty_git_tree(root))",
-          "patch = original(root, *arguments)",
+          "metadata = original(root, *target.committed_diff_arguments(base, head, pathspec))",
+          "requests = io.BytesIO()",
+          "target.write_committed_diff_object_requests(io.BytesIO(metadata), requests)",
+          "objects = target.git_command(root, 'cat-file', '--batch', text=False, input_data=requests.getvalue()).stdout",
           "digest = hashlib.sha256()",
           "target.update_digest_field(digest, b'format', b'codex-security-snapshot/v1')",
-          "target.update_digest_field(digest, b'tracked-diff', patch)",
+          "target.update_digest_field(digest, b'tracked-diff', metadata)",
+          "target.update_digest_field(digest, b'tracked-objects', objects)",
           "print(json.dumps({'streamed': streamed, 'buffered': 'codex-security-snapshot/v1:sha256:' + digest.hexdigest(), 'bufferedDiffCalls': [args for args in calls if 'diff' in args]}))",
         ].join("\n"),
         join(PLUGIN_ROOT, "scripts"),
@@ -940,7 +1041,7 @@ describe("malformed scan artifact recovery", () => {
     expect(probe.status, probe.stderr).toBe(0);
     expect(JSON.parse(probe.stdout)).toEqual({
       digest: selected.contentDigest,
-      spoolDirectories: [fixture.stateDir],
+      spoolDirectories: [fixture.stateDir, fixture.stateDir, fixture.stateDir],
     });
   });
 
