@@ -10,6 +10,7 @@
     "examples/completed-scan/coverage.json",
     "examples/completed-scan/findings.json",
     "examples/completed-scan/scan-manifest.json",
+    "mcp/deep-reducer-integrity.cjs",
     "mcp/server.mjs",
     "mcp/server.mjs.br.part-000",
     "mcp/server.mjs.br.part-001",
