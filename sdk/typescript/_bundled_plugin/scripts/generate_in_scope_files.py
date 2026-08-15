@@ -107,20 +107,18 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
 
 def committed_changed_paths(repository: Path, base: str, head: str) -> list[tuple[Path, str]]:
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            "diff",
-            "--raw",
-            "-z",
-            "--diff-filter=ACMRD",
-            f"{base}..{head}",
-        ],
-        capture_output=True,
-        check=True,
+    from workbench_target import git_command
+
+    result = git_command(
+        repository,
+        "diff",
+        "--raw",
+        "-z",
+        "--diff-filter=ACMRD",
+        f"{base}..{head}",
+        text=False,
     )
+    result.check_returncode()
     fields = result.stdout.split(b"\0")
     changed: list[tuple[Path, str]] = []
     index = 0

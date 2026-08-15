@@ -109,6 +109,7 @@ import {
   enclosingGitWorktreeRoot,
   normalizeRepository,
   normalizeTarget,
+  outermostGitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
   type NormalizedTarget,
@@ -118,6 +119,10 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
+import {
+  resolveTrustedExecutable,
+  trustedExecutableEnvironment,
+} from "./trusted-executable.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -635,6 +640,28 @@ export class CodexSecurity {
         protectedRoot,
         signal,
       });
+      const pluginEnvironment = selectedScanEnvironment(
+        runtime.environment,
+        options.auth,
+        modelProvider,
+      );
+      const protectedGitRoot = await outermostGitMarkerRoot(
+        protectedRoot,
+        signal,
+      );
+      const git = await resolveTrustedExecutable(
+        "git",
+        pluginEnvironment,
+        protectedGitRoot,
+      );
+      const trustedPluginEnvironment = {
+        ...(await trustedExecutableEnvironment(
+          "rg",
+          git?.environment ?? pluginEnvironment,
+          protectedGitRoot,
+        )),
+        CODEX_SECURITY_GIT: git?.executable ?? "",
+      };
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
@@ -812,11 +839,7 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-          ),
+          ...trustedPluginEnvironment,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
         signal,
@@ -1010,13 +1033,7 @@ export class CodexSecurity {
       const environment = {
         ...pluginExecutionEnvironment(
           python,
-          withoutCodexHome(
-            selectedScanEnvironment(
-              runtime.environment,
-              options.auth,
-              modelProvider,
-            ),
-          ),
+          withoutCodexHome(trustedPluginEnvironment),
         ),
         ...(externalProvider === null
           ? {}

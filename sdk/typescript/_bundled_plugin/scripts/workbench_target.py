@@ -120,6 +120,83 @@ def _read_sized_nul_field(
     return output[offset:end], end + 1
 
 
+def _protected_git_root(target: Path) -> Path:
+    root = target.resolve()
+    for ancestor in (root, *root.parents):
+        try:
+            (ancestor / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        root = ancestor
+    return root
+
+
+def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | None:
+    root = _protected_git_root(target)
+    configured = environment.get("CODEX_SECURITY_GIT")
+    if configured is not None:
+        if not configured:
+            return None
+        candidate = Path(configured)
+        windows = sys.platform == "win32"
+        if not candidate.is_absolute():
+            raise SystemExit("CODEX_SECURITY_GIT must name an absolute trusted executable.")
+        try:
+            parent = candidate.parent.resolve(strict=True)
+            canonical = candidate.resolve(strict=True)
+        except OSError as error:
+            raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.") from error
+        if parent.is_relative_to(root) or canonical.is_relative_to(root):
+            raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
+        if (
+            not canonical.is_file()
+            or (
+                windows
+                and (
+                    candidate.suffix.lower() not in {".exe", ".com"}
+                    or canonical.suffix.lower() not in {".exe", ".com"}
+                )
+            )
+            or not os.access(canonical, os.F_OK if windows else os.X_OK)
+        ):
+            raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.")
+        return str(canonical)
+
+    entries: list[str] = []
+    executable: str | None = None
+    names = ("git.exe", "git.com") if sys.platform == "win32" else ("git",)
+    for entry in os.get_exec_path(environment):
+        if not entry:
+            continue
+        try:
+            directory = Path(entry).resolve(strict=True)
+        except OSError:
+            continue
+        if directory.is_relative_to(root):
+            continue
+        candidate: str | None = None
+        safe = True
+        for name in names:
+            path = directory / name
+            try:
+                canonical = path.resolve(strict=True)
+            except OSError:
+                continue
+            if canonical.is_relative_to(root):
+                safe = False
+                break
+            if canonical.is_file() and os.access(
+                canonical, os.F_OK if sys.platform == "win32" else os.X_OK
+            ):
+                candidate = candidate or str(path)
+        if not safe:
+            continue
+        executable = executable or candidate
+        entries.append(str(directory))
+    environment["PATH"] = os.pathsep.join(entries)
+    return executable
+
+
 def git_command(
     target: Path,
     *args: str,
@@ -134,25 +211,28 @@ def git_command(
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
+    executable = _trusted_git_executable(target, environment)
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
-    command = ["git", "-c", "core.fsmonitor=false", "-C", str(target)]
+    command = [executable or "git", "-c", "core.fsmonitor=false", "-C", str(target)]
     if git_dir is not None and work_tree is not None:
         command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
     full_command = [*command, *args]
-    try:
-        return subprocess.run(
-            full_command,
-            check=False,
-            capture_output=True,
-            env=environment,
-            text=text,
-            input=input_data,
-        )
-    except FileNotFoundError:
-        # Git is optional for Codebase scans. Treat an unavailable executable like
-        # any other failed Git probe so the target falls back to a directory snapshot.
-        empty_output = "" if text else b""
-        return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
+    if executable is not None:
+        try:
+            return subprocess.run(
+                full_command,
+                check=False,
+                capture_output=True,
+                env=environment,
+                text=text,
+                input=input_data,
+            )
+        except FileNotFoundError:
+            pass
+    # Git is optional for Codebase scans. Treat an unavailable executable like
+    # any other failed Git probe so the target falls back to a directory snapshot.
+    empty_output = "" if text else b""
+    return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
 
 
 def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
