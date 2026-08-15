@@ -73,7 +73,7 @@ import {
   streamWindowsCredentialAclDescriptors,
   verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
-import { PLUGIN_ROOT } from "./plugin-root.js";
+import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 const temporaryDirectories: string[] = [];
@@ -223,6 +223,101 @@ describe("plugin runtime preparation", () => {
       "candidate-a",
       "candidate-b",
     ]);
+  });
+
+  test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
+    const runtime = await loadBundledRuntime();
+    const source =
+      /function buildCoverage\(context, contract, semanticCoverage, scope, target\) \{[\s\S]*?\n\}/u.exec(
+        runtime,
+      )?.[0];
+    expect(source).toBeDefined();
+
+    type Surface = {
+      id?: string;
+      label: string;
+      disposition: string;
+      receiptRefs?: string[];
+    };
+    type Deferred = { id: string; reason: string; surfaceIds: string[] };
+    const buildCoverage = new Function(
+      "semanticIdentifier",
+      "coverageMode",
+      "inventoryStrategy",
+      `${source}\nreturn buildCoverage;`,
+    )(
+      (label: string) => label.toLowerCase(),
+      () => "deep_repository",
+      () => "repository",
+    ) as (
+      context: Record<string, unknown>,
+      contract: Record<string, unknown>,
+      coverage: { surfaces: Surface[]; deferred: Deferred[] },
+      scope: { includePaths: string[]; excludePaths: string[] },
+      target: Record<string, unknown>,
+    ) => {
+      surfaces: Array<Surface & { id: string; receiptRefs: string[] }>;
+      deferred: Deferred[];
+    };
+
+    const coverage = {
+      surfaces: [
+        {
+          id: "surface-web",
+          label: "Primary",
+          disposition: "reported",
+          receiptRefs: ["artifacts/primary.json"],
+        },
+        { id: "surface-web", label: "Secondary", disposition: "reported" },
+        {
+          id: "surface-web-2",
+          label: "Reserved suffix",
+          disposition: "no_issue_found",
+        },
+        { label: "Uploads", disposition: "reported" },
+        {
+          id: "surface_uploads",
+          label: "Owned uploads",
+          disposition: "reported",
+        },
+        { label: "Archive", disposition: "reported" },
+        { label: "Archive", disposition: "no_issue_found" },
+      ],
+      deferred: [
+        {
+          id: "deferred-review",
+          reason: "Environment unavailable",
+          surfaceIds: ["surface-web", "surface_uploads"],
+        },
+      ],
+    };
+    const original = structuredClone(coverage);
+    const canonical = buildCoverage(
+      { mode: "deep" },
+      {},
+      coverage,
+      { includePaths: ["."], excludePaths: [] },
+      {},
+    );
+
+    expect(canonical.surfaces.map((surface) => surface.id)).toEqual([
+      "surface-web",
+      "surface-web-3",
+      "surface-web-2",
+      "surface_uploads-2",
+      "surface_uploads",
+      "surface_archive",
+      "surface_archive-2",
+    ]);
+    expect(canonical.surfaces.map((surface) => surface.label)).toEqual(
+      coverage.surfaces.map((surface) => surface.label),
+    );
+    expect(canonical.surfaces[0]!.receiptRefs).toEqual([
+      "artifacts/primary.json",
+    ]);
+    expect(canonical.surfaces[1]!.receiptRefs).toEqual([]);
+    expect(canonical.deferred).toEqual(coverage.deferred);
+    expect(coverage).toEqual(original);
   });
 
   test("generates canonical scoped security inventory paths", async () => {
@@ -1700,7 +1795,8 @@ describe("plugin runtime preparation", () => {
   });
 
   test("uses an explicit Codex executable override", () => {
-    const configured = join(tmpdir(), "custom codex", "codex");
+    const executable = process.platform === "win32" ? "codex.exe" : "codex";
+    const configured = join(tmpdir(), "custom codex", executable);
 
     expect(resolveCodexCommand({ CODEX_CLI_PATH: ` ${configured} ` })).toEqual({
       command: configured,
@@ -1708,12 +1804,37 @@ describe("plugin runtime preparation", () => {
     expect(resolveCodexCommand({ CODEX_CLI_PATH: "   " })).toEqual(
       resolveCodexCommand({}),
     );
-    expect(resolveCodexCommand({ CODEX_CLI_PATH: "./bin/codex" })).toEqual({
-      command: join(process.cwd(), "bin", "codex"),
-    });
+    expect(
+      resolveCodexCommand({ CODEX_CLI_PATH: `./bin/${executable}` }),
+    ).toEqual({ command: join(process.cwd(), "bin", executable) });
     expect(resolveCodexCommand({ Codex_Cli_Path: configured })).toEqual({
       command: configured,
     });
+  });
+
+  test("replaces unspawnable Windows Codex shims with the bundled executable", () => {
+    const fallback = resolveCodexCommand({});
+
+    for (const name of ["codex", "codex.cmd", "CODEX.CMD", "codex.bat"]) {
+      const configured = join(tmpdir(), "npm shims", name);
+      expect(resolveCodexCommand({ CODEX_CLI_PATH: configured })).toEqual(
+        process.platform === "win32" ? fallback : { command: configured },
+      );
+      expect(
+        pluginExecutionEnvironment("/managed/python", {
+          CODEX_CLI_PATH: configured,
+        })["CODEX_CLI_PATH"],
+      ).toBe(process.platform === "win32" ? fallback.command : configured);
+    }
+
+    if (process.platform === "win32") {
+      const result = spawnSync(fallback.command, ["--version"], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/^codex-cli\s+\d/u);
+    }
   });
 
   test("launches the bundled Codex through the Deep Scan MCP environment without a global executable", async () => {
@@ -1758,7 +1879,11 @@ describe("plugin runtime preparation", () => {
   });
 
   test("preserves an explicit Codex executable override for nested workers", () => {
-    const configured = join(tmpdir(), "custom codex", "codex");
+    const configured = join(
+      tmpdir(),
+      "custom codex",
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
 
     expect(
       pluginExecutionEnvironment("/managed/python", {
@@ -4573,6 +4698,24 @@ describe("runtime directories and plugin Python boundary", () => {
         process.umask(previousUmask);
       }
     }
+  });
+
+  test("resolves inherited Python names case-insensitively", async () => {
+    const interpreter =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(interpreter).not.toBeNull();
+
+    expect(
+      await resolvePluginPython({
+        environment: {
+          PATH: "",
+          Python: interpreter!,
+          ...(process.env["SystemRoot"] === undefined
+            ? {}
+            : { SystemRoot: process.env["SystemRoot"] }),
+        },
+      }),
+    ).toBe(await realpath(interpreter!));
   });
 
   testPosix("uses configured, inherited, and managed Python", async () => {
