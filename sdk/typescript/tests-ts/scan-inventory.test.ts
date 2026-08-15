@@ -139,6 +139,9 @@ describe("security scan file inventory", () => {
     "conditional",
     "relative",
     "relative parent",
+    ...(process.platform === "win32"
+      ? []
+      : ["trailing newline", "trailing carriage return"]),
   ])(
     "honors %s global Git excludes across scoped nested checkouts",
     async (kind) => {
@@ -147,6 +150,12 @@ describe("security scan file inventory", () => {
       const checkout = await repository();
       const home = join(dirname(checkout), "home");
       const configuration = join(dirname(checkout), "configuration");
+      const configuredExcludes =
+        kind === "trailing newline"
+          ? "custom-excludes\n"
+          : kind === "trailing carriage return"
+            ? "custom-excludes\r"
+            : "custom-excludes";
       const excludes =
         kind === "HOME default"
           ? join(home, ".config", "git", "ignore")
@@ -154,8 +163,10 @@ describe("security scan file inventory", () => {
             ? join(checkout, "rel-ignore")
             : kind === "relative parent"
               ? join(dirname(checkout), "external-ignore")
-              : kind === "configured" || kind === "conditional"
-                ? join(home, "custom-excludes")
+              : kind === "configured" ||
+                  kind === "conditional" ||
+                  kind.startsWith("trailing ")
+                ? join(home, configuredExcludes)
                 : join(configuration, "git", "ignore");
       const nested = join(checkout, "nested");
       await Promise.all([
@@ -182,6 +193,7 @@ describe("security scan file inventory", () => {
       };
       if (
         kind === "configured" ||
+        kind.startsWith("trailing ") ||
         kind === "relative" ||
         kind === "relative parent"
       ) {

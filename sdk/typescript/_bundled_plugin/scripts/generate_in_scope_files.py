@@ -2023,6 +2023,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     configuration_scope,
                     "--includes",
                     "--path",
+                    "--null",
                     "--get",
                     "core.excludesFile",
                 ],
@@ -2050,9 +2051,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if configured_global_ignore.returncode == 0:
             break
     if configured_global_ignore is not None and configured_global_ignore.returncode == 0:
-        global_ignore = Path(
-            os.fsdecode(configured_global_ignore.stdout.rstrip(b"\r\n"))
-        )
+        global_ignore = Path(os.fsdecode(configured_global_ignore.stdout.removesuffix(b"\0")))
         if not global_ignore.is_absolute():
             global_ignore = repository / global_ignore
             try:
