@@ -23,7 +23,7 @@ from workbench_target import (
     worktree_content_digest,
 )
 from workbench_validation import optional_text, user_text
-from windows_paths import portable_path
+from windows_paths import extended_path, portable_path
 
 
 def safe_segment(value: str) -> str:
@@ -108,7 +108,8 @@ def archive_scan(
         raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
 
     previous_scan = connection.execute(
-        "SELECT id, status FROM scans WHERE scan_dir = ?", (str(portable_scan_dir),)
+        "SELECT id, status FROM scans WHERE scan_dir IN (?, ?)",
+        (str(portable_scan_dir), str(extended_path(portable_scan_dir))),
     ).fetchone()
     if previous_scan is None:
         return
@@ -137,7 +138,7 @@ def archive_scan(
     )
     for artifact in artifacts:
         try:
-            relative_path = Path(artifact["path"]).relative_to(portable_scan_dir)
+            relative_path = portable_path(Path(artifact["path"])).relative_to(portable_scan_dir)
         except ValueError:
             continue
         connection.execute(

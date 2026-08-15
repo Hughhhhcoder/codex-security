@@ -531,6 +531,12 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
             if git_candidates is not None:
                 candidates = git_candidates
             else:
+                absolute_search = os.name == "nt" and str(repo).startswith("\\\\?\\")
+                search_path = (
+                    str(scope_path)
+                    if absolute_search
+                    else str(portable_path(scope_path).relative_to(portable_path(repo)))
+                )
                 command = [
                     "rg",
                     "--files",
@@ -540,10 +546,15 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                     "--glob",
                     "!.git/**",
                     "--",
-                    str(portable_path(scope_path).relative_to(portable_path(repo))),
+                    search_path,
                 ]
                 try:
-                    result = subprocess.run(command, cwd=repo, capture_output=True, check=False)
+                    result = subprocess.run(
+                        command,
+                        cwd=None if absolute_search else repo,
+                        capture_output=True,
+                        check=False,
+                    )
                 except OSError as exc:
                     ignore_names = (".gitignore", ".ignore", ".rgignore")
                     ancestors = (scope_path, *scope_path.parents)

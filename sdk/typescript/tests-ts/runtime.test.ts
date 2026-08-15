@@ -329,11 +329,14 @@ describe("plugin runtime preparation", () => {
         process.platform === "win32" ? "rg.exe" : "rg",
       );
     expect(existsSync(ripgrep)).toBe(true);
+    const pathVariable =
+      Object.keys(process.env).find((name) => name.toUpperCase() === "PATH") ??
+      "PATH";
     const inventoryOptions = {
       encoding: "utf8" as const,
       env: {
         ...process.env,
-        PATH: [dirname(ripgrep), process.env["PATH"]]
+        [pathVariable]: [dirname(ripgrep), process.env[pathVariable]]
           .filter(Boolean)
           .join(delimiter),
       },
@@ -532,6 +535,33 @@ describe("plugin runtime preparation", () => {
         "./SECURITY.md\n./app.ts\n",
       );
 
+      const longScopes = join(root, "long-path-scopes.json");
+      const longScopedOutput = join(root, "long-path-scoped-source.jsonl");
+      await writeFile(longScopes, JSON.stringify(["."]));
+      const scopedSource = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          "make-repo-scope-input",
+          "--repo",
+          longRepository,
+          "--scopes-file",
+          longScopes,
+          "--out",
+          longScopedOutput,
+        ],
+        inventoryOptions,
+      );
+      expect(scopedSource.status, scopedSource.stderr).toBe(0);
+      expect(
+        (await readFile(longScopedOutput, "utf8"))
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+      ).toEqual([{ path: "SECURITY.md" }, { path: "app.ts" }]);
+
       const policy = spawnSync(
         python!,
         [
@@ -722,6 +752,16 @@ describe("plugin runtime preparation", () => {
       });
       const scanRoot = join(root, "long-path-scans");
       const workbench = join(PLUGIN_ROOT, "scripts", "workbench_db.py");
+      const nearLimitScanDirectory = join(
+        root,
+        "n".repeat(247 - root.length - 1),
+      );
+      expect(nearLimitScanDirectory.length).toBe(247);
+      await mkdir(nearLimitScanDirectory);
+      await copyFile(
+        join(longScanDirectory, "scan-manifest.json"),
+        join(nearLimitScanDirectory, "scan-manifest.json"),
+      );
       const artifactProbe = spawnSync(
         python!,
         [
@@ -734,10 +774,15 @@ describe("plugin runtime preparation", () => {
             "module = runpy.run_path(sys.argv[1])",
             "scan_dir = Path(sys.argv[2])",
             "names = ('report.md', 'findings.json', 'exports/results.sarif')",
-            "print(json.dumps({name: module['available_artifact_path'](scan_dir, scan_dir / name) is not None for name in names}))",
+            "artifacts = {name: module['available_artifact_path'](scan_dir, scan_dir / name) is not None for name in names}",
+            "near_limit = Path(sys.argv[3])",
+            "artifacts['nearLimitRequired'] = module['artifact_path'](near_limit, 'scan-manifest.json', required=True) is not None",
+            "artifacts['nearLimitAvailable'] = module['available_artifact_path'](near_limit, near_limit / 'scan-manifest.json') is not None",
+            "print(json.dumps(artifacts))",
           ].join("\n"),
           workbench,
           longScanDirectory,
+          nearLimitScanDirectory,
         ],
         { encoding: "utf8" },
       );
@@ -746,6 +791,8 @@ describe("plugin runtime preparation", () => {
         "report.md": true,
         "findings.json": true,
         "exports/results.sarif": true,
+        nearLimitRequired: true,
+        nearLimitAvailable: true,
       });
       const mixedStarted = spawnSync(
         python!,
@@ -4917,15 +4964,17 @@ describe("runtime directories and plugin Python boundary", () => {
           "from pathlib import Path",
           "sys.path.insert(0, sys.argv[1])",
           "from workbench_scan_start import archive_scan",
+          "from windows_paths import extended_path",
           "scan_dir = Path(sys.argv[2])",
+          "stored_scan_dir = extended_path(scan_dir)",
           "archived_scan_dir = Path(sys.argv[3])",
           "connection = sqlite3.connect(':memory:')",
           "connection.row_factory = sqlite3.Row",
           "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
           "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
-          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
+          "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(stored_scan_dir), 'before'))",
           "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
-          "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
+          "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(stored_scan_dir / path)) for kind, path in artifacts.items()])",
           "args = argparse.Namespace(archive_existing=True, archived_scan_dir=str(archived_scan_dir))",
           "archive_scan(connection, args, scan_dir, 'after', lambda path: path.resolve(strict=True))",
           "scan = connection.execute('SELECT scan_dir FROM scans WHERE id = ?', ('previous-scan',)).fetchone()",

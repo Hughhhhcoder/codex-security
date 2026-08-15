@@ -3488,7 +3488,7 @@ def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
     try:
         resolved_scan_dir = require_canonical_scan_directory(scan_dir)
         resolved = filesystem_path(candidate).resolve(strict=True)
-        resolved.relative_to(resolved_scan_dir)
+        portable_path(resolved).relative_to(portable_path(resolved_scan_dir))
     except (FileNotFoundError, RuntimeError, SystemExit, ValueError):
         return None
     if (
@@ -3501,10 +3501,10 @@ def available_artifact_path(scan_dir: Path, candidate: Path) -> Path | None:
 
 def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | None:
     scan_dir = require_canonical_scan_directory(scan_dir)
-    candidate = scan_dir / file_name
+    candidate = filesystem_path(scan_dir / file_name)
     try:
         resolved = candidate.resolve(strict=True)
-        resolved.relative_to(scan_dir.resolve())
+        portable_path(resolved).relative_to(portable_path(scan_dir))
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         if not required and isinstance(exc, FileNotFoundError):
             return None
