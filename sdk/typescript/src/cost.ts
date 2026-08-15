@@ -107,7 +107,7 @@ export class ScanCostTracker {
   #lastCost: number | null = null;
   #failedSession: SessionUsage | null = null;
   #hasDelegatedWorkers = false;
-  #hasUnverifiedWorkerUsage = false;
+  #hasUnverifiedSessionUsage = false;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -222,8 +222,8 @@ export class ScanCostTracker {
       this.#options.maxCostUsd !== undefined &&
       (rootUsage === null ||
         cost === null ||
-        (this.#hasDelegatedWorkers &&
-          (workerUsage === null || this.#hasUnverifiedWorkerUsage)))
+        this.#hasUnverifiedSessionUsage ||
+        (this.#hasDelegatedWorkers && workerUsage === null))
     ) {
       throw (
         refreshError ??
@@ -373,11 +373,12 @@ export class ScanCostTracker {
 
     let usage: ScanTokenUsage | null = null;
     let threadUsage: ScanTokenUsage | null = null;
-    let hasUnverifiedWorkerUsage = false;
+    let hasUnverifiedSessionUsage = false;
     for (const session of this.#sessions.values()) {
       if (session.threadId !== null && included.has(session.threadId)) {
+        if (session.pendingLineBytes > 0) hasUnverifiedSessionUsage = true;
         if (session.threadId !== this.#threadId) {
-          if (session.usage === null) hasUnverifiedWorkerUsage = true;
+          if (session.usage === null) hasUnverifiedSessionUsage = true;
           this.#reportWorkerActivities(session);
           this.#reportWorkerProgress(session);
         }
@@ -387,7 +388,7 @@ export class ScanCostTracker {
         }
       }
     }
-    this.#hasUnverifiedWorkerUsage = hasUnverifiedWorkerUsage;
+    this.#hasUnverifiedSessionUsage = hasUnverifiedSessionUsage;
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
     this.#snapshot = { usage, cost };

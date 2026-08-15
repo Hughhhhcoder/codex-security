@@ -16,7 +16,8 @@ import type { ScanActivity } from "../src/scan-activity.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 
 const temporaryDirectories: string[] = [];
-const testPosix = process.platform === "win32" ? test.skip : test;
+const testPosix =
+  process.platform === "win32" || process.geteuid?.() === 0 ? test.skip : test;
 
 async function waitFor(check: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -101,6 +102,7 @@ async function workerScan({
   maxCostUsd?: number;
   onCost?: (cost: { estimatedUsd: number }) => void;
 } = {}): Promise<{
+  home: string;
   root: string;
   worker: string;
   tracker: ScanCostTracker;
@@ -120,7 +122,7 @@ async function workerScan({
     onCost,
   });
   tracker.start("scan-thread");
-  return { root, worker, tracker };
+  return { home, root, worker, tracker };
 }
 
 async function appendSessionItem(
@@ -131,6 +133,19 @@ async function appendSessionItem(
     path,
     `${JSON.stringify({ type: "response_item", payload })}\n`,
   );
+}
+
+async function appendIncompleteTokenUsage(path: string): Promise<void> {
+  const event = JSON.stringify({
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: { input_tokens: 10_000, output_tokens: 1_000 },
+      },
+    },
+  });
+  await appendFile(path, event.slice(0, -1));
 }
 
 function progressMessage(
@@ -1914,6 +1929,61 @@ describe("live scan cost tracking", () => {
       }
     },
   );
+
+  test.each([
+    ["budgeted root", "root", 0.001, true],
+    ["budgeted delegated worker", "worker", 0.001, true],
+    ["budgeted unrelated session", "unrelated", 0.001, false],
+    ["unbudgeted delegated worker", "worker", undefined, false],
+  ] as const)(
+    "handles an incomplete final event from a %s",
+    async (_description, session, maxCostUsd, shouldReject) => {
+      const { home, root, worker, tracker } = await workerScan({ maxCostUsd });
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
+      const path =
+        session === "root"
+          ? root
+          : session === "worker"
+            ? worker
+            : await writeSession(home, "unrelated-thread", {
+                input_tokens: 100,
+                output_tokens: 10,
+              });
+      await appendIncompleteTokenUsage(path);
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
+
+      const completed = tracker.stop({ input_tokens: 100, output_tokens: 10 });
+      if (shouldReject) {
+        await expect(completed).rejects.toThrow(
+          "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+        );
+      } else {
+        await expect(completed).resolves.toMatchObject({
+          cost: { inputTokens: 200, outputTokens: 20 },
+        });
+      }
+    },
+  );
+
+  test("rejects an incomplete final root event without delegated workers", async () => {
+    const home = await codexHome();
+    const root = await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+      maxCostUsd: 0.001,
+    });
+    tracker.start("scan-thread");
+    await appendIncompleteTokenUsage(root);
+    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+
+    await expect(
+      tracker.stop({ input_tokens: 100, output_tokens: 10 }),
+    ).rejects.toThrow("The scan cost limit could not be verified");
+  });
 
   test("keeps final budget enforcement stable when cleanup stops tracking twice", async () => {
     const budget = 0.001;
