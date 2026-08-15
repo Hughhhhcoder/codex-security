@@ -198,6 +198,9 @@ describe("bundled workbench canonical paths", () => {
         "except inventory.InventoryError as error:",
         "    inventories['cyclic'] = str(error)",
         "Path.resolve = original_resolve",
+        "ranking.git_changed_paths = lambda *_: [(repository / 'missing-parent' / 'added.py', 'A')]",
+        "inventory.generate_diff_in_scope_files(repository, 'base', 'head', 'local-patch', output)",
+        "inventories['missingParent'] = output.read_text()",
         "workbench.git_output = lambda *_: str(repository)",
         "workbench.git_worktree_context = lambda _: (repository, '.')",
         "workbench.git_bytes = lambda *_: b'linked/private.py\\0'",
@@ -268,6 +271,7 @@ describe("bundled workbench canonical paths", () => {
         D: "linked/private.py\n",
         revisions: "linked/private.py\n",
         cyclic: "could not inspect a changed Git working-tree path",
+        missingParent: "",
       },
       rankings: {
         M: ["linked/private.py"],

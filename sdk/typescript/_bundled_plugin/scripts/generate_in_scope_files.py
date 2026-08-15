@@ -202,6 +202,8 @@ def generate_diff_in_scope_files(
                             raise InventoryError(
                                 "changed Git working-tree paths must stay inside the selected target"
                             )
+                    except FileNotFoundError:
+                        continue
                     except (OSError, RuntimeError) as error:
                         raise InventoryError(
                             "could not inspect a changed Git working-tree path"
