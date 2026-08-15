@@ -27,6 +27,7 @@ type Location = {
 type Finding = {
   ruleId: string;
   title: string;
+  summary: string;
   remediation: string;
   severity: {
     level: "critical" | "high" | "medium" | "low" | "informational";
@@ -1085,6 +1086,72 @@ describe("Deep scan reducer finding retention", () => {
             ...(source.attackPath["reachability"] as object),
             exploitExecuted: "A live administrator account was modified.",
           },
+        },
+      },
+    ]) {
+      const result = await recordReduction([draft([source])], draft([changed]));
+      expect(result.accepted).toBe(false);
+      expect(result.message).toMatch(/unsupported|evidence/iu);
+    }
+  });
+
+  test("rejects invented claims added to accepted finding narratives", async () => {
+    const source = finding("first", 10);
+    source.validation = {
+      method: "Static source review.",
+      summary: "The administrator route reaches a privileged handler.",
+    };
+    source.attackPath = {
+      summary: "A request reaches a privileged operation.",
+      reachability: { attacker: "An authenticated internal caller." },
+    };
+    source.rootCause = "The handler lacks a role check.";
+    source.severity = {
+      ...source.severity,
+      rationale: "Static source review found a missing role check.",
+    };
+
+    for (const changed of [
+      {
+        ...source,
+        summary: `Dynamic exploitation succeeded. ${source.summary}`,
+      },
+      {
+        ...source,
+        remediation: `Delete production credentials. ${source.remediation}`,
+      },
+      {
+        ...source,
+        validation: {
+          ...source.validation,
+          summary: `Dynamic exploitation succeeded. ${source.validation["summary"]}`,
+        },
+      },
+      {
+        ...source,
+        attackPath: {
+          ...source.attackPath,
+          reachability: {
+            attacker: `An unauthenticated remote attacker. ${(source.attackPath["reachability"] as { attacker: string }).attacker}`,
+          },
+        },
+      },
+      {
+        ...source,
+        rootCause: `Production exploitation succeeded. ${source.rootCause}`,
+      },
+      {
+        ...source,
+        severity: {
+          ...source.severity,
+          rationale: `Live exploitation was confirmed. ${source.severity.rationale}`,
+        },
+      },
+      {
+        ...source,
+        confidence: {
+          ...source.confidence,
+          rationale: `Live exploitation was confirmed. ${source.confidence.rationale}`,
         },
       },
     ]) {

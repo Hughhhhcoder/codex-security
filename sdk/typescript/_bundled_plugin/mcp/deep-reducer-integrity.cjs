@@ -200,26 +200,38 @@ function containsOnlyAcceptedFindingEvidence(
   const supportedCodeEvidence = (retained.codeEvidence ?? []).every(
     (evidence) => {
       const { id: _retainedIdentifier, ...retainedDetails } = evidence;
-      return matching.some((source) =>
-        (source.codeEvidence ?? []).some((accepted) => {
+      const acceptedRecords = matching.flatMap((source) =>
+        (source.codeEvidence ?? []).flatMap((accepted) => {
           const { id: _acceptedIdentifier, ...acceptedDetails } = accepted;
-          return (
-            retainsStructuredValue(
-              retainedDetails,
-              acceptedDetails,
-              "codeEvidence",
-            ) &&
-            containsOnlyAcceptedStructuredFields(
-              retainedDetails,
-              [acceptedDetails],
-              "codeEvidence",
-            )
-          );
+          return retainsStructuredValue(
+            retainedDetails,
+            acceptedDetails,
+            "codeEvidence",
+          )
+            ? [acceptedDetails]
+            : [];
         }),
+      );
+      return containsOnlyAcceptedStructuredFields(
+        retainedDetails,
+        acceptedRecords,
+        "codeEvidence",
       );
     },
   );
   if (!supportedCodeEvidence) return false;
+
+  for (const field of ["summary", "remediation"]) {
+    if (
+      !containsOnlyAcceptedStructuredFields(
+        retained[field],
+        matching.map((source) => source[field]),
+        field,
+      )
+    ) {
+      return false;
+    }
+  }
 
   for (const field of [
     "attackPath",
@@ -502,6 +514,22 @@ function retainsStrongestFindingRating(
     );
   });
   if (!supported) return false;
+
+  for (const key of RATING_NARRATIVE_FIELDS) {
+    if (retained[field][key] === undefined) continue;
+    const narratives = candidates.flatMap((rating) =>
+      rating[key] === undefined ? [] : [rating[key]],
+    );
+    if (
+      !containsOnlyAcceptedStructuredFields(
+        retained[field][key],
+        narratives,
+        key,
+      )
+    ) {
+      return false;
+    }
+  }
 
   return [...RATING_NARRATIVE_FIELDS].every((key) =>
     source[field][key] === undefined
@@ -948,6 +976,9 @@ function containsOnlyAcceptedStructuredFields(
   section = field,
 ) {
   if (accepted.length === 0) return false;
+  if (typeof retained === "string") {
+    return containsOnlyAcceptedNarrative(retained, accepted, field, section);
+  }
   if (retained === null || typeof retained !== "object") {
     return accepted.some((source) =>
       retainsStructuredValue(retained, source, field, section),
@@ -981,6 +1012,27 @@ function containsOnlyAcceptedStructuredFields(
     );
     return containsOnlyAcceptedStructuredFields(value, supported, key, section);
   });
+}
+
+function containsOnlyAcceptedNarrative(retained, accepted, field, section) {
+  const narratives = [...new Set(accepted)].filter(
+    (source) => typeof source === "string" && retained.includes(source),
+  );
+  if (narratives.some((source) => retained === source)) return true;
+  if (
+    !MERGEABLE_TEXT_FIELDS.has(field) &&
+    !(NARRATIVE_SECTIONS.has(section) && NARRATIVE_TEXT_FIELDS.has(field))
+  ) {
+    return false;
+  }
+
+  let remaining = retained;
+  for (const narrative of narratives.sort(
+    (first, second) => second.length - first.length,
+  )) {
+    remaining = remaining.split(narrative).join("");
+  }
+  return /^(?:[\s\p{P}\p{S}]|and|or)*$/iu.test(remaining);
 }
 
 async function relocateDeepReductionWriteups(
