@@ -227,6 +227,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
     repository_identity = directory_identity(repository)
     gitdir_owners: dict[tuple[int, int], tuple[int, int]] = {}
+    ignore_case_roots: dict[tuple[int, int], bool] = {}
     validated_metadata_roots: set[tuple[int, int]] = set()
     validated_object_stores: set[tuple[int, int]] = set()
     validated_metadata_files: set[tuple[int, int]] = set()
@@ -572,6 +573,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         if (section, key) in (
                             ("core", "worktree"),
                             ("core", "sparsecheckout"),
+                            ("core", "ignorecase"),
                             ("extensions", "objectformat"),
                             ("extensions", "worktreeconfig"),
                         ):
@@ -586,6 +588,9 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 raise InventoryError(f"could not inspect Git metadata: {directory}") from error
         if config_includes:
             raise InventoryError("Git config includes are not supported")
+        ignore_case_roots[directory_identity(directory)] = config_enabled(
+            options.get(("core", "ignorecase"), "false")
+        )
         sparse_checkout_enabled = config_enabled(
             options.get(("core", "sparsecheckout"), "false")
         )
@@ -1086,6 +1091,34 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 contents.removeprefix(b"gitdir: ").rstrip(b"\r\n"), owner
             )
             if target is not None and same_filesystem_path(target, path):
+                if not symbolic_metadata(head):
+                    contents = regular_member("HEAD")
+                    if contents is None:
+                        continue
+                    if contents.startswith(b"ref:"):
+                        reference = contents.removeprefix(b"ref:").lstrip(b" \t\r\n")
+                        if not reference.startswith(b"refs/"):
+                            continue
+                    elif re.match(rb"[0-9a-fA-F]{40}", contents) is None:
+                        continue
+                common = path
+                pointer = regular_member("commondir")
+                if pointer is not None:
+                    common = repository_directory(pointer.rstrip(b"\r\n"), path)
+                    if common is None:
+                        continue
+                try:
+                    members = [
+                        (common / name).stat(follow_symlinks=False)
+                        for name in ("objects", "refs")
+                    ]
+                except OSError:
+                    continue
+                if any(
+                    not stat.S_ISDIR(member.st_mode) and not symbolic_metadata(member)
+                    for member in members
+                ):
+                    continue
                 validated_metadata_roots.add(identity)
                 return True
         unowned_metadata_candidates.add(identity)
@@ -1111,9 +1144,26 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     ]
 
     def ripgrep_inventory(
-        directory: Path, requested_scope: str, *, directory_guard: bool = False
+        directory: Path,
+        requested_scope: str,
+        *,
+        directory_guard: bool = False,
+        ignore_case: bool | None = None,
     ) -> set[bytes]:
         arguments = command.copy()
+        if ignore_case is not None:
+            arguments = [
+                argument
+                for argument in arguments
+                if argument != "--ignore-file-case-insensitive"
+            ]
+            if ignore_case:
+                insertion = (
+                    arguments.index("--ignore-file")
+                    if "--ignore-file" in arguments
+                    else len(arguments)
+                )
+                arguments.insert(insertion, "--ignore-file-case-insensitive")
         directory_parts = directory.relative_to(repository).parts
         ignored_aliases = []
         for alias in sorted(metadata_aliases):
@@ -1130,7 +1180,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         arguments.extend(["--", "." if directory_guard else requested_scope])
         with tempfile.TemporaryFile(mode="w+b") as inventory:
             try:
-                result = subprocess.run(
+                result = run_ripgrep(
                     arguments,
                     cwd=directory,
                     stdout=inventory,
@@ -1191,6 +1241,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         preserve_gitignore_descendants: bool = False,
         configured_excludes_only: bool = False,
         include_global_excludes: bool = True,
+        default_excluded: bool = False,
     ) -> set[bytes]:
         requested = {
             normalized(os.fsencode(candidate.relative_to(repository).as_posix()))
@@ -1199,7 +1250,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if directories_only and any(b"\n" in path or b"\r" in path for path in requested):
             raise InventoryError("line separators are not supported in inventory paths")
         directories: list[Path] = []
-        current = root.parent
+        current = root if default_excluded else root.parent
         while True:
             directories.append(current)
             if current == repository:
@@ -1238,7 +1289,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                         for line in contents.splitlines()
                     ):
                         configured_excludes[directory] = contents
-        if not ignore_files and not configured_excludes and (
+        if not default_excluded and not ignore_files and not configured_excludes and (
             global_ignore is None or not include_global_excludes
         ):
             return requested
@@ -1859,6 +1910,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 for directory, contents in configured_excludes.items():
                     contents = admit_gitlink_directories(directory, contents)
                     install_ignore(directory, ".gitignore", contents, prepend=True)
+                if default_excluded:
+                    defaults = b"".join(
+                        b"/" + re.escape(relative) + b"\n"
+                        for relative in batch
+                    )
+                    install_ignore(repository, ".gitignore", defaults, prepend=True)
                 for relative in batch:
                     destination = probe / os.fsdecode(relative)
                     if directories_only:
@@ -1866,7 +1923,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     else:
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         destination.touch()
-                result = subprocess.run(
+                result = run_ripgrep(
                     [
                         *(
                             command
@@ -1959,6 +2016,41 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             )
         except OSError as error:
             raise InventoryError(f"could not run Git: {error}") from error
+
+    ripgrep_global_directory: tempfile.TemporaryDirectory[str] | None = None
+
+    def run_ripgrep(
+        arguments: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal ripgrep_global_directory
+        include_trusted_global = (
+            global_ignore is not None
+            and "--ignore-file-case-insensitive" in arguments
+            and any(
+                argument == "--ignore-file"
+                and index + 1 < len(arguments)
+                and arguments[index + 1] == str(global_ignore)
+                for index, argument in enumerate(arguments)
+            )
+        )
+        if include_trusted_global:
+            if ripgrep_global_directory is None:
+                ripgrep_global_directory = tempfile.TemporaryDirectory()
+                root = Path(ripgrep_global_directory.name)
+                defaults = root / "git"
+                defaults.mkdir()
+                (defaults / "ignore").write_bytes(global_ignore.read_bytes())
+                (root / "gitconfig").write_bytes(b"")
+            controlled_environment = environment.copy()
+            controlled_environment["XDG_CONFIG_HOME"] = ripgrep_global_directory.name
+            controlled_environment["GIT_CONFIG_GLOBAL"] = str(
+                Path(ripgrep_global_directory.name) / "gitconfig"
+            )
+            controlled_environment["GIT_CONFIG_NOSYSTEM"] = "1"
+            arguments = arguments.copy()
+            arguments[arguments.index("--no-ignore-global")] = "--ignore-global"
+            kwargs["env"] = controlled_environment
+        return subprocess.run(arguments, **kwargs)
 
     def resolve_git_root(value: bytes) -> Path:
         root_path = value.removesuffix(b"\n")
@@ -2054,7 +2146,10 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         if configured_global_ignore.returncode == 0:
             break
     if configured_global_ignore is not None and configured_global_ignore.returncode == 0:
-        global_ignore = Path(os.fsdecode(configured_global_ignore.stdout.removesuffix(b"\0")))
+        global_ignore = Path(
+            os.fsdecode(configured_global_ignore.stdout.removesuffix(b"\0"))
+            or os.devnull
+        )
         if not global_ignore.is_absolute():
             global_ignore = repository / global_ignore
             try:
@@ -2085,10 +2180,45 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         configured_home = environment.get("XDG_CONFIG_HOME")
         config_home = Path(configured_home) if configured_home else Path.home() / ".config"
         global_ignore = config_home / "git" / "ignore"
-    if global_ignore.is_file():
-        command.extend(["--ignore-file", str(global_ignore)])
-    else:
+    selected_git_root = next(
+        (
+            ancestor
+            for ancestor in reversed(ancestors)
+            if directory_identity(ancestor) in ignore_case_roots
+        ),
+        None,
+    )
+    if (
+        selected_git_root is not None
+        and ignore_case_roots[directory_identity(selected_git_root)]
+    ):
+        command.append("--ignore-file-case-insensitive")
+    try:
+        ignore_metadata = global_ignore.stat()
+    except FileNotFoundError:
         global_ignore = None
+    except OSError as error:
+        raise InventoryError(f"could not inspect global Git exclusions: {error}") from error
+    else:
+        if not stat.S_ISREG(ignore_metadata.st_mode):
+            try:
+                null_ignore = global_ignore.samefile(os.devnull)
+            except OSError:
+                null_ignore = False
+            if not null_ignore:
+                raise InventoryError(
+                    f"global Git exclusions must be a regular file: {global_ignore}"
+                )
+            global_ignore = None
+        else:
+            try:
+                with global_ignore.open("rb"):
+                    pass
+            except OSError as error:
+                raise InventoryError(
+                    f"could not read global Git exclusions: {error}"
+                ) from error
+            command.extend(["--ignore-file", str(global_ignore)])
 
     scoped_files: dict[Path, list[Path]] = {}
     inspected_directories: set[tuple[int, int]] = set()
@@ -2161,7 +2291,79 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                                 pass
                     pending.append(entry)
 
+    def reconciled_nested_rows(
+        root: Path,
+        nested_scope: str,
+        previous: set[bytes],
+        rendered_prefix: bytes,
+    ) -> set[bytes]:
+        nested_rows = ripgrep_inventory(
+            root,
+            nested_scope,
+            ignore_case=ignore_case_roots[directory_identity(root)],
+        )
+        candidates = [
+            root / os.fsdecode(row.removesuffix(b"\n")) for row in nested_rows
+        ]
+        visible = visible_to_outer_ignores(
+            root, candidates, include_global_excludes=False
+        )
+        root_prefix = os.fsencode(root.relative_to(repository).as_posix()) + b"/"
+        result = {
+            rendered_prefix + row.removeprefix(b"./")
+            for row in nested_rows
+            if normalized(
+                root_prefix + row.removeprefix(b"./").removesuffix(b"\n")
+            ) in visible
+        }
+        omitted = [
+            repository / os.fsdecode(row.removesuffix(b"\n"))
+            for row in previous
+            if row not in result
+        ]
+        if omitted:
+            overrides = visible_to_outer_ignores(
+                root,
+                omitted,
+                include_global_excludes=False,
+                default_excluded=True,
+            )
+            result.update(
+                row
+                for row in previous
+                if normalized(row.removeprefix(b"./").removesuffix(b"\n"))
+                in overrides
+            )
+        return result
+
     rows = ripgrep_inventory(repository, scope)
+    if selected == repository:
+        roots = sorted(
+            discovered_roots.values(),
+            key=lambda path: len(path.relative_to(repository).parts),
+        )
+        for nested in roots:
+            nested_ignore_case = ignore_case_roots.get(
+                directory_identity(nested), False
+            )
+            parent = next(
+                (
+                    root
+                    for root in reversed(roots)
+                    if root != nested and nested.is_relative_to(root)
+                ),
+                repository,
+            )
+            parent_ignore_case = ignore_case_roots.get(
+                directory_identity(parent), False
+            )
+            if nested_ignore_case == parent_ignore_case and global_ignore is None:
+                continue
+            relative = nested.relative_to(repository).as_posix()
+            prefix = os.fsencode(f"./{relative}/")
+            previous = {row for row in rows if row.startswith(prefix)}
+            rows.difference_update(previous)
+            rows.update(reconciled_nested_rows(nested, ".", previous, prefix))
     visible_directories = set(ancestors)
     for row in rows:
         current = (repository / os.fsdecode(row.removesuffix(b"\n"))).parent
@@ -2191,6 +2393,22 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                     rows.add(row)
                 else:
                     rows.discard(row)
+
+    if (
+        selected.is_dir()
+        and selected != repository
+        and selected_git_root is not None
+        and selected_git_root != repository
+        and global_ignore is not None
+    ):
+        nested_scope = selected.relative_to(selected_git_root).as_posix() or "."
+        nested_prefix = os.fsencode(
+            selected_git_root.relative_to(repository).as_posix()
+        ) + b"/"
+        rendered_prefix = (b"./" if scope.startswith("./") else b"") + nested_prefix
+        rows = reconciled_nested_rows(
+            selected_git_root, nested_scope, rows, rendered_prefix
+        )
 
     if worktree is not None or discovered_roots:
         prefix = b"./" if scope == "." or scope.startswith("./") else b""
