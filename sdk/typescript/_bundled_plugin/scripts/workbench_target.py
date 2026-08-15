@@ -361,13 +361,18 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
     paths: list[Path] = []
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
         path = repository / os.fsdecode(raw_path)
-        if not path.parent.resolve().is_relative_to(target):
-            raise SystemExit("Git working-tree paths must stay inside the selected target.")
         try:
             metadata = path.lstat()
         except FileNotFoundError:
             # The index can retain a path that was staged and then deleted.
             continue
+        if (
+            path != target and not path.parent.resolve().is_relative_to(target)
+        ) or (
+            stat.S_ISDIR(metadata.st_mode)
+            and not path.resolve().is_relative_to(target)
+        ):
+            raise SystemExit("Git working-tree paths must stay inside the selected target.")
         paths.append(path)
         if not stat.S_ISDIR(metadata.st_mode):
             continue

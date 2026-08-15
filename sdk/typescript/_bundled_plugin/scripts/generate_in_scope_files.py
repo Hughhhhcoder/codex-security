@@ -186,6 +186,8 @@ def generate_diff_in_scope_files(
 
         for path, status in eligible:
             relative = path.relative_to(repository)
+            if not path.parent.resolve().is_relative_to(repository):
+                continue
             if status != "D":
                 if mode == "revisions":
                     contents = revision_blobs[relative]
@@ -197,7 +199,6 @@ def generate_diff_in_scope_files(
                         continue
                 elif (
                     path.is_symlink()
-                    or not path.parent.resolve().is_relative_to(repository)
                     or not path.is_file()
                     or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
                 ):

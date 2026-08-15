@@ -135,6 +135,11 @@ describe("bundled workbench canonical paths", () => {
     const outside = join(root, "outside");
     await mkdir(repository);
     await mkdir(outside);
+    await mkdir(join(repository, "selected"));
+    await writeFile(
+      join(repository, "selected", "public.py"),
+      "public = True\n",
+    );
     await writeFile(join(outside, "private.py"), "private = True\n");
     await symlink(
       outside,
@@ -154,13 +159,20 @@ describe("bundled workbench canonical paths", () => {
         "repository = Path(sys.argv[2])",
         "output = Path(sys.argv[3])",
         "candidate = repository / 'linked' / 'private.py'",
-        "ranking.git_changed_paths = lambda *_: [(candidate, 'M')]",
         "reads = []",
         "def preview(path, *_):",
         "    reads.append(path.read_text())",
         "    return '', False",
         "previews.preview_for = preview",
-        "inventory.generate_diff_in_scope_files(repository, 'base', 'head', 'local-patch', output)",
+        "inventories = {}",
+        "for status in ('M', 'D'):",
+        "    ranking.git_changed_paths = lambda *_: [(candidate, status)]",
+        "    inventory.generate_diff_in_scope_files(repository, 'base', 'head', 'local-patch', output)",
+        "    inventories[status] = output.read_text()",
+        "inventory.committed_changed_paths = lambda *_: [(candidate, 'M')]",
+        "workbench.git_blob_bytes = lambda _, names: [b'private = True\\n' for _ in names]",
+        "inventory.generate_diff_in_scope_files(repository, 'base', 'head', 'revisions', output)",
+        "inventories['revisions'] = output.read_text()",
         "workbench.git_output = lambda *_: str(repository)",
         "workbench.git_worktree_context = lambda _: (repository, '.')",
         "workbench.git_bytes = lambda *_: b'linked/private.py\\0'",
@@ -170,16 +182,33 @@ describe("bundled workbench canonical paths", () => {
         "    snapshot_rejected = True",
         "else:",
         "    snapshot_rejected = False",
-        "print(json.dumps({'inventory': output.read_text(), 'externalReads': reads, 'snapshotRejected': snapshot_rejected}))",
+        "workbench.git_bytes = lambda *_: b'linked/missing.py\\0'",
+        "missing_skipped = workbench.git_directory_snapshot_paths(repository) == []",
+        "selected = repository / 'selected'",
+        "workbench.git_worktree_context = lambda _: (repository, 'selected')",
+        "workbench.git_bytes = lambda *_: b'selected\\0selected/public.py\\0'",
+        "selected_paths = [path.relative_to(selected).as_posix() for path in workbench.git_directory_snapshot_paths(selected)]",
+        "workbench.git_worktree_context = lambda _: (repository, '.')",
+        "workbench.git_bytes = lambda *_: b'linked\\0'",
+        "try:",
+        "    workbench.git_directory_snapshot_paths(repository)",
+        "except SystemExit:",
+        "    direct_link_rejected = True",
+        "else:",
+        "    direct_link_rejected = False",
+        "print(json.dumps({'inventories': inventories, 'externalReads': reads, 'snapshotRejected': snapshot_rejected, 'missingSkipped': missing_skipped, 'selectedPaths': selected_paths, 'directLinkRejected': direct_link_rejected}))",
       ].join("\n"),
       repository,
       join(root, "inventory.txt"),
     );
 
     expect(result).toEqual({
-      inventory: "",
+      inventories: { M: "", D: "", revisions: "" },
       externalReads: [],
       snapshotRejected: true,
+      missingSkipped: true,
+      selectedPaths: [".", "public.py"],
+      directLinkRejected: process.platform === "win32",
     });
   });
 
