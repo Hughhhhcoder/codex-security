@@ -3,12 +3,14 @@ import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -35,6 +37,8 @@ type Finding = {
     changeConditions?: string;
   };
   confidence: { level: "high" | "medium" | "low"; rationale: string };
+  taxonomy: { category: string; cwe: string[] };
+  provenance: { source: string };
   identity: { anchor: string; instance?: string };
   locations: Location[];
   attackPath?: Record<string, unknown> | null;
@@ -108,9 +112,18 @@ type ReducerResponse = {
   message: string;
   saved?: ScanDraft;
   writeups?: Record<string, string>;
+  receipts?: Record<string, string>;
 };
 
 const scanId = randomUUID();
+const validateAcceptedReduction = createRequire(import.meta.url)(
+  join(PLUGIN_ROOT, "mcp/deep-reducer-integrity.cjs"),
+).validateDeepReduction as (
+  result: ScanDraft,
+  sources: ScanDraft[],
+  previous: ScanDraft | undefined,
+  findingIdentity: (entry: Finding) => string,
+) => void;
 const exampleFinding = (
   JSON.parse(
     readFileSync(
@@ -209,6 +222,16 @@ async function recordReduction(
         mkdirSync(dirname(reportPath), { recursive: true });
         writeFileSync(reportPath, `# ${sourceFinding.title}\n`);
       }
+      for (const surface of source.coverage.surfaces) {
+        for (const receipt of surface.receiptRefs ?? []) {
+          const receiptPath = join(dirname(resultPath), receipt);
+          mkdirSync(dirname(receiptPath), { recursive: true });
+          writeFileSync(
+            receiptPath,
+            JSON.stringify({ worker: id, surface: surface.label }),
+          );
+        }
+      }
       return { id, resultPath };
     });
     const reducerContext: {
@@ -227,6 +250,16 @@ async function recordReduction(
         const reportPath = join(scanRoot, previousFinding.writeup.reportPath);
         mkdirSync(dirname(reportPath), { recursive: true });
         writeFileSync(reportPath, `# ${previousFinding.title}\n`);
+      }
+      for (const surface of previous.coverage.surfaces) {
+        for (const receipt of surface.receiptRefs ?? []) {
+          const receiptPath = join(scanRoot, receipt);
+          mkdirSync(dirname(receiptPath), { recursive: true });
+          writeFileSync(
+            receiptPath,
+            JSON.stringify({ worker: "previous", surface: surface.label }),
+          );
+        }
       }
     }
     prepare?.({ scanRoot, claimedWorkers });
@@ -306,28 +339,57 @@ async function recordReduction(
         | undefined;
       const accepted = response["error"] === undefined && !result?.isError;
       const message = result?.content?.[0]?.text ?? JSON.stringify(response);
+      const saved = accepted
+        ? (JSON.parse(
+            readFileSync(join(reducerRoot, "result.json"), "utf8"),
+          ) as ScanDraft)
+        : undefined;
+      if (saved !== undefined) {
+        validateAcceptedReduction(saved, sources, previous, (entry) => {
+          if (entry.identity !== undefined) {
+            return JSON.stringify([
+              entry.ruleId,
+              entry.identity.anchor,
+              entry.identity.instance ?? null,
+            ]);
+          }
+          const location = entry.locations[0]!;
+          return JSON.stringify([
+            entry.ruleId,
+            [location.path, location.startLine, location.endLine ?? null],
+          ]);
+        });
+      }
 
       return {
         accepted,
         message,
-        ...(accepted
+        ...(saved !== undefined
           ? {
-              saved: JSON.parse(
-                readFileSync(join(reducerRoot, "result.json"), "utf8"),
-              ) as ScanDraft,
+              saved,
               writeups: Object.fromEntries(
-                reduction.findings.flatMap((sourceFinding) =>
-                  sourceFinding.writeup === undefined
-                    ? []
-                    : [
-                        [
-                          sourceFinding.writeup.reportPath,
-                          readFileSync(
-                            join(scanRoot, sourceFinding.writeup.reportPath),
-                            "utf8",
-                          ),
-                        ],
-                      ],
+                saved.findings.some(
+                  (sourceFinding) => sourceFinding.writeup !== undefined,
+                )
+                  ? readdirSync(join(scanRoot, "findings"), {
+                      recursive: true,
+                    })
+                      .filter((entry) => String(entry).endsWith(".md"))
+                      .map((entry) => {
+                        const path = `findings/${String(entry).replaceAll("\\", "/")}`;
+                        return [
+                          path,
+                          readFileSync(join(scanRoot, path), "utf8"),
+                        ];
+                      })
+                  : [],
+              ),
+              receipts: Object.fromEntries(
+                saved.coverage.surfaces.flatMap((surface) =>
+                  (surface.receiptRefs ?? []).map((receipt) => [
+                    receipt,
+                    readFileSync(join(scanRoot, receipt), "utf8"),
+                  ]),
                 ),
               ),
             }
@@ -544,7 +606,7 @@ describe("Deep scan reducer finding retention", () => {
     );
   });
 
-  test("does not overwrite conflicting accepted worker finding writeups", async () => {
+  test("preserves conflicting worker writeups under distinct parent-local paths", async () => {
     const first = finding("first", 10);
     first.writeup = {
       reportPath: "findings/first-finding/first-finding.md",
@@ -557,11 +619,14 @@ describe("Deep scan reducer finding retention", () => {
       draft([first]),
     );
 
-    expect(result.accepted).toBe(false);
-    expect(result.message).toMatch(/conflicting.*writeup/iu);
+    expect(result.accepted, result.message).toBe(true);
+    expect(result.writeups).toEqual({
+      "findings/first-finding/first-finding.md": `# ${first.title}\n`,
+      "findings/first-finding-2/first-finding-2.md": `# ${second.title}\n`,
+    });
   });
 
-  test("rejects a writeup path shared by distinct accepted findings", async () => {
+  test("remaps a writeup path shared by distinct accepted findings", async () => {
     const first = finding("first", 10);
     first.writeup = {
       reportPath: "findings/shared-finding/shared-finding.md",
@@ -574,8 +639,17 @@ describe("Deep scan reducer finding retention", () => {
       draft([first, second]),
     );
 
-    expect(result.accepted).toBe(false);
-    expect(result.message).toMatch(/duplicate.*writeup/iu);
+    expect(result.accepted, result.message).toBe(true);
+    expect(
+      result.saved?.findings.map((entry) => entry.writeup?.reportPath),
+    ).toEqual([
+      "findings/shared-finding/shared-finding.md",
+      "findings/shared-finding-2/shared-finding-2.md",
+    ]);
+    expect(result.writeups).toEqual({
+      "findings/shared-finding/shared-finding.md": `# ${first.title}\n`,
+      "findings/shared-finding-2/shared-finding-2.md": `# ${second.title}\n`,
+    });
   });
 
   test("rejects accepted worker writeups that escape their worker directory", async () => {
@@ -860,6 +934,52 @@ describe("Deep scan reducer finding retention", () => {
     expect(rejected.message).toMatch(/evidence/iu);
   });
 
+  test("reconciles conflicting accepted taxonomy and provenance deterministically", async () => {
+    const lower = finding("first", 10);
+    lower.severity = { ...lower.severity, level: "medium" };
+    lower.taxonomy = {
+      category: "missing-authentication",
+      cwe: ["CWE-306"],
+    };
+    lower.provenance = { source: "initial_review" };
+    const higher = structuredClone(lower);
+    higher.severity = { ...higher.severity, level: "high" };
+    higher.taxonomy = {
+      category: "missing-authorization",
+      cwe: ["CWE-862"],
+    };
+    higher.provenance = { source: "validated_review" };
+    const merged: Finding = {
+      ...higher,
+      taxonomy: {
+        category: "missing-authorization",
+        cwe: ["CWE-306", "CWE-862"],
+      },
+    };
+
+    for (const sources of [
+      [draft([lower]), draft([higher])],
+      [draft([higher]), draft([lower])],
+    ]) {
+      const result = await recordReduction(sources, draft([merged]));
+      expect(result.accepted, result.message).toBe(true);
+      expect(result.saved?.findings[0]?.taxonomy).toEqual(merged.taxonomy);
+      expect(result.saved?.findings[0]?.provenance).toEqual(higher.provenance);
+    }
+
+    const unsupported = await recordReduction(
+      [draft([lower]), draft([higher])],
+      draft([
+        {
+          ...merged,
+          taxonomy: { category: "invented-control", cwe: ["CWE-306"] },
+        },
+      ]),
+    );
+    expect(unsupported.accepted).toBe(false);
+    expect(unsupported.message).toMatch(/unsupported|evidence/iu);
+  });
+
   test("rejects invented validation and attack paths for explicit null evidence", async () => {
     const source = finding("first", 10);
     source.validation = null;
@@ -936,6 +1056,42 @@ describe("Deep scan reducer finding retention", () => {
     expect(result.saved?.findings[0]?.validation).toEqual(validated.validation);
     expect(result.saved?.findings[0]?.attackPath).toEqual(validated.attackPath);
     expect(result.saved?.findings[0]?.rootCause).toEqual(validated.rootCause);
+  });
+
+  test("rejects invented proof appended to accepted validation and attack paths", async () => {
+    const source = finding("first", 10);
+    source.validation = {
+      method: "Static source review.",
+      summary: "The administrator route reaches a privileged handler.",
+    };
+    source.attackPath = {
+      summary: "A crafted request reaches a privileged operation.",
+      reachability: { attacker: "An external unauthenticated caller." },
+    };
+
+    for (const changed of [
+      {
+        ...source,
+        validation: {
+          ...source.validation,
+          exploitExecuted: "An exploit was executed against a live endpoint.",
+        },
+      },
+      {
+        ...source,
+        attackPath: {
+          ...source.attackPath,
+          reachability: {
+            ...(source.attackPath["reachability"] as object),
+            exploitExecuted: "A live administrator account was modified.",
+          },
+        },
+      },
+    ]) {
+      const result = await recordReduction([draft([source])], draft([changed]));
+      expect(result.accepted).toBe(false);
+      expect(result.message).toMatch(/unsupported|evidence/iu);
+    }
   });
 
   test("rejects unaccepted locations and code-evidence records", async () => {
@@ -1346,6 +1502,213 @@ describe("Deep scan reducer finding retention", () => {
 });
 
 describe("Deep scan reducer coverage integrity", () => {
+  test("rejects coverage entries never accepted by a Standard worker", async () => {
+    const accepted = coverage({
+      completeness: "partial",
+      surfaces: [
+        {
+          id: "admin",
+          label: "Administrator endpoint",
+          disposition: "needs_follow_up",
+        },
+      ],
+      explicitExclusions: [
+        { pattern: "generated/**", reason: "Generated code was excluded." },
+      ],
+      deferred: [
+        {
+          id: "follow-up-admin",
+          reason: "The administrator endpoint needs review.",
+          surfaceIds: ["admin"],
+        },
+      ],
+      openQuestions: ["Does the administrator route require authentication?"],
+    });
+
+    for (const changed of [
+      {
+        ...accepted,
+        surfaces: [
+          ...accepted.surfaces,
+          {
+            id: "invented",
+            label: "Invented reviewed endpoint",
+            disposition: "no_issue_found",
+          },
+        ],
+      },
+      {
+        ...accepted,
+        explicitExclusions: [
+          ...accepted.explicitExclusions,
+          { pattern: "src/admin/**", reason: "Invented exclusion." },
+        ],
+      },
+      {
+        ...accepted,
+        deferred: [
+          ...accepted.deferred,
+          { id: "invented-deferred", reason: "Invented proof gap." },
+        ],
+      },
+      {
+        ...accepted,
+        openQuestions: [
+          ...(accepted.openQuestions ?? []),
+          "Was an invented security surface reviewed?",
+        ],
+      },
+    ]) {
+      const result = await recordReduction(
+        [draft([], accepted)],
+        draft([], changed),
+      );
+      expect(result.accepted).toBe(false);
+      expect(result.message).toMatch(/unsupported|invented/iu);
+    }
+  });
+
+  test("relocates accepted worker coverage receipts into the parent scan", async () => {
+    const reviewed = coverage({
+      surfaces: [
+        {
+          id: "admin",
+          label: "Administrator endpoint",
+          disposition: "no_issue_found",
+          receiptRefs: ["artifacts/reviews/admin.json"],
+        },
+      ],
+    });
+
+    const result = await recordReduction(
+      [draft([], reviewed)],
+      draft([], structuredClone(reviewed)),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
+    expect(result.receipts?.["artifacts/reviews/admin.json"]).toBe(
+      JSON.stringify({ worker: "worker-1", surface: "Administrator endpoint" }),
+    );
+  });
+
+  test("remaps colliding coverage receipts without changing reviewed surfaces", async () => {
+    const administrator = coverage({
+      surfaces: [
+        {
+          id: "admin",
+          label: "Administrator endpoint",
+          disposition: "no_issue_found",
+          receiptRefs: ["artifacts/reviews/shared.json"],
+        },
+      ],
+    });
+    const upload = coverage({
+      surfaces: [
+        {
+          id: "upload",
+          label: "Upload endpoint",
+          disposition: "no_issue_found",
+          receiptRefs: ["artifacts/reviews/shared.json"],
+        },
+      ],
+    });
+    const merged = coverage({
+      surfaces: [
+        structuredClone(administrator.surfaces[0]!),
+        structuredClone(upload.surfaces[0]!),
+      ],
+    });
+
+    const result = await recordReduction(
+      [draft([], administrator), draft([], upload)],
+      draft([], merged),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
+    expect(
+      result.saved?.coverage.surfaces.map((surface) => surface.receiptRefs),
+    ).toEqual([
+      ["artifacts/reviews/shared.json"],
+      ["artifacts/reviews/shared-2.json"],
+    ]);
+    expect(result.receipts).toEqual({
+      "artifacts/reviews/shared.json": JSON.stringify({
+        worker: "worker-1",
+        surface: "Administrator endpoint",
+      }),
+      "artifacts/reviews/shared-2.json": JSON.stringify({
+        worker: "worker-2",
+        surface: "Upload endpoint",
+      }),
+    });
+  });
+
+  test("remaps colliding surface identifiers and their deferred references", async () => {
+    const administrator = coverage({
+      completeness: "partial",
+      surfaces: [
+        {
+          id: "shared",
+          label: "Administrator endpoint",
+          disposition: "needs_follow_up",
+        },
+      ],
+      deferred: [
+        {
+          id: "follow-up-admin",
+          reason: "Administrator authorization is not confirmed.",
+          surfaceIds: ["shared"],
+        },
+      ],
+    });
+    const upload = coverage({
+      completeness: "partial",
+      surfaces: [
+        {
+          id: "shared",
+          label: "Upload endpoint",
+          disposition: "needs_follow_up",
+        },
+      ],
+      deferred: [
+        {
+          id: "follow-up-upload",
+          reason: "Upload validation is not confirmed.",
+          surfaceIds: ["shared"],
+        },
+      ],
+    });
+    const merged = coverage({
+      completeness: "partial",
+      surfaces: [
+        structuredClone(administrator.surfaces[0]!),
+        { ...upload.surfaces[0]!, id: "shared-2" },
+      ],
+      deferred: [
+        structuredClone(administrator.deferred[0]!),
+        { ...upload.deferred[0]!, surfaceIds: ["shared-2"] },
+      ],
+    });
+
+    const accepted = await recordReduction(
+      [draft([], administrator), draft([], upload)],
+      draft([], merged),
+    );
+    expect(accepted.accepted, accepted.message).toBe(true);
+    expect(accepted.saved?.coverage.deferred[1]?.surfaceIds).toEqual([
+      "shared-2",
+    ]);
+
+    const mismatched = structuredClone(merged);
+    mismatched.deferred[1]!.surfaceIds = ["shared"];
+    const rejected = await recordReduction(
+      [draft([], administrator), draft([], upload)],
+      draft([], mismatched),
+    );
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.message).toMatch(/deferred/iu);
+  });
+
   test("rejects upgrading a partially reviewed worker result to complete", async () => {
     const first = finding("first", 10);
     const partial = coverage({
@@ -1571,6 +1934,54 @@ describe("Deep scan reducer coverage integrity", () => {
 });
 
 describe("Deep scan reducer threat-model integrity", () => {
+  test("rejects a threat model never accepted by a Standard worker", async () => {
+    const first = finding("first", 10);
+    const invented = {
+      summary: "Invented attack surface and trust boundary.",
+      trustBoundaries: ["an unreviewed administrator endpoint"],
+    };
+
+    const result = await recordReduction(
+      [draft([first])],
+      draft([first], coverage(), invented),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/unsupported.*threat model/iu);
+  });
+
+  test("rejects invented evidence appended to differing threat models", async () => {
+    const first = finding("first", 10);
+    const second = finding("second", 20);
+    const firstModel = {
+      summary: "Review the administrator trust boundary.",
+      trustBoundaries: ["administrator endpoint"],
+    };
+    const secondModel = {
+      summary: "Review the upload trust boundary.",
+      trustBoundaries: ["upload endpoint"],
+    };
+    const invented = {
+      summary: `${firstModel.summary} ${secondModel.summary}`,
+      trustBoundaries: [
+        ...firstModel.trustBoundaries,
+        ...secondModel.trustBoundaries,
+        "invented unreviewed endpoint",
+      ],
+    };
+
+    const result = await recordReduction(
+      [
+        draft([first], coverage(), firstModel),
+        draft([second], coverage(), secondModel),
+      ],
+      draft([first, second], coverage(), invented),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/unsupported.*threat.model/iu);
+  });
+
   test("rejects an aggregate that drops an accepted worker threat model", async () => {
     const first = finding("first", 10);
     const threatModel = {
@@ -1692,6 +2103,42 @@ describe("Deep scan reducer threat-model integrity", () => {
 });
 
 describe("Deep scan reducer scope integrity", () => {
+  test("rejects scope evidence never accepted by a Standard worker", async () => {
+    const first = finding("first", 10);
+    const invented = {
+      summary: "Invented a review outside the assigned scan scope.",
+      artifactsReviewed: ["src/unreviewed.ts"],
+    };
+
+    const result = await recordReduction(
+      [draft([first])],
+      draft([first], coverage(), undefined, invented),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/unsupported.*scope/iu);
+  });
+
+  test("rejects unreviewed artifacts appended to accepted scope evidence", async () => {
+    const first = finding("first", 10);
+    const accepted = {
+      summary: "Review the administrator endpoint.",
+      artifactsReviewed: ["src/admin.ts"],
+    };
+    const invented = {
+      ...accepted,
+      artifactsReviewed: [...accepted.artifactsReviewed, "src/unreviewed.ts"],
+    };
+
+    const result = await recordReduction(
+      [draft([first], coverage(), undefined, accepted)],
+      draft([first], coverage(), undefined, invented),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/unsupported.*scope/iu);
+  });
+
   test("rejects omitted worker scope metadata", async () => {
     const first = finding("first", 10);
     const scope = {

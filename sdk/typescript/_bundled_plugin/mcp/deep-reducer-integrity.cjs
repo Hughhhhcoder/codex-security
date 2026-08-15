@@ -1,5 +1,5 @@
 const { constants: fileConstants, promises: fileSystem } = require("node:fs");
-const { dirname, join, relative, resolve, sep } = require("node:path");
+const { dirname, join, posix, relative, resolve, sep } = require("node:path");
 const { isDeepStrictEqual } = require("node:util");
 
 const FINDING_TEXT_FIELDS = ["summary", "remediation", "rootCause"];
@@ -188,26 +188,73 @@ function containsOnlyAcceptedFindingEvidence(
 
   const supportedLocations = retained.locations.every((location) =>
     matching.some((source) =>
-      source.locations.some((accepted) =>
-        retainsStructuredValue(location, accepted),
+      source.locations.some(
+        (accepted) =>
+          retainsStructuredValue(location, accepted) &&
+          containsOnlyAcceptedStructuredFields(location, [accepted]),
       ),
     ),
   );
   if (!supportedLocations) return false;
 
-  return (retained.codeEvidence ?? []).every((evidence) => {
-    const { id: _retainedIdentifier, ...retainedDetails } = evidence;
-    return matching.some((source) =>
-      (source.codeEvidence ?? []).some((accepted) => {
-        const { id: _acceptedIdentifier, ...acceptedDetails } = accepted;
-        return retainsStructuredValue(
-          retainedDetails,
-          acceptedDetails,
-          "codeEvidence",
-        );
-      }),
-    );
-  });
+  const supportedCodeEvidence = (retained.codeEvidence ?? []).every(
+    (evidence) => {
+      const { id: _retainedIdentifier, ...retainedDetails } = evidence;
+      return matching.some((source) =>
+        (source.codeEvidence ?? []).some((accepted) => {
+          const { id: _acceptedIdentifier, ...acceptedDetails } = accepted;
+          return (
+            retainsStructuredValue(
+              retainedDetails,
+              acceptedDetails,
+              "codeEvidence",
+            ) &&
+            containsOnlyAcceptedStructuredFields(
+              retainedDetails,
+              [acceptedDetails],
+              "codeEvidence",
+            )
+          );
+        }),
+      );
+    },
+  );
+  if (!supportedCodeEvidence) return false;
+
+  for (const field of [
+    "attackPath",
+    "validation",
+    "rootCause",
+    "taxonomy",
+    "provenance",
+    "extensions",
+  ]) {
+    if (retained[field] === undefined || retained[field] === null) continue;
+    const accepted = matching.flatMap((source) => {
+      if (source[field] === undefined || source[field] === null) return [];
+      const identifiers = matchCodeEvidence(retained, source);
+      if (identifiers === null) return [];
+      const value = remapEvidenceReferences(source[field], identifiers);
+      return [
+        field === "rootCause" &&
+        typeof value === "string" &&
+        typeof retained[field] === "object"
+          ? { summary: value }
+          : value,
+      ];
+    });
+    if (
+      !containsOnlyAcceptedStructuredFields(retained[field], accepted, field)
+    ) {
+      return false;
+    }
+  }
+
+  return FINDING_LIST_FIELDS.every((field) =>
+    (retained[field] ?? []).every((entry) =>
+      matching.some((source) => (source[field] ?? []).includes(entry)),
+    ),
+  );
 }
 
 function retainsFindingEvidence(
@@ -262,14 +309,7 @@ function retainsFindingEvidence(
     }
   }
 
-  for (const field of [
-    "attackPath",
-    "validation",
-    "taxonomy",
-    "provenance",
-    "extensions",
-    "writeup",
-  ]) {
+  for (const field of ["attackPath", "validation", "extensions", "writeup"]) {
     if (source[field] === undefined) {
       if (retained[field] === undefined) continue;
       if (
@@ -292,7 +332,34 @@ function retainsFindingEvidence(
       source[field],
       evidenceIdentifiers,
     );
-    if (!retainsStructuredValue(retained[field], expected, field)) return false;
+    if (field === "writeup") {
+      if (
+        !retainsFindingWriteup(
+          retained,
+          source,
+          acceptedFindings,
+          findingIdentity,
+        )
+      ) {
+        return false;
+      }
+    } else if (!retainsStructuredValue(retained[field], expected, field)) {
+      return false;
+    }
+  }
+
+  for (const field of ["taxonomy", "provenance"]) {
+    if (
+      !retainsCategoricalFindingMetadata(
+        retained,
+        source,
+        field,
+        acceptedFindings,
+        findingIdentity,
+      )
+    ) {
+      return false;
+    }
   }
 
   for (const field of ["severity", "confidence"]) {
@@ -310,6 +377,93 @@ function retainsFindingEvidence(
   }
 
   return true;
+}
+
+function retainsCategoricalFindingMetadata(
+  retained,
+  source,
+  field,
+  acceptedFindings,
+  findingIdentity,
+) {
+  const matching = acceptedFindings
+    .filter((finding) => representsFinding(retained, finding, findingIdentity))
+    .sort((first, second) => {
+      const severity =
+        SEVERITY_LEVELS.indexOf(second.severity.level) -
+        SEVERITY_LEVELS.indexOf(first.severity.level);
+      if (severity !== 0) return severity;
+      const score =
+        (second.severity.score ?? -1) - (first.severity.score ?? -1);
+      if (score !== 0) return score;
+      const confidence =
+        CONFIDENCE_LEVELS.indexOf(second.confidence.level) -
+        CONFIDENCE_LEVELS.indexOf(first.confidence.level);
+      if (confidence !== 0) return confidence;
+      return JSON.stringify(first[field]).localeCompare(
+        JSON.stringify(second[field]),
+      );
+    });
+
+  for (const [key, value] of Object.entries(source[field])) {
+    if (Array.isArray(value)) {
+      if (!retainsStructuredValue(retained[field][key], value, key))
+        return false;
+      continue;
+    }
+    if (value !== null && typeof value === "object") {
+      if (!retainsStructuredValue(retained[field][key], value, key))
+        return false;
+      continue;
+    }
+    const preferred = matching.find((finding) =>
+      Object.hasOwn(finding[field], key),
+    );
+    if (!Object.is(retained[field][key], preferred[field][key])) return false;
+  }
+  return true;
+}
+
+function retainsFindingWriteup(
+  retained,
+  source,
+  acceptedFindings,
+  findingIdentity,
+) {
+  const expected = source.writeup.reportPath;
+  const actual = retained.writeup?.reportPath;
+  if (
+    retained.writeup === undefined ||
+    !retainsStructuredValue(
+      { ...retained.writeup, reportPath: expected },
+      source.writeup,
+      "writeup",
+    )
+  ) {
+    return false;
+  }
+  if (actual === expected) return true;
+  if (!isRemappedFindingWriteup(actual, expected)) return false;
+  const collisions = acceptedFindings.filter(
+    (finding) => finding.writeup?.reportPath === expected,
+  );
+  return (
+    collisions.length > 1 &&
+    collisions.some((finding) =>
+      representsFinding(retained, finding, findingIdentity),
+    )
+  );
+}
+
+function isRemappedFindingWriteup(actual, expected) {
+  const source = /^findings\/([^/]+)\/\1\.md$/u.exec(expected);
+  const candidate = /^findings\/([^/]+)\/\1\.md$/u.exec(actual ?? "");
+  if (source === null || candidate === null) return false;
+  const prefix = `${source[1]}-`;
+  return (
+    candidate[1].startsWith(prefix) &&
+    /^\d+$/u.test(candidate[1].slice(prefix.length))
+  );
 }
 
 function retainsStrongestFindingRating(
@@ -366,6 +520,14 @@ function hasAcceptedEvidence(
     if (!representsFinding(retained, candidate, findingIdentity)) return false;
     if (candidate[field] === undefined) return false;
     if (candidate[field] === null) return retained[field] === null;
+    if (field === "writeup") {
+      return retainsFindingWriteup(
+        retained,
+        candidate,
+        acceptedFindings,
+        findingIdentity,
+      );
+    }
     const identifiers = matchCodeEvidence(retained, candidate);
     if (identifiers === null) return false;
     const expected = remapEvidenceReferences(candidate[field], identifiers);
@@ -430,26 +592,57 @@ function validateRetainedCoverage(result, inputs) {
     }
   }
 
+  const acceptedSurfaces = inputs.flatMap((input) => input.coverage.surfaces);
+  const retainedSurfaceIds = new Set();
+  for (const surface of result.surfaces) {
+    if (surface.id !== undefined && retainedSurfaceIds.has(surface.id)) {
+      throw new Error(
+        "Deep reduction returned a duplicate accepted coverage surface identifier.",
+      );
+    }
+    if (surface.id !== undefined) retainedSurfaceIds.add(surface.id);
+    if (
+      acceptedSurfaces.some((source) =>
+        retainsCoverageSurface(surface, source, acceptedSurfaces),
+      )
+    ) {
+      continue;
+    }
+    throw new Error(
+      "Deep reduction returned an unsupported Standard scan coverage surface.",
+    );
+  }
+
+  const coverageMappings = new Map();
   for (const input of inputs) {
     const coverage = input.coverage;
+    const surfaceIdentifiers = new Map();
+    for (const source of coverage.surfaces) {
+      const retained = result.surfaces.find((surface) =>
+        retainsCoverageSurface(surface, source, acceptedSurfaces),
+      );
+      if (retained === undefined) {
+        throw new Error(
+          "Deep reduction discarded an accepted Standard scan coverage surface or its review evidence.",
+        );
+      }
+      if (source.id !== undefined) {
+        surfaceIdentifiers.set(source.id, retained.id ?? source.id);
+      }
+    }
+    coverageMappings.set(input, surfaceIdentifiers);
+
     for (const source of coverage.deferred) {
-      if (result.deferred.some((retained) => sameDeferred(retained, source))) {
+      if (
+        result.deferred.some((retained) =>
+          sameDeferred(retained, source, surfaceIdentifiers),
+        )
+      ) {
         continue;
       }
       throw new Error(
         "Deep reduction discarded deferred Standard scan coverage.",
       );
-    }
-
-    for (const source of coverage.surfaces) {
-      const retained = result.surfaces.some((surface) =>
-        retainsStructuredValue(surface, source),
-      );
-      if (!retained) {
-        throw new Error(
-          "Deep reduction discarded an accepted Standard scan coverage surface or its review evidence.",
-        );
-      }
     }
 
     for (const source of coverage.explicitExclusions) {
@@ -477,10 +670,146 @@ function validateRetainedCoverage(result, inputs) {
       );
     }
   }
+
+  for (const retained of result.deferred) {
+    const supported = inputs.some((input) =>
+      input.coverage.deferred.some((source) =>
+        sameDeferred(retained, source, coverageMappings.get(input)),
+      ),
+    );
+    if (!supported) {
+      throw new Error(
+        "Deep reduction returned unsupported deferred Standard scan coverage.",
+      );
+    }
+  }
+
+  for (const retained of result.explicitExclusions) {
+    const supported = inputs.some((input) =>
+      input.coverage.explicitExclusions.some(
+        (source) =>
+          retainsStructuredValue(retained, source) &&
+          containsOnlyAcceptedStructuredFields(retained, [source]),
+      ),
+    );
+    if (!supported) {
+      throw new Error(
+        "Deep reduction returned an unsupported Standard scan exclusion.",
+      );
+    }
+  }
+
+  for (const retained of result.openQuestions ?? []) {
+    const supported = inputs.some((input) =>
+      (input.coverage.openQuestions ?? []).some((source) => {
+        if (!retainsOpenQuestion(retained, source)) return false;
+        if (typeof retained === "string") return true;
+        const expected =
+          typeof source === "string" ? { question: source } : source;
+        return containsOnlyAcceptedStructuredFields(retained, [expected]);
+      }),
+    );
+    if (!supported) {
+      throw new Error(
+        "Deep reduction returned an unsupported Standard scan open question.",
+      );
+    }
+  }
 }
 
-function sameDeferred(retained, source) {
-  return retainsStructuredValue(retained, source);
+function retainsCoverageSurface(retained, source, acceptedSurfaces) {
+  const {
+    id: sourceIdentifier,
+    receiptRefs: sourceReceipts,
+    ...sourceDetails
+  } = source;
+  const {
+    id: retainedIdentifier,
+    receiptRefs: retainedReceipts,
+    ...retainedDetails
+  } = retained;
+  if (!retainsStructuredValue(retainedDetails, sourceDetails)) return false;
+  if (
+    !containsOnlyAcceptedStructuredFields(
+      retainedDetails,
+      acceptedSurfaces
+        .filter((candidate) => candidate.label === source.label)
+        .map(({ id: _id, receiptRefs: _receipts, ...details }) => details),
+    )
+  ) {
+    return false;
+  }
+  if (
+    sourceIdentifier !== undefined &&
+    retainedIdentifier !== sourceIdentifier &&
+    !isRemappedCoverageSurface(
+      retainedIdentifier,
+      sourceIdentifier,
+      acceptedSurfaces,
+    )
+  ) {
+    return false;
+  }
+
+  for (const receipt of sourceReceipts ?? []) {
+    if (
+      (retainedReceipts ?? []).some((candidate) =>
+        isAcceptedCoverageReceipt(candidate, receipt, acceptedSurfaces),
+      )
+    ) {
+      continue;
+    }
+    return false;
+  }
+  return (retainedReceipts ?? []).every((receipt) =>
+    acceptedSurfaces.some((candidate) =>
+      (candidate.receiptRefs ?? []).some((accepted) =>
+        isAcceptedCoverageReceipt(receipt, accepted, acceptedSurfaces),
+      ),
+    ),
+  );
+}
+
+function isRemappedCoverageSurface(actual, expected, acceptedSurfaces) {
+  if (typeof actual !== "string" || !actual.startsWith(`${expected}-`)) {
+    return false;
+  }
+  if (!/^\d+$/u.test(actual.slice(expected.length + 1))) return false;
+  return (
+    acceptedSurfaces.filter((surface) => surface.id === expected).length > 1
+  );
+}
+
+function isAcceptedCoverageReceipt(actual, expected, acceptedSurfaces) {
+  if (actual === expected) return true;
+  const source = posix.parse(expected);
+  const candidate = posix.parse(actual);
+  if (source.dir !== candidate.dir || source.ext !== candidate.ext)
+    return false;
+  if (!candidate.name.startsWith(`${source.name}-`)) return false;
+  if (!/^\d+$/u.test(candidate.name.slice(source.name.length + 1)))
+    return false;
+  return (
+    acceptedSurfaces.filter((surface) =>
+      (surface.receiptRefs ?? []).includes(expected),
+    ).length > 1
+  );
+}
+
+function sameDeferred(retained, source, surfaceIdentifiers) {
+  const expected =
+    source.surfaceIds === undefined
+      ? source
+      : {
+          ...source,
+          surfaceIds: source.surfaceIds.map(
+            (identifier) => surfaceIdentifiers?.get(identifier) ?? identifier,
+          ),
+        };
+  return (
+    retainsStructuredValue(retained, expected) &&
+    containsOnlyAcceptedStructuredFields(retained, [expected])
+  );
 }
 
 function retainsOpenQuestion(retained, source) {
@@ -496,7 +825,14 @@ function validateRetainedThreatModel(result, inputs) {
   const models = inputs.flatMap((input) =>
     input.threatModel === undefined ? [] : [input.threatModel],
   );
-  if (models.length === 0) return;
+  if (models.length === 0) {
+    if (result !== undefined) {
+      throw new Error(
+        "Deep reduction returned an unsupported Standard scan threat model.",
+      );
+    }
+    return;
+  }
 
   if (result === undefined) {
     throw new Error(
@@ -511,6 +847,11 @@ function validateRetainedThreatModel(result, inputs) {
     return;
   }
 
+  if (!containsOnlyAcceptedStructuredFields(result, models, "threatModel")) {
+    throw new Error(
+      "Deep reduction returned unsupported Standard scan threat-model evidence.",
+    );
+  }
   for (const model of models) {
     for (const [field, value] of Object.entries(model)) {
       if (retainsStructuredValue(result[field], value, field)) continue;
@@ -522,6 +863,25 @@ function validateRetainedThreatModel(result, inputs) {
 }
 
 function validateRetainedScope(result, inputs) {
+  const scopes = inputs.flatMap((input) =>
+    input.scope === undefined ? [] : [input.scope],
+  );
+  if (scopes.length === 0) {
+    if (result !== undefined) {
+      throw new Error(
+        "Deep reduction returned unsupported Standard scan scope evidence.",
+      );
+    }
+    return;
+  }
+  if (
+    result !== undefined &&
+    !containsOnlyAcceptedStructuredFields(result, scopes, "scope")
+  ) {
+    throw new Error(
+      "Deep reduction returned unsupported Standard scan scope evidence.",
+    );
+  }
   for (const input of inputs) {
     if (input.scope === undefined) continue;
     if (retainsStructuredValue(result, input.scope)) continue;
@@ -581,6 +941,48 @@ function retainsStructuredValue(retained, source, field, section = field) {
   return Object.is(retained, source);
 }
 
+function containsOnlyAcceptedStructuredFields(
+  retained,
+  accepted,
+  field,
+  section = field,
+) {
+  if (accepted.length === 0) return false;
+  if (retained === null || typeof retained !== "object") {
+    return accepted.some((source) =>
+      retainsStructuredValue(retained, source, field, section),
+    );
+  }
+
+  if (Array.isArray(retained)) {
+    const entries = accepted.flatMap((source) =>
+      Array.isArray(source) ? source : [],
+    );
+    return retained.every((entry) =>
+      entries.some((source) =>
+        containsOnlyAcceptedStructuredFields(
+          entry,
+          [source],
+          undefined,
+          section,
+        ),
+      ),
+    );
+  }
+
+  return Object.entries(retained).every(([key, value]) => {
+    const supported = accepted.flatMap((source) =>
+      source !== null &&
+      typeof source === "object" &&
+      !Array.isArray(source) &&
+      Object.hasOwn(source, key)
+        ? [source[key]]
+        : [],
+    );
+    return containsOnlyAcceptedStructuredFields(value, supported, key, section);
+  });
+}
+
 async function relocateDeepReductionWriteups(
   reduction,
   inputs,
@@ -592,53 +994,101 @@ async function relocateDeepReductionWriteups(
   const workers = new Map(
     state.claimedWorkers.map((worker) => [worker.id, worker]),
   );
+  const acceptedFindings = inputs.discoveries.flatMap(
+    (discovery) => discovery.result.findings,
+  );
+  if (inputs.previous !== null && inputs.previous !== undefined) {
+    acceptedFindings.push(...inputs.previous.findings);
+  }
+  const acceptedSurfaces = inputs.discoveries.flatMap(
+    (discovery) => discovery.result.coverage.surfaces,
+  );
+  if (inputs.previous !== null && inputs.previous !== undefined) {
+    acceptedSurfaces.push(...inputs.previous.coverage.surfaces);
+  }
   const writeupPaths = new Set();
   for (const finding of reduction.findings) {
     if (finding.writeup === undefined) continue;
     if (writeupPaths.has(finding.writeup.reportPath)) {
-      throw new Error(
-        "Deep reduction returned a duplicate accepted finding writeup.",
-      );
+      finding.writeup = {
+        ...finding.writeup,
+        reportPath: nextAcceptedArtifactPath(
+          finding.writeup.reportPath,
+          "writeup",
+          writeupPaths,
+        ),
+      };
     }
     writeupPaths.add(finding.writeup.reportPath);
   }
+  const receiptPaths = new Set(
+    reduction.coverage.surfaces.flatMap((surface) => surface.receiptRefs ?? []),
+  );
+  const copiedSurfaceReceipts = new Map();
 
   for (const discovery of inputs.discoveries) {
     const worker = workers.get(discovery.workerId);
+    const workerRoot = dirname(worker.resultPath);
     for (const source of discovery.result.findings) {
       if (source.writeup === undefined) continue;
       const retained = reduction.findings.find(
         (candidate) =>
           representsFinding(candidate, source, findingIdentity) &&
-          candidate.writeup?.reportPath === source.writeup.reportPath,
+          retainsFindingWriteup(
+            candidate,
+            source,
+            acceptedFindings,
+            findingIdentity,
+          ),
       );
       if (retained === undefined) continue;
 
-      const workerRoot = dirname(worker.resultPath);
-      const sourcePath = join(workerRoot, source.writeup.reportPath);
-      await requireRegularFile(sourcePath, workerRoot);
-      const destinationPath = join(scanRoot, source.writeup.reportPath);
-      await ensureScanLocalWriteupDirectory(scanRoot, dirname(destinationPath));
-      try {
-        await fileSystem.copyFile(
-          sourcePath,
-          destinationPath,
-          fileConstants.COPYFILE_EXCL,
-        );
-      } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
-        await requireRegularFile(destinationPath, scanRoot);
-        const [existing, accepted] = await Promise.all([
-          fileSystem.readFile(destinationPath),
-          fileSystem.readFile(sourcePath),
-        ]);
-        if (!existing.equals(accepted)) {
-          throw new Error(
-            "Deep reduction cannot overwrite a conflicting accepted finding writeup.",
-          );
-        }
+      await copyAcceptedScanArtifact({
+        scanRoot,
+        workerRoot,
+        source: source.writeup.reportPath,
+        destination: retained.writeup.reportPath,
+        kind: "writeup",
+        reserved: writeupPaths,
+        requireRegularFile,
+      });
+    }
+
+    for (const source of discovery.result.coverage.surfaces) {
+      const retained = reduction.coverage.surfaces.find((candidate) =>
+        retainsCoverageSurface(candidate, source, acceptedSurfaces),
+      );
+      if (retained === undefined) continue;
+      let copied = copiedSurfaceReceipts.get(retained);
+      if (copied === undefined) {
+        copied = new Set();
+        copiedSurfaceReceipts.set(retained, copied);
       }
-      await requireRegularFile(destinationPath, scanRoot);
+
+      for (const receipt of source.receiptRefs ?? []) {
+        const preferred = (retained.receiptRefs ?? []).find((candidate) =>
+          isAcceptedCoverageReceipt(candidate, receipt, acceptedSurfaces),
+        );
+        if (preferred === undefined) continue;
+        const relocated = await copyAcceptedScanArtifact({
+          scanRoot,
+          workerRoot,
+          source: receipt,
+          destination: preferred,
+          kind: "receipt",
+          reserved: receiptPaths,
+          requireRegularFile,
+        });
+        if (relocated !== preferred) {
+          if (copied.has(preferred)) {
+            retained.receiptRefs.push(relocated);
+          } else {
+            const position = retained.receiptRefs.indexOf(preferred);
+            retained.receiptRefs[position] = relocated;
+          }
+        }
+        copied.add(relocated);
+      }
     }
   }
 
@@ -648,6 +1098,67 @@ async function relocateDeepReductionWriteups(
       join(scanRoot, finding.writeup.reportPath),
       scanRoot,
     );
+  }
+  for (const surface of reduction.coverage.surfaces) {
+    for (const receipt of surface.receiptRefs ?? []) {
+      await requireRegularFile(join(scanRoot, receipt), scanRoot);
+    }
+  }
+}
+
+async function copyAcceptedScanArtifact({
+  scanRoot,
+  workerRoot,
+  source,
+  destination,
+  kind,
+  reserved,
+  requireRegularFile,
+}) {
+  const sourcePath = join(workerRoot, source);
+  await requireRegularFile(sourcePath, workerRoot);
+  let relativeDestination = destination;
+
+  while (true) {
+    const destinationPath = join(scanRoot, relativeDestination);
+    await ensureScanLocalWriteupDirectory(scanRoot, dirname(destinationPath));
+    try {
+      await fileSystem.copyFile(
+        sourcePath,
+        destinationPath,
+        fileConstants.COPYFILE_EXCL,
+      );
+      await requireRegularFile(destinationPath, scanRoot);
+      return relativeDestination;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      await requireRegularFile(destinationPath, scanRoot);
+      const [existing, accepted] = await Promise.all([
+        fileSystem.readFile(destinationPath),
+        fileSystem.readFile(sourcePath),
+      ]);
+      if (existing.equals(accepted)) return relativeDestination;
+      relativeDestination = nextAcceptedArtifactPath(
+        destination,
+        kind,
+        reserved,
+      );
+      reserved.add(relativeDestination);
+    }
+  }
+}
+
+function nextAcceptedArtifactPath(original, kind, reserved) {
+  const parsed = posix.parse(original);
+  const slug = kind === "writeup" ? parsed.name : undefined;
+  let suffix = 2;
+  while (true) {
+    const candidate =
+      kind === "writeup"
+        ? `findings/${slug}-${suffix}/${slug}-${suffix}.md`
+        : posix.join(parsed.dir, `${parsed.name}-${suffix}${parsed.ext}`);
+    if (!reserved.has(candidate)) return candidate;
+    suffix += 1;
   }
 }
 
