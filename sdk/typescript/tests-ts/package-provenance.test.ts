@@ -10,6 +10,9 @@ type PackageProvenance = {
 const { assertExpectedGitHead } = (await import(
   new URL("../scripts/package-provenance.mjs", import.meta.url).href
 )) as PackageProvenance;
+const { regularTarListingLines } = (await import(
+  new URL("../scripts/package-tar-listing.mjs", import.meta.url).href
+)) as { regularTarListingLines: (listing: string) => string[] };
 
 const releaseCommit = "e94d6bef9797a192febfde89a26ec7f831bc09b2";
 
@@ -45,5 +48,27 @@ describe("npm package release provenance", () => {
     expect(() => assertExpectedGitHead({}, "main")).toThrow(
       "Expected release gitHead must be a full 40-character lowercase Git commit SHA.",
     );
+  });
+});
+
+describe("npm package tar listings", () => {
+  test("accepts regular entries with Unix or Windows line endings", () => {
+    const file = "-rw-r--r-- package/package.json";
+    const directory = "drwxr-xr-x package/dist/";
+
+    expect(regularTarListingLines(`${file}\n${directory}\n`)).toEqual([
+      file,
+      directory,
+    ]);
+    expect(regularTarListingLines(`${file}\r\n${directory}\r\n`)).toEqual([
+      file,
+      directory,
+    ]);
+  });
+
+  test("rejects symbolic links and other non-regular entries", () => {
+    expect(() =>
+      regularTarListingLines("lrwxrwxrwx package/link -> target\r\n"),
+    ).toThrow("npm tarball contains a non-regular entry");
   });
 });
