@@ -51,16 +51,8 @@ def ensure_security_target(connection: sqlite3.Connection, target_path: str) -> 
     if existing:
         current = next((row for row in existing if row["current_path"] == target_path), existing[0])
         target_id = str(current["id"])
-        for previous in existing:
-            previous_id = str(previous["id"])
-            if previous_id == target_id:
-                continue
-            for table in ("workspaces", "scans"):
-                connection.execute(
-                    f"UPDATE {table} SET target_id = ?, target_path = ? WHERE target_id = ?",
-                    (target_id, target_path, previous_id),
-                )
-            connection.execute("DELETE FROM security_targets WHERE id = ?", (previous_id,))
+        if len(existing) > 1:
+            return target_id
         if current["current_path"] != target_path:
             timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             connection.execute(

@@ -346,6 +346,7 @@ def write_jsonl(output: Path, rows: list[JsonRow]) -> None:
 
 
 def write_json(output: Path, payload: dict[str, object]) -> None:
+    output = filesystem_path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -355,7 +356,7 @@ def write_json(output: Path, payload: dict[str, object]) -> None:
 
 def load_scopes_file(scopes_file: Path) -> list[str]:
     try:
-        loaded: object = json.loads(scopes_file.read_text(encoding="utf-8"))
+        loaded: object = json.loads(filesystem_path(scopes_file).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Unable to read scopes file: {scopes_file}") from exc
     if (
@@ -608,8 +609,8 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
 
 def bind_repo_scopes(args: argparse.Namespace) -> None:
     scopes = load_scopes_file(Path(args.scopes_file).expanduser())
-    manifest_path = Path(args.manifest).expanduser()
-    coverage_path = Path(args.coverage).expanduser()
+    manifest_path = filesystem_path(Path(args.manifest).expanduser())
+    coverage_path = filesystem_path(Path(args.coverage).expanduser())
     try:
         manifest: object = json.loads(manifest_path.read_text(encoding="utf-8"))
         coverage: object = json.loads(coverage_path.read_text(encoding="utf-8"))
@@ -762,7 +763,7 @@ def make_rank_shards(args: argparse.Namespace) -> None:
     rows = load_jsonl(rank_input, "Rank input", validate_rank_input_row)
     require_unique_paths(rows, "Rank input")
 
-    output_dir = Path(args.out_dir).expanduser()
+    output_dir = filesystem_path(Path(args.out_dir).expanduser())
     output_dir.mkdir(parents=True, exist_ok=True)
     existing = sorted((*output_dir.glob(SHARD_INPUT_GLOB), *output_dir.glob(SHARD_OUTPUT_GLOB)))
     if existing:
@@ -833,8 +834,8 @@ def make_rank_pool_plan(args: argparse.Namespace) -> None:
     if args.usable_worker_slots < 1:
         raise SystemExit("--usable-worker-slots must be at least 1")
 
-    shard_dir = Path(args.shard_dir).expanduser()
-    output = Path(args.out).expanduser()
+    shard_dir = filesystem_path(Path(args.shard_dir).expanduser())
+    output = filesystem_path(Path(args.out).expanduser())
     require_plan_shard_dir(output, shard_dir)
     input_shards = discover_input_shards(shard_dir)
     worker_count = min(len(input_shards), args.usable_worker_slots, RANK_POOL_WORKER_CAP)
@@ -861,9 +862,10 @@ def make_rank_pool_plan(args: argparse.Namespace) -> None:
 
 
 def load_rank_pool_plan(plan_path: Path) -> tuple[dict[str, object], bytes]:
-    if not plan_path.exists():
+    plan_file = filesystem_path(plan_path)
+    if not plan_file.exists():
         raise SystemExit(f"Rank pool plan missing: {plan_path}")
-    plan_bytes = plan_path.read_bytes()
+    plan_bytes = plan_file.read_bytes()
     try:
         payload: object = json.loads(plan_bytes)
     except json.JSONDecodeError as exc:
@@ -1006,8 +1008,8 @@ def validate_rank_pool_plan(
 
 
 def validate_rank_worker_command(args: argparse.Namespace) -> None:
-    plan_path = Path(args.plan).expanduser()
-    shard_dir = Path(args.shard_dir).expanduser()
+    plan_path = filesystem_path(Path(args.plan).expanduser())
+    shard_dir = filesystem_path(Path(args.shard_dir).expanduser())
     _, _, workers, plan_bytes = validate_rank_pool_plan(plan_path, shard_dir)
 
     slot = require_integer(args.slot, "--slot", minimum=1)
@@ -1046,8 +1048,8 @@ def validate_rank_worker_command(args: argparse.Namespace) -> None:
 
 
 def validate_rank_pool_command(args: argparse.Namespace) -> None:
-    plan_path = Path(args.plan).expanduser()
-    shard_dir = Path(args.shard_dir).expanduser()
+    plan_path = filesystem_path(Path(args.plan).expanduser())
+    shard_dir = filesystem_path(Path(args.shard_dir).expanduser())
     input_shards, expected_output_names, workers, _ = validate_rank_pool_plan(plan_path, shard_dir)
 
     actual_output_names = {path.name for path in shard_dir.glob(SHARD_OUTPUT_GLOB)}
@@ -1109,7 +1111,7 @@ def merge_rank_outputs(args: argparse.Namespace) -> None:
     authoritative_rows = load_jsonl(rank_input, "Rank input", validate_rank_input_row)
     require_unique_paths(authoritative_rows, "Rank input")
 
-    shard_dir = Path(args.shard_dir).expanduser()
+    shard_dir = filesystem_path(Path(args.shard_dir).expanduser())
     input_shards = discover_input_shards(shard_dir)
     output_shards = sorted(shard_dir.glob(SHARD_OUTPUT_GLOB))
     expected_output_names = {

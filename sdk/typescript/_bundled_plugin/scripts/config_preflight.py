@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
 
 def read_toml(path: Path, *, required: bool) -> dict[str, Any]:
     try:
-        with path.open("rb") as file:
+        with filesystem_path(path).open("rb") as file:
             return tomllib.load(file)
     except FileNotFoundError:
         if required:
@@ -235,7 +235,7 @@ def resolve_project_root(cwd: Path, config_layers: list[tuple[Path, dict[str, An
     if not markers:
         return cwd
     for candidate in (cwd, *cwd.parents):
-        if any((candidate / marker).exists() for marker in markers):
+        if any(filesystem_path(candidate / marker).exists() for marker in markers):
             return candidate
     return cwd
 

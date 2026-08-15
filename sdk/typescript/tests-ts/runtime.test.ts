@@ -695,24 +695,81 @@ describe("plugin runtime preparation", () => {
         longRankInput,
         `${JSON.stringify({ path: "app.ts", area: "diff", preview: "export {};" })}\n`,
       );
-      const copiedReview = spawnSync(
-        python!,
-        [
-          "-I",
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-          "copy-deep-review-input",
-          "--rank-input",
-          longRankInput,
-          "--out",
-          longReviewInput,
-        ],
-        { encoding: "utf8" },
-      );
-      expect(copiedReview.status, copiedReview.stderr).toBe(0);
+      const runRankCommand = (args: string[]) => {
+        const result = spawnSync(
+          python!,
+          [
+            "-I",
+            "-B",
+            join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+            ...args,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(result.status, result.stderr).toBe(0);
+      };
+      runRankCommand([
+        "copy-deep-review-input",
+        "--rank-input",
+        longRankInput,
+        "--out",
+        longReviewInput,
+      ]);
       expect(
         JSON.parse((await readFile(longReviewInput, "utf8")).trim()),
       ).toEqual({ path: "app.ts", area: "diff" });
+
+      const shardDirectory = join(longScanDirectory, "rank_shards");
+      const rankPlan = join(longScanDirectory, "rank_worker_assignments.json");
+      const rankOutput = join(longScanDirectory, "rank_output.jsonl");
+      runRankCommand([
+        "make-rank-shards",
+        "--rank-input",
+        longRankInput,
+        "--out-dir",
+        shardDirectory,
+      ]);
+      runRankCommand([
+        "make-rank-pool-plan",
+        "--shard-dir",
+        shardDirectory,
+        "--usable-worker-slots",
+        "1",
+        "--out",
+        rankPlan,
+      ]);
+      await writeFile(
+        join(shardDirectory, "rank-shard-0001.output.jsonl"),
+        `${JSON.stringify({ path: "app.ts", area: "diff", score: 1, include: true, reason: "review" })}\n`,
+      );
+      runRankCommand([
+        "validate-rank-worker",
+        "--plan",
+        rankPlan,
+        "--shard-dir",
+        shardDirectory,
+        "--slot",
+        "1",
+      ]);
+      runRankCommand([
+        "validate-rank-pool",
+        "--plan",
+        rankPlan,
+        "--shard-dir",
+        shardDirectory,
+      ]);
+      runRankCommand([
+        "merge-rank-outputs",
+        "--rank-input",
+        longRankInput,
+        "--shard-dir",
+        shardDirectory,
+        "--out",
+        rankOutput,
+      ]);
+      expect(
+        JSON.parse((await readFile(rankOutput, "utf8")).trim()),
+      ).toMatchObject({ path: "app.ts", area: "diff", score: 1 });
 
       const candidates = join(root, "long-path-candidates.jsonl");
       const normalized = join(root, "long-path-normalized.jsonl");
@@ -793,6 +850,33 @@ describe("plugin runtime preparation", () => {
         join(longScanDirectory, "scan-manifest.json"),
         join(nearLimitScanDirectory, "scan-manifest.json"),
       );
+      const nearLimitConfigDirectory = join(nearLimitScanDirectory, ".codex");
+      await mkdir(nearLimitConfigDirectory);
+      await writeFile(
+        join(nearLimitConfigDirectory, "config.toml"),
+        'model = "near-limit"\n',
+      );
+      const configProbe = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "module = runpy.run_path(sys.argv[1])",
+            "root = Path(sys.argv[2])",
+            "path = module['project_config_paths'](root, root)[0]",
+            "print(json.dumps(module['read_toml'](path, required=True)))",
+          ].join("\n"),
+          join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
+          nearLimitScanDirectory,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(configProbe.status, configProbe.stderr).toBe(0);
+      expect(JSON.parse(configProbe.stdout)).toEqual({ model: "near-limit" });
       const nearLimitDatabase = spawnSync(
         python!,
         ["-I", "-B", workbench, "database-info"],
@@ -808,6 +892,14 @@ describe("plugin runtime preparation", () => {
       expect(JSON.parse(nearLimitDatabase.stdout)).toEqual({
         databasePath: join(nearLimitScanDirectory, "workbench.sqlite3"),
       });
+      const findingDirectory = join(
+        longScanDirectory,
+        "findings",
+        "candidate-1",
+      );
+      await mkdir(join(findingDirectory, "poc"), { recursive: true });
+      await writeFile(join(findingDirectory, "candidate-1.md"), "# Finding\n");
+      await writeFile(join(findingDirectory, "poc", "repro.txt"), "proof\n");
       const artifactProbe = spawnSync(
         python!,
         [
@@ -824,6 +916,7 @@ describe("plugin runtime preparation", () => {
             "near_limit = Path(sys.argv[3])",
             "artifacts['nearLimitRequired'] = module['artifact_path'](near_limit, 'scan-manifest.json', required=True) is not None",
             "artifacts['nearLimitAvailable'] = module['available_artifact_path'](near_limit, near_limit / 'scan-manifest.json') is not None",
+            "artifacts['findingArtifacts'] = module['finding_artifact_paths'](scan_dir, {'writeup': {'reportPath': 'findings/candidate-1/candidate-1.md'}})",
             "print(json.dumps(artifacts))",
           ].join("\n"),
           workbench,
@@ -839,6 +932,10 @@ describe("plugin runtime preparation", () => {
         "exports/results.sarif": true,
         nearLimitRequired: true,
         nearLimitAvailable: true,
+        findingArtifacts: [
+          "findings/candidate-1/candidate-1.md",
+          "findings/candidate-1/poc/repro.txt",
+        ],
       });
       const mixedStarted = spawnSync(
         python!,
@@ -951,11 +1048,19 @@ describe("plugin runtime preparation", () => {
             "from pathlib import Path",
             "sys.path.insert(0, sys.argv[1])",
             "from windows_paths import extended_path, filesystem_path",
+            "from workbench_target_state import ensure_security_target",
             "database = filesystem_path(Path(sys.argv[2]) / 'workbench.sqlite3')",
             "connection = sqlite3.connect(database)",
             "target_path = sys.argv[3]",
             "target_id = connection.execute('SELECT id FROM security_targets WHERE current_path = ?', (target_path,)).fetchone()[0]",
             "legacy_path = str(extended_path(Path(target_path)))",
+            "fixture = sqlite3.connect(':memory:')",
+            "fixture.row_factory = sqlite3.Row",
+            "fixture.executescript('CREATE TABLE security_targets (id TEXT PRIMARY KEY, current_path TEXT); CREATE TABLE workspaces (target_id TEXT, target_path TEXT); CREATE TABLE scans (target_id TEXT, target_path TEXT)')",
+            "fixture.executemany('INSERT INTO security_targets VALUES (?, ?)', ((target_id, target_path), ('legacy-target', legacy_path)))",
+            "fixture.execute('INSERT INTO scans VALUES (?, ?)', ('legacy-target', legacy_path))",
+            "assert ensure_security_target(fixture, target_path) == target_id",
+            "assert fixture.execute('SELECT target_id FROM scans').fetchone()[0] == 'legacy-target'",
             "connection.execute('UPDATE security_targets SET current_path = ? WHERE id = ?', (legacy_path, target_id))",
             "for table in ('workspaces', 'scans'):",
             "    connection.execute(f'UPDATE {table} SET target_path = ? WHERE target_id = ?', (legacy_path, target_id))",
@@ -1058,6 +1163,49 @@ describe("plugin runtime preparation", () => {
       };
       expect(deepScan.scanDir.length).toBeGreaterThan(260);
       expect(deepScan.scanDir).not.toStartWith("\\\\?\\");
+
+      const deepDiscovery = join(deepScan.scanDir, "artifacts", "02_discovery");
+      await mkdir(deepDiscovery, { recursive: true });
+      await writeFile(join(deepDiscovery, "in_scope_files.txt"), "app.ts\n");
+      await writeFile(
+        join(deepDiscovery, "candidate_ledger.jsonl"),
+        `${JSON.stringify({
+          candidate_id: "candidate-1",
+          summary: "candidate",
+          evidence: "evidence",
+          locations: [{ path: "app.ts" }],
+        })}\n`,
+      );
+      const budgetProbe = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          [
+            "import json, runpy, sys",
+            "from pathlib import Path",
+            "from types import SimpleNamespace",
+            "module = runpy.run_path(sys.argv[1])",
+            "module['deep_scan'].configure(SimpleNamespace(require_canonical_scan_directory=module['require_canonical_scan_directory']))",
+            "scan = {'scan_dir': sys.argv[2]}",
+            "scan_dir = module['require_canonical_scan_directory'](Path(sys.argv[2]))",
+            "print(json.dumps(module['budget_exhausted_candidates'](scan, scan_dir)))",
+          ].join("\n"),
+          workbench,
+          deepScan.scanDir,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(budgetProbe.status, budgetProbe.stderr).toBe(0);
+      expect(JSON.parse(budgetProbe.stdout)).toEqual([
+        {
+          candidate_id: "candidate-1",
+          summary: "candidate",
+          evidence: "evidence",
+          locations: [{ path: "app.ts" }],
+        },
+      ]);
 
       const deepPromptPath = join(deepScan.scanDir, "setup-prompt.md");
       const deepArtifactDirectory = join(deepScan.scanDir, "setup-artifacts");

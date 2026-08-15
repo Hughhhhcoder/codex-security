@@ -1218,7 +1218,7 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
         inventory = Path(artifacts["inScopeFilesPath"])
         inventory_descriptor = open_scan_local_file_descriptor(
             scan_dir,
-            inventory.relative_to(scan_dir).as_posix(),
+            portable_path(inventory).relative_to(portable_path(scan_dir)).as_posix(),
             "Canonical Deep Scan in-scope inventory",
         )
         with os.fdopen(inventory_descriptor, "rb") as source:
@@ -1226,7 +1226,7 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
             in_scope = {re.sub(r"^(?:\./)+", "", line) for line in lines if line}
         descriptor = open_scan_local_file_descriptor(
             scan_dir,
-            ledger.relative_to(scan_dir).as_posix(),
+            portable_path(ledger).relative_to(portable_path(scan_dir)).as_posix(),
             "Canonical Deep Scan candidate ledger",
         )
         with os.fdopen(descriptor, "r", encoding="utf-8") as source:
@@ -3299,7 +3299,7 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
         artifacts.append(report_path)
 
     poc_relative = report_relative.parent / "poc"
-    poc_root = scan_dir.joinpath(*poc_relative.parts)
+    poc_root = filesystem_path(scan_dir.joinpath(*poc_relative.parts))
     try:
         if not stat.S_ISDIR(poc_root.stat(follow_symlinks=False).st_mode):
             return artifacts
@@ -3321,7 +3321,7 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
         for file_name in sorted(file_names):
             candidate = current_path / file_name
             try:
-                relative_path = candidate.relative_to(scan_dir).as_posix()
+                relative_path = portable_path(candidate).relative_to(portable_path(scan_dir)).as_posix()
             except ValueError:
                 continue
             if not scan_local_regular_file(scan_dir, relative_path):
