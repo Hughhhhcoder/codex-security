@@ -173,6 +173,16 @@ describe("bundled workbench canonical paths", () => {
         "workbench.git_blob_bytes = lambda _, names: [b'private = True\\n' for _ in names]",
         "inventory.generate_diff_in_scope_files(repository, 'base', 'head', 'revisions', output)",
         "inventories['revisions'] = output.read_text()",
+        "original_resolve = Path.resolve",
+        "def cyclic_resolve(path, *args, **kwargs):",
+        "    if path.name == 'cyclic':",
+        "        raise RuntimeError('symlink loop')",
+        "    return original_resolve(path, *args, **kwargs)",
+        "Path.resolve = cyclic_resolve",
+        "ranking.git_changed_paths = lambda *_: [(repository / 'cyclic' / 'private.py', 'M')]",
+        "inventory.generate_diff_in_scope_files(repository, 'base', 'head', 'local-patch', output)",
+        "inventories['cyclic'] = output.read_text()",
+        "Path.resolve = original_resolve",
         "workbench.git_output = lambda *_: str(repository)",
         "workbench.git_worktree_context = lambda _: (repository, '.')",
         "workbench.git_bytes = lambda *_: b'linked/private.py\\0'",
@@ -203,7 +213,12 @@ describe("bundled workbench canonical paths", () => {
     );
 
     expect(result).toEqual({
-      inventories: { M: "", D: "", revisions: "" },
+      inventories: {
+        M: "",
+        D: "linked/private.py\n",
+        revisions: "linked/private.py\n",
+        cyclic: "",
+      },
       externalReads: [],
       snapshotRejected: true,
       missingSkipped: true,

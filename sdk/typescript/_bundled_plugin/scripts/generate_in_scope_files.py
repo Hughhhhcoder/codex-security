@@ -186,8 +186,6 @@ def generate_diff_in_scope_files(
 
         for path, status in eligible:
             relative = path.relative_to(repository)
-            if not path.parent.resolve().is_relative_to(repository):
-                continue
             if status != "D":
                 if mode == "revisions":
                     contents = revision_blobs[relative]
@@ -197,12 +195,18 @@ def generate_diff_in_scope_files(
                         )
                     if is_binary_sample(contents):
                         continue
-                elif (
-                    path.is_symlink()
-                    or not path.is_file()
-                    or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
-                ):
-                    continue
+                else:
+                    try:
+                        if not path.parent.resolve().is_relative_to(repository):
+                            continue
+                    except RuntimeError:
+                        continue
+                    if (
+                        path.is_symlink()
+                        or not path.is_file()
+                        or preview_for(path, DEFAULT_PREVIEW_BYTES)[1]
+                    ):
+                        continue
             relative_path = relative.as_posix()
             if "\n" in relative_path or "\r" in relative_path:
                 raise InventoryError(
