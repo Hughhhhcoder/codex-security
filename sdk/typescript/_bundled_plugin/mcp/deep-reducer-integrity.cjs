@@ -1,12 +1,27 @@
 const { isDeepStrictEqual } = require("node:util");
 
-const THREAT_MODEL_LISTS = [
-  "assets",
-  "trustBoundaries",
-  "attackerCapabilities",
-  "securityObjectives",
-  "assumptions",
+const FINDING_TEXT_FIELDS = ["summary", "remediation", "rootCause"];
+const FINDING_LIST_FIELDS = ["remediationTests", "preventiveControls"];
+const MERGEABLE_TEXT_FIELDS = new Set([
+  "summary",
+  "remediation",
+  "rootCause",
+  "reason",
+  "rationale",
+  "notes",
+  "context",
+  "runtimeStatus",
+  "validationMode",
+  "followUpPrompt",
+]);
+const SEVERITY_LEVELS = [
+  "informational",
+  "low",
+  "medium",
+  "high",
+  "critical",
 ];
+const CONFIDENCE_LEVELS = ["low", "medium", "high"];
 
 function validateDeepReduction(result, sources, previous, findingIdentity) {
   const currentFindingIds = new Set(result.findings.map(findingIdentity));
@@ -21,24 +36,36 @@ function validateDeepReduction(result, sources, previous, findingIdentity) {
     );
   }
 
-  for (const source of sources) {
+  const inputs = previous === undefined ? sources : [...sources, previous];
+
+  for (const source of inputs) {
     for (const finding of source.findings) {
-      const represented = result.findings.some((retained) =>
+      const matches = result.findings.filter((retained) =>
         representsFinding(retained, finding, findingIdentity),
       );
-      if (represented) continue;
+      if (matches.length === 0) {
+        throw Object.assign(
+          new Error(
+            `Deep reduction omitted an accepted Standard scan finding (${finding.ruleId}). Preserve its identity or merge only findings with the same rule and root control.`,
+          ),
+          { code: "merge_traceability_omitted_source_candidates" },
+        );
+      }
+      if (matches.some((retained) => retainsFindingEvidence(retained, finding))) {
+        continue;
+      }
       throw Object.assign(
         new Error(
-          `Deep reduction omitted an accepted Standard scan finding (${finding.ruleId}). Preserve its identity or merge only findings with the same rule and root control.`,
+          `Deep reduction discarded accepted finding evidence (${finding.ruleId}). Preserve every location, code-evidence item, attack path, validation detail, and remediation.`,
         ),
         { code: "merge_traceability_omitted_source_candidates" },
       );
     }
   }
 
-  const inputs = previous === undefined ? sources : [...sources, previous];
   validateRetainedCoverage(result.coverage, inputs);
   validateRetainedThreatModel(result.threatModel, inputs);
+  validateRetainedScope(result.scope, inputs);
 }
 
 function representsFinding(retained, source, findingIdentity) {
@@ -59,15 +86,83 @@ function representsFinding(retained, source, findingIdentity) {
   );
 }
 
+function retainsFindingEvidence(retained, source) {
+  for (const location of source.locations) {
+    if (
+      retained.locations.some((candidate) =>
+        retainsStructuredValue(candidate, location),
+      )
+    ) {
+      continue;
+    }
+    return false;
+  }
+
+  for (const evidence of source.codeEvidence ?? []) {
+    if (
+      (retained.codeEvidence ?? []).some((candidate) =>
+        retainsStructuredValue(candidate, evidence),
+      )
+    ) {
+      continue;
+    }
+    return false;
+  }
+
+  for (const field of FINDING_TEXT_FIELDS) {
+    if (source[field] === undefined || source[field] === null) continue;
+    if (!retainsStructuredValue(retained[field], source[field], field)) {
+      return false;
+    }
+  }
+
+  for (const field of FINDING_LIST_FIELDS) {
+    if (!retainsStructuredValue(retained[field] ?? [], source[field] ?? [])) {
+      return false;
+    }
+  }
+
+  for (const field of ["attackPath", "validation", "taxonomy", "provenance"]) {
+    if (source[field] === undefined || source[field] === null) continue;
+    if (!retainsStructuredValue(retained[field], source[field])) return false;
+  }
+
+  if (
+    SEVERITY_LEVELS.indexOf(retained.severity.level) <
+    SEVERITY_LEVELS.indexOf(source.severity.level)
+  ) {
+    return false;
+  }
+  if (
+    CONFIDENCE_LEVELS.indexOf(retained.confidence.level) <
+    CONFIDENCE_LEVELS.indexOf(source.confidence.level)
+  ) {
+    return false;
+  }
+  if (
+    !retainsStructuredValue(
+      retained.confidence.rationale,
+      source.confidence.rationale,
+      "rationale",
+    )
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 function validateRetainedCoverage(result, inputs) {
   for (const input of inputs) {
     const coverage = input.coverage;
     if (
-      coverage.completeness !== "complete" &&
-      result.completeness === "complete"
+      (coverage.completeness === "partial" &&
+        result.completeness !== "partial") ||
+      (coverage.completeness === "unknown" &&
+        result.completeness === "complete")
     ) {
       throw new Error(
-        `Deep reduction changed ${coverage.completeness} Standard scan coverage to complete.`,
+        `Deep reduction changed ${coverage.completeness} Standard scan coverage to ${result.completeness}.`,
       );
     }
 
@@ -81,31 +176,19 @@ function validateRetainedCoverage(result, inputs) {
     }
 
     for (const source of coverage.surfaces) {
-      const retained = result.surfaces.find(
-        (surface) =>
-          (source.id !== undefined && surface.id === source.id) ||
-          surface.label === source.label,
+      const retained = result.surfaces.some((surface) =>
+        retainsStructuredValue(surface, source),
       );
       if (!retained) {
         throw new Error(
-          "Deep reduction discarded an accepted Standard scan coverage surface.",
-        );
-      }
-      if (
-        source.disposition === "needs_follow_up" &&
-        retained.disposition !== "needs_follow_up"
-      ) {
-        throw new Error(
-          "Deep reduction discarded an unresolved Standard scan follow-up surface.",
+          "Deep reduction discarded an accepted Standard scan coverage surface or its review evidence.",
         );
       }
     }
 
     for (const source of coverage.explicitExclusions) {
-      const retained = result.explicitExclusions.some(
-        (exclusion) =>
-          exclusion.pattern === source.pattern &&
-          exclusion.reason === source.reason,
+      const retained = result.explicitExclusions.some((exclusion) =>
+        retainsStructuredValue(exclusion, source),
       );
       if (!retained) {
         throw new Error(
@@ -116,11 +199,8 @@ function validateRetainedCoverage(result, inputs) {
 
     const resultQuestions = result.openQuestions ?? [];
     for (const source of coverage.openQuestions ?? []) {
-      const sourceQuestion = questionText(source);
       if (
-        resultQuestions.some(
-          (retained) => questionText(retained) === sourceQuestion,
-        )
+        resultQuestions.some((retained) => retainsOpenQuestion(retained, source))
       ) {
         continue;
       }
@@ -132,27 +212,16 @@ function validateRetainedCoverage(result, inputs) {
 }
 
 function sameDeferred(retained, source) {
-  if (source.id !== undefined && retained.id === source.id) return true;
-  if (
-    source.candidateId !== undefined &&
-    retained.candidateId === source.candidateId
-  ) {
-    return true;
+  return retainsStructuredValue(retained, source);
+}
+
+function retainsOpenQuestion(retained, source) {
+  if (typeof source === "string") {
+    return (
+      (typeof retained === "string" ? retained : retained.question) === source
+    );
   }
-
-  return (
-    retained.reason === source.reason &&
-    sameTextList(retained.paths, source.paths) &&
-    sameTextList(retained.surfaceIds, source.surfaceIds)
-  );
-}
-
-function sameTextList(left = [], right = []) {
-  return isDeepStrictEqual([...left].sort(), [...right].sort());
-}
-
-function questionText(question) {
-  return typeof question === "string" ? question : question.question;
+  return retainsStructuredValue(retained, source);
 }
 
 function validateRetainedThreatModel(result, inputs) {
@@ -173,16 +242,49 @@ function validateRetainedThreatModel(result, inputs) {
   }
 
   for (const model of models) {
-    for (const field of THREAT_MODEL_LISTS) {
-      const retained = result[field] ?? [];
-      for (const value of model[field] ?? []) {
-        if (retained.includes(value)) continue;
-        throw new Error(
-          `Deep reduction discarded an accepted threat-model ${field} entry.`,
-        );
-      }
+    for (const [field, value] of Object.entries(model)) {
+      if (retainsStructuredValue(result[field], value, field)) continue;
+      throw new Error(
+        `Deep reduction discarded an accepted threat-model ${field} entry.`,
+      );
     }
   }
+}
+
+function validateRetainedScope(result, inputs) {
+  for (const input of inputs) {
+    if (input.scope === undefined) continue;
+    if (retainsStructuredValue(result, input.scope)) continue;
+    throw new Error(
+      "Deep reduction discarded accepted Standard scan scope details or limitations.",
+    );
+  }
+}
+
+function retainsStructuredValue(retained, source, field) {
+  if (source === null) return retained === null;
+  if (typeof source === "string") {
+    return (
+      typeof retained === "string" &&
+      (retained === source ||
+        (MERGEABLE_TEXT_FIELDS.has(field) && retained.includes(source)))
+    );
+  }
+  if (Array.isArray(source)) {
+    return (
+      Array.isArray(retained) &&
+      source.every((entry) =>
+        retained.some((candidate) => retainsStructuredValue(candidate, entry)),
+      )
+    );
+  }
+  if (typeof source === "object") {
+    if (typeof retained !== "object" || retained === null) return false;
+    return Object.entries(source).every(([key, value]) =>
+      retainsStructuredValue(retained[key], value, key),
+    );
+  }
+  return Object.is(retained, source);
 }
 
 module.exports = { validateDeepReduction };

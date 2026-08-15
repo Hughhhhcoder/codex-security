@@ -24,8 +24,18 @@ type Location = {
 type Finding = {
   ruleId: string;
   title: string;
+  remediation: string;
   identity: { anchor: string; instance?: string };
   locations: Location[];
+  attackPath?: Record<string, unknown> | null;
+  codeEvidence?: Array<{
+    id: string;
+    label: string;
+    path: string;
+    startLine: number;
+    code: string;
+    explanation: string;
+  }>;
   findingId?: string;
   occurrenceId?: string;
   fingerprints?: unknown;
@@ -38,6 +48,9 @@ type Coverage = {
     id?: string;
     label: string;
     disposition: string;
+    receiptRefs?: string[];
+    riskArea?: string;
+    notes?: string;
   }>;
   explicitExclusions: Array<{ pattern: string; reason: string }>;
   deferred: Array<{
@@ -47,7 +60,7 @@ type Coverage = {
     paths?: string[];
     surfaceIds?: string[];
   }>;
-  openQuestions?: Array<string | { question: string }>;
+  openQuestions?: Array<string | { question: string; followUpPrompt?: string }>;
 };
 
 type ThreatModel = {
@@ -59,11 +72,21 @@ type ThreatModel = {
   assumptions?: string[];
 };
 
+type Scope = {
+  summary?: string;
+  artifactsReviewed?: string[];
+  runtimeStatus?: string;
+  validationMode?: string;
+  context?: string;
+  limitations?: string[];
+};
+
 type ScanDraft = {
   scanId: string;
   findings: Finding[];
   coverage: Coverage;
   threatModel?: ThreatModel;
+  scope?: Scope;
 };
 
 type ReducerResponse = {
@@ -113,12 +136,14 @@ function draft(
   findings: Finding[],
   scanCoverage = coverage(),
   threatModel?: ThreatModel,
+  scope?: Scope,
 ): ScanDraft {
   return {
     scanId,
     findings,
     coverage: scanCoverage,
     ...(threatModel === undefined ? {} : { threatModel }),
+    ...(scope === undefined ? {} : { scope }),
   };
 }
 
@@ -320,6 +345,76 @@ describe("Deep scan reducer finding retention", () => {
     expect(result.saved?.findings).toHaveLength(1);
   });
 
+  test("retains distinct evidence when workers share a finding identity", async () => {
+    const first = finding("first", 10);
+    const second = finding("first", 20);
+    const result = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([first]),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/evidence/iu);
+  });
+
+  test("accepts shared identities after merging every affected location", async () => {
+    const first = finding("first", 10);
+    const second = finding("first", 20);
+    const merged = structuredClone(first);
+    merged.locations.push(second.locations[0]!);
+    const result = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([merged]),
+    );
+
+    expect(result.accepted, result.message).toBe(true);
+    expect(result.saved?.findings[0]?.locations).toHaveLength(2);
+  });
+
+  test("retains source attack-path and remediation evidence during merging", async () => {
+    const first = finding("first", 10);
+    const second = structuredClone(first);
+    second.attackPath = {
+      summary: "An external request reaches the privileged handler.",
+    };
+    second.remediation =
+      "Enforce authentication before the privileged handler.";
+
+    for (const merged of [
+      { ...first, remediation: second.remediation },
+      { ...first, attackPath: second.attackPath },
+    ]) {
+      const result = await recordReduction(
+        [draft([first]), draft([second])],
+        draft([merged]),
+      );
+      expect(result.accepted, result.message).toBe(false);
+      expect(result.message).toMatch(/evidence/iu);
+    }
+  });
+
+  test("preserves distinct code-evidence records for a shared finding", async () => {
+    const first = finding("first", 10);
+    const second = structuredClone(first);
+    second.codeEvidence = [
+      {
+        id: "administrator-control",
+        label: "Administrator control",
+        path: "src/first.ts",
+        startLine: 10,
+        code: "handleAdministratorRequest(request)",
+        explanation: "The privileged request reaches the handler unchecked.",
+      },
+    ];
+    const result = await recordReduction(
+      [draft([first]), draft([second])],
+      draft([first]),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/evidence/iu);
+  });
+
   test("accepts a semantic merge with the same broken root control", async () => {
     const first = finding("first", 10);
     const second = finding("first", 20);
@@ -332,9 +427,11 @@ describe("Deep scan reducer finding retention", () => {
     };
     first.locations.push(rootControl);
     second.locations.push(structuredClone(rootControl));
+    const merged = structuredClone(first);
+    merged.locations.push(second.locations[0]!);
     const result = await recordReduction(
       [draft([first, second])],
-      draft([first]),
+      draft([merged]),
     );
 
     expect(result.accepted, result.message).toBe(true);
@@ -392,6 +489,26 @@ describe("Deep scan reducer coverage integrity", () => {
     expect(result.message).toMatch(/partial.*complete/iu);
   });
 
+  test("keeps known partial coverage from becoming unknown", async () => {
+    const partial = coverage({ completeness: "partial" });
+    const unknown = coverage({ completeness: "unknown" });
+    const result = await recordReduction(
+      [draft([], partial)],
+      draft([], unknown),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/partial.*unknown/iu);
+  });
+
+  test("does not upgrade unknown worker coverage to complete", async () => {
+    const unknown = coverage({ completeness: "unknown" });
+    const result = await recordReduction([draft([], unknown)], draft([]));
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/unknown.*complete/iu);
+  });
+
   test("retains every deferred proof gap from accepted worker results", async () => {
     const first = finding("first", 10);
     const partial = coverage({
@@ -412,6 +529,91 @@ describe("Deep scan reducer coverage integrity", () => {
 
     expect(result.accepted).toBe(false);
     expect(result.message).toMatch(/deferred/iu);
+  });
+
+  test("preserves deferred-item evidence when its identifier is unchanged", async () => {
+    const first = finding("first", 10);
+    const item = {
+      id: "follow-up-admin",
+      reason: "The administrator endpoint was not reviewed.",
+      paths: ["src/admin.ts"],
+      surfaceIds: ["admin"],
+    };
+    const partial = coverage({
+      completeness: "partial",
+      deferred: [item],
+    });
+
+    for (const changed of [
+      { ...item, reason: "A different review was postponed." },
+      { ...item, paths: [] },
+      { ...item, surfaceIds: [] },
+    ]) {
+      const result = await recordReduction(
+        [draft([first], partial)],
+        draft(
+          [first],
+          coverage({ completeness: "partial", deferred: [changed] }),
+        ),
+      );
+      expect(result.accepted, result.message).toBe(false);
+      expect(result.message).toMatch(/deferred/iu);
+    }
+  });
+
+  test("preserves matched surface dispositions and review evidence", async () => {
+    const first = finding("first", 10);
+    const surface = {
+      id: "admin",
+      label: "Administrator endpoint",
+      disposition: "reported",
+      receiptRefs: ["artifacts/reviews/admin.json"],
+      riskArea: "Authentication",
+      notes: "The administrator authentication guard was inspected.",
+    };
+    const reviewed = coverage({ surfaces: [surface] });
+
+    for (const changed of [
+      { ...surface, label: "Different endpoint" },
+      { ...surface, disposition: "no_issue_found" },
+      { ...surface, receiptRefs: [] },
+      { ...surface, riskArea: "Unrelated risk" },
+      { ...surface, notes: "No useful notes." },
+    ]) {
+      const result = await recordReduction(
+        [draft([first], reviewed)],
+        draft([first], coverage({ surfaces: [changed] })),
+      );
+      expect(result.accepted, result.message).toBe(false);
+      expect(result.message).toMatch(/surface/iu);
+    }
+  });
+
+  test("preserves concrete follow-up instructions in open questions", async () => {
+    const first = finding("first", 10);
+    const question = {
+      question: "Does the endpoint require authentication?",
+      followUpPrompt: "Trace the middleware chain before accepting requests.",
+    };
+    const partial = coverage({
+      completeness: "partial",
+      openQuestions: [question],
+    });
+
+    for (const changed of [
+      question.question,
+      { ...question, followUpPrompt: "Perform a different review." },
+    ]) {
+      const result = await recordReduction(
+        [draft([first], partial)],
+        draft(
+          [first],
+          coverage({ completeness: "partial", openQuestions: [changed] }),
+        ),
+      );
+      expect(result.accepted, result.message).toBe(false);
+      expect(result.message).toMatch(/question/iu);
+    }
   });
 
   test("retains follow-up surfaces, exclusions, and open questions", async () => {
@@ -515,11 +717,35 @@ describe("Deep scan reducer threat-model integrity", () => {
         draft([first], coverage(), firstThreatModel),
         draft([second], coverage(), secondThreatModel),
       ],
-      draft([first, second], coverage(), firstThreatModel),
+      draft([first, second], coverage(), {
+        summary: `${firstThreatModel.summary} ${secondThreatModel.summary}`,
+        assets: firstThreatModel.assets,
+      }),
     );
 
     expect(result.accepted).toBe(false);
     expect(result.message).toMatch(/threat.model.*assets/iu);
+  });
+
+  test("preserves every source summary when threat models differ", async () => {
+    const first = finding("first", 10);
+    const second = finding("second", 20);
+    const firstThreatModel = {
+      summary: "The public request boundary protects account records.",
+    };
+    const secondThreatModel = {
+      summary: "The internal job boundary protects audit records.",
+    };
+    const result = await recordReduction(
+      [
+        draft([first], coverage(), firstThreatModel),
+        draft([second], coverage(), secondThreatModel),
+      ],
+      draft([first, second], coverage(), firstThreatModel),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/threat.model.*summary/iu);
   });
 
   test("accepts a complete aggregate that preserves worker evidence", async () => {
@@ -556,6 +782,86 @@ describe("Deep scan reducer threat-model integrity", () => {
 
     expect(result.accepted, result.message).toBe(true);
     expect(result.saved).toEqual(aggregate);
+  });
+});
+
+describe("Deep scan reducer scope integrity", () => {
+  test("rejects omitted worker scope metadata", async () => {
+    const first = finding("first", 10);
+    const scope = {
+      summary: "Review the authentication boundary.",
+      artifactsReviewed: ["src/admin.ts"],
+      runtimeStatus: "Static review only.",
+      validationMode: "Source-backed validation.",
+      context: "The administrator handler accepts external requests.",
+      limitations: ["The identity provider was unavailable."],
+    };
+    const result = await recordReduction(
+      [draft([first], coverage(), undefined, scope)],
+      draft([first]),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/scope/iu);
+  });
+
+  test("preserves shared reviewed artifacts and runtime limitations", async () => {
+    const first = finding("first", 10);
+    const scope = {
+      summary: "Review the authentication boundary.",
+      artifactsReviewed: ["src/admin.ts"],
+      limitations: ["The identity provider was unavailable."],
+    };
+    const result = await recordReduction(
+      [draft([first], coverage(), undefined, scope)],
+      draft([first], coverage(), undefined, { ...scope, limitations: [] }),
+    );
+
+    expect(result.accepted).toBe(false);
+    expect(result.message).toMatch(/scope/iu);
+  });
+
+  test("combines distinct worker scope evidence without dropping limitations", async () => {
+    const first = finding("first", 10);
+    const second = finding("second", 20);
+    const firstScope = {
+      summary: "Review the request handler.",
+      artifactsReviewed: ["src/handler.ts"],
+      limitations: ["The identity provider was unavailable."],
+    };
+    const secondScope = {
+      summary: "Review the administrator endpoint.",
+      artifactsReviewed: ["src/admin.ts"],
+      limitations: ["The deployment configuration was unavailable."],
+    };
+
+    const incomplete = await recordReduction(
+      [
+        draft([first], coverage(), undefined, firstScope),
+        draft([second], coverage(), undefined, secondScope),
+      ],
+      draft([first, second], coverage(), undefined, firstScope),
+    );
+    expect(incomplete.accepted).toBe(false);
+    expect(incomplete.message).toMatch(/scope/iu);
+
+    const combined = {
+      summary: `${firstScope.summary} ${secondScope.summary}`,
+      artifactsReviewed: [
+        ...firstScope.artifactsReviewed,
+        ...secondScope.artifactsReviewed,
+      ],
+      limitations: [...firstScope.limitations, ...secondScope.limitations],
+    };
+    const accepted = await recordReduction(
+      [
+        draft([first], coverage(), undefined, firstScope),
+        draft([second], coverage(), undefined, secondScope),
+      ],
+      draft([first, second], coverage(), undefined, combined),
+    );
+    expect(accepted.accepted, accepted.message).toBe(true);
+    expect(accepted.saved?.scope).toEqual(combined);
   });
 });
 
