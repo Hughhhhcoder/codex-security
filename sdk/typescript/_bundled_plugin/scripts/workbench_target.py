@@ -231,7 +231,8 @@ def worktree_content_digest_for_context(
                 digest,
                 b"untracked-content",
                 directory_content_digest(
-                    path.resolve(), _selected_target=(work_tree or repository).resolve()
+                    path.resolve(),
+                    _selected_target=((work_tree or repository) / pathspec).resolve(),
                 ).encode(),
             )
         elif stat.S_ISREG(metadata.st_mode):
@@ -374,9 +375,14 @@ def git_directory_snapshot_paths(
             # The index can retain a path that was staged and then deleted.
             continue
         parent = path.parent
-        if parent not in resolved_parents:
-            resolved_parents[parent] = parent.resolve()
-        directory = path.resolve() if stat.S_ISDIR(metadata.st_mode) else None
+        try:
+            if parent not in resolved_parents:
+                resolved_parents[parent] = parent.resolve()
+            directory = path.resolve() if stat.S_ISDIR(metadata.st_mode) else None
+        except (OSError, RuntimeError):
+            if skip_unsafe_paths:
+                continue
+            raise SystemExit("Git working-tree paths must stay inside the selected target.")
         try:
             target_entry = directory is not None and directory.samefile(canonical_target)
         except OSError:
