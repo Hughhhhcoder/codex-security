@@ -43,7 +43,11 @@ from rank_preview import (
     preview_for,
     preview_for_bytes,
 )
-from workbench_target import git_blob_bytes, git_directory_snapshot_paths
+from workbench_target import (
+    _snapshot_directory_is_within_target,
+    git_blob_bytes,
+    git_directory_snapshot_paths,
+)
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -693,14 +697,16 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
     for path, status in changed:
         rel = path.relative_to(repo)
 
+        unsafe_parent = False
         if status != "D" and args.mode != "revisions":
             try:
-                if not path.parent.resolve(strict=True).is_relative_to(repo):
-                    continue
+                unsafe_parent = not _snapshot_directory_is_within_target(
+                    path.parent.resolve(strict=True), repo
+                )
             except (OSError, RuntimeError):
-                continue
+                unsafe_parent = True
 
-        if status == "D":
+        if status == "D" or unsafe_parent:
             preview = ""
         elif args.mode == "revisions":
             content = revision_blobs[rel]

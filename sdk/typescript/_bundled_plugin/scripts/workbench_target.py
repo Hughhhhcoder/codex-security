@@ -10,7 +10,6 @@ import sqlite3
 import stat
 import subprocess
 import sys
-import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -361,8 +360,6 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
         raise SystemExit("Could not inspect files in the selected Git working tree.")
     paths: list[Path] = []
     canonical_target = target.resolve()
-    if sys.platform == "darwin":
-        canonical_target = Path(unicodedata.normalize("NFC", os.fspath(canonical_target)))
     resolved_parents: dict[Path, Path] = {target: canonical_target}
     for raw_path in (raw_path for raw_path in listed.split(b"\0") if raw_path):
         path = repository / os.fsdecode(raw_path)
@@ -373,16 +370,12 @@ def git_directory_snapshot_paths(target: Path) -> list[Path] | None:
             continue
         parent = path.parent
         if parent not in resolved_parents:
-            resolved_parent = parent.resolve()
-            if sys.platform == "darwin":
-                resolved_parent = Path(
-                    unicodedata.normalize("NFC", os.fspath(resolved_parent))
-                )
-            resolved_parents[parent] = resolved_parent
+            resolved_parents[parent] = parent.resolve()
         directory = path.resolve() if stat.S_ISDIR(metadata.st_mode) else None
-        if directory is not None and sys.platform == "darwin":
-            directory = Path(unicodedata.normalize("NFC", os.fspath(directory)))
-        target_entry = directory is not None and directory.samefile(canonical_target)
+        try:
+            target_entry = directory is not None and directory.samefile(canonical_target)
+        except OSError:
+            target_entry = False
         if (
             not target_entry
             and not _snapshot_directory_is_within_target(
