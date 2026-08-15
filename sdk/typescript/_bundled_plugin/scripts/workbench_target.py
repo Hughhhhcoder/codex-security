@@ -214,6 +214,9 @@ def worktree_content_digest(target: Path) -> str:
 
 def committed_diff_arguments(base: str, head: str, pathspec: str) -> tuple[str, ...]:
     return (
+        f"--attr-source={head}",
+        "-c",
+        f"core.attributesFile={os.devnull}",
         "-c",
         "core.quotePath=true",
         "-c",

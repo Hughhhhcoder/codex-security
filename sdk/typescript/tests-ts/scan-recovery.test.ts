@@ -752,6 +752,46 @@ describe("malformed scan artifact recovery", () => {
     expect((await completeScan(fixture)).warnings).toEqual([]);
   });
 
+  test("keeps committed snapshots stable when checkout attributes change", async () => {
+    const fixture = await startDraftScan("committed");
+    const selected = committedDiffTarget(fixture);
+    await writeFile(
+      join(fixture.repository, ".gitattributes"),
+      "src/extract.py binary\n",
+    );
+    const globalAttributes = join(fixture.stateDir, "global.attributes");
+    await writeFile(globalAttributes, "src/extract.py binary\n");
+    fixtureGit(
+      fixture.repository,
+      "config",
+      "core.attributesFile",
+      globalAttributes,
+    );
+
+    const inspected = await workbench(fixture, [
+      "inspect-setup",
+      "--target-path",
+      fixture.repository,
+      "--scope",
+      ".",
+      "--mode",
+      "diff",
+      "--diff-target-kind",
+      "range",
+      "--diff-base-revision",
+      selected.baseRevision,
+      "--diff-head-revision",
+      selected.headRevision,
+      "--diff-content-digest",
+      selected.contentDigest,
+    ]);
+
+    expect(inspected["diffTarget"]).toMatchObject({
+      contentDigest: selected.contentDigest,
+    });
+    expect((await completeScan(fixture)).warnings).toEqual([]);
+  });
+
   test("hashes committed diff output without buffering the Git patch", async () => {
     const fixture = await startDraftScan("committed");
     const selected = committedDiffTarget(fixture);
