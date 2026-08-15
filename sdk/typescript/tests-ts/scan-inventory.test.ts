@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  copyFile,
   link as hardlink,
   mkdir,
   mkdtemp,
@@ -131,7 +132,14 @@ describe("security scan file inventory", () => {
     ]);
   });
 
-  test.each(["XDG default", "HOME default", "configured", "conditional"])(
+  test.each([
+    "XDG default",
+    "HOME default",
+    "configured",
+    "conditional",
+    "relative",
+    "relative parent",
+  ])(
     "honors %s global Git excludes across scoped nested checkouts",
     async (kind) => {
       if (Bun.which("rg") === null) return;
@@ -142,9 +150,13 @@ describe("security scan file inventory", () => {
       const excludes =
         kind === "HOME default"
           ? join(home, ".config", "git", "ignore")
-          : kind === "configured" || kind === "conditional"
-            ? join(home, "custom-excludes")
-            : join(configuration, "git", "ignore");
+          : kind === "relative"
+            ? join(checkout, "rel-ignore")
+            : kind === "relative parent"
+              ? join(dirname(checkout), "external-ignore")
+              : kind === "configured" || kind === "conditional"
+                ? join(home, "custom-excludes")
+                : join(configuration, "git", "ignore");
       const nested = join(checkout, "nested");
       await Promise.all([
         mkdir(dirname(excludes), { recursive: true }),
@@ -153,7 +165,7 @@ describe("security scan file inventory", () => {
       ]);
       execFileSync("git", ["init", "-q"], { cwd: nested });
       await Promise.all([
-        writeFile(excludes, "*.ts\n!visible.ts\n"),
+        writeFile(excludes, "*.ts\n!visible.ts\nrel-ignore\n"),
         writeFile(join(checkout, "private.ts"), "private\n"),
         writeFile(join(checkout, "visible.ts"), "visible\n"),
         writeFile(join(nested, "private.ts"), "private\n"),
@@ -168,10 +180,23 @@ describe("security scan file inventory", () => {
         GIT_CONFIG_GLOBAL: join(home, ".gitconfig"),
         GIT_CONFIG_NOSYSTEM: "1",
       };
-      if (kind === "configured") {
+      if (
+        kind === "configured" ||
+        kind === "relative" ||
+        kind === "relative parent"
+      ) {
         execFileSync(
           "git",
-          ["config", "--global", "core.excludesFile", excludes],
+          [
+            "config",
+            "--global",
+            "core.excludesFile",
+            kind === "relative"
+              ? "rel-ignore"
+              : kind === "relative parent"
+                ? "../external-ignore"
+                : excludes,
+          ],
           {
             cwd: checkout,
             env: environment,
@@ -252,6 +277,96 @@ describe("security scan file inventory", () => {
       }),
     ).toEqual(["./global-private.ts", "./system-private.ts", "./visible.ts"]);
   });
+
+  test("inventories snapshots and default excludes when Git is unavailable", async () => {
+    const ripgrep = Bun.which("rg");
+    if (ripgrep === null || python === null) return;
+
+    const checkout = await repository(false);
+    const binaries = join(dirname(checkout), "binaries");
+    const configuration = join(dirname(checkout), "configuration");
+    await Promise.all([
+      mkdir(binaries),
+      mkdir(join(configuration, "git"), { recursive: true }),
+    ]);
+    await Promise.all([
+      copyFile(
+        ripgrep,
+        join(binaries, process.platform === "win32" ? "rg.exe" : "rg"),
+      ),
+      writeFile(join(configuration, "git", "ignore"), "private.ts\n"),
+      writeFile(join(checkout, "private.ts"), "private\n"),
+      writeFile(join(checkout, "visible.ts"), "visible\n"),
+    ]);
+
+    expect(
+      await inventory(checkout, ".", {
+        ...process.env,
+        PATH: binaries,
+        XDG_CONFIG_HOME: configuration,
+        GIT_CONFIG_NOSYSTEM: "1",
+      }),
+    ).toEqual(["./visible.ts"]);
+  });
+
+  test
+    .skipIf(process.platform === "win32")
+    .each([
+      "file",
+      "directory",
+      "reentry file",
+      "reentry directory",
+      "case reentry file",
+      "case reentry directory",
+    ])(
+    "rejects a symbolic %s in a repository-relative global exclude path",
+    async (kind) => {
+      if (Bun.which("rg") === null) return;
+
+      const checkout = await repository();
+      const home = join(dirname(checkout), "home");
+      const external = join(dirname(checkout), "external");
+      const file = kind.endsWith("file");
+      const relative = file ? "rel-ignore" : "rules/rel-ignore";
+      const alias = kind.startsWith("case")
+        ? basename(checkout).toUpperCase()
+        : basename(checkout);
+      if (
+        kind.startsWith("case") &&
+        !(await realpath(join(dirname(checkout), alias)).then(
+          async (resolved) => resolved === (await realpath(checkout)),
+          () => false,
+        ))
+      ) {
+        return;
+      }
+      const configured = kind.includes("reentry")
+        ? `../${alias}/${relative}`
+        : relative;
+      await Promise.all([mkdir(home), mkdir(external)]);
+      await writeFile(join(external, "rel-ignore"), "private.ts\n");
+      await symlink(
+        file ? join(external, "rel-ignore") : external,
+        join(checkout, file ? "rel-ignore" : "rules"),
+      );
+      const environment = {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        GIT_CONFIG_GLOBAL: join(home, ".gitconfig"),
+        GIT_CONFIG_NOSYSTEM: "1",
+      };
+      execFileSync(
+        "git",
+        ["config", "--global", "core.excludesFile", configured],
+        { cwd: checkout, env: environment },
+      );
+
+      await expect(inventory(checkout, ".", environment)).rejects.toThrow(
+        "symbolic ignore files are not supported",
+      );
+    },
+  );
 
   test.each([".gitignore", ".ignore", ".rgignore"])(
     "inventories ordinary directories named %s",

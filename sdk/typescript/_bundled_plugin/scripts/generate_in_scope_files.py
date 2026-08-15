@@ -2013,6 +2013,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     skip_system = environment.get("GIT_CONFIG_NOSYSTEM", "").strip().casefold()
     if skip_system in ("", "0", "false", "no", "off"):
         configuration_scopes.append("--system")
+    configured_global_ignore: subprocess.CompletedProcess[bytes] | None = None
     for configuration_scope in configuration_scopes:
         try:
             configured_global_ignore = subprocess.run(
@@ -2031,6 +2032,12 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
                 stderr=subprocess.PIPE,
                 check=False,
             )
+        except FileNotFoundError as error:
+            if worktree is not None:
+                raise InventoryError(
+                    f"could not inspect global Git exclusions: {error}"
+                ) from error
+            break
         except OSError as error:
             raise InventoryError(
                 f"could not inspect global Git exclusions: {error}"
@@ -2042,10 +2049,36 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
             raise InventoryError(f"could not inspect global Git exclusions: {detail}")
         if configured_global_ignore.returncode == 0:
             break
-    if configured_global_ignore.returncode == 0:
+    if configured_global_ignore is not None and configured_global_ignore.returncode == 0:
         global_ignore = Path(
             os.fsdecode(configured_global_ignore.stdout.rstrip(b"\r\n"))
         )
+        if not global_ignore.is_absolute():
+            global_ignore = repository / global_ignore
+            try:
+                components = global_ignore.relative_to(repository).parts
+            except ValueError:
+                components = ()
+            current = repository
+            for component in components:
+                if component == "..":
+                    current = current.parent
+                    continue
+                current /= component
+                try:
+                    metadata = current.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    break
+                if not current.is_relative_to(repository):
+                    if (
+                        not symbolic_metadata(metadata)
+                        and stat.S_ISDIR(metadata.st_mode)
+                        and (metadata.st_dev, metadata.st_ino) == repository_identity
+                    ):
+                        current = repository
+                    continue
+                if symbolic_metadata(metadata):
+                    raise InventoryError("symbolic ignore files are not supported")
     else:
         configured_home = environment.get("XDG_CONFIG_HOME")
         config_home = Path(configured_home) if configured_home else Path.home() / ".config"
