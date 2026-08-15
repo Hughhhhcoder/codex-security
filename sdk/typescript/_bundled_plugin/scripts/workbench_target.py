@@ -398,7 +398,7 @@ def git_directory_snapshot_paths(
             nested_repository_root is not None
             and Path(nested_repository_root).resolve() == path.resolve()
         ):
-            nested_paths = git_directory_snapshot_paths(path)
+            nested_paths = git_directory_snapshot_paths(path, skip_unsafe_paths=skip_unsafe_paths)
             if nested_paths is not None:
                 paths.extend(nested_paths)
                 continue
