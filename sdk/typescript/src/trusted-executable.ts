@@ -22,16 +22,7 @@ export async function resolveTrustedExecutable(
     : { executable: inspected.executable, environment: inspected.environment };
 }
 
-export async function trustedExecutableEnvironment(
-  candidate: string,
-  environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
-): Promise<Record<string, string | undefined>> {
-  return (await inspectTrustedExecutable(candidate, environment, protectedRoot))
-    .environment;
-}
-
-async function inspectTrustedExecutable(
+export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string,
@@ -45,8 +36,13 @@ async function inspectTrustedExecutable(
   const path = Object.entries(environment).find(
     ([name]) => name.toUpperCase() === "PATH",
   )?.[1];
+  // Match child_process lookup defaults without broadening an explicit PATH.
+  const searchPath =
+    path ??
+    (process.platform === "win32" ? process.env["PATH"] : "/usr/bin:/bin") ??
+    "";
   const entries: string[] = [];
-  for (const entry of path?.split(delimiter) ?? []) {
+  for (const entry of searchPath.split(delimiter)) {
     if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
     if (canonical === null || isWithin(root, canonical)) continue;
@@ -98,14 +94,12 @@ async function inspectTrustedExecutable(
     }
   }
   const sanitizedEnvironment = { ...environment };
-  if (path !== undefined) {
-    for (const name of Object.keys(sanitizedEnvironment)) {
-      if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
-    }
-    sanitizedEnvironment["PATH"] = entries
-      .filter((entry) => !unsafeEntries.has(entry))
-      .join(delimiter);
+  for (const name of Object.keys(sanitizedEnvironment)) {
+    if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
   }
+  sanitizedEnvironment["PATH"] = entries
+    .filter((entry) => !unsafeEntries.has(entry))
+    .join(delimiter);
   return { executable, environment: sanitizedEnvironment };
 }
 

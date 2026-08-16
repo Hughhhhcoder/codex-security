@@ -16,7 +16,7 @@ import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CodexSecurity } from "../src/api.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
-import { trustedExecutableEnvironment } from "../src/trusted-executable.js";
+import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { preparedRuntime } from "./support/api-events.js";
 
@@ -210,28 +210,40 @@ describe("bundled workbench trusted Git", () => {
     expect(JSON.parse(result.stdout)).toEqual({ status: 127, output: "" });
   });
 
-  test("preserves absent PATH while clearing explicitly unsafe PATH", async () => {
+  test("uses default lookup only when PATH is absent", async () => {
     const target = fixture();
-    const missing = await trustedExecutableEnvironment(
+    const defaultPath =
+      process.platform === "win32" ? process.env["PATH"] : "/usr/bin:/bin";
+    const expected = await inspectTrustedExecutable(
+      "git",
+      { HOME: target.root, PATH: defaultPath ?? "" },
+      target.repository,
+    );
+    const missing = await inspectTrustedExecutable(
       "git",
       { HOME: target.root },
       target.repository,
     );
-    expect(missing).not.toHaveProperty("PATH");
+    expect(missing).toEqual(expected);
 
-    const undefinedPath = await trustedExecutableEnvironment(
+    const undefinedPath = await inspectTrustedExecutable(
       "git",
       { HOME: target.root, PATH: undefined },
       target.repository,
     );
-    expect(undefinedPath["PATH"]).toBeUndefined();
+    expect(undefinedPath).toEqual(expected);
 
-    const unsafe = await trustedExecutableEnvironment(
-      "git",
-      { HOME: target.root, PATH: dirname(target.shim) },
-      target.repository,
-    );
-    expect(unsafe["PATH"]).toBe("");
+    for (const path of ["", dirname(target.shim)]) {
+      const unavailable = await inspectTrustedExecutable(
+        "git",
+        { HOME: target.root, PATH: path },
+        target.repository,
+      );
+      expect(unavailable).toEqual({
+        executable: null,
+        environment: { HOME: target.root, PATH: "" },
+      });
+    }
   });
 
   test("rejects explicitly selected repository-controlled Git", () => {

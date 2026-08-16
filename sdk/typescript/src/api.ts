@@ -120,10 +120,7 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
-import {
-  resolveTrustedExecutable,
-  trustedExecutableEnvironment,
-} from "./trusted-executable.js";
+import { inspectTrustedExecutable } from "./trusted-executable.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -648,23 +645,19 @@ export class CodexSecurity {
         modelProvider,
       );
       const protectedGitRoot = await outermostGitMarkerRoot(repo, signal);
-      const gitEnvironment = await trustedExecutableEnvironment(
+      const git = await inspectTrustedExecutable(
         "git",
         pluginEnvironment,
         protectedGitRoot,
       );
-      const git = await resolveTrustedExecutable(
-        "git",
-        gitEnvironment,
+      const ripgrep = await inspectTrustedExecutable(
+        "rg",
+        git.environment,
         protectedGitRoot,
       );
       const trustedPluginEnvironment = {
-        ...(await trustedExecutableEnvironment(
-          "rg",
-          git?.environment ?? gitEnvironment,
-          protectedGitRoot,
-        )),
-        CODEX_SECURITY_GIT: git?.executable ?? "",
+        ...ripgrep.environment,
+        CODEX_SECURITY_GIT: git.executable ?? "",
       };
       checkOpen();
       const scanOutputRoot =
