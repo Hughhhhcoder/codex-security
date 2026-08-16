@@ -10,6 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench_target import git_command, ripgrep_command
+
 
 class InventoryError(ValueError):
     """Raised when the repository, scope, or inventory cannot be used safely."""
@@ -70,7 +74,6 @@ def resolve_output(value: str) -> Path:
 def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     """Atomically write the exact ripgrep inventory sorted as ``LC_ALL=C``."""
     command = [
-        "rg",
         "--files",
         "--hidden",
         "--no-ignore",
@@ -83,13 +86,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
     ]
     with tempfile.TemporaryFile(mode="w+b") as inventory:
         try:
-            result = subprocess.run(
-                command,
-                cwd=repository,
-                stdout=inventory,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
+            result = ripgrep_command(repository, *command, stdout=inventory)
         except OSError as error:
             raise InventoryError(f"could not run ripgrep: {error}") from error
 
@@ -107,8 +104,6 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
 
 
 def committed_changed_paths(repository: Path, base: str, head: str) -> list[tuple[Path, str]]:
-    from workbench_target import git_command
-
     result = git_command(
         repository,
         "diff",
@@ -144,7 +139,6 @@ def generate_diff_in_scope_files(
     output: Path,
 ) -> int:
     """Reuse the existing diff selection without generating previews or duplicate worklists."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from generate_rank_input import git_changed_paths, path_is_excluded
     from rank_preview import (
         DEFAULT_PREVIEW_BYTES,

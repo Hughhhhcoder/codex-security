@@ -29,7 +29,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 from collections import Counter
 from collections.abc import Callable
@@ -43,7 +42,12 @@ from rank_preview import (
     preview_for,
     preview_for_bytes,
 )
-from workbench_target import git_blob_bytes, git_command, git_directory_snapshot_paths
+from workbench_target import (
+    git_blob_bytes,
+    git_command,
+    git_directory_snapshot_paths,
+    ripgrep_command,
+)
 
 EXCLUDED_DIRS = {
     ".cache",
@@ -521,7 +525,6 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                 candidates = git_candidates
             else:
                 command = [
-                    "rg",
                     "--files",
                     "--hidden",
                     "--no-require-git",
@@ -532,7 +535,7 @@ def make_repo_scope_input(args: argparse.Namespace) -> None:
                     str(scope_path.relative_to(repo)),
                 ]
                 try:
-                    result = subprocess.run(command, cwd=repo, capture_output=True, check=False)
+                    result = ripgrep_command(repo, *command)
                 except OSError as exc:
                     ignore_names = (".gitignore", ".ignore", ".rgignore")
                     ancestors = (scope_path, *scope_path.parents)

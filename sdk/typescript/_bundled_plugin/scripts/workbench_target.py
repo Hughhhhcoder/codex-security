@@ -11,7 +11,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -138,7 +138,7 @@ def _inside_protected_git_root(candidate: Path, root: Path) -> bool:
     )
 
 
-def _is_git_executable(candidate: Path, canonical: Path) -> bool:
+def _is_native_executable(candidate: Path, canonical: Path) -> bool:
     windows = sys.platform == "win32"
     return (
         canonical.is_file()
@@ -153,31 +153,43 @@ def _is_git_executable(candidate: Path, canonical: Path) -> bool:
     )
 
 
-def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | None:
+def _trusted_executable(
+    target: Path,
+    environment: dict[str, str],
+    name: str,
+) -> str | None:
     root = _protected_git_root(target)
-    configured = environment.get("CODEX_SECURITY_GIT")
+    setting = f"CODEX_SECURITY_{name.upper()}"
+    configured = environment.get(setting)
     if configured is not None:
         if not configured:
             return None
         candidate = Path(configured)
         if not candidate.is_absolute():
-            raise SystemExit("CODEX_SECURITY_GIT must name an absolute trusted executable.")
+            raise SystemExit(f"{setting} must name an absolute trusted executable.")
         try:
             canonical = candidate.resolve(strict=True)
             if _inside_protected_git_root(canonical, root) or any(
                 _inside_protected_git_root(ancestor.resolve(strict=True), root)
                 for ancestor in candidate.parents
             ):
-                raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
+                raise SystemExit(f"{setting} must stay outside the protected repository.")
         except OSError as error:
-            raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.") from error
-        if not _is_git_executable(candidate, canonical):
-            raise SystemExit("CODEX_SECURITY_GIT does not name an available executable.")
+            raise SystemExit(f"{setting} does not name an available executable.") from error
+        if not _is_native_executable(candidate, canonical):
+            raise SystemExit(f"{setting} does not name an available executable.")
         return configured
 
     entries: list[str] = []
     executable: str | None = None
-    names = ("git.exe", "git.com") if sys.platform == "win32" else ("git",)
+    names = (f"{name}.exe", f"{name}.com") if sys.platform == "win32" else (name,)
+    if sys.platform == "win32":
+        path_keys = sorted(key for key in environment if key.upper() == "PATH")
+        if path_keys:
+            path = environment[path_keys[0]]
+            for key in path_keys:
+                del environment[key]
+            environment["PATH"] = path
     for entry in os.get_exec_path(environment):
         if not entry:
             continue
@@ -198,7 +210,7 @@ def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | 
                     break
             except OSError:
                 continue
-            if _is_git_executable(path, canonical):
+            if _is_native_executable(path, canonical):
                 candidate = candidate or str(path)
         if not safe:
             continue
@@ -206,6 +218,29 @@ def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | 
         entries.append(str(directory))
     environment["PATH"] = os.pathsep.join(entries)
     return executable
+
+
+def _trusted_git_executable(target: Path, environment: dict[str, str]) -> str | None:
+    return _trusted_executable(target, environment, "git")
+
+
+def ripgrep_command(
+    target: Path,
+    *args: str,
+    stdout: IO[bytes] | int = subprocess.PIPE,
+) -> subprocess.CompletedProcess[bytes]:
+    environment = os.environ.copy()
+    executable = _trusted_executable(target, environment, "rg")
+    if executable is None:
+        raise FileNotFoundError("ripgrep is not available on a trusted PATH.")
+    return subprocess.run(
+        [executable, *args],
+        cwd=target,
+        stdout=stdout,
+        stderr=subprocess.PIPE,
+        env=environment,
+        check=False,
+    )
 
 
 def git_command(

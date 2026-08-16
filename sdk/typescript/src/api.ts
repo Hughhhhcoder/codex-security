@@ -658,6 +658,8 @@ export class CodexSecurity {
       const trustedPluginEnvironment = {
         ...ripgrep.environment,
         CODEX_SECURITY_GIT: git.executable ?? "",
+        // The Codex runtime can add its bundled tools to PATH after this point.
+        CODEX_SECURITY_RG: ripgrep.executable ?? undefined,
       };
       checkOpen();
       const scanOutputRoot =

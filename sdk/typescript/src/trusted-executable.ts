@@ -33,9 +33,13 @@ export async function inspectTrustedExecutable(
   const root = await realpath(protectedRoot).catch(() =>
     resolve(protectedRoot),
   );
-  const path = Object.entries(environment).find(
-    ([name]) => name.toUpperCase() === "PATH",
-  )?.[1];
+  const pathKeys =
+    process.platform === "win32"
+      ? Object.keys(environment)
+          .filter((name) => name.toUpperCase() === "PATH")
+          .sort()
+      : ["PATH"];
+  const path = environment[pathKeys[0] ?? "PATH"];
   // Match child_process lookup defaults without broadening an explicit PATH.
   const searchPath =
     path ??
@@ -94,9 +98,7 @@ export async function inspectTrustedExecutable(
     }
   }
   const sanitizedEnvironment = { ...environment };
-  for (const name of Object.keys(sanitizedEnvironment)) {
-    if (name.toUpperCase() === "PATH") delete sanitizedEnvironment[name];
-  }
+  for (const name of pathKeys) delete sanitizedEnvironment[name];
   sanitizedEnvironment["PATH"] = entries
     .filter((entry) => !unsafeEntries.has(entry))
     .join(delimiter);
