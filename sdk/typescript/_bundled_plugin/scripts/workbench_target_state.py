@@ -454,38 +454,51 @@ def _repository_predates_history(
 
 
 def normalize_pre_release_repository_identities(connection: sqlite3.Connection) -> None:
-    """Upgrade only known old hashes whose recorded generation is still present."""
+    """Retain only individually established pre-release identity bindings."""
     if not supports_repository_identity(connection):
         return
-    for target in connection.execute(
-        "SELECT id, current_path, created_at, repository_identity FROM security_targets "
-        "WHERE repository_identity IS NOT NULL"
-    ).fetchall():
+    identities = RepositoryIdentityCache(connection)
+    targets = connection.execute(
+        "SELECT id AS target_id, current_path AS target_path, created_at, repository_identity "
+        "FROM security_targets WHERE repository_identity IS NOT NULL"
+    ).fetchall()
+    states = {target["target_id"]: identities.for_row(target) for target in targets}
+    anchors = {
+        state.stored_identity: state.repository
+        for state in states.values()
+        if state.repository is not None
+        and state.verified_identity == state.stored_identity
+    }
+    for target in targets:
         stored = target["repository_identity"]
-        state = _inspect_repository_target(
-            connection, target["id"], target["current_path"], stored
-        )
-        identity = state.repository
-        if (
-            identity is None
-            or identity.value == stored
-            or not state.strict_owner_matches
-            or stored not in _pre_release_repository_identities(identity)
-        ):
-            continue
+        state = states[target["target_id"]]
         scans = connection.execute(
             "SELECT started_at, created_at FROM scans WHERE target_id = ? OR target_path = ?",
-            (target["id"], target["current_path"]),
+            (target["target_id"], target["target_path"]),
         ).fetchall()
-        if not _repository_predates_history(
-            identity, scans, empty_timestamp=target["created_at"]
+        anchor = anchors.get(stored)
+        identity = state.repository
+        replacement = None
+        if anchor is not None:
+            if _repository_predates_history(
+                anchor, scans, empty_timestamp=target["created_at"]
+            ):
+                replacement = stored
+        elif (
+            identity is not None
+            and state.strict_owner_matches
+            and stored in _pre_release_repository_identities(identity)
+            and _repository_predates_history(
+                identity, scans, empty_timestamp=target["created_at"]
+            )
         ):
-            continue
-        connection.execute(
-            "UPDATE security_targets SET repository_identity = ? "
-            "WHERE id = ? AND repository_identity = ?",
-            (identity.value, target["id"], stored),
-        )
+            replacement = identity.value
+        if replacement != stored:
+            connection.execute(
+                "UPDATE security_targets SET repository_identity = ? "
+                "WHERE id = ? AND repository_identity = ?",
+                (replacement, target["target_id"], stored),
+            )
 
 
 def backfill_repository_identities(connection: sqlite3.Connection) -> None:

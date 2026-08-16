@@ -35,7 +35,7 @@ connection.execute("PRAGMA foreign_keys = ON")
 identity_migration = next(item for item in MIGRATIONS if item[0] == 31)
 initial = (
     (*tuple(item for item in MIGRATIONS if item[0] <= 28), (30, *identity_migration[1:]))
-    if scenario == "migration" else
+    if scenario in ("migration", "v30-current") else
     tuple(item for item in MIGRATIONS if item[0] <= 30)
     if scenario == "null-history" else MIGRATIONS
 )
@@ -75,7 +75,7 @@ def add_target(name, stored, live=None, relative=".", birth=1_000_000_000):
     return details[path]
 
 
-def add_scan(scan_id, target, owner="current", started=timestamp):
+def add_scan(scan_id, target, owner="current", started=timestamp, created=timestamp):
     path = paths[target]
     device, inode = metadata[path].st_dev, metadata[path].st_ino
     if owner == "missing":
@@ -94,7 +94,7 @@ def add_scan(scan_id, target, owner="current", started=timestamp):
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (scan_id, "workspace-" + scan_id, path, target, device, inode, "synthetic",
          ".", "standard", str(root / "scans" / scan_id), "complete", "reporting",
-         started, timestamp, timestamp, timestamp),
+         started, created, created, created),
     )
     connection.execute(
         "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
@@ -286,6 +286,48 @@ with ExitStack() as stack:
                 "SELECT repository_identity FROM security_targets WHERE id = 'changed'"
             ).fetchone()[0],
         }))
+    elif scenario == "v30-current":
+        generation_birth = state._timestamp_ns("2026-08-02T00:00:00Z")
+        later = "2026-08-03T00:00:00Z"
+        for name in ("current-owner", "old-owner", "removed-old", "removed-valid", "invalid-time"):
+            add_target(name, "current-generation", birth=generation_birth)
+            recorded = later if name in ("current-owner", "removed-valid") else timestamp
+            add_scan(name + "-scan", name, started="invalid" if name == "invalid-time" else recorded, created=recorded)
+        add_target("unverified-anchor", "unverified-current")
+        add_scan("unverified-anchor-scan", "unverified-anchor", owner="missing")
+        add_target("opaque-missing", "opaque-current")
+        add_scan("opaque-missing-scan", "opaque-missing")
+        add_target("valid-scope", "scope-current", relative="service")
+        add_scan("valid-scope-scan", "valid-scope")
+        missing.update(paths[name] for name in ("removed-old", "removed-valid", "opaque-missing"))
+        for name in ("current-owner", "old-owner", "removed-old", "removed-valid"):
+            add_finding(name + "-scan", name + "-finding", closed=name != "current-owner")
+            connection.execute(
+                "INSERT INTO scan_artifacts VALUES (?, ?, ?, ?)",
+                (name + "-scan", "findings", str(root / name / "findings.json"), timestamp),
+            )
+        tables = ("scans", "findings", "finding_occurrences", "finding_triage", "scan_artifacts")
+        retained = {table: [tuple(row) for row in connection.execute("SELECT * FROM " + table)] for table in tables}
+        target_ids = sorted(paths)
+        apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
+        state.backfill_repository_identities(connection)
+        try:
+            state.ensure_security_target(connection, paths["old-owner"])
+        except SystemExit:
+            old_registration_rejected = True
+        else:
+            old_registration_rejected = False
+        print(json.dumps({
+            "stored": {row["id"]: row["repository_identity"] for row in connection.execute(
+                "SELECT id, repository_identity FROM security_targets"
+            )},
+            "recordsPreserved": retained == {table: [tuple(row) for row in connection.execute("SELECT * FROM " + table)] for table in tables},
+            "targetIdsPreserved": target_ids == sorted(row["id"] for row in connection.execute("SELECT id FROM security_targets")),
+            "aliases": sorted(indexes.repository_target_ids(connection, "current-owner")),
+            "removedExact": listed("removed-old"),
+            "visibleFindings": sorted(row["findingId"] for row in findings("current-owner")),
+            "oldRegistrationRejected": old_registration_rejected,
+        }))
     elif scenario == "lineage":
         for name, stored, live in [
             ("requested", "repository-current", None),
@@ -382,7 +424,7 @@ with ExitStack() as stack:
                 missing.add(paths[name])
             expected[name] = identity.value if name in {
                 "old-basic", "old-description", "current", "no-scans", "scope-upper", "scope-lower"
-            } else stored
+            } else None
         apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
         first = {
             row["id"]: row["repository_identity"]
@@ -497,4 +539,28 @@ test("admits rerun lineage only through the verified repository and exact scope"
     changed: false,
   });
   expect(result["scanCount"]).toBe(7);
+});
+
+test("quarantines unproved public-v30 bindings without discarding historical records", () => {
+  const result = run("v30-current");
+
+  expect(result["stored"]).toEqual({
+    "current-owner": "current-generation",
+    "old-owner": null,
+    "removed-old": null,
+    "removed-valid": "current-generation",
+    "invalid-time": null,
+    "unverified-anchor": null,
+    "opaque-missing": null,
+    "valid-scope": "scope-current",
+  });
+  expect(result["recordsPreserved"]).toBe(true);
+  expect(result["targetIdsPreserved"]).toBe(true);
+  expect(result["aliases"]).toEqual(["current-owner", "removed-valid"]);
+  expect(result["removedExact"]).toEqual(["removed-old-scan"]);
+  expect(result["visibleFindings"]).toEqual([
+    "current-owner-finding",
+    "removed-valid-finding",
+  ]);
+  expect(result["oldRegistrationRejected"]).toBe(true);
 });

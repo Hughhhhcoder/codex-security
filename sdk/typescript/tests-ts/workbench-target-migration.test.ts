@@ -349,7 +349,7 @@ describe("stable workbench target migration", () => {
     ],
     [
       "pre-release-identity-version",
-      "preserves an identity recorded under the pre-release migration number",
+      "quarantines an unverifiable pre-release identity without changing its target",
     ],
   ] as const)("%s: %s", (scenario) => {
     const python =
@@ -397,10 +397,7 @@ describe("stable workbench target migration", () => {
       },
       repositoryIdentityColumnIsNullable: true,
       repositoryIdentityIndexIsUnique: false,
-      targetIdentity:
-        scenario === "pre-release-identity-version"
-          ? "synthetic-identity"
-          : null,
+      targetIdentity: null,
       targetId: "target-existing",
       teamOnlyPublicationIndexes: [
         "finding_publications_team_only_external_issue",
