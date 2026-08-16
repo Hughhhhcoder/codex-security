@@ -42,13 +42,20 @@ legacy_identity_migration = (
     "ALTER TABLE security_targets ADD COLUMN repository_identity TEXT;\n"
     "CREATE INDEX security_targets_by_repository_identity ON security_targets(repository_identity);\n",
 )
+recorded_identity31 = scenario == "migration-recorded31"
 initial = (
     (*tuple(item for item in MIGRATIONS if item[0] <= 28), legacy_identity_migration)
     if scenario in ("migration", "v30-current", "completion-order") else
     tuple(item for item in MIGRATIONS if item[0] <= 30)
-    if scenario == "null-history" else MIGRATIONS
+    if scenario == "null-history" or recorded_identity31 else MIGRATIONS
 )
 apply_migrations(connection, initial, lambda: timestamp, lambda database: None)
+if recorded_identity31:
+    connection.executescript(legacy_identity_migration[2])
+    connection.execute(
+        "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+        (31, legacy_identity_migration[1], timestamp),
+    )
 paths = {}
 details = {}
 metadata = {}
@@ -367,6 +374,69 @@ with ExitStack() as stack:
             "weakHistory": connection.execute("SELECT repository_generation FROM scans WHERE id = 'weak-history'").fetchone()[0],
             "weakBindingPreserved": connection.execute("SELECT repository_identity FROM security_targets WHERE id = 'weak'").fetchone()[0] == legacy.legacy_value,
             "absentExactCounts": [absent_findings, absent_repository["openFindingsCount"]],
+        }))
+    elif scenario == "repository-counts":
+        for name, stored, live in (
+            ("first", "shared-generation", None),
+            ("second", "shared-generation", None),
+            ("absent", "shared-generation", None),
+            ("independent", "other-generation", None),
+            ("refused", "previous-generation", "current-generation"),
+        ):
+            add_target(name, stored, live)
+            add_scan(name + "-scan", name)
+        add_scan("first-legacy", "first", generation=None)
+        add_scan("second-legacy", "second", generation=None)
+        add_finding("first-scan", "shared-open")
+        add_finding("second-scan", "shared-open")
+        add_finding("first-legacy", "first-local")
+        add_finding("second-legacy", "second-local")
+        reviewed = add_finding("first-scan", "reviewed-original", closed=True)
+        renamed = add_finding("absent-scan", "reviewed-renamed")
+        add_finding("independent-scan", "independent-open")
+        add_finding("refused-scan", "refused-open")
+        connection.execute("INSERT INTO scan_comparisons VALUES (?, ?, ?, ?, ?)",
+                           ("first-scan", "absent-scan", "{}", timestamp, timestamp))
+        connection.execute("INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, ?)",
+                           ("first-scan", "absent-scan", reviewed, renamed, "Synthetic match"))
+        missing.add(paths["absent"])
+        real_index = indexes._indexed_findings
+        real_inspect = state._inspect_repository_target
+        def repository_counts(**options):
+            args = argparse.Namespace(query=None, target_id=None, status=None, limit=None, offset=0)
+            vars(args).update(options)
+            calls, inspections = [], []
+            def indexed(database, **kwargs):
+                scope = kwargs.get("scan_scope")
+                calls.append(None if scope is None else scope.target_id)
+                return real_index(database, **kwargs)
+            def inspected(database, target_id, *args, **kwargs):
+                inspections.append(target_id)
+                return real_inspect(database, target_id, *args, **kwargs)
+            with patch.object(indexes, "_indexed_findings", side_effect=indexed), \
+                 patch.object(state, "_inspect_repository_target", side_effect=inspected):
+                result = indexes.list_repositories(connection, args)
+            return {
+                "counts": {row["targetId"]: row["openFindingsCount"] for row in result["repositories"]},
+                "ids": [row["targetId"] for row in result["repositories"]],
+                "calls": calls, "inspections": sorted(inspections),
+                "nextOffset": result.get("nextOffset"),
+            }
+        all_repositories = repository_counts()
+        direct_counts = {
+            name: sum(row["status"] == "open" for row in findings(name)) for name in paths
+        }
+        open_repositories = repository_counts(status="open_findings")
+        page = repository_counts(status="open_findings", limit=2, offset=1)
+        print(json.dumps({
+            "all": all_repositories,
+            "directCounts": direct_counts,
+            "absentOnly": repository_counts(target_id="absent"),
+            "queryOnly": repository_counts(query="INDEPENDENT"),
+            "refusedOnly": repository_counts(target_id="refused"),
+            "notScanned": repository_counts(status="not_scanned"),
+            "openIds": open_repositories["ids"],
+            "pagePreserved": page["ids"] == open_repositories["ids"][1:3] and page["nextOffset"] == 3,
         }))
     elif scenario == "scan-writers":
         add_target("writer", "generation-writer")
@@ -1277,12 +1347,40 @@ with ExitStack() as stack:
                     "old-basic", "old-description", "no-scans", "scope-upper", "scope-lower"
                 } else None
             )
-        apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
-        first = {
-            row["id"]: row["repository_identity"]
-            for row in connection.execute("SELECT id, repository_identity FROM security_targets")
+        add_finding("old-basic-scan", "historical-finding", closed=True)
+        connection.execute(
+            "INSERT INTO scan_artifacts VALUES (?, ?, ?, ?)",
+            ("old-basic-scan", "findings", str(root / "historical-findings.json"), timestamp),
+        )
+        tables = ("scans", "findings", "finding_occurrences", "finding_triage", "scan_artifacts")
+        columns = {
+            table: ", ".join(row["name"] for row in connection.execute("PRAGMA table_info(" + table + ")"))
+            for table in tables
         }
-        apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
+        def retained_records():
+            return {table: [tuple(row) for row in connection.execute(
+                "SELECT " + columns[table] + " FROM " + table
+            )] for table in tables}
+        retained = retained_records()
+        starting_version = connection.execute(
+            "SELECT version FROM schema_migrations WHERE name = ?",
+            ("persist repository identities",),
+        ).fetchone()[0]
+        real_normalize = state.normalize_pre_release_repository_identities
+        normalization_transactions = []
+        def normalize(database):
+            normalization_transactions.append(database.in_transaction)
+            return real_normalize(database)
+        with patch.object(state, "normalize_pre_release_repository_identities", side_effect=normalize) as normalizer:
+            apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
+            first = {
+                row["id"]: row["repository_identity"]
+                for row in connection.execute("SELECT id, repository_identity FROM security_targets")
+            }
+            probes.clear()
+            apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
+            current_open_probes = sum(probes.values())
+            normalization_count = normalizer.call_count
         second = {
             row["id"]: row["repository_identity"]
             for row in connection.execute("SELECT id, repository_identity FROM security_targets")
@@ -1290,6 +1388,12 @@ with ExitStack() as stack:
         print(json.dumps({
             "identities": first,
             "expected": expected,
+            "startingVersion": starting_version,
+            "normalizationCount": normalization_count,
+            "normalizationTransactions": normalization_transactions,
+            "currentOpenProbes": current_open_probes,
+            "recordsPreserved": retained == retained_records(),
+            "scanGenerationsUnbound": all(row[0] is None for row in connection.execute("SELECT repository_generation FROM scans")),
             "idempotent": first == second,
             "foldedLegacyScopesEqual": originals["scope-upper"] == originals["scope-lower"],
             "currentScopesDistinct": first["scope-upper"] != first["scope-lower"],
@@ -1358,6 +1462,67 @@ test("keeps automatic history bounded by saved scan generation", () => {
   expect(result["weakHistory"]).toBeNull();
   expect(result["weakBindingPreserved"]).toBe(true);
   expect(result["absentExactCounts"]).toEqual([1, 1]);
+});
+
+test("counts repository groups once while preserving absent exact-target decisions", () => {
+  const result = run("repository-counts");
+  const all = result["all"] as {
+    counts: Record<string, number>;
+    calls: Array<string | null>;
+    inspections: string[];
+  };
+
+  expect(all.counts).toEqual({
+    first: 2,
+    second: 2,
+    absent: 1,
+    independent: 1,
+    refused: 0,
+  });
+  expect(result["directCounts"]).toEqual(all.counts);
+  expect(all.calls).toEqual([null, "absent"]);
+  expect(all.inspections).toEqual([
+    "absent",
+    "first",
+    "independent",
+    "refused",
+    "second",
+  ]);
+  expect(result["absentOnly"]).toEqual({
+    counts: { absent: 1 },
+    ids: ["absent"],
+    calls: ["absent"],
+    inspections: ["absent"],
+    nextOffset: null,
+  });
+  expect(result["queryOnly"]).toEqual({
+    counts: { independent: 1 },
+    ids: ["independent"],
+    calls: [null],
+    inspections: ["independent"],
+    nextOffset: null,
+  });
+  expect(result["refusedOnly"]).toEqual({
+    counts: { refused: 0 },
+    ids: ["refused"],
+    calls: [],
+    inspections: ["refused"],
+    nextOffset: null,
+  });
+  expect(result["notScanned"]).toEqual({
+    counts: {},
+    ids: [],
+    calls: [],
+    inspections: [],
+    nextOffset: null,
+  });
+  expect((result["openIds"] as string[]).sort()).toEqual([
+    "absent",
+    "first",
+    "independent",
+    "second",
+  ]);
+  expect(result["pagePreserved"]).toBe(true);
 });
 
 test("records generation explicitly in both transactional parent scan writers", () => {
@@ -1617,18 +1782,29 @@ test("keeps authenticated historical aliases visible without trusting a replacem
   expect(result["stored"]).toBe("repository-current");
 });
 
-test("upgrades only independently verified pre-release repository hashes", () => {
-  const result = run("migration");
+test.each(["migration", "migration-recorded31"])(
+  "upgrades only independently verified pre-release repository hashes (%s)",
+  (scenario) => {
+    const result = run(scenario);
 
-  expect(result["identities"]).toEqual(result["expected"]);
-  expect(result["idempotent"]).toBe(true);
-  expect(result["foldedLegacyScopesEqual"]).toBe(true);
-  expect(result["currentScopesDistinct"]).toBe(true);
-  expect(result["targetCount"]).toBe(12);
-  expect(result["migrations"]).toEqual(
-    Array.from({ length: 31 }, (_, index) => index + 1),
-  );
-});
+    expect(result["identities"]).toEqual(result["expected"]);
+    expect(result["startingVersion"]).toBe(
+      scenario === "migration-recorded31" ? 31 : 30,
+    );
+    expect(result["normalizationCount"]).toBe(1);
+    expect(result["normalizationTransactions"]).toEqual([true]);
+    expect(result["currentOpenProbes"]).toBe(0);
+    expect(result["recordsPreserved"]).toBe(true);
+    expect(result["scanGenerationsUnbound"]).toBe(true);
+    expect(result["idempotent"]).toBe(true);
+    expect(result["foldedLegacyScopesEqual"]).toBe(true);
+    expect(result["currentScopesDistinct"]).toBe(true);
+    expect(result["targetCount"]).toBe(12);
+    expect(result["migrations"]).toEqual(
+      Array.from({ length: 31 }, (_, index) => index + 1),
+    );
+  },
+);
 
 test("keeps unproved legacy history unbound and rejects newer or indeterminate owners", () => {
   const result = run("null-history");

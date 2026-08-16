@@ -195,13 +195,20 @@ if scenario == "out-of-order-publication-migrations":
     apply_migrations(
         connection, (*historical, identity_migration), lambda: timestamp, backfill
     )
-elif scenario == "pre-release-identity-version":
-    apply_migrations(
-        connection,
-        (*historical, legacy_identity_migration),
-        lambda: timestamp,
-        backfill,
-    )
+elif scenario in ("pre-release-identity-version", "pre-release-identity-version31"):
+    if scenario == "pre-release-identity-version":
+        apply_migrations(
+            connection,
+            (*historical, legacy_identity_migration),
+            lambda: timestamp,
+            backfill,
+        )
+    else:
+        connection.executescript(legacy_identity_migration[2])
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            (identity_version, legacy_identity_migration[1], timestamp),
+        )
     connection.execute(
         "UPDATE security_targets SET repository_identity = 'synthetic-identity'"
     )
@@ -243,6 +250,11 @@ print(json.dumps({
     ),
     "repositoryIdentityIndexIsUnique": bool(
         indexes["security_targets_by_repository_identity"]["unique"]
+    ),
+    "hasRepositoryGenerationColumn": "repository_generation" in scan_columns,
+    "hasRepositoryGenerationIndex": "scans_by_repository_generation" in scan_indexes,
+    "repositoryGenerationColumnIsNullable": not bool(
+        scan_columns["repository_generation"]["notnull"]
     ),
     "completionSequenceIsNullable": not bool(
         scan_columns["completion_sequence"]["notnull"]
@@ -372,6 +384,10 @@ describe("stable workbench target migration", () => {
       "pre-release-identity-version",
       "quarantines an unverifiable pre-release identity without changing its target",
     ],
+    [
+      "pre-release-identity-version31",
+      "repairs an already-renumbered pre-release identity migration",
+    ],
   ] as const)("%s: %s", (scenario) => {
     const python =
       Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
@@ -402,6 +418,9 @@ describe("stable workbench target migration", () => {
       publicationMigrations: Record<string, string>;
       repositoryIdentityColumnIsNullable: boolean;
       repositoryIdentityIndexIsUnique: boolean;
+      hasRepositoryGenerationColumn: boolean;
+      hasRepositoryGenerationIndex: boolean;
+      repositoryGenerationColumnIsNullable: boolean;
       completionSequenceIsNullable: boolean;
       completionSequenceIndexIsUnique: boolean;
       completionSequenceTriggers: string[];
@@ -410,7 +429,9 @@ describe("stable workbench target migration", () => {
       teamOnlyPublicationIndexes: string[];
     };
     expect(result).toEqual({
-      backfillCalls: scenario === "pre-release-identity-version" ? 0 : 1,
+      backfillCalls: scenario.startsWith("pre-release-identity-version")
+        ? 0
+        : 1,
       hasRepositoryIdentityColumn: true,
       hasRepositoryIdentityIndex: true,
       identityVersion: 31,
@@ -421,6 +442,9 @@ describe("stable workbench target migration", () => {
       },
       repositoryIdentityColumnIsNullable: true,
       repositoryIdentityIndexIsUnique: false,
+      hasRepositoryGenerationColumn: true,
+      hasRepositoryGenerationIndex: true,
+      repositoryGenerationColumnIsNullable: true,
       completionSequenceIsNullable: true,
       completionSequenceIndexIsUnique: true,
       completionSequenceTriggers: [

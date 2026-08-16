@@ -943,9 +943,6 @@ def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: 
         repository_identity_migration is not None
         and repository_identity_migration["name"] == "persist repository identities"
     ):
-        from workbench_target_state import normalize_pre_release_repository_identities
-
-        normalize_pre_release_repository_identities(connection)
         connection.execute(
             "UPDATE schema_migrations SET version = 31 WHERE version = 30 AND name = ?",
             ("persist repository identities",),
@@ -1335,6 +1332,20 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
         "AND name = 'security_targets_by_repository_identity'"
     ).fetchone()
     identity_changed = "repository_identity" not in columns or index_exists is None
+    if (
+        "repository_identity" in columns
+        and connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = 31 AND name = ?",
+            ("persist repository identities",),
+        ).fetchone() is not None
+        and not any(
+            row["name"] == "repository_generation"
+            for row in connection.execute("PRAGMA table_info(scans)")
+        )
+    ):
+        from workbench_target_state import normalize_pre_release_repository_identities
+
+        normalize_pre_release_repository_identities(connection)
     migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 31)
     for statement in sql_statements(migration_sql):
         if statement.startswith("ALTER TABLE security_targets"):

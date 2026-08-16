@@ -3,6 +3,7 @@
 import argparse
 import sqlite3
 import sys
+from collections import Counter
 from collections.abc import Iterator
 from itertools import islice
 from pathlib import Path
@@ -317,17 +318,34 @@ def list_repositories(
         latest_scan_by_target.setdefault(row["target_id"], scans_by_id[row["id"]])
 
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
-
-    scan_evidence = {
-        row["id"]: row for row in connection.execute("SELECT * FROM scans")
-    }
-    open_findings = [
-        row for row in _indexed_findings(connection, identities=identities)
-        if row["status"] == "open"
+    query = args.query.strip().casefold() if args is not None and args.query else ""
+    selected_targets = [
+        (target_id, latest_scan, target)
+        for target_id, latest_scan in latest_scan_by_target.items()
+        if (target := targets.get(target_id)) is not None
+        and (args is None or args.target_id is None or target_id == args.target_id)
+        and (args is None or args.status != "not_scanned")
+        and (
+            not query
+            or query in target["display_name"].casefold()
+            or query in target["current_path"].casefold()
+        )
     ]
+    scopes = {
+        target_id: identities.scope(target_id)
+        for target_id, _, _ in selected_targets
+    }
+    open_findings_by_group = Counter(
+        scan_repository_group(row)
+        for row in _indexed_findings(connection, identities=identities)
+        if row["status"] == "open"
+    ) if any(
+        scope.available and not scope.exact_target for scope in scopes.values()
+    ) else Counter()
 
-    def open_findings_count(target_id: str) -> int:
-        scope = identities.scope(target_id)
+    def open_findings_count(scope: RepositoryScanScope) -> int:
+        if not scope.available:
+            return 0
         if scope.exact_target:
             return sum(
                 row["status"] == "open"
@@ -335,38 +353,32 @@ def list_repositories(
                     connection, identities=identities, scan_scope=scope
                 )
             )
-        return sum(
-            any(scope.contains(scan_evidence[scan_id]) for scan_id in row["known_scan_ids"])
-            for row in open_findings
+        return (
+            open_findings_by_group[("repository", scope.generation)]
+            if identities.supports_generation and scope.generation is not None else 0
+        ) + (
+            open_findings_by_group[("target", scope.target_id)] if scope.target_id else 0
         )
+
     repositories = [
         {
             "checkoutAvailable": Path(target["current_path"]).is_dir(),
             "displayName": target["display_name"],
             "latestScan": latest_scan,
-            "openFindingsCount": open_findings_count(target_id),
+            "openFindingsCount": open_findings_count(scopes[target_id]),
             "scanCount": scan_count_by_target[target_id],
             "targetId": target_id,
             "targetPath": target["current_path"],
         }
-        for target_id, latest_scan in latest_scan_by_target.items()
-        if (target := targets.get(target_id)) is not None
+        for target_id, latest_scan, target in selected_targets
     ]
     if args is None:
         return {"repositories": repositories}
 
-    query = args.query.strip().casefold() if args.query else ""
     repositories = [
         repository
         for repository in repositories
-        if (args.target_id is None or repository["targetId"] == args.target_id)
-        and args.status != "not_scanned"
-        and (args.status != "open_findings" or repository["openFindingsCount"] > 0)
-        and (
-            not query
-            or query in repository["displayName"].casefold()
-            or query in repository["targetPath"].casefold()
-        )
+        if args.status != "open_findings" or repository["openFindingsCount"] > 0
     ]
     if args.limit is None and args.offset == 0:
         return {"repositories": repositories}
