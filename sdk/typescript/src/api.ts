@@ -658,12 +658,18 @@ export class CodexSecurity {
         git.environment,
         protectedGitRoot,
       );
-      const ripgrepKeys =
+      const toolBindingKeys = (
+        setting: "CODEX_SECURITY_GIT" | "CODEX_SECURITY_RG",
+      ): string[] =>
         process.platform === "win32"
           ? Object.keys(pluginEnvironment)
-              .filter((name) => name.toUpperCase() === "CODEX_SECURITY_RG")
+              .filter((name) => name.toUpperCase() === setting)
               .sort()
-          : ["CODEX_SECURITY_RG"];
+          : [setting];
+      const gitKeys = toolBindingKeys("CODEX_SECURITY_GIT");
+      const ripgrepKeys = toolBindingKeys("CODEX_SECURITY_RG");
+      const gitDisabled =
+        pluginEnvironment[gitKeys[0] ?? "CODEX_SECURITY_GIT"] === "";
       const ripgrepDisabled =
         pluginEnvironment[ripgrepKeys[0] ?? "CODEX_SECURITY_RG"] === "";
       if (
@@ -690,8 +696,12 @@ export class CodexSecurity {
       const trustedPluginEnvironment: ProcessEnvironment = {
         ...ripgrep.environment,
       };
-      for (const name of ripgrepKeys) delete trustedPluginEnvironment[name];
-      trustedPluginEnvironment["CODEX_SECURITY_GIT"] = git.executable ?? "";
+      for (const name of [...gitKeys, ...ripgrepKeys]) {
+        delete trustedPluginEnvironment[name];
+      }
+      trustedPluginEnvironment["CODEX_SECURITY_GIT"] = gitDisabled
+        ? ""
+        : git.executable ?? "";
       // The Codex runtime can add its bundled tools to PATH after this point.
       trustedPluginEnvironment["CODEX_SECURITY_RG"] = ripgrepDisabled
         ? ""

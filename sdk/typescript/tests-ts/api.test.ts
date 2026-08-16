@@ -4556,11 +4556,6 @@ describe("CodexSecurity orchestration", () => {
                 startThread: () => ({
                   id: null,
                   async runStreamed() {
-                    expect(
-                      existsSync(
-                        join(credentialHome, ".codex-security-scan.lock"),
-                      ),
-                    ).toBe(false);
                     activeScans += 1;
                     maximumActiveScans = Math.max(
                       maximumActiveScans,
@@ -4585,6 +4580,11 @@ describe("CodexSecurity orchestration", () => {
                         concurrentScans,
                         new Promise((resolve) => setTimeout(resolve, 5_000)),
                       ]);
+                      expect(
+                        existsSync(
+                          join(credentialHome, ".codex-security-scan.lock"),
+                        ),
+                      ).toBe(false);
                       const after = parseToml(
                         await readFile(deepScanConfigPath!, "utf8"),
                       );
@@ -5474,8 +5474,10 @@ describe("CodexSecurity orchestration", () => {
       "platform",
     )!;
     const inspected: [string, string][] = [];
+    let gitHost: string | null = null;
     let host: string | null = null;
     let rejected: string | null = null;
+    let sanitizedGitEnvironment: Record<string, string | undefined> | undefined;
     mock.module("../src/trusted-executable.js", () => ({
       ...originalTrusted,
       resolveTrustedExecutable: async () => null,
@@ -5485,14 +5487,22 @@ describe("CodexSecurity orchestration", () => {
         protectedRoot: string,
       ) => {
         inspected.push([candidate, protectedRoot]);
+        const sanitizedEnvironment = { ...environment, PATH: "" };
+        if (candidate === "git") {
+          sanitizedGitEnvironment = sanitizedEnvironment;
+        } else if (candidate === "rg") {
+          expect(sanitizedGitEnvironment).toBe(environment);
+        }
         return {
           executable:
-            candidate === "git" || candidate === rejected
-              ? null
-              : candidate === "rg"
-                ? host
-                : candidate,
-          environment: { ...environment, PATH: "" },
+            candidate === "git"
+              ? gitHost
+              : candidate === rejected
+                ? null
+                : candidate === "rg"
+                  ? host
+                  : candidate,
+          environment: sanitizedEnvironment,
         };
       },
     }));
@@ -5511,8 +5521,10 @@ describe("CodexSecurity orchestration", () => {
       scenario: string;
       platform?: NodeJS.Platform;
       host: boolean;
+      gitAvailable?: boolean;
       bindings?: Record<string, string>;
       expected: "host" | "staged" | "disabled" | "missing";
+      expectedGit?: "host" | "disabled";
     }[] = [
       { scenario: "host", host: true, expected: "host" },
       { scenario: "bundled", host: false, expected: "staged" },
@@ -5546,6 +5558,66 @@ describe("CodexSecurity orchestration", () => {
         bindings: { CODEX_SECURITY_RG: "previous", Codex_Security_Rg: "" },
         expected: "host",
       },
+      {
+        scenario: "Git binding absent",
+        host: true,
+        gitAvailable: true,
+        expected: "host",
+        expectedGit: "host",
+      },
+      {
+        scenario: "Git binding nonempty",
+        host: true,
+        gitAvailable: true,
+        bindings: { CODEX_SECURITY_GIT: "previous" },
+        expected: "host",
+        expectedGit: "host",
+      },
+      {
+        scenario: "Git binding disabled",
+        platform: "linux",
+        host: true,
+        gitAvailable: true,
+        bindings: { CODEX_SECURITY_GIT: "" },
+        expected: "host",
+        expectedGit: "disabled",
+      },
+      {
+        scenario: "case-distinct POSIX Git binding",
+        platform: "linux",
+        host: true,
+        gitAvailable: true,
+        bindings: { Codex_Security_Git: "" },
+        expected: "host",
+        expectedGit: "host",
+      },
+      {
+        scenario: "Windows Git alias disable",
+        platform: "win32",
+        host: true,
+        gitAvailable: true,
+        bindings: { Codex_Security_Git: "" },
+        expected: "host",
+        expectedGit: "disabled",
+      },
+      {
+        scenario: "Windows effective Git binding",
+        platform: "win32",
+        host: true,
+        gitAvailable: true,
+        bindings: { CODEX_SECURITY_GIT: "previous", Codex_Security_Git: "" },
+        expected: "host",
+        expectedGit: "host",
+      },
+      {
+        scenario: "Windows effective Git disable",
+        platform: "win32",
+        host: true,
+        gitAvailable: true,
+        bindings: { CODEX_SECURITY_GIT: "", Codex_Security_Git: "previous" },
+        expected: "host",
+        expectedGit: "disabled",
+      },
     ];
 
     try {
@@ -5573,6 +5645,13 @@ describe("CodexSecurity orchestration", () => {
           await mkdir(path, { mode: 0o700 });
         }
         const filename = process.platform === "win32" ? "rg.exe" : "rg";
+        gitHost = entry.gitAvailable
+          ? join(
+              root,
+              "host-tools",
+              process.platform === "win32" ? "git.exe" : "git",
+            )
+          : null;
         const staged =
           scenario === "rejected-copy"
             ? join(repository, filename)
@@ -5580,6 +5659,7 @@ describe("CodexSecurity orchestration", () => {
         host = entry.host ? join(root, "host-tools", filename) : null;
         rejected = scenario === "rejected-copy" ? staged : null;
         inspected.length = 0;
+        sanitizedGitEnvironment = undefined;
         const stageCalls: string[] = [];
         const workbenchEnvironments: WorkbenchCommandOptions["environment"][] =
           [];
@@ -5659,8 +5739,16 @@ describe("CodexSecurity orchestration", () => {
             ...workbenchEnvironments,
             ...codexEnvironments,
           ]) {
+            expect(selected?.["CODEX_SECURITY_GIT"]).toBe(
+              entry.expectedGit === "host" ? gitHost ?? undefined : "",
+            );
             expect(selected?.["CODEX_SECURITY_RG"]).toBe(expected);
             expect(selected?.["PATH"]).toBe("");
+            expect(selected?.["Codex_Security_Git"]).toBe(
+              process.platform === "win32"
+                ? undefined
+                : entry.bindings?.["Codex_Security_Git"],
+            );
             expect(selected?.["Codex_Security_Rg"]).toBe(
               process.platform === "win32"
                 ? undefined
