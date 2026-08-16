@@ -144,11 +144,13 @@ async function withMockAccountingSessions(
   check: (
     tracker: ScanCostTracker,
     append: (threadId: string, events: readonly MockAccountingEvent[]) => void,
+    omit: (threadId: string) => void,
   ) => Promise<void>,
 ): Promise<void> {
   const home = join(tmpdir(), "codex-security-mock-cost");
   const directory = join(home, "sessions");
   const files = new Map<string, Buffer>();
+  const omittedFiles = new Set<string>();
   const events = new Map<string, MockAccountingEvent>();
   const append = (
     threadId: string,
@@ -180,11 +182,13 @@ async function withMockAccountingSessions(
     readdir: async (path: unknown) => {
       if (String(path) !== directory)
         throw new Error("Unexpected session directory");
-      return [...files.keys()].map((path) => ({
-        name: path.slice(directory.length + 1),
-        isDirectory: () => false,
-        isFile: () => true,
-      }));
+      return [...files.keys()]
+        .filter((path) => !omittedFiles.has(path))
+        .map((path) => ({
+          name: path.slice(directory.length + 1),
+          isDirectory: () => false,
+          isFile: () => true,
+        }));
     },
     open: async (path: unknown) => {
       const contents = files.get(String(path));
@@ -214,7 +218,9 @@ async function withMockAccountingSessions(
   const tracker = new ScanCostTracker({ ...options, codexHome: home });
   tracker.start("scan-thread");
   try {
-    await check(tracker, append);
+    await check(tracker, append, (threadId) => {
+      omittedFiles.add(join(directory, `rollout-${threadId}.jsonl`));
+    });
   } finally {
     await tracker.stop().catch(() => {});
     parse.mockRestore();
@@ -2384,6 +2390,102 @@ describe("live scan cost tracking", () => {
           usage: { input_tokens: 200, output_tokens: 20 },
           cost: null,
         });
+      },
+    );
+  });
+
+  test("reports mocked readable costs before rejecting missing sessions", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "reports mocked readable costs before rejecting missing sessions",
+      )
+    ) {
+      return;
+    }
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const freshUsage = { input_tokens: 1_000, output_tokens: 100 };
+    const finalCost = {
+      inputTokens: 1_200,
+      outputTokens: 120,
+      estimatedUsd: 0.00384,
+    };
+    const missingMessage =
+      "A tracked scan session disappeared before its cost could be verified.";
+    for (const [missingSession, maxCostUsd, rejects] of [
+      ["scan-thread", 0.001, true],
+      ["retained-worker", 0.001, true],
+      ["unrelated-thread", 1, false],
+      ["retained-worker", undefined, false],
+    ] as const) {
+      const reports: Array<number | "rejected"> = [];
+      await withMockAccountingSessions(
+        {
+          "scan-thread": accountingSession("scan-thread", [
+            accountingEvent(rootUsage),
+          ]),
+          "retained-worker": accountingSession(
+            "retained-worker",
+            [accountingEvent(rootUsage)],
+            "scan-thread",
+          ),
+          "growing-worker": accountingSession(
+            "growing-worker",
+            [accountingEvent(rootUsage)],
+            "scan-thread",
+          ),
+          "unrelated-thread": accountingSession("unrelated-thread", [
+            accountingEvent(freshUsage),
+          ]),
+        },
+        {
+          model: "gpt-5.6-terra",
+          maxCostUsd,
+          onCost: (cost) => reports.push(cost.estimatedUsd),
+        },
+        async (tracker, append, omit) => {
+          expect((await tracker.stop()).cost?.estimatedUsd).toBe(0.00096);
+          omit(missingSession);
+          append("growing-worker", [
+            accountingEvent(freshUsage),
+            { type: "event_msg", payload: { type: "task_complete" } },
+          ]);
+          const refreshed = tracker.refresh();
+          if (rejects) {
+            await expect(
+              refreshed.catch((error: unknown) => {
+                reports.push("rejected");
+                throw error;
+              }),
+            ).rejects.toThrow(missingMessage);
+            expect(reports).toEqual([0.00096, 0.00384, "rejected"]);
+            const cleanup = await tracker.stop();
+            expect(cleanup.cost).toMatchObject(finalCost);
+            await expect(tracker.stop(rootUsage)).rejects.toThrow(
+              missingMessage,
+            );
+            expect(await tracker.stop()).toEqual(cleanup);
+          } else {
+            await expect(refreshed).resolves.toMatchObject({ cost: finalCost });
+            await expect(tracker.stop(rootUsage)).resolves.toMatchObject({
+              cost: finalCost,
+            });
+            expect(reports).toEqual([0.00096, 0.00384]);
+          }
+        },
+      );
+    }
+    await withMockAccountingSessions(
+      {
+        "scan-thread": accountingSession("scan-thread", [
+          accountingEvent(rootUsage),
+        ]),
+      },
+      { model: "gpt-5.6-terra", maxCostUsd: 1 },
+      async (tracker, _append, omit) => {
+        expect((await tracker.stop()).cost?.estimatedUsd).toBe(0.00032);
+        omit("scan-thread");
+        await expect(tracker.stop(rootUsage)).rejects.toThrow(missingMessage);
       },
     );
   });

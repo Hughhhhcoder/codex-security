@@ -426,6 +426,11 @@ export class ScanCostTracker {
     const hasUnverifiedWorkerAttribution = [...ambiguousWorkers].some(
       (threadId) => !included.has(threadId),
     );
+    let readFailure: {
+      session: SessionUsage;
+      error: unknown;
+      rootOnlyRecoverable: boolean;
+    } | null = null;
     if (this.#options.maxCostUsd !== undefined) {
       for (const [path, session] of this.#sessions) {
         if (
@@ -433,16 +438,19 @@ export class ScanCostTracker {
           included.has(session.threadId) &&
           !presentSessions.has(path)
         ) {
-          throw new Error(
-            "A tracked scan session disappeared before its cost could be verified.",
-          );
+          readFailure ??= {
+            session,
+            error: new Error(
+              "A tracked scan session disappeared before its cost could be verified.",
+            ),
+            rootOnlyRecoverable: false,
+          };
         }
       }
     }
-    let readFailure: { session: SessionUsage; error: unknown } | null = null;
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) {
-        readFailure ??= { session, error };
+        readFailure ??= { session, error, rootOnlyRecoverable: true };
       } else if (isSessionAccessDenied(error)) {
         quarantineSession(session, error);
       }
@@ -462,7 +470,11 @@ export class ScanCostTracker {
           this.#options.maxCostUsd !== undefined &&
           session.accountingError !== null
         ) {
-          readFailure ??= { session, error: session.accountingError };
+          readFailure ??= {
+            session,
+            error: session.accountingError,
+            rootOnlyRecoverable: true,
+          };
         }
         if (session.pendingLineBytes > 0) observed.unverified = true;
         const usage = session.accounting?.usage ?? null;
@@ -502,6 +514,7 @@ export class ScanCostTracker {
     }
     if (readFailure !== null) {
       this.#rootOnlyReadError =
+        readFailure.rootOnlyRecoverable &&
         readFailure.session.threadId === this.#threadId &&
         included.size === 1 &&
         !hasUnverifiedWorkerAttribution;
