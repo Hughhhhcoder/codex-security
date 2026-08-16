@@ -1520,6 +1520,7 @@ describe("connected Linear publication", () => {
   test("retains distinct duplicate Linear issue IDs for indeterminate recovery", async () => {
     const publication = preparedPublication();
     const issue = publication.issues[0]!;
+    const first = issueEvent(issue, { identifier: "SYNTH-DUPLICATE-A" });
     const unverified = JSON.parse(
       issueEvent(issue, { identifier: "SYNTH-DUPLICATE-B" }),
     );
@@ -1548,10 +1549,7 @@ describe("connected Linear publication", () => {
               ]);
               return {
                 exitCode: 0,
-                stdout: [
-                  issueEvent(issue, { identifier: "SYNTH-DUPLICATE-A" }),
-                  JSON.stringify(unverified),
-                ].join("\n"),
+                stdout: [first, JSON.stringify(unverified)].join("\n"),
                 stderr: "",
               };
             },
@@ -1581,7 +1579,7 @@ describe("connected Linear publication", () => {
     ]);
     expect(
       await readFile(join(dirname(handoffFile!), "events.jsonl"), "utf8"),
-    ).toBe(`${JSON.stringify(unverified)}\n`);
+    ).toBe(`${first}\n${JSON.stringify(unverified)}\n`);
   });
 
   test("retains unverified handoffs while persisting independently valid issues", async () => {
@@ -1685,9 +1683,13 @@ describe("connected Linear publication", () => {
     expect(result.counts).toEqual({ findings: 2, created: 2, failed: 0 });
   });
 
-  test.each([false, true])(
-    "retains mutation evidence when payload verification fails (receipt failure: %s)",
-    async (receiptFails) => {
+  test.each([
+    [false, false],
+    [true, false],
+    [false, true],
+  ] as const)(
+    "retains mutation evidence when payload verification fails (receipt failure: %s, existing event log: %s)",
+    async (receiptFails, eventLogExists) => {
       const publication = preparedPublication(2);
       const changed = JSON.parse(issueEvent(publication.issues[1]!));
       changed.item.arguments.team = "different-team";
@@ -1720,6 +1722,13 @@ describe("connected Linear publication", () => {
                 onEvent,
               ) => {
                 handoffFile = publicationData(input).handoffFile;
+                if (eventLogExists) {
+                  await writeFile(
+                    join(dirname(handoffFile), "events.jsonl"),
+                    "Existing event log\n",
+                    { flag: "wx", mode: 0o600 },
+                  );
+                }
                 onEvent?.(changed);
                 return { exitCode: 0, stdout: output, stderr: "" };
               },
@@ -1746,8 +1755,19 @@ describe("connected Linear publication", () => {
       expect(await readFile(handoffFile!, "utf8")).toContain("SEC-1");
       const eventsFile = join(dirname(handoffFile!), "events.jsonl");
       expect(await readFile(eventsFile, "utf8")).toBe(
-        `${JSON.stringify(changed)}\n`,
+        eventLogExists
+          ? "Existing event log\n"
+          : `${JSON.stringify(changed)}\n`,
       );
+      if (eventLogExists) {
+        expect(receipt).toMatchObject({
+          warnings: [
+            expect.stringContaining(
+              "Could not preserve unverified Linear publication events",
+            ),
+          ],
+        });
+      }
       expect(updates).toContainEqual(
         expect.objectContaining({
           type: "issue_completed",
@@ -1766,6 +1786,7 @@ describe("connected Linear publication", () => {
     const scenarios: Array<{
       name: string;
       events: (publication: PreparedScanPublication) => string[];
+      indeterminate?: boolean;
     }> = [
       {
         name: "different created issue",
@@ -1784,6 +1805,7 @@ describe("connected Linear publication", () => {
       },
       {
         name: "duplicate connector calls",
+        indeterminate: true,
         events: (publication) => [
           issueEvent(publication.issues[0]!),
           issueEvent(publication.issues[0]!),
@@ -1793,7 +1815,7 @@ describe("connected Linear publication", () => {
 
     for (const scenario of scenarios) {
       const publication = preparedPublication();
-      const result = await publishScanInternal(
+      const operation = publishScanInternal(
         publication.scanDirectory,
         OPTIONS,
         dependencies(
@@ -1813,6 +1835,14 @@ describe("connected Linear publication", () => {
           },
         ),
       );
+
+      if (scenario.indeterminate) {
+        await expect(operation).rejects.toThrow(
+          "could not verify every completed mutation",
+        );
+        continue;
+      }
+      const result = await operation;
 
       expect(result.created, scenario.name).toEqual([]);
       expect(result.failed, scenario.name).toHaveLength(1);

@@ -186,6 +186,42 @@ describe("Codex Linear publication events", () => {
     expect(result.unverifiedEvents).toHaveLength(2);
   });
 
+  test("retains every completed mutation for an indeterminate finding", () => {
+    const prepared = publication();
+    const first = event(prepared);
+    const second = JSON.parse(first);
+    second.item.arguments.title = "Changed title";
+    second.item.result.structured_content.identifier = "SEC-OTHER";
+    const changed = JSON.stringify(second);
+
+    const result = collectPublicationEvents(
+      `${first}\n${changed}`,
+      prepared,
+      "missing",
+    );
+    expect(result.created).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.unverifiedEvents).toEqual([first, changed]);
+  });
+
+  test("keeps verified findings when an additional completed mutation is unknown", () => {
+    const prepared = publication();
+    const first = event(prepared);
+    const extra = JSON.parse(first);
+    extra.item.arguments.description = "An unrelated issue";
+    extra.item.result.structured_content.identifier = "SEC-OTHER";
+    const unknown = JSON.stringify(extra);
+
+    const result = collectPublicationEvents(
+      `${first}\n${unknown}`,
+      prepared,
+      "missing",
+    );
+    expect(result.created[0]?.issueIdentifier).toBe("SEC-1");
+    expect(result.failed).toEqual([]);
+    expect(result.unverifiedEvents).toEqual([unknown]);
+  });
+
   test("rejects missing, mismatched, or ambiguous finding occurrence IDs", () => {
     const prepared = publication(2);
     const first = prepared.issues[0]!;

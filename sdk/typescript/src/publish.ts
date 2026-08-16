@@ -295,6 +295,7 @@ export async function publishScanInternal(
     prepared,
     failureMessage,
   );
+  let eventLogWarning: string | undefined;
   if (events.unverifiedEvents !== undefined) {
     try {
       await writeFile(
@@ -307,12 +308,12 @@ export async function publishScanInternal(
         },
       );
     } catch (error) {
-      throw new CodexSecurityError(
-        `Could not preserve unverified Linear publication events: ${safeErrorMessage(error)}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
-        { cause: error },
-      );
+      eventLogWarning = `Could not preserve unverified Linear publication events: ${safeErrorMessage(error)}.`;
+      result.warnings = [eventLogWarning];
     }
   }
+  const recoveryWarning =
+    eventLogWarning === undefined ? "" : ` ${eventLogWarning}`;
   const handoffResults = await collectPublicationHandoff(
     handoff.file,
     prepared,
@@ -332,7 +333,7 @@ export async function publishScanInternal(
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new CodexSecurityError(
-        `Could not persist created Linear issues: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
+        `Could not persist created Linear issues: ${detail}.${recoveryWarning} The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: error },
       );
     }
@@ -352,12 +353,12 @@ export async function publishScanInternal(
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new CodexSecurityError(
-        `Linear publication ${reason} and its partial receipt could not be saved: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
+        `Linear publication ${reason} and its partial receipt could not be saved: ${detail}.${recoveryWarning} The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: error },
       );
     }
     throw new CodexSecurityError(
-      `Linear publication ${reason}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
+      `Linear publication ${reason}.${recoveryWarning} The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
       { cause: options.signal?.reason },
     );
   }

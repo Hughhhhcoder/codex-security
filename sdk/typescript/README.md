@@ -626,7 +626,8 @@ Connected-app publication checks recorded issue-creation arguments against the
 prepared payload. If a completed mutation cannot be verified, publication keeps
 any verified successes in local history, retains its private recovery handoff
 and available event log, and exits with the recovery path. Inspect the existing
-Linear issues before retrying. This checks the submitted arguments; it is not a
+Linear issues before retrying. A failure to save the auxiliary event log does
+not discard verified issue records. This checks the submitted arguments; it is not a
 fresh readback of the remote issues.
 
 Issue descriptions contain source code and vulnerability details. Select a

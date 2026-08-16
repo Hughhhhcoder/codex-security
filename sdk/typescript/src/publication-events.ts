@@ -27,7 +27,11 @@ export function collectPublicationEvents(
   >();
   const failed = new Map<string, string>();
   const unexpected: string[] = [];
-  const unverifiedEvents: string[] = [];
+  const completedEvents: Array<{
+    findingId: string | undefined;
+    line: string;
+  }> = [];
+  const indeterminateFindings = new Set<string>();
 
   for (const line of output.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
@@ -53,13 +57,15 @@ export function collectPublicationEvents(
     const issue = isRecord(args)
       ? matchPublicationIssue(publication, args)
       : undefined;
+    if (item["status"] === "completed") {
+      completedEvents.push({ findingId: issue?.findingId, line });
+    }
     if (issue === undefined) {
-      if (item["status"] === "completed") unverifiedEvents.push(line);
       unexpected.push("Codex attempted to create an unexpected Linear issue.");
       continue;
     }
     if (!hasExpectedPublicationArguments(publication, issue, args)) {
-      if (item["status"] === "completed") unverifiedEvents.push(line);
+      indeterminateFindings.add(issue.findingId);
       failed.set(
         issue.findingId,
         "Codex attempted to create a Linear issue with unexpected arguments or destination.",
@@ -67,6 +73,7 @@ export function collectPublicationEvents(
       continue;
     }
     if (failed.has(issue.findingId) || created.has(issue.findingId)) {
+      indeterminateFindings.add(issue.findingId);
       failed.set(
         issue.findingId,
         "Codex attempted to create more than one Linear issue for this finding.",
@@ -101,11 +108,18 @@ export function collectPublicationEvents(
   }
 
   if (unexpected.length > 0 && publication.issues.length > 0) {
-    const target =
-      publication.issues.find((issue) => !created.has(issue.findingId)) ??
-      publication.issues[0]!;
-    failed.set(target.findingId, unexpected.join(" "));
+    const target = publication.issues.find(
+      (issue) => !created.has(issue.findingId),
+    );
+    if (target !== undefined)
+      failed.set(target.findingId, unexpected.join(" "));
   }
+  const unverifiedEvents = completedEvents
+    .filter(
+      ({ findingId }) =>
+        findingId === undefined || indeterminateFindings.has(findingId),
+    )
+    .map(({ line }) => line);
 
   return {
     ...(unverifiedEvents.length > 0
