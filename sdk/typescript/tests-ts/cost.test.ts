@@ -2270,6 +2270,20 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test("returns a definitive overage first discovered during failure cleanup", async () => {
+    const { worker, tracker } = await workerScan({
+      rootUsage: { input_tokens: 1_000, output_tokens: 100 },
+      maxCostUsd: 0.001,
+    });
+    await appendIncompleteTokenUsage(worker);
+
+    expect((await tracker.stop()).cost).toMatchObject({
+      inputTokens: 1_100,
+      outputTokens: 110,
+      estimatedUsd: 0.00352,
+    });
+  });
+
   test("preserves higher observed root usage when completed-turn usage is stale", async () => {
     const { tracker } = await workerScan({
       rootUsage: { input_tokens: 1_000, output_tokens: 100 },

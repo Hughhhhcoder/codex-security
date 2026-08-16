@@ -3352,6 +3352,7 @@ describe("CodexSecurity orchestration", () => {
     ["live polling", "live"],
     ["turn completion", "completed"],
     ["turn completion after a tracking failure", "tracking-failure"],
+    ["failure cleanup after a tracking failure", "cleanup"],
     ["turn completion after user cancellation", "canceled"],
   ] as const)(
     "stops and records a scan with over-budget usage from %s",
@@ -3368,6 +3369,29 @@ describe("CodexSecurity orchestration", () => {
       const cancellation = new AbortController();
       const userCanceled = costSource === "canceled";
       let turns = 0;
+      let rejectPoll: ((error: unknown) => void) | undefined;
+      const rootUsage: Record<string, number> =
+        costSource === "cleanup"
+          ? {
+              input_tokens: 1_250,
+              cached_input_tokens: 200,
+              output_tokens: 30,
+            }
+          : costSource === "live"
+            ? {
+                input_tokens: 500,
+                cached_input_tokens: 100,
+                output_tokens: 10,
+              }
+            : { input_tokens: 100, output_tokens: 1 };
+      const workerUsage: Record<string, number> =
+        costSource === "cleanup"
+          ? {}
+          : {
+              input_tokens: costSource === "live" ? 750 : 250,
+              cached_input_tokens: 100,
+              output_tokens: costSource === "live" ? 20 : 10,
+            };
       const cost = {
         model: "gpt-5.6-sol",
         inputTokens: 1_250,
@@ -3409,23 +3433,20 @@ describe("CodexSecurity orchestration", () => {
                 async function* events(): AsyncGenerator<ThreadEvent> {
                   yield { type: "thread.started", thread_id: "scan-thread" };
                   await Promise.all([
-                    writeUsageSession(codexHome, "scan-thread", {
-                      input_tokens: costSource === "live" ? 500 : 100,
-                      cached_input_tokens: costSource === "live" ? 100 : 0,
-                      output_tokens: costSource === "live" ? 10 : 1,
-                    }),
+                    writeUsageSession(codexHome, "scan-thread", rootUsage),
                     writeUsageSession(
                       codexHome,
                       "worker-thread",
-                      {
-                        input_tokens: costSource === "live" ? 750 : 250,
-                        cached_input_tokens: 100,
-                        output_tokens: costSource === "live" ? 20 : 10,
-                      },
+                      workerUsage,
                       "scan-thread",
                     ),
                   ]);
-                  if (costSource !== "live") {
+                  if (costSource === "cleanup") {
+                    expect(rejectPoll).toBeDefined();
+                    rejectPoll?.(new Error("session read failed"));
+                    rejectPoll = undefined;
+                  }
+                  if (costSource !== "live" && costSource !== "cleanup") {
                     await copyCompletedScan(root);
                     yield {
                       type: "turn.completed",
@@ -3465,9 +3486,10 @@ describe("CodexSecurity orchestration", () => {
       const keepEventLoopAlive = setTimeout(() => {}, 10_000);
       const originalRefresh = ScanCostTracker.prototype.refresh;
       let firstRefresh = true;
-      let rejectPoll: ((error: unknown) => void) | undefined;
       const refresh =
-        costSource === "tracking-failure" || userCanceled
+        costSource === "tracking-failure" ||
+        costSource === "cleanup" ||
+        userCanceled
           ? spyOn(ScanCostTracker.prototype, "refresh").mockImplementation(
               function (this: ScanCostTracker) {
                 if (firstRefresh) {

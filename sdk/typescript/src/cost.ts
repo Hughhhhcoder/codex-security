@@ -227,6 +227,7 @@ export class ScanCostTracker {
       this.#snapshot = snapshot;
       this.#finalSnapshot = snapshot;
       this.#reportCost(snapshot.cost);
+      if (!finalizing) return snapshot;
     }
     if (refreshFailure !== null) {
       if (
