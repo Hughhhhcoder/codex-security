@@ -1080,9 +1080,33 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   let frameworkOutput = "";
-  let structuredScanFailure = false;
+  let renderedScanFailure: string | undefined;
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
+  const startedAt = performance.now();
+  const scanFailure = (
+    command: "scan" | "scans rerun",
+    format: string,
+    code: "SCAN_FAILED" | "SCAN_REPLAY_UNAVAILABLE",
+    message: string,
+  ) => {
+    const error = { code, message };
+    if (format === "json" || format === "jsonl") {
+      // Keep failures complete and exclude framework invocation metadata.
+      const payload = argv.includes("--full-output")
+        ? {
+            ok: false,
+            error,
+            meta: {
+              command,
+              duration: `${Math.round(performance.now() - startedAt)}ms`,
+            },
+          }
+        : error;
+      renderedScanFailure = `${JSON.stringify(payload, null, format === "json" ? 2 : undefined)}\n`;
+    }
+    return { ...error, exitCode };
+  };
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1425,22 +1449,21 @@ export async function main(
         }
         if (scanArguments === undefined) {
           exitCode = 2;
-          structuredScanFailure = format === "json" || format === "jsonl";
-          return incurError({
-            code: "SCAN_REPLAY_UNAVAILABLE",
-            message: "The saved scan could not be replayed.",
-            exitCode,
-          });
+          return incurError(
+            scanFailure(
+              "scans rerun",
+              format,
+              "SCAN_REPLAY_UNAVAILABLE",
+              "The saved scan could not be replayed.",
+            ),
+          );
         }
         const outcome = await runScan(scanArguments, errorOutput, dependencies);
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
-          structuredScanFailure = format === "json" || format === "jsonl";
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
+          return incurError(
+            scanFailure("scans rerun", format, "SCAN_FAILED", outcome.error),
+          );
         }
         return outcome.data;
       },
@@ -2070,12 +2093,9 @@ export async function main(
         );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
-          structuredScanFailure = format === "json" || format === "jsonl";
-          return incurError({
-            code: "SCAN_FAILED",
-            message: outcome.error,
-            exitCode,
-          });
+          return incurError(
+            scanFailure("scan", format, "SCAN_FAILED", outcome.error),
+          );
         }
         if (
           !options.dryRun &&
@@ -2671,18 +2691,23 @@ export async function main(
     updateController.abort();
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
-  if (frameworkExit !== undefined && !structuredScanFailure) {
+  if (frameworkExit !== undefined && renderedScanFailure === undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
       `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
     );
     return 2;
   }
-  if (frameworkOutput.length === 0) return exitCode;
+  if (renderedScanFailure === undefined && frameworkOutput.length === 0) {
+    return exitCode;
+  }
   try {
     await writeCliOutput(
       output,
-      renderedPublication ?? renderedHistory ?? frameworkOutput,
+      renderedScanFailure ??
+        renderedPublication ??
+        renderedHistory ??
+        frameworkOutput,
     );
     return exitCode;
   } catch (error) {

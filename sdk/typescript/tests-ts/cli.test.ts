@@ -13,7 +13,8 @@ import { delimiter, join, normalize } from "node:path";
 import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { Formatter } from "incur";
 import { parse as parseToml } from "smol-toml";
 import type {
   CodexSecurityConfig,
@@ -5207,6 +5208,119 @@ describe("CLI", () => {
         });
       }
       expect(stderr.text()).toBe(`codex-security: ${scenario.detail}\n`);
+    }
+  });
+
+  test("keeps structured scan failure envelopes free of framework metadata", async () => {
+    const originalFormat = Formatter.format;
+    const marker = "SYNTHETIC_FRAMEWORK_METADATA";
+    let decorated = 0;
+    const formatter = spyOn(Formatter, "format").mockImplementation(
+      (value, format) => {
+        if (typeof value !== "object" || value === null) {
+          return originalFormat(value, format);
+        }
+        const record = value as {
+          ok?: boolean;
+          code?: string;
+          error?: { code?: string };
+        };
+        const code = record.ok === false ? record.error?.code : record.code;
+        if (code !== "SCAN_FAILED" && code !== "SCAN_REPLAY_UNAVAILABLE") {
+          return originalFormat(value, format);
+        }
+        decorated += 1;
+        const cta = { description: marker, commands: [] };
+        return originalFormat(
+          {
+            ...record,
+            ...(record.ok === false
+              ? { meta: { command: marker, duration: marker, cta } }
+              : { cta }),
+            frameworkOnly: marker,
+          },
+          format,
+        );
+      },
+    );
+
+    try {
+      for (const [arguments_, command, unavailable] of [
+        [["scan", "."], "scan", false],
+        [["scans", "rerun", "scan-original"], "scans rerun", false],
+        [["scans", "rerun", "scan-original"], "scans rerun", true],
+      ] as const) {
+        for (const format of ["json", "jsonl"]) {
+          for (const [outputOptions, fullOutput] of [
+            [[], false],
+            [["--full-output"], true],
+            [["--token-count"], false],
+            [["--token-limit", "1"], false],
+            [["--full-output", "--token-offset", "1"], true],
+          ] as const) {
+            const stdout = capture();
+            const stderr = capture();
+            const expectedError = unavailable
+              ? {
+                  code: "SCAN_REPLAY_UNAVAILABLE",
+                  message: "The saved scan could not be replayed.",
+                }
+              : {
+                  code: "SCAN_FAILED",
+                  message: "The scan failed. See stderr for details.",
+                };
+            const before = decorated;
+            expect(
+              await main(
+                [...arguments_, "--format", format, ...outputOptions],
+                stdout.stream,
+                stderr.stream,
+                dependencies({
+                  onWorkbench: (): JsonObject =>
+                    unavailable
+                      ? {}
+                      : {
+                          recipe: {
+                            repository: "/original/repository",
+                            target: { kind: "repository", paths: [] },
+                            mode: "standard",
+                            config: {},
+                          },
+                        },
+                  onRun: () => {
+                    throw new CodexSecurityError("synthetic scan failure");
+                  },
+                }),
+              ),
+            ).toBe(2);
+            expect(decorated).toBeGreaterThan(before);
+            expect(JSON.parse(stdout.text())).toEqual(
+              fullOutput
+                ? {
+                    ok: false,
+                    error: expectedError,
+                    meta: {
+                      command,
+                      duration: expect.stringMatching(/^\d+ms$/u),
+                    },
+                  }
+                : expectedError,
+            );
+            expect(stdout.text()).not.toContain(marker);
+            expect(stdout.text().endsWith("\n")).toBe(true);
+            if (format === "jsonl") {
+              expect(stdout.text().trimEnd().split("\n")).toHaveLength(1);
+            }
+            expect(stderr.text()).toContain(
+              unavailable
+                ? "This scan does not have a saved launch recipe."
+                : "synthetic scan failure",
+            );
+          }
+        }
+      }
+    } finally {
+      formatter.mockRestore();
     }
   });
 
