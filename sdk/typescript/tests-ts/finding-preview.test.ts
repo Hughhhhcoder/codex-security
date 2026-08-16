@@ -16,6 +16,7 @@ describe("bundled finding previews", () => {
       "git_calls = []",
       "def git_bytes(_, *args):",
       "    git_calls.append((args, os.environ.get('GIT_NO_LAZY_FETCH'), os.environ.get('GIT_ALLOW_PROTOCOL')))",
+      "    if args[0] == 'config': return b'true\\n'",
       "    if args[0] == 'ls-tree':",
       "        parent = args[-1].partition(':')[2]",
       "        prefix = tuple(Path(parent).parts) if parent else ()",
@@ -60,6 +61,12 @@ describe("bundled finding previews", () => {
       "        os.rename(target / 'src', target / 'moved')",
       "        result = excerpt('src/public.py', ['SRC'])",
       "        os.rename(target / 'moved', target / 'src')",
+      "        return result",
+      "    def historical_normalization_alias():",
+      "        if not (target / decomposed).is_dir(): return None",
+      "        os.rename(target / composed, target / 'moved-unicode')",
+      "        result = excerpt(f'{composed}/public.py', [decomposed])",
+      "        os.rename(target / 'moved-unicode', target / composed)",
       "        return result",
       "    def nested_target():",
       "        excerpts.git_worktree_context = lambda selected: (selected.parent, 'ScopedTarget') if selected == target else (selected, '.')",
@@ -198,6 +205,7 @@ describe("bundled finding previews", () => {
       "        'caseCollision': case_collision(),",
       "        'exactCaseCollision': case_collision('src'),",
       "        'historicalAlias': historical_alias(),",
+      "        'historicalNormalizationAlias': historical_normalization_alias(),",
       "        'nestedTarget': nested_target(),",
       "        'missingGit': missing_git(),",
       "        'caseSensitiveCollision': case_sensitive_collision(),",
@@ -262,6 +270,9 @@ describe("bundled finding previews", () => {
       exactCaseCollision: null,
       historicalAlias:
         preview.caseAlias === null ? null : "1  deadbeef:src/public.py",
+      historicalNormalizationAlias: preview.normalizationSupported
+        ? "1  deadbeef:café/public.py"
+        : null,
       nestedTarget: "1  deadbeef:ScopedTarget/private.py",
       missingGit: null,
       caseSensitiveCollision: null,

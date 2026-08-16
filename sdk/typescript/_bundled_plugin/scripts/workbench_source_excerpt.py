@@ -228,14 +228,17 @@ def filesystem_case_alias(target: Path, selected: Path, actual: Path) -> bool:
         if selected.is_symlink() or actual.is_symlink() or not selected.samefile(actual):
             return False
     except OSError:
-        if len(selected.name) != len(actual.name) or any(
-            left != right
-            and (
-                not left.isascii()
-                or not right.isascii()
-                or left.casefold() != right.casefold()
-            )
+        ascii_alias = len(selected.name) == len(actual.name) and all(
+            left == right
+            or left.isascii()
+            and right.isascii()
+            and left.casefold() == right.casefold()
             for left, right in zip(selected.name, actual.name)
+        )
+        if not ascii_alias and (
+            normalize("NFC", selected.name) != normalize("NFC", actual.name)
+            or offline_git_bytes(target, "config", "--bool", "core.precomposeunicode")
+            not in {b"true", b"true\n"}
         ):
             return False
         for directory in (target, *target.parents):
