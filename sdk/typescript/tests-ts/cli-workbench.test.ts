@@ -72,7 +72,7 @@ describe("CLI workbench", () => {
       ).toBe(0);
       expect(stderr.text()).toContain(
         confirmed.length
-          ? "FINDINGS  2 (1 confirmed this scan; 1 previously found; 2 high)"
+          ? "FINDINGS  2 (1 confirmed in latest repository scan; 1 previously found; 2 high)"
           : "FINDINGS  0\n",
       );
     }
@@ -843,6 +843,7 @@ describe("CLI workbench", () => {
 
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;
+    let rerunRepository: string | undefined;
 
     expect(
       await main(
@@ -850,7 +851,8 @@ describe("CLI workbench", () => {
         capture().stream,
         capture().stream,
         dependencies({
-          onTurn: (_repository, options) => {
+          onTurn: (repository, options) => {
+            rerunRepository = repository;
             parentScanId = (options as { parentScanId?: string }).parentScanId;
           },
           onWorkbench: (args): JsonObject =>
@@ -858,7 +860,7 @@ describe("CLI workbench", () => {
               ? { scans: [{ scanId: "latest-scan" }] }
               : {
                   recipe: {
-                    repository: "/current/repository",
+                    repository: "/removed/linked-worktree",
                     target: { kind: "repository", paths: [] },
                     mode: "standard",
                     config: {},
@@ -868,6 +870,7 @@ describe("CLI workbench", () => {
       ),
     ).toBe(0);
     expect(parentScanId).toBe("latest-scan");
+    expect(rerunRepository).toBe("/current/repository");
   });
 
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {

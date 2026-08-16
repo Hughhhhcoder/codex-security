@@ -29,8 +29,9 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
 
     indexed_findings = {
         finding_id: finding
-        for finding in _indexed_findings(connection, identities=identities)
-        if finding["target_id"] in target_ids
+        for finding in _indexed_findings(
+            connection, identities=identities, target_ids=set(target_ids)
+        )
         for finding_id in finding["matched_finding_ids"]
     }
     target_placeholders = ", ".join("?" for _ in target_ids)

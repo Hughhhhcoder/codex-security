@@ -292,19 +292,28 @@ def list_unmatched_scan_pairs(
         available.append(scan)
 
     saved_pairs = {
-        (row["before_scan_id"], row["after_scan_id"])
+        frozenset((row["before_scan_id"], row["after_scan_id"]))
         for row in connection.execute("SELECT before_scan_id, after_scan_id FROM scan_comparisons")
     }
+    focus_scan_id = getattr(args, "after_scan_id", None)
+    if focus_scan_id is not None and not any(scan["id"] == focus_scan_id for scan in selected):
+        raise SystemExit("The scan to match is not a completed scan in this repository.")
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     for index, after in enumerate(available):
+        if focus_scan_id is not None and after["id"] != focus_scan_id:
+            continue
+        candidates = (
+            available[:index] if focus_scan_id is None
+            else [before for before in available if before["id"] != focus_scan_id]
+        )
         previous = [
             before
-            for before in available[:index]
-            if args.force or (before["id"], after["id"]) not in saved_pairs
+            for before in candidates
+            if args.force or frozenset((before["id"], after["id"])) not in saved_pairs
         ]
-        skipped += index - len(previous)
+        skipped += len(candidates) - len(previous)
         if not previous:
             continue
         for scan in (*previous, after):

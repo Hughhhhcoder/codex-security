@@ -38,9 +38,8 @@ def list_global_findings(
     )
     findings = (
         row
-        for row in _indexed_findings(connection, identities=identities)
-        if (target_ids is None or row["target_id"] in target_ids)
-        and (args.severity is None or row["severity"] == args.severity)
+        for row in _indexed_findings(connection, identities=identities, target_ids=target_ids)
+        if (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
         and (
             not query
@@ -92,8 +91,19 @@ def _indexed_findings(
     connection: sqlite3.Connection,
     *,
     identities: RepositoryIdentityCache | None = None,
+    target_ids: set[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
+    if target_ids is not None and not target_ids:
+        return
     identities = identities or RepositoryIdentityCache(connection)
+    target_values = tuple(sorted(target_ids)) if target_ids is not None else ()
+    placeholders = ", ".join("?" for _ in target_values)
+    target_filter = f"scans.target_id IN ({placeholders})" if target_ids is not None else "1"
+    match_filter = (
+        f"before_scans.target_id IN ({placeholders}) "
+        f"AND after_scans.target_id IN ({placeholders})"
+        if target_ids is not None else "1"
+    )
     parents: dict[
         tuple[tuple[str, str], str], tuple[tuple[str, str], str]
     ] = {}
@@ -104,7 +114,7 @@ def _indexed_findings(
         return identity
 
     for match in connection.execute(
-        """
+        f"""
         SELECT before_scans.target_id AS before_target_id,
             after_scans.target_id AS after_target_id,
             before.finding_id AS before_finding_id,
@@ -116,7 +126,9 @@ def _indexed_findings(
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
         JOIN security_targets AS after_targets ON after_targets.id = after_scans.target_id
-        """
+        WHERE {match_filter}
+        """,
+        (*target_values, *target_values),
     ):
         before_repository = identities.group(match["before_target_id"])
         after_repository = identities.group(match["after_target_id"])
@@ -140,19 +152,20 @@ def _indexed_findings(
     latest_scan_by_repository = {
         identities.group(row["target_id"]): row["id"]
         for row in connection.execute(
-            """
+            f"""
             SELECT scans.target_id, scans.id
             FROM scans
             JOIN security_targets AS targets ON targets.id = scans.target_id
-            WHERE scans.status = 'complete'
+            WHERE scans.status = 'complete' AND {target_filter}
             ORDER BY scans.started_at, scans.id
-            """
+            """,
+            target_values,
         )
     }
 
     grouped: dict[tuple[tuple[str, str], str], list[sqlite3.Row]] = {}
     for row in connection.execute(
-        """
+        f"""
         SELECT
             occurrences.id AS occurrence_id,
             occurrences.finding_id,
@@ -182,7 +195,9 @@ def _indexed_findings(
         JOIN scans ON scans.id = occurrences.scan_id
         JOIN security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        WHERE {target_filter}
         """,
+        target_values,
     ):
         grouped.setdefault(
             group(

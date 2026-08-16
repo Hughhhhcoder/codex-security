@@ -1418,6 +1418,9 @@ export async function main(
             scanId,
           ]);
           scanArguments = scanArgumentsFromRecipe(recipe, scanId);
+          if (args.scanId === undefined) {
+            scanArguments.repository = dependencies.currentDirectory();
+          }
           scanArguments.verbose = options.verbose;
         } catch (error) {
           const message = errorMessage(error);
@@ -4284,7 +4287,7 @@ function printScanSummary(
     repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
       .length ?? 0;
   const findingSummary = repositoryFindings?.length
-    ? `${confirmedCount} confirmed this scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
+    ? `${confirmedCount} confirmed in latest repository scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
     : severitySummary;
   const findingColor =
     findingCount === 0

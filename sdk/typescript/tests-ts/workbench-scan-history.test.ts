@@ -31,7 +31,16 @@ test("loads each scan's matching findings once across historical batches", () =>
     "connection.set_trace_callback(queries.append)",
     "backfilled = []",
     "result = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda _connection, scan: backfilled.append(scan['id']), read_coverage=lambda _scan: {})",
-    "print(json.dumps({'result': result, 'backfilled': backfilled, 'findingQueries': sum('FROM finding_occurrences AS occurrences' in query for query in queries)}))",
+    "finding_queries = sum('FROM finding_occurrences AS occurrences' in query for query in queries)",
+    "def planned(focus=None):",
+    "    value = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False, after_scan_id=focus), backfill_finding_details=lambda *_: None, read_coverage=lambda _: {})",
+    "    return {'batches': [{'after': batch['afterScanId'], 'before': [scan['scanId'] for scan in batch['beforeScans']]} for batch in value['batches']], 'skipped': value['skippedPairs']}",
+    "connection.execute(\"UPDATE scans SET status = 'running' WHERE id = 'scan-0'\")",
+    "later_completed_first = planned('scan-2')",
+    "connection.execute(\"UPDATE scans SET status = 'complete' WHERE id = 'scan-0'\")",
+    "earlier_completed_last = planned('scan-0')",
+    "connection.execute(\"INSERT INTO scan_comparisons VALUES ('scan-2', 'scan-0')\")",
+    "print(json.dumps({'result': result, 'backfilled': backfilled, 'findingQueries': finding_queries, 'laterCompletedFirst': later_completed_first, 'earlierCompletedLast': earlier_completed_last, 'reverseCached': planned('scan-0'), 'chronological': planned()}))",
   ].join("\n");
 
   const result = spawnSync(
@@ -52,6 +61,25 @@ test("loads each scan's matching findings once across historical batches", () =>
   expect(JSON.parse(result.stdout)).toMatchObject({
     backfilled: ["scan-0", "scan-1", "scan-2"],
     findingQueries: 3,
+    laterCompletedFirst: {
+      batches: [{ after: "scan-2", before: ["scan-1"] }],
+      skipped: 0,
+    },
+    earlierCompletedLast: {
+      batches: [{ after: "scan-0", before: ["scan-1", "scan-2"] }],
+      skipped: 0,
+    },
+    reverseCached: {
+      batches: [{ after: "scan-0", before: ["scan-1"] }],
+      skipped: 1,
+    },
+    chronological: {
+      batches: [
+        { after: "scan-1", before: ["scan-0"] },
+        { after: "scan-2", before: ["scan-1"] },
+      ],
+      skipped: 1,
+    },
     result: {
       scanCount: 3,
       batches: [

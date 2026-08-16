@@ -74,6 +74,7 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -97,7 +98,7 @@ from workbench_target_state import (
 
 scenario = sys.argv[2]
 root, repository, worktree, clone = map(Path, sys.argv[3:7])
-timestamp = "2026-08-01T00:00:00Z"
+timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
 connection.execute("PRAGMA foreign_keys = ON")

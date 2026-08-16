@@ -1651,7 +1651,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         target_id = ensure_security_target(connection, str(repository))
         if parent_scan_id is not None:
             parent = require_scan(connection, parent_scan_id)
-            if parent["target_id"] != target_id:
+            if parent["target_id"] not in native_indexes.repository_target_ids(connection, target_id):
                 raise SystemExit("A rerun must belong to the same repository as its parent scan.")
 
         connection.execute(

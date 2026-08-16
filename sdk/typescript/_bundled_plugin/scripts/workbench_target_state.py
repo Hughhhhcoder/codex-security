@@ -184,6 +184,7 @@ class RepositoryTargetState:
     repository: GitRepositoryIdentity | None = None
     ownership_matches: bool = False
     strict_owner_matches: bool = False
+    generation_matches_history: bool = False
     missing: bool = False
 
     @property
@@ -195,7 +196,11 @@ class RepositoryTargetState:
         if not self.ownership_matches or self.repository is None:
             return None
         if self.stored_identity is None:
-            return self.live_identity if self.strict_owner_matches else None
+            return (
+                self.live_identity
+                if self.strict_owner_matches and self.generation_matches_history
+                else None
+            )
         return self.live_identity if self.live_identity == self.stored_identity else None
 
     @property
@@ -249,6 +254,7 @@ def _inspect_repository_target(
     malformed_owner = False
     mismatch = False
     strict_owner_matches = False
+    generation_matches_history = False
     ownership_matches = True
     if {"target_id", "target_path"} <= scan_columns:
         if not {"target_device", "target_inode"} <= scan_columns:
@@ -257,15 +263,23 @@ def _inspect_repository_target(
                 (target_id, target_path),
             ).fetchone() is not None
             strict_owner_matches = not historical_scan
+            generation_matches_history = repository is not None and not historical_scan
         else:
             strict_owner_matches = True
-            for scan in connection.execute(
-                """
-                SELECT target_device, target_inode FROM scans
+            timestamps = ", started_at, created_at" if {
+                "started_at", "created_at"
+            } <= scan_columns else ""
+            scans = connection.execute(
+                f"""
+                SELECT target_device, target_inode{timestamps} FROM scans
                 WHERE target_id = ? OR target_path = ?
                 """,
                 (target_id, target_path),
-            ):
+            ).fetchall()
+            generation_matches_history = (
+                repository is not None and _repository_predates_history(repository, scans)
+            )
+            for scan in scans:
                 historical_scan = True
                 device, inode = scan["target_device"], scan["target_inode"]
                 if device is None and inode is None:
@@ -298,10 +312,14 @@ def _inspect_repository_target(
                 and (
                     not verified_repository or historical_scan and not recorded_owner
                 )
+                or stored_identity is None
+                and repository is not None
+                and historical_scan
+                and not generation_matches_history
             )
     return RepositoryTargetState(
         target_id, target_path, stored_identity, resolved_path, metadata, repository,
-        ownership_matches, strict_owner_matches,
+        ownership_matches, strict_owner_matches, generation_matches_history,
     )
 
 
@@ -415,6 +433,26 @@ def _timestamp_ns(value: str) -> int | None:
     return (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
 
 
+def _repository_predates_history(
+    identity: GitRepositoryIdentity,
+    scans: list[sqlite3.Row],
+    *,
+    empty_timestamp: str | None = None,
+) -> bool:
+    if not scans and empty_timestamp is None:
+        return True
+    if any(not {"started_at", "created_at"} <= set(scan.keys()) for scan in scans):
+        return False
+    timestamps = (
+        [_timestamp_ns(scan[column]) for scan in scans for column in ("started_at", "created_at")]
+        if scans else [_timestamp_ns(empty_timestamp)]
+    )
+    return (
+        all(value is not None for value in timestamps)
+        and identity.birth_time_ns <= min(timestamps)
+    )
+
+
 def normalize_pre_release_repository_identities(connection: sqlite3.Connection) -> None:
     """Upgrade only known old hashes whose recorded generation is still present."""
     if not supports_repository_identity(connection):
@@ -439,11 +477,9 @@ def normalize_pre_release_repository_identities(connection: sqlite3.Connection) 
             "SELECT started_at, created_at FROM scans WHERE target_id = ? OR target_path = ?",
             (target["id"], target["current_path"]),
         ).fetchall()
-        timestamps = (
-            [_timestamp_ns(scan[column]) for scan in scans for column in ("started_at", "created_at")]
-            if scans else [_timestamp_ns(target["created_at"])]
-        )
-        if any(value is None for value in timestamps) or identity.birth_time_ns > min(timestamps):
+        if not _repository_predates_history(
+            identity, scans, empty_timestamp=target["created_at"]
+        ):
             continue
         connection.execute(
             "UPDATE security_targets SET repository_identity = ? "

@@ -137,6 +137,7 @@ def parse_args(description: str) -> argparse.Namespace:
 
     list_unmatched_scan_pairs = subparsers.add_parser("list-unmatched-scan-pairs")
     list_unmatched_scan_pairs.add_argument("--repository", required=True)
+    list_unmatched_scan_pairs.add_argument("--after-scan-id")
     list_unmatched_scan_pairs.add_argument("--force", action="store_true")
 
     register_cli_scan = subparsers.add_parser("register-cli-scan")

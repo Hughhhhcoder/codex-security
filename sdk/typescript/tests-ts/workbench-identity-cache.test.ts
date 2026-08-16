@@ -21,6 +21,8 @@ sys.path.insert(0, sys.argv[1])
 import workbench_scan_history as history
 import workbench_native_indexes as indexes
 import workbench_target_state as state
+import workbench_feedback as feedback_module
+import workbench_db as workbench
 from workbench_feedback import get_scan_feedback
 from workbench_schema import MIGRATIONS, apply_migrations
 
@@ -33,7 +35,9 @@ connection.execute("PRAGMA foreign_keys = ON")
 identity_migration = next(item for item in MIGRATIONS if item[0] == 31)
 initial = (
     (*tuple(item for item in MIGRATIONS if item[0] <= 28), (30, *identity_migration[1:]))
-    if scenario == "migration" else MIGRATIONS
+    if scenario == "migration" else
+    tuple(item for item in MIGRATIONS if item[0] <= 30)
+    if scenario == "null-history" else MIGRATIONS
 )
 apply_migrations(connection, initial, lambda: timestamp, lambda database: None)
 paths = {}
@@ -55,12 +59,19 @@ def add_target(name, stored, live=None, relative=".", birth=1_000_000_000):
     details[path] = state.GitRepositoryIdentity(
         live or stored or "repository-current", relative, str(root / "common"), 11, 22, birth
     )
-    connection.execute(
-        "INSERT INTO security_targets "
-        "(id, current_path, display_name, created_at, updated_at, repository_identity) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (name, path, name, timestamp, timestamp, stored),
-    )
+    if state.supports_repository_identity(connection):
+        connection.execute(
+            "INSERT INTO security_targets "
+            "(id, current_path, display_name, created_at, updated_at, repository_identity) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (name, path, name, timestamp, timestamp, stored),
+        )
+    else:
+        connection.execute(
+            "INSERT INTO security_targets "
+            "(id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (name, path, name, timestamp, timestamp),
+        )
     return details[path]
 
 
@@ -210,6 +221,7 @@ with ExitStack() as stack:
         before = add_finding("persisted-scan", "before-review")
         after = add_finding("legacy-scan", "after-review", closed=True)
         add_finding("legacy-second", "legacy-open")
+        add_finding("unrelated-scan", "unrelated-finding", closed=True)
         connection.execute(
             "INSERT INTO scan_comparisons VALUES (?, ?, ?, ?, ?)",
             ("persisted-scan", "legacy-scan", "{}", timestamp, timestamp),
@@ -233,9 +245,22 @@ with ExitStack() as stack:
         indexed = findings("requested")
         indexing_probes = dict(probes)
         probes.clear()
-        feedback = get_scan_feedback(
-            connection, connection.execute("SELECT * FROM scans WHERE id = 'requested-scan'").fetchone()
-        )
+        feedback_scope = []
+        feedback_queries = []
+        def scoped_index(database, **kwargs):
+            feedback_scope.extend(sorted(kwargs["target_ids"]))
+            return indexes._indexed_findings(database, **kwargs)
+        connection.set_trace_callback(feedback_queries.append)
+        with patch.object(feedback_module, "_indexed_findings", side_effect=scoped_index):
+            feedback = get_scan_feedback(
+                connection, connection.execute("SELECT * FROM scans WHERE id = 'requested-scan'").fetchone()
+            )
+        connection.set_trace_callback(None)
+        index_queries = [query for query in feedback_queries if any(marker in query for marker in (
+            "SELECT before_scans.target_id AS before_target_id",
+            "SELECT scans.target_id, scans.id",
+            "occurrences.id AS occurrence_id",
+        ))]
         feedback_probes = dict(probes)
         print(json.dumps({
             "scans": scans,
@@ -244,6 +269,10 @@ with ExitStack() as stack:
             "aliases": sorted(indexes.repository_target_ids(connection, "requested")),
             "findings": indexed,
             "feedback": [row["findingId"] for row in feedback["falsePositives"]],
+            "feedbackScope": feedback_scope,
+            "feedbackIndexQueriesScoped": len(index_queries) == 3 and all(
+                "target_id IN (" in query for query in index_queries
+            ),
             "listingRequestedProbes": listing_probes.get(paths["requested"], 0),
             "matchingRequestedProbes": matching_probes.get(paths["requested"], 0),
             "matchingUnrelatedProbes": matching_probes.get(paths["unrelated"], 0),
@@ -256,6 +285,74 @@ with ExitStack() as stack:
             "changedStored": connection.execute(
                 "SELECT repository_identity FROM security_targets WHERE id = 'changed'"
             ).fetchone()[0],
+        }))
+    elif scenario == "lineage":
+        for name, stored, live in [
+            ("requested", "repository-current", None),
+            ("removed", "repository-current", None),
+            ("legacy", None, "repository-current"),
+            ("unverified", None, "repository-current"),
+            ("clone", "repository-other", None),
+            ("scope", "repository-current-scope", None),
+            ("changed", "repository-previous", "repository-current"),
+        ]:
+            add_target(name, stored, live, relative="service" if name == "scope" else ".")
+            add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
+        missing.add(paths["removed"])
+        scan_dir = root / "scan-output"
+        original_iterdir = Path.iterdir
+        stack.enter_context(patch.object(Path, "iterdir", lambda path: iter(()) if path == scan_dir else original_iterdir(path)))
+        stack.enter_context(patch.object(workbench, "require_target", return_value=Path(paths["requested"])))
+        stack.enter_context(patch.object(workbench, "require_scannable_target"))
+        stack.enter_context(patch.object(workbench, "require_canonical_scan_directory", return_value=scan_dir))
+        stack.enter_context(patch.object(workbench, "directory_snapshot_regular_file_count", return_value=0))
+        stack.enter_context(patch.object(workbench, "scan_target_identity", return_value={}))
+        stack.enter_context(patch.object(workbench, "require_uuid", side_effect=lambda value, label: value))
+        stack.enter_context(patch.object(workbench, "archive_scan"))
+        class LineageAccepted(Exception):
+            pass
+        stack.enter_context(patch.object(workbench, "insert_running_scan", side_effect=LineageAccepted))
+        connection.commit()
+        accepted = {}
+        for name in paths:
+            args = argparse.Namespace(
+                repository=paths["requested"], scan_dir=str(scan_dir), parent_scan_id=name + "-scan",
+                recipe_json=json.dumps({"repository": paths["requested"], "mode": "standard", "config": {}, "target": {"kind": "repository", "paths": []}}),
+            )
+            try:
+                workbench.register_cli_scan(connection, args)
+            except LineageAccepted:
+                accepted[name] = True
+            except SystemExit:
+                accepted[name] = False
+        print(json.dumps({"accepted": accepted, "scanCount": connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0]}))
+    elif scenario == "null-history":
+        newer_birth = state._timestamp_ns("2026-08-02T00:00:00Z")
+        for name, birth in [
+            ("unchanged", 1_000_000_000), ("newer", newer_birth),
+            ("invalid-time", 1_000_000_000), ("no-history", newer_birth),
+        ]:
+            add_target(name, None, "current-" + name, birth=birth)
+            if name != "no-history":
+                add_scan(name + "-scan", name, started="invalid" if name == "invalid-time" else timestamp)
+        apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
+        add_target("replacement-alias", "current-newer", birth=newer_birth)
+        add_scan("replacement-alias-scan", "replacement-alias", started="2026-08-03T00:00:00Z")
+        errors = {}
+        for name in ("unchanged", "newer", "invalid-time", "no-history"):
+            try:
+                state.ensure_security_target(connection, paths[name])
+            except SystemExit as error:
+                errors[name] = str(error)
+        print(json.dumps({
+            "stored": {row["id"]: row["repository_identity"] for row in connection.execute(
+                "SELECT id, repository_identity FROM security_targets"
+            )},
+            "registrationErrors": sorted(errors),
+            "aliases": sorted(indexes.repository_target_ids(connection, "replacement-alias")),
+            "sameCheckoutMetadata": connection.execute(
+                "SELECT target_inode FROM scans WHERE id = 'newer-scan'"
+            ).fetchone()[0] == metadata[paths["newer"]].st_ino,
         }))
     else:
         stack.enter_context(patch.object(os.path, "normcase", lambda value: os.fspath(value).lower()))
@@ -347,6 +444,8 @@ test("reuses verified legacy aliases and probes each saved target once per reque
     findings.find((finding) => finding["findingId"] === "legacy-open"),
   ).toBeDefined();
   expect(result["feedback"]).toEqual(["after-review"]);
+  expect(result["feedbackScope"]).toEqual(result["aliases"]);
+  expect(result["feedbackIndexQueriesScoped"]).toBe(true);
   expect(result["listingRequestedProbes"]).toBe(1);
   expect(result["matchingRequestedProbes"]).toBe(1);
   expect(result["matchingUnrelatedProbes"]).toBe(1);
@@ -368,4 +467,34 @@ test("upgrades only independently verified pre-release repository hashes", () =>
   expect(result["migrations"]).toEqual(
     Array.from({ length: 31 }, (_, index) => index + 1),
   );
+});
+
+test("does not assign legacy history to a newer or indeterminate Git generation", () => {
+  const result = run("null-history");
+
+  expect(result["sameCheckoutMetadata"]).toBe(true);
+  expect(result["stored"]).toEqual({
+    unchanged: "current-unchanged",
+    newer: null,
+    "invalid-time": null,
+    "no-history": "current-no-history",
+    "replacement-alias": "current-newer",
+  });
+  expect(result["registrationErrors"]).toEqual(["invalid-time", "newer"]);
+  expect(result["aliases"]).toEqual(["replacement-alias"]);
+});
+
+test("admits rerun lineage only through the verified repository and exact scope", () => {
+  const result = run("lineage");
+
+  expect(result["accepted"]).toEqual({
+    requested: true,
+    removed: true,
+    legacy: true,
+    unverified: false,
+    clone: false,
+    scope: false,
+    changed: false,
+  });
+  expect(result["scanCount"]).toBe(7);
 });
