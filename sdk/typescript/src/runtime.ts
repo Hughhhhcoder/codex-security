@@ -199,15 +199,51 @@ export async function prepareCodexSecurityStateDirectory(
     path,
     validateLocation,
   );
-  try {
-    const created = await mkdir(canonical, { recursive: true, mode: 0o700 });
-    if (created !== undefined && (process.umask() & 0o700) !== 0) {
-      await chmod(canonical, 0o700);
-    }
-    return await validateCodexSecurityStateDirectory(
+  const validatePinned = async (): Promise<string> => {
+    const validated = await validateCodexSecurityStateDirectory(
       canonical,
       validateLocation,
     );
+    if (relative(canonical, validated) !== "") {
+      throw new OutputDirectoryError(
+        `Configured Codex Security state directory changed during preparation: ${canonical}`,
+      );
+    }
+    return validated;
+  };
+  try {
+    const missing: string[] = [];
+    let current = canonical;
+    while (true) {
+      try {
+        await lstat(current);
+        break;
+      } catch (error) {
+        if (nodeErrorCode(error) !== "ENOENT") throw error;
+        missing.push(current);
+        const parent = dirname(current);
+        if (parent === current) throw error;
+        current = parent;
+      }
+    }
+    await validatePinned();
+    for (const directory of missing.reverse()) {
+      try {
+        await mkdir(directory, { mode: 0o700 });
+      } catch (error) {
+        if (nodeErrorCode(error) !== "EEXIST") throw error;
+        await validatePinned();
+        continue;
+      }
+      // Restore owner access before creating a child under a restrictive umask.
+      if (
+        process.platform !== "win32" &&
+        ((await lstat(directory)).mode & 0o700) !== 0o700
+      ) {
+        await chmod(directory, 0o700);
+      }
+    }
+    return await validatePinned();
   } catch (error) {
     if (error instanceof OutputDirectoryError) throw error;
     throw new OutputDirectoryError(

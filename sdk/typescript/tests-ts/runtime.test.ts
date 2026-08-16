@@ -3644,19 +3644,108 @@ describe("runtime directories and plugin Python boundary", () => {
     "changes owner permissions only on newly created state roots",
     async () => {
       const root = await temporaryDirectory();
-      const state = join(root, "state");
+      const existing = join(root, "existing");
+      await mkdir(existing, { mode: 0o755 });
+      await chmod(existing, 0o755);
+      for (const mask of [0o700, 0o777]) {
+        const first = join(existing, `nested-${mask.toString(8)}`);
+        const second = join(first, "parent");
+        const state = join(second, "state");
+        const previousUmask = process.umask(mask);
+        try {
+          expect(await prepareCodexSecurityStateDirectory(state)).toBe(state);
+        } finally {
+          process.umask(previousUmask);
+        }
+        for (const directory of [first, second, state]) {
+          expect((await stat(directory)).mode & 0o7777).toBe(0o700);
+        }
+        expect((await stat(existing)).mode & 0o7777).toBe(0o755);
+        await chmod(state, 0o755);
+        await expect(prepareCodexSecurityStateDirectory(state)).rejects.toThrow(
+          "Configured Codex Security state directory must be private",
+        );
+        expect((await stat(state)).mode & 0o7777).toBe(0o755);
+      }
+    },
+  );
+
+  testPosix(
+    "revalidates colliding state components without changing or redirecting them",
+    async () => {
+      if (
+        runMockInSubprocess(
+          import.meta.path,
+          "revalidates colliding state components without changing or redirecting them",
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const parent = join(root, "parent");
+      const state = join(parent, "state");
+      const nonprivateState = join(root, "nonprivate-state");
+      const alias = join(root, "alias");
+      const destination = join(root, "destination");
+      await mkdir(destination, { mode: 0o700 });
+      const pending = new Set([parent, nonprivateState, alias]);
+      const originalMkdir = fsPromises.mkdir;
+      const originalChmod = fsPromises.chmod;
+      const changed: string[] = [];
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        mkdir: async (...args: Parameters<typeof originalMkdir>) => {
+          const path = String(args[0]);
+          if (!pending.delete(path)) return await originalMkdir(...args);
+          if (path === alias) {
+            await symlink(destination, alias, "dir");
+          } else {
+            await originalMkdir(path, { mode: 0o755 });
+            await originalChmod(path, 0o755);
+          }
+          throw Object.assign(new Error("Directory already exists."), {
+            code: "EEXIST",
+          });
+        },
+        chmod: async (...args: Parameters<typeof originalChmod>) => {
+          changed.push(String(args[0]));
+          return await originalChmod(...args);
+        },
+      }));
       const previousUmask = process.umask(0o777);
       try {
-        expect(await prepareCodexSecurityStateDirectory(state)).toBe(state);
+        const locations: [string, boolean][] = [];
+        expect(
+          await prepareCodexSecurityStateDirectory(state, (path) => {
+            locations.push([path, existsSync(path)]);
+          }),
+        ).toBe(state);
+        expect(locations[0]).toEqual([state, false]);
+        expect(locations.at(-1)).toEqual([state, true]);
+        expect((await stat(parent)).mode & 0o7777).toBe(0o755);
+        expect((await stat(state)).mode & 0o7777).toBe(0o700);
+
+        await expect(
+          prepareCodexSecurityStateDirectory(nonprivateState),
+        ).rejects.toThrow(
+          "Configured Codex Security state directory must be private",
+        );
+        expect((await stat(nonprivateState)).mode & 0o7777).toBe(0o755);
+        process.umask(previousUmask);
+        await expect(
+          prepareCodexSecurityStateDirectory(join(alias, "state")),
+        ).rejects.toThrow("state directory changed during preparation");
+        expect(existsSync(join(destination, "state"))).toBe(false);
+        expect(pending.size).toBe(0);
+        expect(changed).toEqual([state]);
       } finally {
         process.umask(previousUmask);
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          mkdir: originalMkdir,
+          chmod: originalChmod,
+        }));
       }
-      expect((await stat(state)).mode & 0o7777).toBe(0o700);
-      await chmod(state, 0o755);
-      await expect(prepareCodexSecurityStateDirectory(state)).rejects.toThrow(
-        "Configured Codex Security state directory must be private",
-      );
-      expect((await stat(state)).mode & 0o7777).toBe(0o755);
     },
   );
 
