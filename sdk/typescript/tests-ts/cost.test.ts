@@ -126,11 +126,12 @@ function accountingSession(
   threadId: string,
   events: readonly MockAccountingEvent[],
   parentThreadId?: string,
+  metadata: Readonly<Record<string, unknown>> = {},
 ): MockAccountingEvent[] {
   return [
     {
       type: "session_meta",
-      payload: { id: threadId, parent_thread_id: parentThreadId },
+      payload: { ...metadata, id: threadId, parent_thread_id: parentThreadId },
     },
     ...events,
     { type: "event_msg", payload: { type: "task_complete" } },
@@ -831,6 +832,219 @@ describe("live scan cost tracking", () => {
       }
     },
   );
+
+  test("resolves mocked worker ancestry before directory attribution", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "resolves mocked worker ancestry before directory attribution",
+      )
+    ) {
+      return;
+    }
+    const scanDirectory = join(tmpdir(), "codex-security-mock-scan");
+    const artifacts = join(scanDirectory, "artifacts");
+    const workerDirectory = join(
+      artifacts,
+      "deep_discovery",
+      "workers",
+      "worker",
+      "output",
+    );
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const session = (
+      id: string,
+      parent?: string,
+      cwd?: string,
+      timestamp?: string,
+      input = 1_000,
+    ) =>
+      accountingSession(
+        id,
+        [accountingEvent({ input_tokens: input, output_tokens: input / 10 })],
+        parent,
+        { cwd, timestamp },
+      );
+    const roots = {
+      "scan-thread": session(
+        "scan-thread",
+        undefined,
+        scanDirectory,
+        "2026-07-26T12:00:00Z",
+        100,
+      ),
+      "previous-root": session(
+        "previous-root",
+        undefined,
+        scanDirectory,
+        "2026-07-26T11:00:00Z",
+      ),
+    };
+    const previousWorkers = {
+      "previous-coordinator": session(
+        "previous-coordinator",
+        "previous-root",
+        artifacts,
+      ),
+      "previous-worker": session(
+        "previous-worker",
+        "previous-coordinator",
+        workerDirectory,
+        "invalid timestamp",
+      ),
+      "resumed-previous-worker": session(
+        "resumed-previous-worker",
+        "previous-root",
+        workerDirectory,
+        "2026-07-26T12:02:00Z",
+      ),
+      "older-independent": session(
+        "older-independent",
+        undefined,
+        workerDirectory,
+        "2026-07-26T11:59:00Z",
+      ),
+    };
+    await withMockAccountingSessions(
+      {
+        ...roots,
+        ...previousWorkers,
+        "current-child": session(
+          "current-child",
+          "current-independent",
+          workerDirectory,
+          undefined,
+          300,
+        ),
+        "current-independent": session(
+          "current-independent",
+          undefined,
+          artifacts,
+          "2026-07-26T12:01:00Z",
+          200,
+        ),
+        "unrelated-conflict-a": session("unrelated-conflict", "previous-root"),
+        "unrelated-conflict-b": session("unrelated-conflict", "missing-parent"),
+      },
+      { model: "gpt-5.6-terra", maxCostUsd: 1, scanDirectory },
+      async (tracker) => {
+        expect((await tracker.stop(rootUsage)).cost).toMatchObject({
+          inputTokens: 600,
+          outputTokens: 60,
+        });
+      },
+    );
+    await withMockAccountingSessions(
+      {
+        ...roots,
+        ...previousWorkers,
+        "scan-thread": [
+          new SyntaxError("mock parser diagnostic"),
+          ...roots["scan-thread"],
+        ],
+      },
+      { model: "gpt-5.6-terra", maxCostUsd: 1, scanDirectory },
+      async (tracker) => {
+        expect((await tracker.stop(rootUsage)).cost?.inputTokens).toBe(100);
+      },
+    );
+    const unresolvedWorkers: Array<Record<string, MockAccountingEvent[]>> = [
+      {
+        orphan: session(
+          "orphan",
+          "missing-parent",
+          workerDirectory,
+          "2026-07-26T12:01:00Z",
+        ),
+      },
+      { orphan: session("orphan", "missing-parent", workerDirectory) },
+      {
+        "cycle-a": session("cycle-a", "cycle-b", workerDirectory),
+        "cycle-b": session("cycle-b", "cycle-a"),
+      },
+      {
+        "conflict-a": session("conflict", "scan-thread", workerDirectory),
+        "conflict-b": session("conflict", "previous-root"),
+      },
+      {
+        "conflict-a": session("conflict", "scan-thread"),
+        "conflict-b": session("conflict", "previous-root"),
+      },
+    ];
+    for (const workers of unresolvedWorkers) {
+      await withMockAccountingSessions(
+        { ...roots, ...workers },
+        { model: "gpt-5.6-terra", maxCostUsd: 1, scanDirectory },
+        async (tracker) => {
+          await expect(tracker.stop(rootUsage)).rejects.toThrow(
+            "The scan cost limit could not be verified",
+          );
+        },
+      );
+    }
+  });
+
+  test("limits mocked worker-directory attribution to contained output paths", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "limits mocked worker-directory attribution to contained output paths",
+      )
+    ) {
+      return;
+    }
+    const scanDirectory = join(tmpdir(), "codex-security-mock-scan");
+    const artifacts = join(scanDirectory, "artifacts");
+    const workers = join(artifacts, "deep_discovery", "workers");
+    const timestamp = "2026-07-26T12:01:00Z";
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    for (const [cwd, startedAt, expectedInput] of [
+      [artifacts, timestamp, 1_100],
+      [join(workers, "worker", "output"), timestamp, 1_100],
+      [join(workers, "worker", "output"), undefined, null],
+      [join(artifacts, "deep_discovery", "output"), undefined, 100],
+      [join(artifacts, "deep_discovery", "output"), timestamp, 100],
+      [
+        join(artifacts, "deep_discovery", "workers-other", "worker", "output"),
+        undefined,
+        100,
+      ],
+    ] as const) {
+      await withMockAccountingSessions(
+        {
+          "scan-thread": accountingSession(
+            "scan-thread",
+            [accountingEvent(rootUsage)],
+            undefined,
+            {
+              cwd: scanDirectory,
+              timestamp: "2026-07-26T12:00:00Z",
+            },
+          ),
+          worker: accountingSession(
+            "worker",
+            [accountingEvent({ input_tokens: 1_000, output_tokens: 100 })],
+            undefined,
+            {
+              cwd,
+              timestamp: startedAt,
+            },
+          ),
+        },
+        { model: "gpt-5.6-terra", maxCostUsd: 1, scanDirectory },
+        async (tracker) => {
+          const stopped = tracker.stop(rootUsage);
+          if (expectedInput === null) {
+            await expect(stopped).rejects.toThrow(
+              "The scan cost limit could not be verified",
+            );
+          } else {
+            expect((await stopped).cost?.inputTokens).toBe(expectedInput);
+          }
+        },
+      );
+    }
+  });
 
   test("ignores replayed parent history in forked worker sessions", async () => {
     const home = await codexHome();

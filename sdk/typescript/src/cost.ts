@@ -1,5 +1,5 @@
 import { open, readdir } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import {
   scanActivityFromSessionEvent,
   type ScanActivity,
@@ -266,7 +266,8 @@ export class ScanCostTracker {
   }
 
   async #readSessions(): Promise<void> {
-    if (this.#threadId === null) return;
+    const rootThreadId = this.#threadId;
+    if (rootThreadId === null) return;
     this.#rootOnlyReadError = false;
     const presentSessions = new Set<string>();
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
@@ -319,32 +320,78 @@ export class ScanCostTracker {
       }
     }
 
-    const included = new Set([this.#threadId]);
+    const parents = new Map<string, string | null>();
+    const conflictingParents = new Set<string>();
+    for (const session of this.#sessions.values()) {
+      if (session.threadId === null) continue;
+      const previous = parents.get(session.threadId);
+      if (previous !== undefined && previous !== session.parentThreadId) {
+        conflictingParents.add(session.threadId);
+      } else {
+        parents.set(session.threadId, session.parentThreadId);
+      }
+    }
+    const knownOwner = (threadId: string): string | null => {
+      const seen = new Set<string>();
+      while (threadId !== rootThreadId) {
+        if (seen.has(threadId) || conflictingParents.has(threadId)) return null;
+        seen.add(threadId);
+        const parent = parents.get(threadId);
+        if (parent === undefined) return null;
+        if (parent === null) return threadId;
+        threadId = parent;
+      }
+      return rootThreadId;
+    };
+
+    const included = new Set([rootThreadId]);
     const ambiguousWorkers = new Set<string>();
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
-          (session) => session.threadId === this.#threadId,
+          (session) => session.threadId === rootThreadId,
         )?.startedAt ?? null;
       const artifactsDirectory = join(this.#options.scanDirectory, "artifacts");
+      const workersDirectory = join(
+        artifactsDirectory,
+        "deep_discovery",
+        "workers",
+      );
       for (const session of this.#sessions.values()) {
-        if (session.threadId === null || session.workingDirectory === null) {
-          continue;
-        }
-        const workerDirectory = relative(
-          join(artifactsDirectory, "deep_discovery", "workers"),
-          session.workingDirectory,
-        ).split(sep);
         if (
-          session.workingDirectory !== artifactsDirectory &&
-          !(workerDirectory.length === 2 && workerDirectory[1] === "output")
+          session.threadId === null ||
+          session.threadId === rootThreadId ||
+          session.workingDirectory === null
         ) {
           continue;
         }
+        const workerDirectory = relative(
+          workersDirectory,
+          session.workingDirectory,
+        );
+        const components = workerDirectory.split(sep);
+        const isWorkerDirectory =
+          !isAbsolute(workerDirectory) &&
+          components.length === 2 &&
+          components[0] !== ".." &&
+          relative(
+            join(workersDirectory, components[0]!, "output"),
+            session.workingDirectory,
+          ) === "";
+        if (
+          relative(artifactsDirectory, session.workingDirectory) !== "" &&
+          !isWorkerDirectory
+        ) {
+          continue;
+        }
+        const owner = knownOwner(session.threadId);
+        if (owner === null) {
+          ambiguousWorkers.add(session.threadId);
+          continue;
+        }
+        if (owner !== session.threadId) continue;
         if (scanStartedAt === null || session.startedAt === null) {
-          if (session.threadId !== this.#threadId) {
-            ambiguousWorkers.add(session.threadId);
-          }
+          ambiguousWorkers.add(session.threadId);
           continue;
         }
         if (session.startedAt >= scanStartedAt) included.add(session.threadId);
@@ -360,6 +407,10 @@ export class ScanCostTracker {
           included.has(session.parentThreadId) &&
           !included.has(session.threadId)
         ) {
+          if (conflictingParents.has(session.threadId)) {
+            ambiguousWorkers.add(session.threadId);
+            continue;
+          }
           included.add(session.threadId);
           changed = true;
         }
