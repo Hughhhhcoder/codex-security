@@ -2500,6 +2500,180 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each([
+    "complete",
+    "unverified",
+    "canceled-before",
+    "canceled-during",
+    "canceled-rejection",
+    "over-budget",
+  ] as const)(
+    "rechecks strict final accounting when the fresh result is %s",
+    async (state) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await Promise.all([
+        mkdir(repository),
+        mkdir(codexHome),
+        mkdir(scanDir, { mode: 0o700 }),
+      ]);
+      const model = "gpt-5.6-sol";
+      const rootUsage = {
+        input_tokens: 100,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: 10,
+        reasoning_output_tokens: 0,
+      };
+      const finalUsage = {
+        ...rootUsage,
+        input_tokens: 200,
+        output_tokens: 20,
+      };
+      const rootCost = estimateScanCost(model, rootUsage)!;
+      const finalCost = estimateScanCost(model, finalUsage)!;
+      const overBudget = state === "over-budget";
+      const maxCostUsd = overBudget ? 0.001 : 1;
+      const firstError = new Error("Initial strict accounting check failed.");
+      const retryError = new Error("Fresh strict accounting check failed.");
+      const cancellation = new AbortController();
+      const retryStarted = Promise.withResolvers<void>();
+      const releaseRetry = Promise.withResolvers<void>();
+      const commands: Array<readonly string[]> = [];
+      const finalizations: unknown[] = [];
+      let cleanupStops = 0;
+      let turns = 0;
+      const client = new TestClient(
+        { codexOverrides: { model } },
+        {
+          environment: {},
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (_options: unknown, args: readonly string[]) => {
+            commands.push(args);
+            return mockWorkbench(args);
+          },
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                turns += 1;
+                await copyCompletedScan(root);
+                async function* events(): AsyncGenerator<ThreadEvent> {
+                  for await (const event of completedEvents()) {
+                    yield event.type === "turn.completed"
+                      ? { ...event, usage: rootUsage }
+                      : event;
+                  }
+                }
+                return { events: events() };
+              },
+            }),
+          }),
+        },
+      );
+      const start = spyOn(
+        ScanCostTracker.prototype,
+        "start",
+      ).mockImplementation(() => {});
+      const originalStop = ScanCostTracker.prototype.stop;
+      const stop = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+        async function (
+          this: ScanCostTracker,
+          ...args: Parameters<ScanCostTracker["stop"]>
+        ) {
+          if (args.length === 0) {
+            cleanupStops += 1;
+            return overBudget
+              ? { usage: rootUsage, cost: rootCost }
+              : { usage: finalUsage, cost: finalCost };
+          }
+          finalizations.push(args[0]);
+          if (finalizations.length === 1) {
+            if (state === "canceled-before") cancellation.abort();
+            throw firstError;
+          }
+          retryStarted.resolve();
+          await releaseRetry.promise;
+          if (state === "unverified" || state === "canceled-rejection") {
+            throw retryError;
+          }
+          const snapshot = await originalStop.call(this, finalUsage);
+          if (overBudget) throw retryError;
+          return snapshot;
+        },
+      );
+      const outcome = client
+        .run(repository, { maxCostUsd, signal: cancellation.signal })
+        .then(
+          (result) => ({ ok: true as const, result }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+      try {
+        if (state !== "canceled-before") {
+          await Promise.race([
+            retryStarted.promise,
+            outcome.then(() => {
+              throw new Error("Scan ended before strict re-verification.");
+            }),
+          ]);
+          expect(
+            commands.some((args) => args[0] === "prepare-scan-completion"),
+          ).toBe(false);
+          if (state === "canceled-during" || state === "canceled-rejection") {
+            cancellation.abort();
+          }
+          releaseRetry.resolve();
+        }
+        const settled = await outcome;
+        if (state === "complete") {
+          expect(settled.ok).toBe(true);
+          if (!settled.ok) throw settled.error;
+          expect(settled.result.turnResult.usage).toMatchObject(finalUsage);
+          expect(settled.result.cost).toEqual(finalCost);
+          const completion = commands.find(
+            (args) => args[0] === "complete-scan",
+          );
+          expect(completion).toContain(JSON.stringify(finalCost));
+          expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
+        } else {
+          expect(settled.ok).toBe(false);
+          if (settled.ok) throw new Error("Unverified scan completed.");
+          if (state.startsWith("canceled-")) {
+            expect(settled.error).toBeInstanceOf(ScanInterruptedError);
+          } else if (overBudget) {
+            expect(settled.error).toMatchObject({
+              name: ScanCostLimitExceededError.name,
+              maxCostUsd,
+              cost: finalCost,
+            });
+          } else {
+            expect(settled.error).toBe(firstError);
+          }
+          const failure = commands.find((args) => args[0] === "fail-scan");
+          expect(failure).toContain(JSON.stringify(finalCost));
+          expect(commands.some((args) => args[0] === "complete-scan")).toBe(
+            false,
+          );
+        }
+        expect(finalizations).toHaveLength(state === "canceled-before" ? 1 : 2);
+        for (const usage of finalizations) expect(usage).toBe(rootUsage);
+        expect(cleanupStops).toBe(state === "complete" ? 0 : 1);
+        expect(turns).toBe(1);
+      } finally {
+        releaseRetry.resolve();
+        await outcome;
+        stop.mockRestore();
+        start.mockRestore();
+        await client.close();
+      }
+    },
+  );
+
   test("uses the actual scanner inventory instead of a stale workbench estimate", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

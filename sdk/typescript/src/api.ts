@@ -1120,11 +1120,21 @@ export class CodexSecurity {
           }
         },
         onFinalize: async (usage) => {
-          const snapshot = await tracker.stop(usage).catch((error: unknown) => {
-            if (options.maxCostUsd !== undefined) throw error;
-            reportTrackingError(error);
-            return { usage, cost: estimateScanCost(model, usage) };
-          });
+          const snapshot = await tracker
+            .stop(usage)
+            .catch(async (error: unknown) => {
+              if (options.maxCostUsd !== undefined) {
+                throwIfAborted(signal, scanDir);
+                try {
+                  return await tracker.stop(usage);
+                } catch {
+                  throwIfAborted(signal, scanDir);
+                  throw error;
+                }
+              }
+              reportTrackingError(error);
+              return { usage, cost: estimateScanCost(model, usage) };
+            });
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
             notifyObserver(
