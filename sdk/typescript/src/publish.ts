@@ -16,6 +16,7 @@ import {
   safeErrorMessage,
 } from "./errors.js";
 import {
+  linearPublicationArguments,
   prepareScanPublication,
   type LinearPublicationDestination,
   type PreparedPublicationIssue,
@@ -23,6 +24,7 @@ import {
 } from "./publication.js";
 import {
   collectPublicationEvents,
+  hasExpectedPublicationArguments,
   matchPublicationIssue,
 } from "./publication-events.js";
 import {
@@ -293,6 +295,24 @@ export async function publishScanInternal(
     prepared,
     failureMessage,
   );
+  if (events.unverifiedEvents !== undefined) {
+    try {
+      await writeFile(
+        join(handoff.directory, "events.jsonl"),
+        `${events.unverifiedEvents.join("\n")}\n`,
+        {
+          encoding: "utf8",
+          flag: "wx",
+          mode: 0o600,
+        },
+      );
+    } catch (error) {
+      throw new CodexSecurityError(
+        `Could not preserve unverified Linear publication events: ${safeErrorMessage(error)}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
+        { cause: error },
+      );
+    }
+  }
   const handoffResults = await collectPublicationHandoff(
     handoff.file,
     prepared,
@@ -320,7 +340,10 @@ export async function publishScanInternal(
   result.failed = handoffResults.failed;
   result.counts.created = result.created.length;
   result.counts.failed = result.failed.length;
-  if (options.signal?.aborted) {
+  if (options.signal?.aborted || handoffResults.indeterminate) {
+    const reason = options.signal?.aborted
+      ? "was interrupted"
+      : "could not verify every completed mutation";
     try {
       await (dependencies.writeReceipt ?? writePublicationReceipt)(
         result,
@@ -329,13 +352,13 @@ export async function publishScanInternal(
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new CodexSecurityError(
-        `Linear publication was interrupted and its partial receipt could not be saved: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
+        `Linear publication ${reason} and its partial receipt could not be saved: ${detail}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
         { cause: error },
       );
     }
     throw new CodexSecurityError(
-      `Linear publication was interrupted. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
-      { cause: options.signal.reason },
+      `Linear publication ${reason}. The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`,
+      { cause: options.signal?.reason },
     );
   }
   await rm(handoff.directory, { recursive: true, force: true }).catch(
@@ -403,27 +426,18 @@ async function publishLinearApiIssues(
     const batch = publication.issues.slice(index, index + 20);
     const settled = await Promise.allSettled(
       batch.map(async (issue) => {
-        const content = {
-          title: issue.title,
-          description: issue.description,
-          ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-        };
-        const arguments_ = {
-          team: publication.destination.teamId,
-          ...(publication.destination.projectId === undefined
-            ? {}
-            : { project: publication.destination.projectId }),
-          ...content,
-        };
+        const arguments_ = linearPublicationArguments(
+          publication.destination,
+          issue,
+        );
+        const { team, project, ...content } = arguments_;
         let outcome:
           | { issueIdentifier: string; url: string }
           | { error: string };
         try {
           const response = await client.createIssue({
-            teamId: publication.destination.teamId,
-            ...(publication.destination.projectId === undefined
-              ? {}
-              : { projectId: publication.destination.projectId }),
+            teamId: team,
+            ...(project === undefined ? {} : { projectId: project }),
             ...content,
             ...(assigneeId === undefined ? {} : { assigneeId }),
           });
@@ -610,15 +624,7 @@ async function createPublicationHandoff(
   const issues = publication.issues.map((issue) => ({
     findingId: issue.findingId,
     occurrenceId: issue.occurrenceId,
-    arguments: {
-      team: publication.destination.teamId,
-      ...(publication.destination.projectId === undefined
-        ? {}
-        : { project: publication.destination.projectId }),
-      title: issue.title,
-      description: issue.description,
-      ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-    },
+    arguments: linearPublicationArguments(publication.destination, issue),
   }));
   const batches = Array.from(
     { length: Math.ceil(issues.length / 20) },
@@ -659,6 +665,10 @@ async function collectPublicationHandoff(
   const expectedIssues = new Map(
     publication.issues.map((issue) => [issue.findingId, issue]),
   );
+  const eventCreated = new Map(
+    events.created.map((issue) => [issue.findingId, issue]),
+  );
+  let indeterminate = events.indeterminate ?? false;
 
   for (const line of content.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
@@ -759,6 +769,26 @@ async function collectPublicationHandoff(
       );
       continue;
     }
+    if (
+      !hasExpectedPublicationArguments(publication, issue, record["arguments"])
+    ) {
+      const verified = eventCreated.get(issue.findingId);
+      if (
+        verified?.issueIdentifier === identifier &&
+        (url === undefined ||
+          verified.url === undefined ||
+          url === verified.url)
+      ) {
+        created.set(issue.findingId, verified);
+      } else {
+        indeterminate = true;
+        failed.set(
+          issue.findingId,
+          "Codex wrote a Linear publication with unexpected arguments or destination.",
+        );
+      }
+      continue;
+    }
     created.set(issue.findingId, {
       findingId: issue.findingId,
       occurrenceId: issue.occurrenceId,
@@ -777,9 +807,6 @@ async function collectPublicationHandoff(
     }
   }
 
-  const eventCreated = new Map(
-    events.created.map((issue) => [issue.findingId, issue]),
-  );
   const eventFailed = new Map(
     events.failed.map((issue) => [issue.findingId, issue.error]),
   );
@@ -822,6 +849,7 @@ async function collectPublicationHandoff(
   }
 
   return {
+    ...(indeterminate ? { indeterminate: true } : {}),
     created: publication.issues.flatMap((issue) => {
       const saved = created.get(issue.findingId);
       return saved === undefined ? [] : [saved];
@@ -844,15 +872,32 @@ async function preserveVerifiedHandoff(
   } catch {
     current = "";
   }
+  const planned = new Map(
+    publication.issues.map((issue) => [issue.findingId, issue]),
+  );
+  const verified = new Map(issues.map((issue) => [issue.findingId, issue]));
   const recorded = new Set<string>();
   for (const line of current.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
     try {
       const record = JSON.parse(line) as unknown;
+      if (!isRecord(record) || typeof record["findingId"] !== "string")
+        continue;
+      const expected = planned.get(record["findingId"]);
+      const saved = verified.get(record["findingId"]);
       if (
-        isRecord(record) &&
-        typeof record["findingId"] === "string" &&
-        !Object.hasOwn(record, "error")
+        expected !== undefined &&
+        saved !== undefined &&
+        record["scanId"] === publication.scanId &&
+        record["occurrenceId"] === expected.occurrenceId &&
+        (record["issueIdentifier"] ?? record["identifier"] ?? record["id"]) ===
+          saved.issueIdentifier &&
+        !Object.hasOwn(record, "error") &&
+        hasExpectedPublicationArguments(
+          publication,
+          expected,
+          record["arguments"],
+        )
       ) {
         recorded.add(record["findingId"]);
       }
@@ -861,9 +906,6 @@ async function preserveVerifiedHandoff(
     }
   }
 
-  const planned = new Map(
-    publication.issues.map((issue) => [issue.findingId, issue]),
-  );
   const records = issues
     .filter((issue) => !recorded.has(issue.findingId))
     .map((issue) => {
@@ -874,17 +916,10 @@ async function preserveVerifiedHandoff(
         occurrenceId: issue.occurrenceId,
         issueIdentifier: issue.issueIdentifier,
         ...(issue.url === undefined ? {} : { url: issue.url }),
-        arguments: {
-          team: publication.destination.teamId,
-          ...(publication.destination.projectId === undefined
-            ? {}
-            : { project: publication.destination.projectId }),
-          title: expected.title,
-          description: expected.description,
-          ...(expected.priority === undefined
-            ? {}
-            : { priority: expected.priority }),
-        },
+        arguments: linearPublicationArguments(
+          publication.destination,
+          expected,
+        ),
       });
     });
   if (records.length === 0) return;

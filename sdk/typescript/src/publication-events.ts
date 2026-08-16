@@ -1,6 +1,7 @@
-import type {
-  PreparedPublicationIssue,
-  PreparedScanPublication,
+import {
+  linearPublicationArguments,
+  type PreparedPublicationIssue,
+  type PreparedScanPublication,
 } from "./publication.js";
 
 export interface CollectedPublicationEvents {
@@ -11,6 +12,8 @@ export interface CollectedPublicationEvents {
     url?: string;
   }>;
   failed: Array<{ findingId: string; error: string }>;
+  indeterminate?: boolean;
+  unverifiedEvents?: string[];
 }
 
 export function collectPublicationEvents(
@@ -24,6 +27,7 @@ export function collectPublicationEvents(
   >();
   const failed = new Map<string, string>();
   const unexpected: string[] = [];
+  const unverifiedEvents: string[] = [];
 
   for (const line of output.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
@@ -50,7 +54,16 @@ export function collectPublicationEvents(
       ? matchPublicationIssue(publication, args)
       : undefined;
     if (issue === undefined) {
+      if (item["status"] === "completed") unverifiedEvents.push(line);
       unexpected.push("Codex attempted to create an unexpected Linear issue.");
+      continue;
+    }
+    if (!hasExpectedPublicationArguments(publication, issue, args)) {
+      if (item["status"] === "completed") unverifiedEvents.push(line);
+      failed.set(
+        issue.findingId,
+        "Codex attempted to create a Linear issue with unexpected arguments or destination.",
+      );
       continue;
     }
     if (failed.has(issue.findingId) || created.has(issue.findingId)) {
@@ -95,6 +108,9 @@ export function collectPublicationEvents(
   }
 
   return {
+    ...(unverifiedEvents.length > 0
+      ? { indeterminate: true, unverifiedEvents }
+      : {}),
     created: publication.issues.flatMap((issue) => {
       if (failed.has(issue.findingId)) return [];
       const result = created.get(issue.findingId);
@@ -108,6 +124,22 @@ export function collectPublicationEvents(
         : [{ findingId: issue.findingId, error: failureMessage }];
     }),
   };
+}
+
+export function hasExpectedPublicationArguments(
+  publication: PreparedScanPublication,
+  issue: PreparedPublicationIssue,
+  actual: unknown,
+): boolean {
+  if (!isRecord(actual)) return false;
+  const expected = linearPublicationArguments(publication.destination, issue);
+  return (
+    Object.keys(actual).length === Object.keys(expected).length &&
+    Object.entries(expected).every(
+      ([key, value]) =>
+        Object.hasOwn(actual, key) && Object.is(actual[key], value),
+    )
+  );
 }
 
 export function matchPublicationIssue(
