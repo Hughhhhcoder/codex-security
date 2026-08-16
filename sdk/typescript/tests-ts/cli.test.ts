@@ -24,6 +24,7 @@ import type {
 import {
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
+  ConfigurationError,
   DiffTarget,
   InvalidTargetError,
   OutputDirectoryError,
@@ -3964,6 +3965,12 @@ describe("CLI", () => {
       [
         "git ref naming a forbidden branch",
         new InvalidTargetError("unknown Git ref: origin/forbidden-paths"),
+      ],
+      [
+        "knowledge-base parser failure",
+        new ConfigurationError(
+          "Cannot extract text from knowledge base PDF: /documents/network-security.pdf",
+        ),
       ],
       [
         "python interpreter unavailable",
