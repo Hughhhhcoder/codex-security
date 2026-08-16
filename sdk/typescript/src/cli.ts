@@ -52,9 +52,13 @@ import {
 import { accountStatus } from "./auth.js";
 import {
   fullMarkdownManifestArguments,
+  humanValidationMessage,
   INCUR_VALUE_OPTIONS,
+  INFO_OUTPUT_SCHEMA,
   parseIncurArguments,
   renderFullMarkdownManifest,
+  SCAN_MARKDOWN_RESULT_RESTRICTION,
+  validateCommandResultOptions,
 } from "./cli-manifest.js";
 import {
   createBulkScanDiscoveryDependencies,
@@ -230,7 +234,6 @@ const COMMAND_VALUE_OPTIONS = new Set([
   "--project",
   "--linear-assignee",
 ]);
-const SCAN_AUTH_OPTION = z.enum(["auto", "chatgpt", "api-key"]);
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
@@ -1901,9 +1904,12 @@ export async function main(
       }),
       options: z
         .object({
-          auth: SCAN_AUTH_OPTION.default("auto").describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
-          ),
+          auth: z
+            .enum(["auto", "chatgpt", "api-key"])
+            .default("auto")
+            .describe(
+              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+            ),
           verbose: z
             .boolean()
             .default(false)
@@ -2052,7 +2058,7 @@ export async function main(
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
-            "codex-security: Markdown output is not supported for scan results.\n",
+            `codex-security: ${SCAN_MARKDOWN_RESULT_RESTRICTION}\n`,
           );
           exitCode = 2;
           return;
@@ -2645,24 +2651,7 @@ export async function main(
           openWorldHint: false,
         },
       },
-      output: z.object({
-        sdkVersion: z.string().describe("Codex Security package version."),
-        bundledPluginVersion: z
-          .string()
-          .describe("Bundled security plugin version."),
-        scanMcp: z
-          .literal(false)
-          .describe("Whether scans are available over MCP; always false."),
-        cancellationNote: z.string().describe("Why scans are CLI-only."),
-        cliVersion: z.string().describe("Codex Security CLI version."),
-        codexVersion: z.string().describe("Bundled Codex executable version."),
-        codexSdkVersion: z.string().describe("Bundled Codex SDK version."),
-        model: z.string().describe("Default scan model."),
-        reasoningEffort: z.string().describe("Default scan reasoning effort."),
-        nextStep: z
-          .string()
-          .describe("Suggested first local preflight command."),
-      }),
+      output: INFO_OUTPUT_SCHEMA,
       run() {
         return {
           sdkVersion: VERSION,
@@ -2706,7 +2695,7 @@ export async function main(
   if (frameworkExit !== undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
-      `codex-security: ${safeIncurErrorMessage(frameworkOutput)}\n`,
+      `codex-security: ${safeIncurErrorMessage(frameworkOutput, cli, argv)}\n`,
     );
     return 2;
   }
@@ -2944,86 +2933,11 @@ function validateCliArguments(
   ) {
     return undefined;
   }
-  const structuredOutput = argv.some(
-    (value, index) =>
-      value === "--json" ||
-      (value === "--format" &&
-        (argv[index + 1] === "json" || argv[index + 1] === "jsonl")),
-  );
-  if (
-    structuredOutput &&
-    ["validate", "patch", "login", "logout"].includes(command)
-  ) {
-    return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
-  }
-  if (
-    command === "export" &&
-    structuredOutput &&
-    argv.some(
-      (value, index) =>
-        value === "--output=-" ||
-        (value === "--output" && argv[index + 1] === "-"),
-    ) &&
-    argv.some(
-      (value, index) =>
-        value === "--export-format=csv" ||
-        (value === "--export-format" && argv[index + 1] === "csv"),
-    )
-  ) {
-    return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
-  }
-  if (command === "scan") {
-    if (
-      argv.some(
-        (value) =>
-          value === "--filter-output" || value.startsWith("--filter-output="),
-      )
-    ) {
-      return "--filter-output is not supported for scan results.";
-    }
-    if (
-      argv.some(
-        (value, index) => value === "--format" && argv[index + 1] === "md",
-      )
-    ) {
-      return "Markdown output is not supported for scan results.";
-    }
-  }
+  const resultOptionError = validateCommandResultOptions(command, argv);
+  if (resultOptionError !== undefined) return resultOptionError;
   const nestedCommand =
     command === "scans" || command === "findings" || command === "publish";
   const subcommand = nestedCommand ? commandArguments[1] : undefined;
-  if (command === "info") {
-    const metadataFields = new Set([
-      "sdkVersion",
-      "bundledPluginVersion",
-      "scanMcp",
-      "cancellationNote",
-      "cliVersion",
-      "codexVersion",
-      "codexSdkVersion",
-      "model",
-      "reasoningEffort",
-      "nextStep",
-    ]);
-    for (let index = 0; index < argv.length; index += 1) {
-      const argument = argv[index]!;
-      if (
-        argument !== "--filter-output" &&
-        !argument.startsWith("--filter-output=")
-      ) {
-        continue;
-      }
-      const selector = argument.includes("=")
-        ? argument.slice(argument.indexOf("=") + 1)
-        : argv[index + 1];
-      if (
-        selector !== undefined &&
-        !selector.split(",").every((field) => metadataFields.has(field))
-      ) {
-        return "--filter-output must select an info metadata field.";
-      }
-    }
-  }
   for (
     let index = nestedCommand ? 2 : 1;
     index < commandArguments.length;
@@ -3377,27 +3291,30 @@ export function skillCommandFailure(
   return `${command} failed with exit code ${status}.`;
 }
 
-export function safeIncurErrorMessage(output: string): string {
-  const lines = output.split("\n");
-  const usage = lines.indexOf("See below for usage.");
-  if (
-    usage > 0 &&
-    lines
-      .slice(0, usage)
-      .some((line) => line.startsWith("Error: invalid value for --auth: "))
-  ) {
-    return `Invalid value for --auth. Expected one of: ${SCAN_AUTH_OPTION.options.join(", ")}.`;
-  }
-  const message = lines
+export function safeIncurErrorMessage(
+  output: string,
+  cli: Cli.Cli,
+  argv: readonly string[],
+): string {
+  const message = output
+    .split("\n")
     .find((line) => line.startsWith("message: "))
     ?.slice("message: ".length);
-  if (message === undefined) return safeErrorMessage(output.trim());
-  try {
-    const parsed: unknown = JSON.parse(message);
-    return safeErrorMessage(typeof parsed === "string" ? parsed : message);
-  } catch {
-    return safeErrorMessage(message);
+  let detail = message ?? output.trim();
+  if (message !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(message);
+      if (typeof parsed === "string") detail = parsed;
+    } catch {}
   }
+  const safe = safeErrorMessage(detail);
+  return safe === "[redacted]"
+    ? humanValidationMessage(
+        cli,
+        parseIncurArguments(argv).commandArguments,
+        output,
+      ) ?? safe
+    : safe;
 }
 
 function isOutsidePath(path: string): boolean {

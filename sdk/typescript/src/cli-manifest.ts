@@ -30,6 +30,124 @@ export const INCUR_VALUE_OPTIONS = new Set([
   "--token-offset",
 ]);
 
+export const INFO_OUTPUT_SCHEMA = z.object({
+  sdkVersion: z.string().describe("Codex Security package version."),
+  bundledPluginVersion: z.string().describe("Bundled security plugin version."),
+  scanMcp: z
+    .literal(false)
+    .describe("Whether scans are available over MCP; always false."),
+  cancellationNote: z.string().describe("Why scans are CLI-only."),
+  cliVersion: z.string().describe("Codex Security CLI version."),
+  codexVersion: z.string().describe("Bundled Codex executable version."),
+  codexSdkVersion: z.string().describe("Bundled Codex SDK version."),
+  model: z.string().describe("Default scan model."),
+  reasoningEffort: z.string().describe("Default scan reasoning effort."),
+  nextStep: z.string().describe("Suggested first local preflight command."),
+});
+
+const INFO_METADATA_FIELDS = new Set(Object.keys(INFO_OUTPUT_SCHEMA.shape));
+export const SCAN_MARKDOWN_RESULT_RESTRICTION =
+  "Markdown output is not supported for scan results.";
+
+interface CommandResultRule {
+  commands: readonly string[];
+  message(command: string): string;
+  rejects(argv: readonly string[]): boolean;
+}
+
+function hasOptionValue(
+  argv: readonly string[],
+  option: string,
+  value: string,
+): boolean {
+  return argv.some(
+    (argument, index) =>
+      argument === `${option}=${value}` ||
+      (argument === option && argv[index + 1] === value),
+  );
+}
+
+function structuredOutputRequested(argv: readonly string[]): boolean {
+  return (
+    argv.includes("--json") ||
+    hasOptionValue(argv, "--format", "json") ||
+    hasOptionValue(argv, "--format", "jsonl")
+  );
+}
+
+const COMMAND_RESULT_RULES: readonly CommandResultRule[] = [
+  {
+    commands: ["validate", "patch", "login", "logout"],
+    message: (command) =>
+      `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`,
+    rejects: structuredOutputRequested,
+  },
+  {
+    commands: ["export"],
+    message: () =>
+      "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.",
+    rejects: (argv) =>
+      structuredOutputRequested(argv) &&
+      hasOptionValue(argv, "--output", "-") &&
+      hasOptionValue(argv, "--export-format", "csv"),
+  },
+  {
+    commands: ["scan"],
+    message: () => "--filter-output is not supported for scan results.",
+    rejects: (argv) =>
+      argv.some(
+        (argument) =>
+          argument === "--filter-output" ||
+          argument.startsWith("--filter-output="),
+      ),
+  },
+  {
+    commands: ["scan"],
+    message: () => SCAN_MARKDOWN_RESULT_RESTRICTION,
+    rejects: (argv) => hasOptionValue(argv, "--format", "md"),
+  },
+  {
+    commands: ["info"],
+    message: () => "--filter-output must select an info metadata field.",
+    rejects: (argv) =>
+      argv.some((argument, index) => {
+        if (
+          argument !== "--filter-output" &&
+          !argument.startsWith("--filter-output=")
+        ) {
+          return false;
+        }
+        const selector = argument.includes("=")
+          ? argument.slice(argument.indexOf("=") + 1)
+          : argv[index + 1];
+        return (
+          selector !== undefined &&
+          !selector.split(",").every((field) => INFO_METADATA_FIELDS.has(field))
+        );
+      }),
+  },
+];
+
+function commandResultRules(command: string): CommandResultRule[] {
+  const root = command.split(" ", 1)[0]!;
+  return COMMAND_RESULT_RULES.filter((rule) => rule.commands.includes(root));
+}
+
+export function commandResultRestrictions(command: string): string[] {
+  const root = command.split(" ", 1)[0]!;
+  return commandResultRules(command).map((rule) => rule.message(root));
+}
+
+export function validateCommandResultOptions(
+  command: string,
+  argv: readonly string[],
+): string | undefined {
+  const root = command.split(" ", 1)[0]!;
+  return commandResultRules(command)
+    .find((rule) => rule.rejects(argv))
+    ?.message(root);
+}
+
 /** Keep command lookup aligned with Incur's built-in option consumption. */
 export function parseIncurArguments(argv: readonly string[]): {
   commandArguments: string[];
@@ -66,6 +184,74 @@ export function fullMarkdownManifestArguments(
   return format === undefined || format === "md" ? commandArguments : undefined;
 }
 
+function commandScope(
+  commands: readonly Skill.CommandInfo[],
+  commandArguments: readonly string[],
+): string {
+  let scope = "";
+  for (const argument of commandArguments) {
+    const next = scope ? `${scope} ${argument}` : argument;
+    if (
+      !commands.some(
+        ({ name }) => name === next || name?.startsWith(`${next} `),
+      )
+    ) {
+      break;
+    }
+    scope = next;
+    if (commands.some(({ name }) => name === scope)) break;
+  }
+  return scope;
+}
+
+/** Reconstruct only schema-owned guidance from Incur's human validation block. */
+export function humanValidationMessage(
+  cli: Cli.Cli,
+  commandArguments: readonly string[],
+  output: string,
+): string | undefined {
+  const lines = output.split("\n");
+  const usage = lines.indexOf("See below for usage.");
+  if (usage <= 0) return undefined;
+  const commands = Cli.collectSkillCommands(
+    Cli.toCommands.get(cli)!,
+    [],
+    new Map(),
+  );
+  const scope = commandScope(commands, commandArguments);
+  const command = commands.find(({ name }) => name === scope);
+  if (command?.options === undefined) return undefined;
+  const input = z.toJSONSchema(command.options, {
+    io: "input",
+    unrepresentable: "any",
+  });
+  const required = new Set(input.required);
+  const messages: string[] = [];
+  for (const line of lines.slice(0, usage)) {
+    const field = Object.keys(command.options.shape).find((name) => {
+      const flag = `--${optionName(name)}`;
+      return (
+        line.startsWith(`Error: invalid value for ${flag}: `) ||
+        (required.has(name) &&
+          line === `Error: missing required option ${flag}`)
+      );
+    });
+    if (field === undefined) return undefined;
+    const property = input.properties?.[field];
+    if (typeof property !== "object" || property === null) return undefined;
+    const constraints = staticInputConstraints(property);
+    if (constraints === undefined) return undefined;
+    const flag = `--${optionName(field)}`;
+    const problem = line.startsWith("Error: missing required option ")
+      ? "Missing required option"
+      : "Invalid value for";
+    messages.push(
+      `${problem} ${flag}. ${describeConstraints(constraints, plainValue, true).join(" ")}`,
+    );
+  }
+  return messages.join("\n");
+}
+
 /** Render a documentation-only view; keep Incur's parsed schemas unchanged. */
 export function renderFullMarkdownManifest(
   cli: Cli.Cli,
@@ -79,19 +265,7 @@ export function renderFullMarkdownManifest(
     [],
     groups,
   );
-  let scope = "";
-  for (const argument of commandArguments) {
-    const next = scope ? `${scope} ${argument}` : argument;
-    if (
-      !allCommands.some(
-        ({ name }) => name === next || name?.startsWith(`${next} `),
-      )
-    ) {
-      break;
-    }
-    scope = next;
-    if (allCommands.some(({ name }) => name === scope)) break;
-  }
+  const scope = commandScope(allCommands, commandArguments);
   const commands = allCommands
     .filter((command) => selected.has(command.name!))
     .map((command) => ({
@@ -125,6 +299,7 @@ export function renderFullMarkdownManifest(
       ? `Run \`${cli.name} --llms-full\` for the operating guide.`
       : readOperatingGuide(),
     "## Global options and integrations",
+    "The global format and filtering options below apply to discovery output. Command results also follow the restrictions in each command reference.",
     "```text\n" + Help.formatRoot(cli.name, { root: true }) + "\n```",
     ...(groupRows.length === 0
       ? []
@@ -137,9 +312,18 @@ export function renderFullMarkdownManifest(
           ].join("\n"),
         ]),
     "## Command reference",
-    ...commands.map((command) =>
-      Skill.generate(cli.name, [command]).replace(/^#/gmu, "###"),
-    ),
+    ...commands.map((command) => {
+      const restrictions = commandResultRestrictions(command.name ?? "");
+      return [
+        Skill.generate(cli.name, [command]).replace(/^#/gmu, "###"),
+        ...(restrictions.length === 0
+          ? []
+          : [
+              "#### Command result restrictions",
+              restrictions.map((restriction) => `- ${restriction}`).join("\n"),
+            ]),
+      ].join("\n\n");
+    }),
     "",
   ].join("\n\n");
 }
@@ -193,32 +377,84 @@ function documentInputs(
             details.push(`Each value: ${itemDetails.join(" ")}`);
           }
         }
-        const key = options
-          ? name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)
-          : name;
+        const key = options ? optionName(name) : name;
         return [key, field.describe(details.join(" "))];
       }),
     ),
   );
 }
 
-function describeConstraints(property: z.core.JSONSchema.JSONSchema): string[] {
+const CONSTRAINT_LABELS = [
+  ["minimum", "Minimum"],
+  ["exclusiveMinimum", "Must be greater than"],
+  ["maximum", "Maximum"],
+  ["exclusiveMaximum", "Must be less than"],
+  ["minLength", "Minimum length"],
+  ["maxLength", "Maximum length"],
+] as const;
+
+function staticInputConstraints(
+  property: z.core.JSONSchema.JSONSchema,
+): z.core.JSONSchema.JSONSchema | undefined {
+  if (
+    typeof property.type !== "string" ||
+    !["string", "number", "integer", "boolean", "null"].includes(
+      property.type,
+    ) ||
+    property.$ref !== undefined ||
+    property.anyOf !== undefined ||
+    property.oneOf !== undefined ||
+    property.allOf !== undefined ||
+    property.not !== undefined ||
+    property.if !== undefined
+  ) {
+    return undefined;
+  }
+  const values =
+    property.enum ??
+    (property.const === undefined ? undefined : [property.const]);
+  if (
+    values !== undefined &&
+    !values.every(
+      (value) =>
+        value === null ||
+        typeof value === "string" ||
+        typeof value === "boolean" ||
+        (typeof value === "number" && Number.isFinite(value)),
+    )
+  ) {
+    return undefined;
+  }
+  const constraints: z.core.JSONSchema.JSONSchema = {
+    type: property.type,
+    ...(values === undefined ? {} : { enum: values }),
+  };
+  for (const [key] of CONSTRAINT_LABELS) {
+    const value = property[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+    constraints[key] = value;
+  }
+  return constraints;
+}
+
+function describeConstraints(
+  property: z.core.JSONSchema.JSONSchema,
+  renderValue: (value: unknown) => string = codeValue,
+  includeType = false,
+): string[] {
   const details: string[] = [];
+  if (includeType) details.push(`Expected type: ${property.type}.`);
   const values =
     property.enum ??
     (property.const === undefined ? undefined : [property.const]);
   if (values !== undefined) {
-    details.push(`Allowed values: ${values.map(codeValue).join(", ")}.`);
+    details.push(`Allowed values: ${values.map(renderValue).join(", ")}.`);
   }
-  if (property.type === "integer") details.push("Must be an integer.");
-  for (const [key, label] of [
-    ["minimum", "Minimum"],
-    ["exclusiveMinimum", "Must be greater than"],
-    ["maximum", "Maximum"],
-    ["exclusiveMaximum", "Must be less than"],
-    ["minLength", "Minimum length"],
-    ["maxLength", "Maximum length"],
-  ] as const) {
+  if (property.type === "integer" && !includeType) {
+    details.push("Must be an integer.");
+  }
+  for (const [key, label] of CONSTRAINT_LABELS) {
     if (property[key] !== undefined) {
       details.push(`${label}: ${property[key]}.`);
     }
@@ -226,6 +462,16 @@ function describeConstraints(property: z.core.JSONSchema.JSONSchema): string[] {
   return details;
 }
 
+function optionName(name: string): string {
+  return name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`);
+}
+
+function plainValue(value: unknown): string {
+  return typeof value === "string"
+    ? value
+    : JSON.stringify(value) ?? String(value);
+}
+
 function codeValue(value: unknown): string {
-  return `\`${typeof value === "string" ? value : JSON.stringify(value)}\``;
+  return `\`${plainValue(value)}\``;
 }

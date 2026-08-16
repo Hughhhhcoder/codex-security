@@ -3,10 +3,12 @@ import { readFile } from "node:fs/promises";
 import { Cli, Schema, z } from "incur";
 import { main } from "../src/cli.js";
 import {
+  commandResultRestrictions,
   fullMarkdownManifestArguments,
   INCUR_VALUE_OPTIONS,
   parseIncurArguments,
   renderFullMarkdownManifest,
+  validateCommandResultOptions,
 } from "../src/cli-manifest.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import {
@@ -494,6 +496,55 @@ describe("full CLI manifest", () => {
       ).toBe(2);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).not.toBe("");
+    }
+  });
+
+  test("documents the same result restrictions that the wrapper enforces", () => {
+    const names = [
+      "scan",
+      "validate",
+      "patch",
+      "login",
+      "logout",
+      "export",
+      "info",
+    ];
+    const cli = Cli.create("codex-security");
+    for (const name of names) {
+      cli.command(name, {
+        run() {
+          throw new Error("Manifest rendering must not run a command.");
+        },
+      });
+    }
+    const root = renderFullMarkdownManifest(cli, {
+      commands: names.map((name) => ({ name })),
+    });
+    const sections = commandSections(root);
+    for (const [command, args] of [
+      ["scan", ["scan", "--format", "md"]],
+      ["scan", ["scan", "--filter-output", "findings"]],
+      ["validate", ["validate", "--json"]],
+      ["patch", ["patch", "--format", "jsonl"]],
+      ["login", ["login", "--json"]],
+      ["logout", ["logout", "--json"]],
+      [
+        "export",
+        ["export", "--json", "--output", "-", "--export-format", "csv"],
+      ],
+      ["info", ["info", "--filter-output", "findings"]],
+    ] as const) {
+      const restriction = validateCommandResultOptions(command, args);
+      expect(restriction).toBeDefined();
+      expect(commandResultRestrictions(command)).toContain(restriction!);
+      expect(sections.get(command)).toContain(restriction!);
+      const scoped = renderFullMarkdownManifest(
+        cli,
+        { commands: [{ name: command }] },
+        [command],
+      );
+      expect(scoped).toContain("discovery output");
+      expect(scoped).toContain(restriction!);
     }
   });
 });
