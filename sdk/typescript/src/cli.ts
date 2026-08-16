@@ -230,6 +230,7 @@ const COMMAND_VALUE_OPTIONS = new Set([
   "--project",
   "--linear-assignee",
 ]);
+const SCAN_AUTH_OPTION = z.enum(["auto", "chatgpt", "api-key"]);
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
@@ -1900,12 +1901,9 @@ export async function main(
       }),
       options: z
         .object({
-          auth: z
-            .enum(["auto", "chatgpt", "api-key"])
-            .default("auto")
-            .describe(
-              "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
-            ),
+          auth: SCAN_AUTH_OPTION.default("auto").describe(
+            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
+          ),
           verbose: z
             .boolean()
             .default(false)
@@ -2708,7 +2706,7 @@ export async function main(
   if (frameworkExit !== undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
-      `codex-security: ${safeErrorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      `codex-security: ${safeIncurErrorMessage(frameworkOutput)}\n`,
     );
     return 2;
   }
@@ -3379,17 +3377,26 @@ export function skillCommandFailure(
   return `${command} failed with exit code ${status}.`;
 }
 
-function incurErrorMessage(output: string): string {
-  const message = output
-    .split("\n")
+export function safeIncurErrorMessage(output: string): string {
+  const lines = output.split("\n");
+  const usage = lines.indexOf("See below for usage.");
+  if (
+    usage > 0 &&
+    lines
+      .slice(0, usage)
+      .some((line) => line.startsWith("Error: invalid value for --auth: "))
+  ) {
+    return `Invalid value for --auth. Expected one of: ${SCAN_AUTH_OPTION.options.join(", ")}.`;
+  }
+  const message = lines
     .find((line) => line.startsWith("message: "))
     ?.slice("message: ".length);
-  if (message === undefined) return output.trim();
+  if (message === undefined) return safeErrorMessage(output.trim());
   try {
     const parsed: unknown = JSON.parse(message);
-    return typeof parsed === "string" ? parsed : message;
+    return safeErrorMessage(typeof parsed === "string" ? parsed : message);
   } catch {
-    return message;
+    return safeErrorMessage(message);
   }
 }
 

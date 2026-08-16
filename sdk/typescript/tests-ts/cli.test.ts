@@ -33,7 +33,12 @@ import {
   ScanInterruptedError,
   VERSION,
 } from "../src/index.js";
-import { main, parseCodexOverrides, Progress } from "../src/cli.js";
+import {
+  main,
+  parseCodexOverrides,
+  Progress,
+  safeIncurErrorMessage,
+} from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
@@ -2753,6 +2758,23 @@ describe("CLI", () => {
       expect(stdout.text()).toBe("");
       expect(stderr.text()).not.toContain("SYNTHETIC");
     }
+  });
+
+  test("preserves value-free auth guidance in human framework errors", () => {
+    const message = safeIncurErrorMessage(
+      [
+        "Error: invalid value for --auth: Invalid option",
+        "See below for usage.",
+        "",
+        "Usage: codex-security scan [repository] [options]",
+      ].join("\n"),
+    );
+    expect(message).toBe(
+      "Invalid value for --auth. Expected one of: auto, chatgpt, api-key.",
+    );
+    expect(
+      safeIncurErrorMessage("Error: invalid value for --auth: Invalid option"),
+    ).toBe("[redacted]");
   });
 
   test("honors Incur help before command validation", async () => {
