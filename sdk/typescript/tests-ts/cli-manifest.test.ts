@@ -543,7 +543,7 @@ describe("full CLI manifest", () => {
         { commands: [{ name: command }] },
         [command],
       );
-      expect(scoped).toContain("discovery output");
+      expect(scoped).toMatch(/--filter-output.*only to command results/u);
       expect(scoped).toContain(restriction!);
     }
   });

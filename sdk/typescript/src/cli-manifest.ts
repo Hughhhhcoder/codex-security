@@ -299,7 +299,7 @@ export function renderFullMarkdownManifest(
       ? `Run \`${cli.name} --llms-full\` for the operating guide.`
       : readOperatingGuide(),
     "## Global options and integrations",
-    "The global format and filtering options below apply to discovery output. Command results also follow the restrictions in each command reference.",
+    "`--format` and `--json` select the output format for `--llms`, `--llms-full`, and `--schema`. `--filter-output` applies only to command results, which follow the restrictions in each command reference.",
     "```text\n" + Help.formatRoot(cli.name, { root: true }) + "\n```",
     ...(groupRows.length === 0
       ? []
