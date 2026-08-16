@@ -114,7 +114,7 @@ function taskEvent(
 type MockAccountingEvent = Readonly<Record<string, unknown>> | Error;
 
 function accountingEvent(
-  usage: Readonly<Record<string, number>>,
+  usage: Readonly<Record<string, number>> | null,
 ): MockAccountingEvent {
   return {
     type: "event_msg",
@@ -2392,6 +2392,126 @@ describe("live scan cost tracking", () => {
         });
       },
     );
+  });
+
+  test("keeps mocked unusable own usage scoped to accounting", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "keeps mocked unusable own usage scoped to accounting",
+      )
+    ) {
+      return;
+    }
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const inherited = { input_tokens: 1_000, output_tokens: 100 };
+    const high = accountingEvent({ input_tokens: 2_000, output_tokens: 200 });
+    const low = accountingEvent({ input_tokens: 1_100, output_tokens: 110 });
+    const metadata = { timestamp: "2026-07-26T12:02:00Z" };
+    const history = [
+      { type: "session_meta", payload: { id: "inherited-thread" } },
+      accountingEvent(inherited),
+    ];
+    const started = {
+      type: "event_msg",
+      payload: { type: "task_started", started_at: 1_785_067_320 },
+    };
+    const infoOnly = {
+      type: "event_msg",
+      payload: { type: "token_count", info: null },
+    };
+    for (const unavailable of [
+      accountingEvent(null),
+      accountingEvent({ input_tokens: 900, output_tokens: 90 }),
+    ]) {
+      for (const [scope, maxCostUsd, expectedInput] of [
+        ["worker", 0.001, null],
+        ["first-error", 0.001, null],
+        ["worker", undefined, 1_100],
+        ["unrelated", 1, 100],
+        ["root", 1, 1_200],
+        ["replay", 1, 1_100],
+      ] as const) {
+        const events =
+          scope === "replay"
+            ? [
+                ...history,
+                unavailable,
+                accountingEvent(inherited),
+                started,
+                high,
+                infoOnly,
+                low,
+              ]
+            : [
+                ...history,
+                started,
+                high,
+                ...(scope === "first-error"
+                  ? [new SyntaxError("mock existing accounting diagnostic")]
+                  : []),
+                unavailable,
+                low,
+              ];
+        const sessions: Readonly<
+          Record<string, readonly MockAccountingEvent[]>
+        > =
+          scope === "root"
+            ? {
+                "scan-thread": accountingSession(
+                  "scan-thread",
+                  events,
+                  undefined,
+                  metadata,
+                ),
+              }
+            : {
+                "scan-thread": accountingSession("scan-thread", [
+                  accountingEvent(rootUsage),
+                ]),
+                "worker-thread": accountingSession(
+                  "worker-thread",
+                  events,
+                  scope === "unrelated" ? undefined : "scan-thread",
+                  metadata,
+                ),
+              };
+        const costs: number[] = [];
+        await withMockAccountingSessions(
+          sessions,
+          {
+            model: "gpt-5.6-terra",
+            maxCostUsd,
+            onCost: (cost) => costs.push(cost.estimatedUsd),
+          },
+          async (tracker) => {
+            const completed = tracker.stop(
+              scope === "root"
+                ? { input_tokens: 1_200, output_tokens: 120 }
+                : rootUsage,
+            );
+            if (expectedInput === null) {
+              await expect(completed).rejects.toThrow(
+                scope === "first-error"
+                  ? "tracked session record could not be read"
+                  : "model pricing or token usage is unavailable",
+              );
+              expect((await tracker.stop()).cost).toMatchObject({
+                inputTokens: 1_100,
+                outputTokens: 110,
+                estimatedUsd: 0.00352,
+              });
+              expect(costs[0]).toBe(0.00352);
+            } else {
+              expect((await completed).cost).toMatchObject({
+                inputTokens: expectedInput,
+                outputTokens: expectedInput / 10,
+              });
+            }
+          },
+        );
+      }
+    }
   });
 
   test("reports mocked readable costs before rejecting missing sessions", async () => {

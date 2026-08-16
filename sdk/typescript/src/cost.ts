@@ -909,18 +909,19 @@ function readSessionEvent(
     return;
   }
   const usage = tokenUsage(payload["info"]["total_token_usage"]);
-  if (usage === null) return;
   const ownUsage =
-    session.inheritedUsage === null
-      ? usage
-      : subtractTokenUsage(usage, session.inheritedUsage);
+    usage === null
+      ? null
+      : session.inheritedUsage === null
+        ? usage
+        : subtractTokenUsage(usage, session.inheritedUsage);
+  const cost = ownUsage === null ? null : estimateScanCost(model, ownUsage);
+  if (cost === null) {
+    session.accountingError ??= new Error(
+      "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+    );
+  }
   if (ownUsage !== null) {
-    const cost = estimateScanCost(model, ownUsage);
-    if (cost === null) {
-      session.accountingError ??= new Error(
-        "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
-      );
-    }
     if (
       session.accounting?.cost == null ||
       (cost !== null &&
