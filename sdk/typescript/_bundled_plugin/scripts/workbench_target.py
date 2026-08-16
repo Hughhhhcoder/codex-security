@@ -120,14 +120,20 @@ def _read_sized_nul_field(
     return output[offset:end], end + 1
 
 
-def _protected_git_root(target: Path) -> Path:
-    root = target.resolve()
-    for ancestor in (root, *root.parents):
-        try:
-            (ancestor / ".git").lstat()
-        except FileNotFoundError:
-            continue
-        root = ancestor
+def _protected_git_root(target: Path) -> Path | None:
+    """Return the outermost repository root, or None for a stale target."""
+    try:
+        root = target.resolve(strict=True)
+        if not stat.S_ISDIR(root.stat().st_mode):
+            return None
+        for ancestor in (root, *root.parents):
+            try:
+                (ancestor / ".git").lstat()
+            except FileNotFoundError:
+                continue
+            root = ancestor
+    except (FileNotFoundError, NotADirectoryError):
+        return None
     return root
 
 
@@ -159,6 +165,8 @@ def _trusted_executable(
     name: str,
 ) -> str | None:
     root = _protected_git_root(target)
+    if root is None:
+        return None
     setting = f"CODEX_SECURITY_{name.upper()}"
     configured = environment.get(setting)
     if configured is not None:

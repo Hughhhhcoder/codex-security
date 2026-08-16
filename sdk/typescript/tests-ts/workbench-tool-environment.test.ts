@@ -124,6 +124,82 @@ describe("workbench tool environments", () => {
     });
   });
 
+  test("treats stale target roots as unavailable without hiding other errors", () => {
+    runPythonMocks(`
+import stat
+from types import SimpleNamespace
+repository = Path.cwd()
+directory = SimpleNamespace(st_mode=stat.S_IFDIR)
+with (
+    patch.object(Path, "resolve", autospec=True, return_value=repository) as resolve,
+    patch.object(Path, "stat", return_value=directory) as metadata,
+    patch.object(Path, "lstat", side_effect=FileNotFoundError) as marker,
+):
+    assert workbench._protected_git_root(repository) == repository
+    resolve.assert_called_once_with(repository, strict=True)
+
+    metadata.return_value = SimpleNamespace(st_mode=stat.S_IFREG)
+    marker.reset_mock()
+    assert workbench._protected_git_root(repository) is None
+    marker.assert_not_called()
+    metadata.return_value = directory
+
+    for error in (FileNotFoundError, NotADirectoryError):
+        for operation in (resolve, metadata):
+            operation.side_effect = error
+            assert workbench._protected_git_root(repository) is None
+            operation.side_effect = None
+    marker.side_effect = NotADirectoryError
+    assert workbench._protected_git_root(repository) is None
+
+    for operation in (resolve, metadata, marker):
+        marker.side_effect = FileNotFoundError
+        failure = PermissionError("target metadata is unavailable")
+        operation.side_effect = failure
+        try:
+            workbench._protected_git_root(repository)
+        except PermissionError as error:
+            assert error is failure
+        else:
+            raise AssertionError("unrelated filesystem error was hidden")
+        operation.side_effect = None
+`);
+  });
+
+  test("keeps stale history probes unavailable without spawning a tool", () => {
+    runPythonMocks(`
+import workbench_scan_history as history
+repository = Path.cwd()
+before = {"target_id": "historical", "target_path": str(repository)}
+after = {"target_id": "selected", "target_path": str(repository.parent)}
+with (
+    patch.object(workbench, "_protected_git_root", return_value=None),
+    patch.object(workbench, "_inside_protected_git_root") as inside,
+    patch.object(workbench.os, "get_exec_path") as lookup,
+    patch.object(workbench.subprocess, "run") as run,
+):
+    for environment in (
+        {"PATH": ""},
+        {"PATH": "", "CODEX_SECURITY_GIT": sys.executable, "CODEX_SECURITY_RG": sys.executable},
+    ):
+        with patch.dict(workbench.os.environ, environment, clear=True):
+            completed = workbench.git_command(repository, "rev-parse", "--show-toplevel", text=True)
+            assert (completed.returncode, completed.stdout, completed.stderr) == (127, "", "")
+            assert workbench.git_output(repository, "rev-parse", "--git-common-dir") is None
+            assert workbench.git_bytes(repository, "rev-parse", "--git-common-dir") is None
+            assert not history._same_repository(before, after, after_identity=(None, None))
+            try:
+                workbench.ripgrep_command(repository, "--files")
+            except FileNotFoundError:
+                pass
+            else:
+                raise AssertionError("unavailable target was accepted")
+    inside.assert_not_called()
+    lookup.assert_not_called()
+    run.assert_not_called()
+`);
+  });
+
   test("uses only a resolved ripgrep command and never spawns when unavailable", () => {
     runPythonMocks(`
 repository = Path.cwd()
