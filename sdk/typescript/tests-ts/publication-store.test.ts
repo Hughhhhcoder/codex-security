@@ -11,8 +11,8 @@ import {
   stat,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   inspectPublicationStore,
   preparePublicationStore,
@@ -21,6 +21,7 @@ import {
 import type { PreparedScanPublication } from "../src/publication.js";
 import type { PublishedScanIssue } from "../src/publish.js";
 import { runWorkbench } from "../src/runtime.js";
+import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const SCAN_ID = "22222222-2222-4222-8222-222222222222";
@@ -174,6 +175,69 @@ function publishedIssue(
 }
 
 describe("read-only publication history", () => {
+  test("forwards cancellation to Python discovery and the workbench and cleans up its input", async () => {
+    const fixture = await publicationFixture();
+    const controller = new AbortController();
+    const reason = new Error("Synthetic inspection cancellation.");
+    let inputFile = "";
+    let started!: () => void;
+    const inspecting = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const python = spyOn(runtime, "resolvePluginPython").mockImplementation(
+      async (options) => {
+        expect(options?.signal).toBe(controller.signal);
+        return fixture.python;
+      },
+    );
+    const workbench = spyOn(runtime, "runWorkbench").mockImplementation(
+      async (options, args) => {
+        started();
+        expect(options.signal).toBe(controller.signal);
+        expect(args[0]).toBe("inspect-linear-publication");
+        inputFile = args[args.indexOf("--input-file") + 1]!;
+        return new Promise<never>((_resolve, reject) => {
+          options.signal!.addEventListener(
+            "abort",
+            () => reject(options.signal!.reason),
+            { once: true },
+          );
+        });
+      },
+    );
+    try {
+      const pending = inspectPublicationStore(
+        fixture.publication,
+        fixture.environment,
+        controller.signal,
+      );
+      await inspecting;
+      controller.abort(reason);
+      await expect(pending).rejects.toBe(reason);
+      expect(inputFile).not.toBe("");
+      expect(existsSync(dirname(inputFile))).toBe(false);
+    } finally {
+      controller.abort(reason);
+      workbench.mockRestore();
+      python.mockRestore();
+    }
+  });
+
+  test("rejects a pre-aborted inspection before looking for local history", async () => {
+    const fixture = await publicationFixture({ createDatabase: false });
+    const controller = new AbortController();
+    const reason = new Error("Inspection already canceled.");
+    controller.abort(reason);
+    await expect(
+      inspectPublicationStore(
+        fixture.publication,
+        fixture.environment,
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+    expect(existsSync(fixture.stateDirectory)).toBe(false);
+  });
+
   test("does not create a missing database or migrate old history", async () => {
     const missing = await publicationFixture({ createDatabase: false });
     await expect(

@@ -14,11 +14,14 @@ import {
 export async function inspectPublicationStore(
   publication: PreparedScanPublication,
   environment: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
 ): Promise<PublishedScanIssue[]> {
   const result = await runPublicationWorkbench(
     "inspect-linear-publication",
     publication,
     environment,
+    undefined,
+    signal,
   );
   const recorded = result["recorded"];
   if (
@@ -120,7 +123,9 @@ async function runPublicationWorkbench(
   publication: PreparedScanPublication,
   environment: NodeJS.ProcessEnv,
   issues?: readonly PublishedScanIssue[],
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
+  signal?.throwIfAborted();
   const stateDirectory = codexSecurityStateDirectory(environment);
   const database = join(stateDirectory, "workbench.sqlite3");
   try {
@@ -135,9 +140,11 @@ async function runPublicationWorkbench(
     resolvePluginPython({
       environment,
       protectedRoot: publication.scanDirectory,
+      ...(signal === undefined ? {} : { signal }),
     }),
     bundledPluginRoot(),
   ]);
+  signal?.throwIfAborted();
   const findings = publication.issues.map(({ findingId, occurrenceId }) => ({
     findingId,
     occurrenceId,
@@ -166,6 +173,7 @@ async function runPublicationWorkbench(
         python,
         pluginRoot,
         environment,
+        ...(signal === undefined ? {} : { signal }),
         failureMessage:
           command === "record-linear-publications"
             ? "Could not persist created Linear issues in the local Codex Security scan history"

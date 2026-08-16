@@ -269,6 +269,40 @@ async function processHasExited(pid: number): Promise<boolean> {
 }
 
 describe("skip-recorded publication", () => {
+  test("forwards cancellation into read-only history inspection", async () => {
+    const publication = preparedPublication();
+    const controller = new AbortController();
+    const reason = new Error("Retry inspection canceled.");
+    await expect(
+      publishScanInternal(
+        "scan",
+        { ...OPTIONS, skipExisting: true, signal: controller.signal },
+        dependencies(
+          publication,
+          {},
+          {
+            inspectPublicationStore: async (
+              _publication,
+              _environment,
+              signal,
+            ) => {
+              expect(signal).toBe(controller.signal);
+              controller.abort(reason);
+              signal!.throwIfAborted();
+              return [];
+            },
+            preparePublicationStore: async () => {
+              throw new Error("Canceled retries must not write history.");
+            },
+            resolveCodex: () => {
+              throw new Error("Canceled retries must not start Codex.");
+            },
+          },
+        ),
+      ),
+    ).rejects.toBe(reason);
+  });
+
   test("keeps the default create-new behavior and makes opt-in previews read-only", async () => {
     const publication = preparedPublication(2);
     const recorded: PublishedScanIssue = {

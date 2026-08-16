@@ -253,6 +253,32 @@ describe("read-only publication preflight", () => {
     expect(calls).toEqual([]);
   });
 
+  test("forwards cancellation while history inspection is in progress", async () => {
+    const controller = new AbortController();
+    const reason = new Error("History check canceled.");
+    await expect(
+      checkScanPublicationInternal(
+        "scan",
+        { ...OPTIONS, signal: controller.signal },
+        dependencies({
+          inspectPublicationStore: async (
+            _publication,
+            _environment,
+            signal,
+          ) => {
+            expect(signal).toBe(controller.signal);
+            controller.abort(reason);
+            signal!.throwIfAborted();
+            return [];
+          },
+          linearClient: () => {
+            throw new Error("Canceled checks must not contact Linear.");
+          },
+        }),
+      ),
+    ).rejects.toBe(reason);
+  });
+
   test("does not echo provider response data on an access failure", async () => {
     const key = "lin_api_SYNTHETIC_PRIVATE_KEY";
     const client = readClient([]);

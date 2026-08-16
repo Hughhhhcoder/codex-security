@@ -192,7 +192,7 @@ export async function publishScanInternal(
   if (options.skipExisting) {
     result.skipped = await (
       dependencies.inspectPublicationStore ?? inspectPublicationStore
-    )(preparedScan, environment);
+    )(preparedScan, environment, options.signal);
     result.counts.skipped = result.skipped.length;
     const recorded = new Set(result.skipped.map((issue) => issue.findingId));
     prepared = {
@@ -424,7 +424,7 @@ export async function checkScanPublicationInternal(
   );
   const recorded = await (
     dependencies.inspectPublicationStore ?? inspectPublicationStore
-  )(prepared, environment);
+  )(prepared, environment, options.signal);
   options.signal?.throwIfAborted();
   const result: CheckScanPublicationResult = {
     scanId: prepared.scanId,
