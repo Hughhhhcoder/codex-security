@@ -91,6 +91,7 @@ export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
   environment: ProcessEnvironment;
+  protectedRoot?: string;
   signal?: AbortSignal;
   failureMessage?: string;
 }
@@ -1292,6 +1293,39 @@ export async function runWorkbench(
 ): Promise<JsonObject> {
   let stdout: string;
   try {
+    let environment = Object.fromEntries(
+      Object.entries(options.environment).filter(
+        ([name]) =>
+          name.toUpperCase() !== "OPENAI_API_KEY" &&
+          name.toUpperCase() !== "CODEX_API_KEY" &&
+          name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+          name.toUpperCase() !== "FIREWORKS_API_KEY",
+      ),
+    );
+    if (options.protectedRoot !== undefined) {
+      if (
+        !Object.keys(environment).some((name) => name.toUpperCase() === "PATH")
+      ) {
+        const inheritedPath = Object.entries(process.env).find(
+          ([name]) => name.toUpperCase() === "PATH",
+        )?.[1];
+        if (inheritedPath !== undefined) environment["PATH"] = inheritedPath;
+      }
+      const python = await resolveTrustedExecutable(
+        options.python,
+        environment,
+        options.protectedRoot,
+      );
+      if (python !== null) environment = python.environment;
+      const git = await resolveTrustedExecutable(
+        "git",
+        environment,
+        options.protectedRoot,
+      );
+      environment["CODEX_SECURITY_GIT_EXECUTABLE"] = git?.executable ?? "";
+      environment["CODEX_SECURITY_GIT_PATH"] =
+        git?.environment["PATH"] ?? environment["PATH"] ?? "";
+    }
     ({ stdout } = await execFile(
       options.python,
       [
@@ -1301,15 +1335,7 @@ export async function runWorkbench(
         ...args,
       ],
       {
-        env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY" &&
-              name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-              name.toUpperCase() !== "FIREWORKS_API_KEY",
-          ),
-        ),
+        env: environment,
         encoding: "utf8",
         maxBuffer: Infinity,
         windowsHide: true,

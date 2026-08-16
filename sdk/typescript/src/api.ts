@@ -813,6 +813,7 @@ export class CodexSecurity {
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
+        protectedRoot,
         environment: {
           ...selectedScanEnvironment(
             runtime.environment,

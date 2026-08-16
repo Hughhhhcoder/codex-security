@@ -3809,6 +3809,113 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
+  test("does not execute repository-local Git shims in the trusted workbench", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const untrusted = join(repository, "node_modules", ".bin");
+    const pluginRoot = join(root, "plugin");
+    await mkdir(untrusted, { recursive: true });
+    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+    const fakeGit = join(
+      untrusted,
+      process.platform === "win32" ? "git.cmd" : "git",
+    );
+    await writeFile(
+      fakeGit,
+      process.platform === "win32"
+        ? "@echo repository-controlled-git\r\n"
+        : "#!/bin/sh\necho repository-controlled-git\n",
+      { mode: 0o755 },
+    );
+    await writeFile(
+      join(pluginRoot, "scripts", "workbench_db.py"),
+      [
+        "import json, os, sys",
+        "from pathlib import Path",
+        "sys.path.insert(0, os.environ['CODEX_SECURITY_TEST_PLUGIN_SCRIPTS'])",
+        "from workbench_target import git_output",
+        "git = git_output(Path(os.environ['CODEX_SECURITY_TEST_REPOSITORY']), '--version')",
+        "print(json.dumps({'git': git, 'path': os.environ.get('PATH')}))",
+      ].join("\n"),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+
+    const result = await runWorkbench(
+      {
+        python: python!,
+        pluginRoot,
+        protectedRoot: repository,
+        environment: {
+          CODEX_SECURITY_TEST_PLUGIN_SCRIPTS: join(PLUGIN_ROOT, "scripts"),
+          CODEX_SECURITY_TEST_REPOSITORY: repository,
+          PATH: [untrusted, process.env["PATH"]]
+            .filter(Boolean)
+            .join(delimiter),
+        },
+      },
+      ["test-command"],
+    );
+
+    expect(result["git"]).toStartWith("git version ");
+    expect(String(result["path"]).split(delimiter)).not.toContain(untrusted);
+
+    const withoutGit = await runWorkbench(
+      {
+        python: python!,
+        pluginRoot,
+        protectedRoot: repository,
+        environment: {
+          CODEX_SECURITY_TEST_PLUGIN_SCRIPTS: join(PLUGIN_ROOT, "scripts"),
+          CODEX_SECURITY_TEST_REPOSITORY: repository,
+          PATH: untrusted,
+        },
+      },
+      ["test-command"],
+    );
+    expect(withoutGit).toMatchObject({ git: null, path: "" });
+
+    const inherited = await runWorkbench(
+      {
+        python: python!,
+        pluginRoot,
+        protectedRoot: repository,
+        environment: {
+          CODEX_SECURITY_TEST_PLUGIN_SCRIPTS: join(PLUGIN_ROOT, "scripts"),
+          CODEX_SECURITY_TEST_REPOSITORY: repository,
+        },
+      },
+      ["test-command"],
+    );
+    expect(inherited["git"]).toStartWith("git version ");
+
+    if (process.platform !== "win32") {
+      const helpers = join(root, "trusted-helpers");
+      const launcher = join(root, "trusted-python");
+      await mkdir(helpers);
+      await symlink(Bun.which("sh")!, join(helpers, "sh"));
+      await writeFile(
+        launcher,
+        `#!/usr/bin/env sh\nexec ${JSON.stringify(python)} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const configured = await runWorkbench(
+        {
+          python: launcher,
+          pluginRoot,
+          protectedRoot: repository,
+          environment: {
+            CODEX_SECURITY_TEST_PLUGIN_SCRIPTS: join(PLUGIN_ROOT, "scripts"),
+            CODEX_SECURITY_TEST_REPOSITORY: repository,
+            PATH: helpers,
+          },
+        },
+        ["test-command"],
+      );
+      expect(configured).toMatchObject({ git: null, path: helpers });
+    }
+  });
+
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
     const root = await temporaryDirectory("codex-security-legacy-migrations-");
     const repository = join(root, "repository");

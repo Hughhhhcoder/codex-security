@@ -134,11 +134,18 @@ def git_command(
     for name in GIT_REPOSITORY_ENVIRONMENT:
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
+    executable = environment.pop("CODEX_SECURITY_GIT_EXECUTABLE", "git")
+    selected_path = environment.pop("CODEX_SECURITY_GIT_PATH", None)
+    if selected_path is not None:
+        environment["PATH"] = selected_path
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
-    command = ["git", "-c", "core.fsmonitor=false", "-C", str(target)]
+    command = [executable, "-c", "core.fsmonitor=false", "-C", str(target)]
     if git_dir is not None and work_tree is not None:
         command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
     full_command = [*command, *args]
+    if not executable:
+        empty_output = "" if text else b""
+        return subprocess.CompletedProcess(full_command, 127, empty_output, empty_output)
     try:
         return subprocess.run(
             full_command,
