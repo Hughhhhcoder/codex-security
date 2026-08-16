@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sqlite3
+import stat
 import sys
 from functools import cache
 from pathlib import Path, PurePosixPath
@@ -166,7 +167,9 @@ def source_path_in_scope(scan: sqlite3.Row, target: Path, path: str, scope: str)
             return False
     if path_within_scope(path, scope):
         try:
-            if PurePosixPath(path) == PurePosixPath(scope) or not (target / scope).is_file():
+            if PurePosixPath(path) == PurePosixPath(scope) or not scoped_path_is_file(
+                target / scope
+            ):
                 return True
             return bool(committed_tree_entries(target, scan["target_revision"], scope))
         except (KeyError, IndexError, OSError, RuntimeError, SystemExit):
@@ -205,11 +208,18 @@ def source_path_in_scope(scan: sqlite3.Row, target: Path, path: str, scope: str)
         except (OSError, RuntimeError, SystemExit):
             return False
     try:
-        if len(requested.parts) == len(actual.parts) or not (target / scope).is_file():
+        if len(requested.parts) == len(actual.parts) or not scoped_path_is_file(target / scope):
             return True
         committed_scope = str(PurePosixPath(*actual.parts[: len(requested.parts)]))
         return bool(committed_tree_entries(target, scan["target_revision"], committed_scope))
     except (KeyError, IndexError, OSError, RuntimeError, SystemExit):
+        return False
+
+
+def scoped_path_is_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except FileNotFoundError:
         return False
 
 
