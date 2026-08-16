@@ -219,7 +219,7 @@ def source_path_in_scope(scan: sqlite3.Row, target: Path, path: str, scope: str)
 def scoped_path_is_file(path: Path) -> bool:
     try:
         return stat.S_ISREG(path.stat().st_mode)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         return False
 
 
@@ -228,6 +228,16 @@ def filesystem_case_alias(target: Path, selected: Path, actual: Path) -> bool:
         if selected.is_symlink() or actual.is_symlink() or not selected.samefile(actual):
             return False
     except OSError:
+        if len(selected.name) != len(actual.name) or any(
+            left != right
+            and (
+                not left.isascii()
+                or not right.isascii()
+                or left.casefold() != right.casefold()
+            )
+            for left, right in zip(selected.name, actual.name)
+        ):
+            return False
         for directory in (target, *target.parents):
             alternative = next(
                 (
