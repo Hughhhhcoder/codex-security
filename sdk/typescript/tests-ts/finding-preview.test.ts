@@ -304,7 +304,7 @@ describe("bundled finding previews", () => {
       nestedTarget: "1  deadbeef:ScopedTarget/private.py",
       missingGit: null,
       caseSensitiveCollision: null,
-      missingCaseSibling: "1  deadbeef:src/public.py",
+      missingCaseSibling: null,
       missingUnicodeAlias: null,
       mixedCaseFilesystem: null,
       unauthenticatedCommittedAlias: null,
@@ -329,6 +329,47 @@ describe("bundled finding previews", () => {
     if (preview.caseAlias !== null) {
       expect(preview.caseAlias).toBe("1  deadbeef:src/public.py");
     }
+  });
+
+  test("does not use linked entries as evidence of case-insensitive paths", () => {
+    const python =
+      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    expect(python).not.toBeNull();
+    const program = [
+      "import json, stat, sys, tempfile",
+      "from contextlib import nullcontext",
+      "from pathlib import Path",
+      "from types import SimpleNamespace",
+      "from unittest.mock import patch",
+      "sys.path.insert(0, sys.argv[1])",
+      "import workbench_source_excerpt as excerpts",
+      "with tempfile.TemporaryDirectory() as directory:",
+      "    target = Path(directory).resolve()",
+      "    def probe(kind):",
+      "        names = ['Probe', 'probe'] if kind == 'distinct' else ['Probe']",
+      "        entries = [SimpleNamespace(name=name, path=str(target / name)) for name in names]",
+      "        def metadata(path, *args, **kwargs):",
+      "            mode = stat.S_IFLNK if kind == 'symlink' and path.name == 'probe' else stat.S_IFREG",
+      "            return SimpleNamespace(st_mode=mode, st_nlink=2 if kind == 'hardlink' else 1, st_file_attributes=0x400 if kind == 'reparse' and path.name == 'probe' else 0)",
+      "        def samefile(path, other):",
+      "            if path.name in {'SECRET.py', 'secret.py'}: raise FileNotFoundError",
+      "            return {path.name, Path(other).name} == {'Probe', 'probe'}",
+      "        with patch.object(Path, 'is_symlink', return_value=False), patch.object(Path, 'lstat', metadata), patch.object(Path, 'samefile', samefile), patch.object(excerpts.os, 'scandir', side_effect=lambda _: nullcontext(entries)), patch.object(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400, create=True):",
+      "            return excerpts.filesystem_case_alias(target, target / 'SECRET.py', target / 'secret.py')",
+      "    print(json.dumps({kind: probe(kind) for kind in ['regular', 'symlink', 'hardlink', 'distinct', 'reparse']}))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      regular: true,
+      symlink: false,
+      hardlink: false,
+      distinct: false,
+      reparse: false,
+    });
   });
 
   test("normalizes attack-path assessments without changing stored finding details", () => {

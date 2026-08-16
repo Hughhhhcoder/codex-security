@@ -228,6 +228,16 @@ def scoped_path_is_file(path: Path) -> bool:
         return False
 
 
+def safe_case_probe(metadata: os.stat_result) -> bool:
+    if getattr(metadata, "st_file_attributes", 0) & getattr(
+        stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
+    ):
+        return False
+    return stat.S_ISDIR(metadata.st_mode) or (
+        stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+    )
+
+
 def filesystem_case_alias(target: Path, selected: Path, actual: Path) -> bool:
     try:
         if selected.is_symlink() or actual.is_symlink() or not selected.samefile(actual):
@@ -248,25 +258,30 @@ def filesystem_case_alias(target: Path, selected: Path, actual: Path) -> bool:
             return False
         try:
             with os.scandir(selected.parent) as entries:
-                for entry in entries:
-                    alternative = next(
-                        (
-                            entry.name[:index]
-                            + character.swapcase()
-                            + entry.name[index + 1 :]
-                            for index, character in enumerate(entry.name)
-                            if character.isascii() and character.isalpha()
-                        ),
-                        None,
-                    )
-                    if alternative is None or entry.is_symlink():
-                        continue
-                    try:
-                        candidate = Path(entry.path)
-                        if candidate.samefile(candidate.with_name(alternative)):
-                            return True
-                    except OSError:
-                        continue
+                probes = list(entries)
+            names = {entry.name for entry in probes}
+            for entry in probes:
+                alternative = next(
+                    (
+                        entry.name[:index]
+                        + character.swapcase()
+                        + entry.name[index + 1 :]
+                        for index, character in enumerate(entry.name)
+                        if character.isascii() and character.isalpha()
+                    ),
+                    None,
+                )
+                if alternative is None or alternative in names:
+                    continue
+                try:
+                    candidate = Path(entry.path)
+                    alias = candidate.with_name(alternative)
+                    if all(
+                        safe_case_probe(path.lstat()) for path in (candidate, alias)
+                    ) and candidate.samefile(alias):
+                        return True
+                except OSError:
+                    continue
         except OSError:
             return False
         return False
@@ -362,8 +377,10 @@ def committed_object(
                 try:
                     if actual.samefile(repository / parent / entry):
                         raise OSError("Committed source path has an ambiguous case alias.")
-                except FileNotFoundError:
-                    continue
+                except (FileNotFoundError, NotADirectoryError) as error:
+                    raise OSError(
+                        "Committed source path has an unauthenticated case collision."
+                    ) from error
         if len(aliases) == 1 and aliases[0] != name:
             selected_path = repository / parent / name
             committed_alias = repository / parent / aliases[0]
