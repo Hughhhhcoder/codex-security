@@ -4,6 +4,7 @@ import {
   appendFile,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   rm,
   writeFile,
@@ -113,6 +114,10 @@ export interface PublishScanDependencies {
   ) => Promise<PublicationCodexResult>;
   preparePublicationStore?: typeof preparePublicationStore;
   recordPublishedIssues?: typeof recordPublishedIssues;
+  writeEvents?: (
+    directory: string,
+    events: readonly string[],
+  ) => Promise<string>;
   writeReceipt?: (
     result: PublishScanResult,
     environment: NodeJS.ProcessEnv,
@@ -297,21 +302,6 @@ export async function publishScanInternal(
     prepared,
     failureMessage,
   );
-  let eventLogFile: string | undefined;
-  let eventLogWarning: string | undefined;
-  if (events.completedEvents !== undefined) {
-    const file = join(handoff.directory, `events-${randomUUID()}.jsonl`);
-    try {
-      await writeFile(file, `${events.completedEvents.join("\n")}\n`, {
-        encoding: "utf8",
-        flag: "wx",
-        mode: 0o600,
-      });
-      eventLogFile = file;
-    } catch (error) {
-      eventLogWarning = `Could not preserve unverified Linear publication events: ${safeErrorMessage(error)}.`;
-    }
-  }
   const handoffResults = await collectPublicationHandoff(
     handoff.file,
     prepared,
@@ -320,12 +310,11 @@ export async function publishScanInternal(
   );
   result.failed = handoffResults.failed;
   result.counts.failed = result.failed.length;
-  const recoveryMessage = `The publication handoff remains at ${handoff.file}${eventLogFile === undefined ? "" : ` (completed events: ${eventLogFile})`}; recover it before retrying to avoid creating duplicate issues.`;
+  const recoveryMessage = `The publication handoff remains at ${handoff.file}; recover it before retrying to avoid creating duplicate issues.`;
   if (handoffResults.indeterminate) {
     result.indeterminate = true;
     result.warnings = [
       `The Linear publication outcome is indeterminate; local history may not include every created issue. ${recoveryMessage}`,
-      ...(eventLogWarning === undefined ? [] : [eventLogWarning]),
     ];
     try {
       await saveReceipt(result, environment);
@@ -335,7 +324,7 @@ export async function publishScanInternal(
       );
     }
   }
-  const recoveryDetails = result.warnings?.join(" ") ?? recoveryMessage;
+  let persistenceFailure: { cause: unknown; detail: string } | undefined;
   if (handoffResults.created.length > 0) {
     try {
       await preserveVerifiedHandoff(
@@ -346,32 +335,54 @@ export async function publishScanInternal(
       result.created = await (
         dependencies.recordPublishedIssues ?? recordPublishedIssues
       )(prepared, handoffResults.created, environment);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new CodexSecurityError(
-        `Could not persist created Linear issues: ${detail}. ${recoveryDetails}`,
-        { cause: error },
-      );
+    } catch (cause) {
+      persistenceFailure = { cause, detail: safeErrorMessage(cause) };
     }
   }
   result.counts.created = result.created.length;
-  if (options.signal?.aborted || handoffResults.indeterminate) {
-    const reason = options.signal?.aborted
-      ? "was interrupted"
-      : "could not verify every completed mutation";
+  if (
+    persistenceFailure !== undefined ||
+    options.signal?.aborted ||
+    handoffResults.indeterminate
+  ) {
+    if (events.completedEvents !== undefined) {
+      let eventLogNotice: string;
+      try {
+        const file = await (dependencies.writeEvents ?? writePublicationEvents)(
+          handoff.directory,
+          events.completedEvents,
+        );
+        eventLogNotice = `Completed Linear publication events remain at ${file}.`;
+      } catch (error) {
+        eventLogNotice = `Could not preserve unverified Linear publication events: ${safeErrorMessage(error)}.`;
+      }
+      result.warnings = [
+        ...(result.warnings ?? [recoveryMessage]),
+        eventLogNotice,
+      ];
+    }
+    const recoveryDetails = result.warnings?.join(" ") ?? recoveryMessage;
+    const reason =
+      persistenceFailure === undefined
+        ? `Linear publication ${options.signal?.aborted ? "was interrupted" : "could not verify every completed mutation"}`
+        : `Could not persist created Linear issues: ${persistenceFailure.detail}`;
+    const cause =
+      persistenceFailure === undefined
+        ? options.signal?.reason
+        : persistenceFailure.cause;
+    if (persistenceFailure !== undefined && !result.indeterminate) {
+      throw new CodexSecurityError(`${reason}. ${recoveryDetails}`, { cause });
+    }
     try {
       await saveReceipt(result, environment);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new CodexSecurityError(
-        `Linear publication ${reason} and its partial receipt could not be saved: ${detail}. ${recoveryDetails}`,
+        `${reason} and its partial receipt could not be saved: ${detail}. ${recoveryDetails}`,
         { cause: error },
       );
     }
-    throw new CodexSecurityError(
-      `Linear publication ${reason}. ${recoveryDetails}`,
-      { cause: options.signal?.reason },
-    );
+    throw new CodexSecurityError(`${reason}. ${recoveryDetails}`, { cause });
   }
   await rm(handoff.directory, { recursive: true, force: true }).catch(
     () => undefined,
@@ -1098,6 +1109,23 @@ function reportCodexEvent(
     onEvent(event);
   } catch {
     // Ignore malformed diagnostic lines and optional observer failures.
+  }
+}
+
+async function writePublicationEvents(
+  directory: string,
+  events: readonly string[],
+): Promise<string> {
+  const file = join(directory, `events-${randomUUID()}.jsonl`);
+  const handle = await open(file, "wx", 0o600);
+  try {
+    await handle.writeFile(`${events.join("\n")}\n`, "utf8");
+    await handle.close();
+    return file;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(file, { force: true }).catch(() => undefined);
+    throw error;
   }
 }
 

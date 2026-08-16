@@ -1035,6 +1035,45 @@ describe("connected Linear publication", () => {
     ]);
   });
 
+  test("does not stage recovery events for a determinate publication", async () => {
+    const publication = preparedPublication();
+    let handoffFile = "";
+    let eventWrites = 0;
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      OPTIONS,
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_command, _args, input) => {
+            handoffFile = publicationData(input).handoffFile;
+            return {
+              exitCode: 0,
+              stdout: issueEvent(publication.issues[0]!),
+              stderr: "",
+            };
+          },
+          recordPublishedIssues: async (_prepared, issues) => {
+            expect(
+              (await readdir(dirname(handoffFile))).filter((name) =>
+                name.startsWith("events-"),
+              ),
+            ).toEqual([]);
+            return [...issues];
+          },
+          writeEvents: async () => {
+            eventWrites += 1;
+            throw new Error("Determinate publication needs no recovery log.");
+          },
+        },
+      ),
+    );
+
+    expect(result.counts).toEqual({ findings: 1, created: 1, failed: 0 });
+    expect(eventWrites).toBe(0);
+  });
+
   test("retains completed calls with unfamiliar results until a handoff resolves them", async () => {
     const publication = preparedPublication(2);
     const unresolved = JSON.parse(issueEvent(publication.issues[1]!));
@@ -1886,6 +1925,11 @@ describe("connected Linear publication", () => {
                 return { exitCode: 0, stdout: output, stderr: "" };
               },
               recordPublishedIssues: async (_prepared, issues) => {
+                expect(
+                  (await readdir(dirname(handoffFile!))).filter((name) =>
+                    name.startsWith("events-"),
+                  ),
+                ).toEqual([]);
                 persisted = issues.map((issue) => issue.issueIdentifier);
                 return [...issues];
               },
@@ -1933,6 +1977,56 @@ describe("connected Linear publication", () => {
     },
   );
 
+  test("keeps optional recovery-write failures after verified history persistence", async () => {
+    const publication = preparedPublication(2);
+    const changed = JSON.parse(issueEvent(publication.issues[1]!));
+    changed.item.arguments.team = "different-team";
+    const phases: string[] = [];
+    let receipt: PublishScanResult | undefined;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {
+            stdout: [
+              issueEvent(publication.issues[0]!),
+              JSON.stringify(changed),
+            ].join("\n"),
+          },
+          {
+            recordPublishedIssues: async (_prepared, issues) => {
+              phases.push("history");
+              return [...issues];
+            },
+            writeEvents: async () => {
+              phases.push("events");
+              throw new Error("Synthetic event writer unavailable.");
+            },
+            writeReceipt: async (result) => {
+              phases.push(result.created.length === 0 ? "initial" : "final");
+              receipt = structuredClone(result);
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /could not verify every completed mutation.*Could not preserve unverified Linear publication events/u,
+    );
+
+    expect(phases).toEqual(["initial", "history", "events", "final"]);
+    expect(receipt).toMatchObject({
+      indeterminate: true,
+      created: [{ findingId: "finding-1", issueIdentifier: "SEC-1" }],
+      counts: { findings: 2, created: 1, failed: 1 },
+      warnings: expect.arrayContaining([
+        expect.stringContaining("Synthetic event writer unavailable"),
+      ]),
+    });
+  });
+
   test.each(["history", "handoff", "interruption"] as const)(
     "preserves durable indeterminate status across %s failure",
     async (failure) => {
@@ -1976,6 +2070,11 @@ describe("connected Linear publication", () => {
           },
           recordPublishedIssues: async (_prepared, issues) => {
             historyAttempted = true;
+            expect(
+              (await readdir(dirname(handoffFile))).filter((name) =>
+                name.startsWith("events-"),
+              ),
+            ).toEqual([]);
             expect(await readReceipt()).toMatchObject({
               indeterminate: true,
               created: [],
@@ -2023,7 +2122,7 @@ describe("connected Linear publication", () => {
       const archived = (await readdir(receiptDirectory)).filter(
         (name) => name.startsWith(`${digest}-`) && name.endsWith(".json"),
       );
-      expect(archived).toHaveLength(failure === "interruption" ? 2 : 1);
+      expect(archived).toHaveLength(2);
     },
   );
 
