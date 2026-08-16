@@ -155,6 +155,11 @@ identity_migration = next(
     migration for migration in MIGRATIONS if migration[1] == "persist repository identities"
 )
 identity_version = identity_migration[0]
+legacy_identity_migration = (
+    30, "persist repository identities",
+    "ALTER TABLE security_targets ADD COLUMN repository_identity TEXT;\n"
+    "CREATE INDEX security_targets_by_repository_identity ON security_targets(repository_identity);\n",
+)
 historical = tuple(migration for migration in MIGRATIONS if migration[0] <= 28)
 published = tuple(migration for migration in MIGRATIONS if migration[0] < identity_version)
 apply_migrations(
@@ -193,7 +198,7 @@ if scenario == "out-of-order-publication-migrations":
 elif scenario == "pre-release-identity-version":
     apply_migrations(
         connection,
-        (*historical, (30, *identity_migration[1:])),
+        (*historical, legacy_identity_migration),
         lambda: timestamp,
         backfill,
     )
@@ -210,6 +215,12 @@ columns = {
 indexes = {
     row["name"]: row
     for row in connection.execute("PRAGMA index_list(security_targets)")
+}
+scan_columns = {
+    row["name"]: row for row in connection.execute("PRAGMA table_info(scans)")
+}
+scan_indexes = {
+    row["name"]: row for row in connection.execute("PRAGMA index_list(scans)")
 }
 print(json.dumps({
     "backfillCalls": len(backfill_calls),
@@ -233,6 +244,16 @@ print(json.dumps({
     "repositoryIdentityIndexIsUnique": bool(
         indexes["security_targets_by_repository_identity"]["unique"]
     ),
+    "completionSequenceIsNullable": not bool(
+        scan_columns["completion_sequence"]["notnull"]
+    ),
+    "completionSequenceIndexIsUnique": bool(
+        scan_indexes["scans_completion_sequence"]["unique"]
+    ),
+    "completionSequenceTriggers": sorted(row["name"] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+        "AND name LIKE 'scans_assign_%_completion_sequence'"
+    )),
     "migrationName": connection.execute(
         "SELECT name FROM schema_migrations WHERE version = ?", (identity_version,)
     ).fetchone()[0],
@@ -381,6 +402,9 @@ describe("stable workbench target migration", () => {
       publicationMigrations: Record<string, string>;
       repositoryIdentityColumnIsNullable: boolean;
       repositoryIdentityIndexIsUnique: boolean;
+      completionSequenceIsNullable: boolean;
+      completionSequenceIndexIsUnique: boolean;
+      completionSequenceTriggers: string[];
       targetIdentity: string | null;
       targetId: string;
       teamOnlyPublicationIndexes: string[];
@@ -397,6 +421,12 @@ describe("stable workbench target migration", () => {
       },
       repositoryIdentityColumnIsNullable: true,
       repositoryIdentityIndexIsUnique: false,
+      completionSequenceIsNullable: true,
+      completionSequenceIndexIsUnique: true,
+      completionSequenceTriggers: [
+        "scans_assign_inserted_completion_sequence",
+        "scans_assign_updated_completion_sequence",
+      ],
       targetIdentity: null,
       targetId: "target-existing",
       teamOnlyPublicationIndexes: [

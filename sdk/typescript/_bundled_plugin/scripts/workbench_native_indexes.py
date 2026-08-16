@@ -33,9 +33,15 @@ def list_global_findings(
     limit = min(args.limit, FINDINGS_PAGE_MAX)
     query = args.query.strip().casefold() if args.query else ""
     identities = RepositoryIdentityCache(connection)
-    target_ids = (
-        None if args.target_id is None else identities.target_ids(args.target_id)
-    )
+    repository = getattr(args, "repository", None)
+    if repository is not None:
+        target_ids = identities.target_ids_for_path(
+            str(Path(repository).expanduser().resolve())
+        )
+    else:
+        target_ids = (
+            None if args.target_id is None else identities.target_ids(args.target_id)
+        )
     findings = (
         row
         for row in _indexed_findings(connection, identities=identities, target_ids=target_ids)
@@ -149,17 +155,28 @@ def _indexed_findings(
         if before != after:
             parents[after] = before
 
+    completion_column = (
+        "scans.completion_sequence"
+        if "completion_sequence" in identities.scan_columns else "NULL"
+    )
+    completed_at_column = (
+        "scans.completed_at" if "completed_at" in identities.scan_columns else "NULL"
+    )
     latest_scan_by_repository = {
         identities.group(row["target_id"]): row["id"]
-        for row in connection.execute(
-            f"""
-            SELECT scans.target_id, scans.id
-            FROM scans
-            JOIN security_targets AS targets ON targets.id = scans.target_id
-            WHERE scans.status = 'complete' AND {target_filter}
-            ORDER BY scans.started_at, scans.id
-            """,
-            target_values,
+        for row in sorted(
+            connection.execute(
+                f"""
+                SELECT scans.target_id, scans.id, scans.started_at,
+                    {completed_at_column} AS completed_at,
+                    {completion_column} AS completion_sequence
+                FROM scans
+                JOIN security_targets AS targets ON targets.id = scans.target_id
+                WHERE scans.status = 'complete' AND {target_filter}
+                """,
+                target_values,
+            ),
+            key=scan_history._scan_completion_order,
         )
     }
 

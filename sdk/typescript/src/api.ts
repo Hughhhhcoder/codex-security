@@ -1923,16 +1923,19 @@ export class CodexSecurity {
 
 export async function listRepositoryFindings(
   workbench: (args: readonly string[]) => Promise<JsonObject>,
-  targetId: string,
+  target: string | { repository: string },
   status: "open" | "all" = "open",
 ): Promise<JsonObject[] | undefined> {
   const findings: JsonObject[] = [];
+  const selector =
+    typeof target === "string"
+      ? ["--target-id", target]
+      : ["--repository", target.repository];
   let offset: number | undefined;
   do {
     const page = await workbench([
       "list-global-findings",
-      "--target-id",
-      targetId,
+      ...selector,
       ...(status === "open" ? ["--status", "open"] : []),
       ...(offset === undefined ? [] : ["--offset", String(offset)]),
     ]);

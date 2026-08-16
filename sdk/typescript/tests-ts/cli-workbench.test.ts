@@ -18,7 +18,6 @@ describe("CLI workbench", () => {
     const stdout = capture();
     const calls: Array<readonly string[]> = [];
     const responses: JsonObject[] = [
-      { scans: [{ targetId: "selected", targetPath: repository }] },
       { findings: [{ title: "Finding 1" }], nextOffset: 1 },
       { findings: [{ title: "Finding 2" }], nextOffset: null },
     ];
@@ -32,15 +31,14 @@ describe("CLI workbench", () => {
         }),
       ),
     ).toBe(0);
-    expect(calls[0]).toEqual(["list-scans", "--repository", repository]);
-    expect(calls[1]).toEqual([
+    expect(calls[0]).toEqual([
       "list-global-findings",
-      "--target-id",
-      "selected",
+      "--repository",
+      repository,
       "--status",
       "open",
     ]);
-    expect(calls[2]).toEqual([...calls[1]!, "--offset", "1"]);
+    expect(calls[1]).toEqual([...calls[0]!, "--offset", "1"]);
     expect(JSON.parse(stdout.text())).toEqual({
       repository,
       findings: [{ title: "Finding 1" }, { title: "Finding 2" }],
@@ -50,7 +48,7 @@ describe("CLI workbench", () => {
         ["findings", "--json"],
         capture().stream,
         capture().stream,
-        dependencies({ onWorkbench: () => ({ scans: [] }) }),
+        dependencies({ onWorkbench: () => ({ findings: [] }) }),
       ),
     ).toBe(0);
     for (const confirmed of [[true, false], []]) {
@@ -78,55 +76,32 @@ describe("CLI workbench", () => {
     }
   });
 
-  test.each([
-    { requestedScan: false, selectedTarget: "linked" },
-    { requestedScan: true, selectedTarget: "requested" },
-  ])(
-    "lists findings through one trusted target when requested scan exists: $requestedScan",
-    async ({ requestedScan, selectedTarget }) => {
-      const repository = resolve("/current/repository");
-      const linked = resolve("/current/repository-worktree");
-      const findings: JsonObject[] = [
-        { occurrenceId: "requested-finding", status: "open" },
-        { occurrenceId: "linked-finding", status: "open" },
-      ];
-      const calls: Array<readonly string[]> = [];
-      const stdout = capture();
-      expect(
-        await main(
-          ["findings", "list", "--json"],
-          stdout.stream,
-          capture().stream,
-          dependencies({
-            onWorkbench: (args): JsonObject => {
-              calls.push(args);
-              return args[0] === "list-scans"
-                ? {
-                    scans: [
-                      { targetId: "linked", targetPath: linked },
-                      ...(requestedScan
-                        ? [{ targetId: "requested", targetPath: repository }]
-                        : []),
-                    ],
-                  }
-                : { findings, nextOffset: null };
-            },
-          }),
-        ),
-      ).toBe(0);
-      expect(calls).toEqual([
-        ["list-scans", "--repository", repository],
-        [
-          "list-global-findings",
-          "--target-id",
-          selectedTarget,
-          "--status",
-          "open",
-        ],
-      ]);
-      expect(JSON.parse(stdout.text())).toEqual({ repository, findings });
-    },
-  );
+  test("preserves the original findings requester instead of selecting a historical alias", async () => {
+    const repository = resolve("/current/repository");
+    const findings: JsonObject[] = [
+      { occurrenceId: "requested-finding", status: "open" },
+      { occurrenceId: "linked-finding", status: "open" },
+    ];
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    expect(
+      await main(
+        ["findings", "list", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            return { findings, nextOffset: null };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      ["list-global-findings", "--repository", repository, "--status", "open"],
+    ]);
+    expect(JSON.parse(stdout.text())).toEqual({ repository, findings });
+  });
 
   test("returns no findings when no related repository has been scanned", async () => {
     const calls: Array<readonly string[]> = [];
@@ -140,12 +115,14 @@ describe("CLI workbench", () => {
         dependencies({
           onWorkbench: (args) => {
             calls.push(args);
-            return { scans: [] };
+            return { findings: [], nextOffset: null };
           },
         }),
       ),
     ).toBe(0);
-    expect(calls).toEqual([["list-scans", "--repository", repository]]);
+    expect(calls).toEqual([
+      ["list-global-findings", "--repository", repository, "--status", "open"],
+    ]);
     expect(JSON.parse(stdout.text())).toEqual({ repository, findings: [] });
   });
 

@@ -389,12 +389,21 @@ class RepositoryIdentityCache:
         target = self.targets.get(target_id)
         if not self.supports_identity or target is None:
             return {target_id}
-        requested = self.for_row(target)
+        return self._target_ids_for_state(self.for_row(target))
+
+    def target_ids_for_path(self, target_path: str) -> set[str]:
+        return self._target_ids_for_state(self.for_path(target_path))
+
+    def _target_ids_for_state(self, requested: RepositoryTargetState) -> set[str]:
         if not requested.ownership_matches:
             return set()
-        group = self.group(target_id)
-        if group[0] == "target":
-            return {target_id}
+        identity = (
+            requested.stored_identity or requested.verified_identity
+            if self.supports_identity else None
+        )
+        if identity is None:
+            return {requested.target_id} if requested.target_id else set()
+        group = ("repository", identity)
         return {candidate for candidate in self.targets if self.group(candidate) == group}
 
     def origin(self, state: RepositoryTargetState) -> tuple[str, str] | None:

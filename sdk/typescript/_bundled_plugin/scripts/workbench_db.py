@@ -885,6 +885,10 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "This Codex thread already has an active Deep Scan for the selected "
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
+        if ensure_security_target(connection, str(current_target)) != workspace["target_id"]:
+            raise SystemExit(
+                "The saved workspace no longer matches the selected repository target."
+            )
         insert_running_scan(
             connection,
             scan_id=scan_id,

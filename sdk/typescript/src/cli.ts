@@ -1083,12 +1083,16 @@ export async function main(
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
   const history = async (
-    args: readonly string[],
+    args: readonly string[] | (() => Promise<JsonObject>),
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
   ): Promise<JsonObject | undefined> => {
     try {
-      return await select(await dependencies.runWorkbench(args));
+      return await select(
+        await (typeof args === "function"
+          ? args()
+          : dependencies.runWorkbench(args)),
+      );
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
       exitCode = 2;
@@ -1236,23 +1240,13 @@ export async function main(
         args.repository ?? ".",
       );
       return presentHistory(
-        await history(
-          ["list-scans", "--repository", repository],
-          async (value): Promise<JsonObject> => {
-            const scans = value["scans"] as JsonObject[];
-            const target =
-              scans.find((scan) => scan["targetPath"] === repository) ??
-              scans[0];
-            const findings =
-              target === undefined
-                ? []
-                : await listRepositoryFindings(
-                    dependencies.runWorkbench,
-                    target["targetId"] as string,
-                  );
-            return { repository, findings: findings ?? [] };
-          },
-        ),
+        await history(async () => ({
+          repository,
+          findings:
+            (await listRepositoryFindings(dependencies.runWorkbench, {
+              repository,
+            })) ?? [],
+        })),
         "findings",
         format,
         { repository },

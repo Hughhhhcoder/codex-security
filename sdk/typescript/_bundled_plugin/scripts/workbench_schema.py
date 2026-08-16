@@ -692,6 +692,34 @@ MIGRATIONS = (
 
         CREATE INDEX security_targets_by_repository_identity
         ON security_targets(repository_identity);
+
+        ALTER TABLE scans
+        ADD COLUMN completion_sequence INTEGER CHECK (completion_sequence >= 1);
+
+        CREATE UNIQUE INDEX scans_completion_sequence
+        ON scans(completion_sequence);
+
+        CREATE TRIGGER scans_assign_inserted_completion_sequence
+        AFTER INSERT ON scans
+        WHEN NEW.status = 'complete' AND NEW.completion_sequence IS NULL
+        BEGIN
+            UPDATE scans
+            SET completion_sequence = (
+                SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM scans
+            )
+            WHERE id = NEW.id AND completion_sequence IS NULL;
+        END;
+
+        CREATE TRIGGER scans_assign_updated_completion_sequence
+        AFTER UPDATE OF status ON scans
+        WHEN NEW.status = 'complete' AND NEW.completion_sequence IS NULL
+        BEGIN
+            UPDATE scans
+            SET completion_sequence = (
+                SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM scans
+            )
+            WHERE id = NEW.id AND completion_sequence IS NULL;
+        END;
         """,
     ),
 )
@@ -1300,15 +1328,41 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
         "SELECT 1 FROM sqlite_master WHERE type = 'index' "
         "AND name = 'security_targets_by_repository_identity'"
     ).fetchone()
-    if "repository_identity" in columns and index_exists is not None:
-        return False
+    identity_changed = "repository_identity" not in columns or index_exists is None
+    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 31)
+    for statement in sql_statements(migration_sql):
+        if statement.startswith("ALTER TABLE security_targets"):
+            add_column_if_missing(connection, "security_targets", "repository_identity", "TEXT")
+            continue
+        if statement.startswith("ALTER TABLE scans"):
+            add_column_if_missing(
+                connection, "scans", "completion_sequence",
+                "INTEGER CHECK (completion_sequence >= 1)",
+            )
+            continue
+        for prefix in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TRIGGER "):
+            if statement.startswith(prefix):
+                statement = statement.replace(prefix, f"{prefix}IF NOT EXISTS ", 1)
+                break
+        connection.execute(statement)
 
-    add_column_if_missing(connection, "security_targets", "repository_identity", "TEXT")
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS security_targets_by_repository_identity "
-        "ON security_targets(repository_identity)"
-    )
-    return True
+    from workbench_scan_history import _scan_completion_order
+
+    sequence = connection.execute(
+        "SELECT COALESCE(MAX(completion_sequence), 0) FROM scans"
+    ).fetchone()[0]
+    unsequenced = connection.execute(
+        "SELECT id, started_at, completed_at FROM scans "
+        "WHERE status = 'complete' AND completion_sequence IS NULL"
+    ).fetchall()
+    for scan in sorted(unsequenced, key=_scan_completion_order):
+        sequence += 1
+        connection.execute(
+            "UPDATE scans SET completion_sequence = ? "
+            "WHERE id = ? AND completion_sequence IS NULL",
+            (sequence, scan["id"]),
+        )
+    return identity_changed
 
 
 def add_column_if_missing(

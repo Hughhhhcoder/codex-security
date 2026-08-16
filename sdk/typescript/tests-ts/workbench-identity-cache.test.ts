@@ -6,13 +6,14 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 const probe = String.raw`
 import argparse
 import hashlib
+import io
 import json
 import os
 import sqlite3
 import stat
 import sys
 from collections import Counter
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -32,12 +33,16 @@ root = Path.cwd() / "synthetic-identity-fixture"
 connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
 connection.execute("PRAGMA foreign_keys = ON")
-identity_migration = next(item for item in MIGRATIONS if item[0] == 31)
+legacy_identity_migration = (
+    30, "persist repository identities",
+    "ALTER TABLE security_targets ADD COLUMN repository_identity TEXT;\n"
+    "CREATE INDEX security_targets_by_repository_identity ON security_targets(repository_identity);\n",
+)
 initial = (
-    (*tuple(item for item in MIGRATIONS if item[0] <= 28), (30, *identity_migration[1:]))
+    (*tuple(item for item in MIGRATIONS if item[0] <= 28), legacy_identity_migration)
     if scenario in ("migration", "v30-current") else
     tuple(item for item in MIGRATIONS if item[0] <= 30)
-    if scenario == "null-history" else MIGRATIONS
+    if scenario in ("null-history", "completion-order") else MIGRATIONS
 )
 apply_migrations(connection, initial, lambda: timestamp, lambda database: None)
 paths = {}
@@ -286,6 +291,70 @@ with ExitStack() as stack:
                 "SELECT repository_identity FROM security_targets WHERE id = 'changed'"
             ).fetchone()[0],
         }))
+    elif scenario == "completion-order":
+        add_target("first", "repository-current")
+        add_target("second", "repository-current")
+        add_scan("legacy-b", "second", started="2026-07-31T01:00:00Z", created="2026-07-31T05:00:00+01:00")
+        add_scan("legacy-a", "first", started="2026-07-31T02:00:00Z", created="2026-07-31T04:00:00Z")
+        add_scan("legacy-missing", "first", started="2026-07-31T03:00:00Z")
+        connection.execute("UPDATE scans SET completed_at = NULL WHERE id = 'legacy-missing'")
+        add_scan("visible-last", "first", started="2026-08-01T01:00:00Z")
+        add_scan("visible-first", "second", started="2026-08-01T02:00:00Z")
+        connection.execute(
+            "UPDATE scans SET status = 'running', completed_at = NULL "
+            "WHERE id IN ('visible-last', 'visible-first')"
+        )
+        apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
+        def sequences():
+            return {row["id"]: row["completion_sequence"] for row in connection.execute(
+                "SELECT id, completion_sequence FROM scans ORDER BY completion_sequence, id"
+            )}
+        def predecessors(scan_id):
+            plan = history.list_unmatched_scan_pairs(
+                connection,
+                argparse.Namespace(repository=paths["first"], force=False, after_scan_id=scan_id),
+                backfill_finding_details=lambda *_: None, read_coverage=lambda _: {},
+            )
+            return [scan["scanId"] for batch in plan["batches"] for scan in batch["beforeScans"]]
+        legacy = sequences()
+        connection.execute(
+            "UPDATE scans SET status = 'complete', completed_at = '2026-08-01T04:00:00Z' "
+            "WHERE id = 'visible-first'"
+        )
+        connection.commit()
+        first_predecessors = predecessors("visible-first")
+        connection.execute(
+            "UPDATE scans SET status = 'complete', completed_at = '2026-08-01T03:00:00Z' "
+            "WHERE id = 'visible-last'"
+        )
+        connection.commit()
+        add_finding("visible-first", "first-finding")
+        add_finding("visible-last", "last-finding")
+        confirmed = {row["findingId"]: row["confirmedInLatestScan"] for row in findings("first")}
+        last_predecessors = predecessors("visible-last")
+        reciprocal_predecessors = predecessors("visible-first")
+        connection.execute("UPDATE scans SET status = 'complete' WHERE id = 'visible-last'")
+        connection.execute("UPDATE scans SET status = 'failed' WHERE id = 'visible-last'")
+        add_scan("inserted-complete", "second", created="2026-07-01T00:00:00Z")
+        before_repair = sequences()
+        apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
+        print(json.dumps({
+            "legacy": legacy,
+            "firstPredecessors": first_predecessors,
+            "lastPredecessors": last_predecessors,
+            "reciprocalPredecessors": reciprocal_predecessors,
+            "confirmed": confirmed,
+            "sequences": sequences(),
+            "idempotent": sequences() == before_repair,
+            "sequenceOutranksFallback": history._scan_completion_order({
+                "id": "fallback", "started_at": "2999-01-01T00:00:00Z"
+            }) < history._scan_completion_order({
+                "id": "sequenced", "completion_sequence": 1
+            }),
+            "sealedTimes": {row["id"]: row["completed_at"] for row in connection.execute(
+                "SELECT id, completed_at FROM scans WHERE id IN ('visible-first', 'visible-last')"
+            )},
+        }))
     elif scenario == "persisted-alias":
         for name, stored, live in [
             ("requested", "repository-current", None),
@@ -296,6 +365,8 @@ with ExitStack() as stack:
         ]:
             add_target(name, stored, live)
             add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
+        add_target("fresh", "repository-current")
+        connection.execute("DELETE FROM security_targets WHERE id = 'fresh'")
         metadata[paths["reused"]].st_ino += 1000
         add_finding("requested-scan", "current-finding")
         add_finding("reused-scan", "historical-finding", closed=True)
@@ -308,17 +379,94 @@ with ExitStack() as stack:
         feedback = get_scan_feedback(
             connection, connection.execute("SELECT * FROM scans WHERE id = 'requested-scan'").fetchone()
         )
+        def requested_findings(name):
+            return indexes.list_global_findings(
+                connection,
+                argparse.Namespace(repository=paths[name], target_id=None, limit=50, offset=0,
+                                   query=None, severity=None, status=None),
+            )["findings"]
+        target_count = connection.execute("SELECT COUNT(*) FROM security_targets").fetchone()[0]
+        fresh_findings = requested_findings("fresh")
+        with patch.object(sys, "argv", [
+            "workbench", "list-global-findings", "--repository", paths["fresh"],
+            "--target-id", "reused",
+        ]), redirect_stderr(io.StringIO()):
+            try:
+                workbench.parse_args("Synthetic selector test")
+            except SystemExit as error:
+                rejects_both_selectors = error.code == 2
+            else:
+                rejects_both_selectors = False
         print(json.dumps({
             "scans": scans,
             "replacementRequest": listed("reused"),
             "aliases": sorted(indexes.repository_target_ids(connection, "requested")),
             "findings": sorted(row["findingId"] for row in findings("requested")),
+            "freshFindings": sorted(row["findingId"] for row in fresh_findings),
+            "replacementFindings": requested_findings("reused"),
+            "rejectsBothSelectors": rejects_both_selectors,
+            "readOnly": target_count == connection.execute("SELECT COUNT(*) FROM security_targets").fetchone()[0]
+                and connection.execute("SELECT 1 FROM security_targets WHERE id = 'fresh'").fetchone() is None,
             "feedback": [row["findingId"] for row in feedback["falsePositives"]],
             "matchingCount": matching["scanCount"],
             "reusedListingProbes": reused_listing_probes,
             "stored": connection.execute(
                 "SELECT repository_identity FROM security_targets WHERE id = 'reused'"
             ).fetchone()[0],
+        }))
+    elif scenario == "saved-start":
+        original_identity = add_target("requested", "repository-current")
+        other_identity = add_target("other", "repository-other")
+        add_scan("historical", "requested")
+        target = Path(paths["requested"])
+        target_root = root / "scan-output"
+        original_mkdir = Path.mkdir
+        stack.enter_context(patch.object(Path, "mkdir", lambda path, *args, **kwargs: None if path == target_root else original_mkdir(path, *args, **kwargs)))
+        stack.enter_context(patch.object(workbench, "require_uuid", side_effect=lambda value, label: value))
+        stack.enter_context(patch.object(workbench, "require_target", return_value=target))
+        stack.enter_context(patch.object(workbench, "require_remediation_target", return_value=target))
+        stack.enter_context(patch.object(workbench, "require_scannable_target"))
+        stack.enter_context(patch.object(workbench, "require_scope", return_value="."))
+        stack.enter_context(patch.object(workbench, "directory_snapshot_regular_file_count", return_value=0))
+        stack.enter_context(patch.object(workbench, "scan_target_identity", return_value=("synthetic", None, 7, metadata[str(target)].st_ino)))
+        stack.enter_context(patch.object(workbench, "scan_target_root", return_value=target_root))
+        checks = []
+        original_ensure = workbench.ensure_security_target
+        def ensure(database, target_path):
+            checks.append({"transaction": database.in_transaction, "path": target_path})
+            return original_ensure(database, target_path)
+        stack.enter_context(patch.object(workbench, "ensure_security_target", side_effect=ensure))
+        class StartAccepted(Exception):
+            pass
+        stack.enter_context(patch.object(workbench, "insert_running_scan", side_effect=StartAccepted))
+        accepted = {}
+        for name, saved_target, live in [
+            ("valid", "requested", original_identity),
+            ("changed-generation", "requested", other_identity),
+            ("changed-saved-id", "other", original_identity),
+        ]:
+            details[str(target)] = live
+            connection.execute(
+                "INSERT INTO workspaces (id, target_id, target_path, submitted, created_at, updated_at) "
+                "VALUES (?, ?, ?, 1, ?, ?)",
+                (name, saved_target, str(target), timestamp, timestamp),
+            )
+            connection.commit()
+            try:
+                workbench.start_scan(
+                    connection, argparse.Namespace(workspace_id=name, scan_root=None, model=None, reasoning_effort=None)
+                )
+            except StartAccepted:
+                accepted[name] = True
+            except SystemExit:
+                accepted[name] = False
+        print(json.dumps({
+            "accepted": accepted,
+            "verifiedInsideTransaction": len(checks) == 3 and all(
+                item == {"transaction": True, "path": str(target)} for item in checks
+            ),
+            "scanCount": connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0],
+            "stored": connection.execute("SELECT repository_identity FROM security_targets WHERE id = 'requested'").fetchone()[0],
         }))
     elif scenario == "v30-current":
         generation_birth = state._timestamp_ns("2026-08-02T00:00:00Z")
@@ -341,7 +489,15 @@ with ExitStack() as stack:
                 (name + "-scan", "findings", str(root / name / "findings.json"), timestamp),
             )
         tables = ("scans", "findings", "finding_occurrences", "finding_triage", "scan_artifacts")
-        retained = {table: [tuple(row) for row in connection.execute("SELECT * FROM " + table)] for table in tables}
+        columns = {
+            table: ", ".join(row["name"] for row in connection.execute("PRAGMA table_info(" + table + ")"))
+            for table in tables
+        }
+        def retained_records():
+            return {table: [tuple(row) for row in connection.execute(
+                "SELECT " + columns[table] + " FROM " + table
+            )] for table in tables}
+        retained = retained_records()
         target_ids = sorted(paths)
         apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
         state.backfill_repository_identities(connection)
@@ -355,7 +511,7 @@ with ExitStack() as stack:
             "stored": {row["id"]: row["repository_identity"] for row in connection.execute(
                 "SELECT id, repository_identity FROM security_targets"
             )},
-            "recordsPreserved": retained == {table: [tuple(row) for row in connection.execute("SELECT * FROM " + table)] for table in tables},
+            "recordsPreserved": retained == retained_records(),
             "targetIdsPreserved": target_ids == sorted(row["id"] for row in connection.execute("SELECT id FROM security_targets")),
             "aliases": sorted(indexes.repository_target_ids(connection, "current-owner")),
             "removedExact": listed("removed-old"),
@@ -532,6 +688,39 @@ test("reuses verified legacy aliases and probes each saved target once per reque
   expect(result["changedStored"]).toBe("repository-previous");
 });
 
+test("orders completed history by database visibility across legacy and current writers", () => {
+  const result = run("completion-order");
+
+  expect(result["legacy"]).toEqual({
+    "visible-first": null,
+    "visible-last": null,
+    "legacy-missing": 1,
+    "legacy-a": 2,
+    "legacy-b": 3,
+  });
+  expect(result["firstPredecessors"]).not.toContain("visible-last");
+  expect(result["lastPredecessors"]).toContain("visible-first");
+  expect(result["reciprocalPredecessors"]).not.toContain("visible-last");
+  expect(result["confirmed"]).toEqual({
+    "first-finding": false,
+    "last-finding": true,
+  });
+  expect(result["sequences"]).toEqual({
+    "legacy-missing": 1,
+    "legacy-a": 2,
+    "legacy-b": 3,
+    "visible-first": 4,
+    "visible-last": 5,
+    "inserted-complete": 6,
+  });
+  expect(result["idempotent"]).toBe(true);
+  expect(result["sequenceOutranksFallback"]).toBe(true);
+  expect(result["sealedTimes"]).toEqual({
+    "visible-first": "2026-08-01T04:00:00Z",
+    "visible-last": "2026-08-01T03:00:00Z",
+  });
+});
+
 test("keeps authenticated historical aliases visible without trusting a replacement checkout", () => {
   const result = run("persisted-alias");
 
@@ -543,6 +732,13 @@ test("keeps authenticated historical aliases visible without trusting a replacem
   expect(result["replacementRequest"]).toEqual([]);
   expect(result["aliases"]).toEqual(["legacy", "requested", "reused"]);
   expect(result["findings"]).toEqual(["current-finding", "historical-finding"]);
+  expect(result["freshFindings"]).toEqual([
+    "current-finding",
+    "historical-finding",
+  ]);
+  expect(result["replacementFindings"]).toEqual([]);
+  expect(result["rejectsBothSelectors"]).toBe(true);
+  expect(result["readOnly"]).toBe(true);
   expect(result["feedback"]).toEqual(["historical-finding"]);
   expect(result["matchingCount"]).toBe(3);
   expect(result["reusedListingProbes"]).toBe(0);
@@ -590,6 +786,19 @@ test("admits rerun lineage only through the verified repository and exact scope"
     changed: false,
   });
   expect(result["scanCount"]).toBe(7);
+});
+
+test("revalidates saved workspace identity inside the scan-start transaction", () => {
+  const result = run("saved-start");
+
+  expect(result["accepted"]).toEqual({
+    valid: true,
+    "changed-generation": false,
+    "changed-saved-id": false,
+  });
+  expect(result["verifiedInsideTransaction"]).toBe(true);
+  expect(result["scanCount"]).toBe(1);
+  expect(result["stored"]).toBe("repository-current");
 });
 
 test("quarantines unproved public-v30 bindings without discarding historical records", () => {

@@ -237,12 +237,15 @@ def _owned_scan_clause(
     )
 
 
-def _scan_completion_order(scan: sqlite3.Row) -> tuple[int, str]:
+def _scan_completion_order(scan: sqlite3.Row) -> tuple[int, int, str]:
+    sequence = scan["completion_sequence"] if "completion_sequence" in scan.keys() else None
+    if sequence is not None:
+        return (1, sequence, scan["id"])
     completed_at = scan["completed_at"] if "completed_at" in scan.keys() else None
     timestamp = _timestamp_ns(completed_at)
     if timestamp is None:
         timestamp = _timestamp_ns(scan["started_at"])
-    return (timestamp if timestamp is not None else 0, scan["id"])
+    return (0, timestamp if timestamp is not None else 0, scan["id"])
 
 
 def list_unmatched_scan_pairs(
