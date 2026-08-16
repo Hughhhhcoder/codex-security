@@ -1099,6 +1099,12 @@ function higherCostUsage(
   if (next === null) return previous;
   const previousCost = estimateScanCost(model, previous);
   const nextCost = estimateScanCost(model, next);
+  if (previous !== null && previousCost === null && nextCost === null) {
+    const previousTotal =
+      BigInt(previous.input_tokens) + BigInt(previous.output_tokens);
+    const nextTotal = BigInt(next.input_tokens) + BigInt(next.output_tokens);
+    return previousTotal > nextTotal ? previous : next;
+  }
   return previousCost !== null &&
     nextCost !== null &&
     previousCost.estimatedUsd >= nextCost.estimatedUsd

@@ -2502,14 +2502,28 @@ describe("live scan cost tracking", () => {
     const observedRoot = { input_tokens: 100, output_tokens: 10 };
     const workerUsage = { input_tokens: 200, output_tokens: 20 };
     const completedRoot = { input_tokens: 1_000, output_tokens: 100 };
-    for (const [withWorker, refreshFails] of [
-      [false, true],
-      [true, true],
-      [true, false],
+    const equalTotalRoot = { input_tokens: 900, output_tokens: 200 };
+    const boundaryObserved = {
+      input_tokens: Number.MAX_SAFE_INTEGER,
+      output_tokens: 2,
+    };
+    const boundaryCompleted = { ...boundaryObserved, output_tokens: 1 };
+    expect(boundaryObserved.input_tokens + boundaryObserved.output_tokens).toBe(
+      boundaryCompleted.input_tokens + boundaryCompleted.output_tokens,
+    );
+    for (const [observed, completed, expected, withWorker, refreshFails] of [
+      [observedRoot, completedRoot, completedRoot, false, true],
+      [observedRoot, completedRoot, completedRoot, true, true],
+      [observedRoot, completedRoot, completedRoot, true, false],
+      [completedRoot, observedRoot, completedRoot, false, true],
+      [completedRoot, observedRoot, completedRoot, true, true],
+      [completedRoot, equalTotalRoot, equalTotalRoot, false, true],
+      [completedRoot, equalTotalRoot, equalTotalRoot, true, true],
+      [boundaryObserved, boundaryCompleted, boundaryObserved, false, true],
     ] as const) {
       const sessions: Record<string, MockAccountingEvent[]> = {
         "scan-thread": accountingSession("scan-thread", [
-          accountingEvent(observedRoot),
+          accountingEvent(observed),
         ]),
       };
       if (withWorker) {
@@ -2531,21 +2545,32 @@ describe("live scan cost tracking", () => {
         },
         async (tracker) => {
           expect((await tracker.stop()).usage).toMatchObject({
-            input_tokens: withWorker ? 300 : 100,
+            input_tokens:
+              observed.input_tokens +
+              (withWorker ? workerUsage.input_tokens : 0),
+            output_tokens:
+              observed.output_tokens +
+              (withWorker ? workerUsage.output_tokens : 0),
           });
           const refresh = refreshFails
             ? spyOn(tracker, "refresh").mockRejectedValue(refreshError)
             : null;
           try {
-            const final = await tracker.stop(completedRoot);
+            const final = await tracker.stop(completed);
             expect(final).toMatchObject({
               usage: {
-                input_tokens: withWorker ? 1_200 : 1_000,
-                output_tokens: withWorker ? 120 : 100,
+                input_tokens:
+                  expected.input_tokens +
+                  (withWorker ? workerUsage.input_tokens : 0),
+                output_tokens:
+                  expected.output_tokens +
+                  (withWorker ? workerUsage.output_tokens : 0),
               },
               cost: null,
             });
-            if (!withWorker) expect(final.usage).toBe(completedRoot);
+            if (!withWorker && expected === completed) {
+              expect(final.usage).toBe(completed);
+            }
             expect(await tracker.stop()).toBe(final);
             expect(reportedErrors).toEqual(refreshFails ? [refreshError] : []);
             expect(reportedCosts).toEqual([]);

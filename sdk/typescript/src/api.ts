@@ -1128,6 +1128,7 @@ export class CodexSecurity {
                 try {
                   return await tracker.stop(usage);
                 } catch {
+                  runPostScan = null;
                   throwIfAborted(signal, scanDir);
                   throw error;
                 }

@@ -2502,6 +2502,7 @@ describe("CodexSecurity orchestration", () => {
 
   test.each([
     "complete",
+    "complete-followup",
     "unverified",
     "canceled-before",
     "canceled-during",
@@ -2534,6 +2535,7 @@ describe("CodexSecurity orchestration", () => {
       };
       const rootCost = estimateScanCost(model, rootUsage)!;
       const finalCost = estimateScanCost(model, finalUsage)!;
+      const completes = state === "complete" || state === "complete-followup";
       const overBudget = state === "over-budget";
       const maxCostUsd = overBudget ? 0.001 : 1;
       const firstError = new Error("Initial strict accounting check failed.");
@@ -2608,7 +2610,13 @@ describe("CodexSecurity orchestration", () => {
         },
       );
       const outcome = client
-        .run(repository, { maxCostUsd, signal: cancellation.signal })
+        .run(repository, {
+          maxCostUsd,
+          signal: cancellation.signal,
+          ...(state === "unverified" || state === "complete-followup"
+            ? { postScanPrompt: "Record the completed scan accounting." }
+            : {}),
+        })
         .then(
           (result) => ({ ok: true as const, result }),
           (error: unknown) => ({ ok: false as const, error }),
@@ -2630,7 +2638,7 @@ describe("CodexSecurity orchestration", () => {
           releaseRetry.resolve();
         }
         const settled = await outcome;
-        if (state === "complete") {
+        if (completes) {
           expect(settled.ok).toBe(true);
           if (!settled.ok) throw settled.error;
           expect(settled.result.turnResult.usage).toMatchObject(finalUsage);
@@ -2662,8 +2670,8 @@ describe("CodexSecurity orchestration", () => {
         }
         expect(finalizations).toHaveLength(state === "canceled-before" ? 1 : 2);
         for (const usage of finalizations) expect(usage).toBe(rootUsage);
-        expect(cleanupStops).toBe(state === "complete" ? 0 : 1);
-        expect(turns).toBe(1);
+        expect(cleanupStops).toBe(completes ? 0 : 1);
+        expect(turns).toBe(state === "complete-followup" ? 2 : 1);
       } finally {
         releaseRetry.resolve();
         await outcome;
