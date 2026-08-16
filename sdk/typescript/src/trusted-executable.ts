@@ -85,6 +85,9 @@ export async function inspectTrustedExecutable(
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
+    if (process.platform === "win32" && /\.(?:bat|cmd)$/iu.test(canonical)) {
+      continue;
+    }
     if (!current.runnable) continue;
     try {
       await access(

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { constants } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -8,11 +9,16 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, test } from "bun:test";
-import { resolveTrustedExecutable } from "../src/trusted-executable.js";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import {
+  inspectTrustedExecutable,
+  resolveTrustedExecutable,
+} from "../src/trusted-executable.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -145,6 +151,148 @@ describe("trusted executable resolution", () => {
       expect(result.stdout.trim()).toBe(git);
     },
   );
+
+  test("rejects canonical Windows batch targets without rejecting native aliases", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "rejects canonical Windows batch targets without rejecting native aliases",
+      )
+    ) {
+      return;
+    }
+    const originalPromises = { ...fsPromises };
+    const originalPlatform = Object.getOwnPropertyDescriptor(
+      process,
+      "platform",
+    )!;
+    const root = join(tmpdir(), "trusted-executable-metadata-mock");
+    const repository = join(root, "repository");
+    const first = join(root, "first");
+    const second = join(root, "second");
+    const firstExe = join(first, "rg.exe");
+    const firstCom = join(first, "rg.com");
+    const secondExe = join(second, "rg.exe");
+    const native = join(root, "native-target");
+    const command = join(root, "target.CmD");
+    const batch = join(root, "target.BaT");
+    let paths = new Map<string, string>();
+    let files = new Set<string>();
+    const accesses: [string, number][] = [];
+    const missing = () =>
+      Object.assign(new Error("missing mock path"), { code: "ENOENT" });
+    mock.module("node:fs/promises", () => ({
+      ...originalPromises,
+      realpath: async (path: string) => {
+        const canonical = paths.get(path);
+        if (canonical === undefined) throw missing();
+        return canonical;
+      },
+      access: async (path: string, mode: number) => {
+        accesses.push([path, mode]);
+        if (!files.has(path)) throw missing();
+      },
+      stat: async (path: string) => ({ isFile: () => files.has(path) }),
+    }));
+    const cases: {
+      platform: NodeJS.Platform;
+      entries: string[];
+      targets: [string, string][];
+      executable: string | null;
+      keptEntries?: string[];
+    }[] = [
+      {
+        platform: "win32",
+        entries: [first],
+        targets: [[firstExe, command]],
+        executable: null,
+      },
+      {
+        platform: "win32",
+        entries: [first],
+        targets: [[firstExe, batch]],
+        executable: null,
+      },
+      {
+        platform: "win32",
+        entries: [first, second],
+        targets: [
+          [firstExe, command],
+          [secondExe, native],
+        ],
+        executable: secondExe,
+      },
+      {
+        platform: "win32",
+        entries: [first],
+        targets: [[firstExe, native]],
+        executable: firstExe,
+      },
+      {
+        platform: "win32",
+        entries: [first],
+        targets: [[firstCom, native]],
+        executable: firstCom,
+      },
+      {
+        platform: "win32",
+        entries: [first, second],
+        targets: [
+          [firstExe, join(repository, "target.cmd")],
+          [secondExe, native],
+        ],
+        executable: secondExe,
+        keptEntries: [second],
+      },
+      {
+        platform: "linux",
+        entries: [first],
+        targets: [[join(first, "rg"), command]],
+        executable: join(first, "rg"),
+      },
+    ];
+
+    try {
+      for (const entry of cases) {
+        Object.defineProperty(process, "platform", { value: entry.platform });
+        paths = new Map([
+          [repository, repository],
+          ...entry.entries.map((path): [string, string] => [path, path]),
+          ...entry.targets,
+        ]);
+        files = new Set(entry.targets.map(([, canonical]) => canonical));
+        accesses.length = 0;
+        expect(
+          await inspectTrustedExecutable(
+            "rg",
+            { PATH: entry.entries.join(delimiter), KEEP: "ok" },
+            repository,
+          ),
+        ).toEqual({
+          executable: entry.executable,
+          environment: {
+            KEEP: "ok",
+            PATH: (entry.keptEntries ?? entry.entries).join(delimiter),
+          },
+        });
+        expect(
+          accesses.every(
+            ([, mode]) =>
+              mode ===
+              (entry.platform === "win32" ? constants.F_OK : constants.X_OK),
+          ),
+        ).toBe(true);
+        if (entry.platform === "win32") {
+          expect(accesses.some(([path]) => /\.(?:bat|cmd)$/iu.test(path))).toBe(
+            false,
+          );
+        }
+      }
+    } finally {
+      Object.defineProperty(process, "platform", originalPlatform);
+      mock.module("node:fs/promises", () => originalPromises);
+    }
+  });
 
   test("selects runnable Windows executables ahead of extensionless and batch files", async () => {
     const root = await temporaryDirectory();
