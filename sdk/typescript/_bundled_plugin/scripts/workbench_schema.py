@@ -813,10 +813,6 @@ def apply_migrations(
             repair_deep_scan_failure_counter_migration(connection)
         if should_backfill_targets:
             backfill_security_targets(connection)
-        elif any(version == 31 for version, _, _ in migrations):
-            from workbench_target_state import backfill_repository_identities
-
-            backfill_repository_identities(connection)
         connection.commit()
     except BaseException:
         connection.rollback()

@@ -229,7 +229,8 @@ with ExitStack() as stack:
         common = main / ".git"
         admin = common / "worktrees" / "linked"
         objects = common / "objects"
-        active = {"root": main, "gitdir": common, "nul": False}
+        active = {"root": main, "gitdir": common, "nul": False, "config": None}
+        config_command = ("config", "--null", "--show-scope", "--no-includes", "--get", "core.worktree")
         commands = []
         directory = lambda inode, birth: SimpleNamespace(
             st_mode=stat.S_IFDIR, st_dev=7, st_ino=inode, st_birthtime_ns=birth
@@ -247,6 +248,8 @@ with ExitStack() as stack:
             commands.append(arguments)
             if arguments == ("worktree", "list", "--porcelain", "-z"):
                 return b"worktree " + os.fsencode(active["root"]) + b"\0\0" if active["nul"] else None
+            if arguments == config_command:
+                return active["config"]
             paths_by_command = {
                 ("rev-parse", "--show-toplevel"): active["root"],
                 ("rev-parse", "--path-format=absolute", "--git-common-dir"): common,
@@ -255,6 +258,14 @@ with ExitStack() as stack:
             }
             value = paths_by_command.get(arguments)
             return os.fsencode(value) + b"\n" if value is not None else None
+        primary = root / "primary-checkout"
+        def file_primary(configuration, selected_root=primary, forward=common):
+            active.update(root=selected_root, gitdir=common, nul=False, config=configuration)
+            records[str(selected_root / ".git")] = SimpleNamespace(st_mode=stat.S_IFREG)
+            files[str(selected_root / ".git")] = b"gitdir: " + os.fsencode(forward) + b"\n"
+            return real_identity_details(selected_root) is not None
+        def configured(value, scope=b"local"):
+            return scope + b"\0" + os.fsencode(value) + b"\0"
         with patch.object(state, "git_bytes", git_bytes), \
              patch.object(os.path, "realpath", side_effect=os.path.abspath), \
              patch.object(Path, "stat", lambda path, *a, **k: records[str(path)]), \
@@ -272,6 +283,26 @@ with ExitStack() as stack:
             nul_linked = real_identity_details(linked)
             records[str(objects)] = directory(23, 400)
             changed = real_identity_details(linked)
+            literal_tilde = common / "~literal" / "checkout"
+            trailing_lf = root / "primary-checkout\n"
+            trailing_space = root / "primary-checkout "
+            primary_results = {
+                "localAbsolute": file_primary(configured(primary)),
+                "worktreeRelative": file_primary(configured(os.path.relpath(primary, common), b"worktree")),
+                "literalLeadingTilde": file_primary(configured(Path("~literal") / "checkout"), literal_tilde),
+                "trailingLineFeed": file_primary(configured(trailing_lf), trailing_lf),
+                "trailingWhitespace": file_primary(configured(trailing_space), trailing_space),
+                "missing": file_primary(None),
+                "wrongScopes": all(not file_primary(configured(primary, scope)) for scope in (
+                    b"global", b"system", b"command", b"unknown",
+                )),
+                "malformed": all(not file_primary(value) for value in (
+                    b"local\0", b"local\0\0", configured(primary)[:-1],
+                    configured(primary) + b"extra\0",
+                )),
+                "wrongRoot": file_primary(configured(main)),
+                "foreignForward": file_primary(configured(primary), forward=root / "other-common"),
+            }
         print(json.dumps({
             "oldMain": first is not None,
             "oldLinkedMatches": old_linked.value == first.value,
@@ -282,6 +313,9 @@ with ExitStack() as stack:
             "legacyMaterialUnchanged": changed.legacy_value == first.legacy_value,
             "domainSeparated": first.value != first.legacy_value,
             "actualObjectLookup": ("rev-parse", "--path-format=absolute", "--git-path", "objects") in commands,
+            "oldPrimary": primary_results,
+            "rawConfigLookup": any(command == config_command for command in commands)
+                and all(command == config_command for command in commands if command[0] == "config"),
         }))
     elif scenario == "scan-generation":
         for name, value in (("requested", "generation-current"), ("alias", "generation-current"),
@@ -1041,6 +1075,8 @@ with ExitStack() as stack:
         add_target("requested", "repository-current")
         add_scan("requested-scan", "requested")
         add_target("unscanned", None, "repository-current")
+        add_target("unselected", None, "repository-current")
+        details.pop(paths["unselected"])
         add_target("historical", None, "repository-current")
         add_scan("historical-scan", "historical")
         add_finding("historical-scan", "historical-finding", closed=True)
@@ -1049,6 +1085,13 @@ with ExitStack() as stack:
         apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
         apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
         maintenance_probes = dict(probes)
+        probes.clear()
+        with patch.object(state, "_bind_unscanned_repository_identity", wraps=state._bind_unscanned_repository_identity) as guarded_bind:
+            selected_id = state.ensure_security_target(connection, paths["unscanned"])
+            selected_guard = guarded_bind.call_count == 1 and guarded_bind.call_args.args[1:] == (
+                "unscanned", paths["unscanned"], "repository-current",
+            )
+        selected_probes = dict(probes)
         historical_id = state.ensure_security_target(connection, paths["historical"])
         add_scan("established-scan", "unscanned")
         missing.update((paths["unscanned"], paths["historical"]))
@@ -1058,6 +1101,9 @@ with ExitStack() as stack:
             )},
             "fullBackfillCalls": backfill.call_count,
             "maintenanceProbes": {name: maintenance_probes.get(path, 0) for name, path in paths.items()},
+            "selectedProbes": {name: selected_probes.get(path, 0) for name, path in paths.items()},
+            "selectedRegistrationId": selected_id,
+            "selectedGuarded": selected_guard,
             "historicalRegistrationId": historical_id,
             "aliases": sorted(indexes.repository_target_ids(connection, "requested")),
             "scans": listed("requested"),
@@ -1274,6 +1320,19 @@ test("uses registered old-Git paths and stable object-directory generation evide
     legacyMaterialUnchanged: true,
     domainSeparated: true,
     actualObjectLookup: true,
+    oldPrimary: {
+      localAbsolute: true,
+      worktreeRelative: true,
+      literalLeadingTilde: true,
+      trailingLineFeed: true,
+      trailingWhitespace: true,
+      missing: false,
+      wrongScopes: true,
+      malformed: true,
+      wrongRoot: false,
+      foreignForward: false,
+    },
+    rawConfigLookup: true,
   });
 });
 
@@ -1586,20 +1645,30 @@ test("keeps unproved legacy history unbound and rejects newer or indeterminate o
   expect(result["aliases"]).toEqual(["replacement-alias"]);
 });
 
-test("revisits only eligible late NULL identities on ordinary database opens", () => {
+test("binds late NULL identities only when the selected target is registered", () => {
   const result = run("late-null");
 
   expect(result["stored"]).toEqual({
     requested: "repository-current",
     unscanned: "repository-current",
+    unselected: null,
     historical: null,
   });
   expect(result["fullBackfillCalls"]).toBe(0);
   expect(result["maintenanceProbes"]).toEqual({
     requested: 0,
-    unscanned: 1,
+    unscanned: 0,
+    unselected: 0,
     historical: 0,
   });
+  expect(result["selectedProbes"]).toEqual({
+    requested: 0,
+    unscanned: 1,
+    unselected: 0,
+    historical: 0,
+  });
+  expect(result["selectedRegistrationId"]).toBe("unscanned");
+  expect(result["selectedGuarded"]).toBe(true);
   expect(result["historicalRegistrationId"]).toBe("historical");
   expect(result["aliases"]).toEqual(["requested", "unscanned"]);
   expect(result["scans"]).toEqual(["established-scan", "requested-scan"]);

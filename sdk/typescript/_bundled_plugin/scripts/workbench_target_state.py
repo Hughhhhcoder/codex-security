@@ -48,8 +48,10 @@ def _repository_worktree(target: Path) -> tuple[Path, str] | None:
     return canonical_root, relative.as_posix()
 
 
-def _path_from_git_bytes(value: bytes, relative_to: Path) -> Path | None:
-    if value.endswith(b"\n"):
+def _path_from_git_bytes(
+    value: bytes, relative_to: Path, *, strip_line_feed: bool = True
+) -> Path | None:
+    if strip_line_feed and value.endswith(b"\n"):
         value = value[:-1]
     if not value or b"\0" in value:
         return None
@@ -70,24 +72,39 @@ def _registered_worktree(target: Path, root: Path, common: Path) -> bool:
             for record in registered.split(b"\0")
             if record.startswith(b"worktree ")
         )
-    # Git before 2.36 emits unquoted newline-delimited paths. Its reciprocal
-    # administrative files are unambiguous even when a checkout path has newlines.
+    # Git before 2.36 emits unquoted newline-delimited paths. Repository-side
+    # ownership records are unambiguous even when a checkout path has newlines.
     gitdir = _git_path(target, "rev-parse", "--absolute-git-dir")
     dotgit = root / ".git"
     try:
         mode = dotgit.lstat().st_mode
         if stat.S_ISDIR(mode):
             return gitdir == common == Path(os.path.realpath(dotgit))
-        if (
-            not stat.S_ISREG(mode) or gitdir is None
-            or gitdir.parent != common / "worktrees" or not gitdir.is_dir()
-        ):
+        if not stat.S_ISREG(mode) or gitdir is None or not gitdir.is_dir():
             return False
         forward = dotgit.read_bytes()
-        if not forward.startswith(b"gitdir: "):
+        if (
+            not forward.startswith(b"gitdir: ")
+            or _path_from_git_bytes(forward[len(b"gitdir: "):], root) != gitdir
+        ):
             return False
+        if gitdir == common:
+            configured = git_bytes(
+                target, "config", "--null", "--show-scope", "--no-includes",
+                "--get", "core.worktree",
+            )
+            fields = configured.split(b"\0") if configured is not None else []
+            if (
+                len(fields) != 3 or fields[0] not in (b"local", b"worktree")
+                or not fields[1] or fields[2]
+            ):
+                return False
+            configured_root = _path_from_git_bytes(
+                fields[1], gitdir, strip_line_feed=False
+            )
+            return configured_root is not None and str(configured_root) == str(root)
         return (
-            _path_from_git_bytes(forward[len(b"gitdir: "):], root) == gitdir
+            gitdir.parent == common / "worktrees"
             and _path_from_git_bytes((gitdir / "gitdir").read_bytes(), gitdir)
             == Path(os.path.realpath(dotgit))
         )

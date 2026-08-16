@@ -671,7 +671,11 @@ generation in the selected state database. The generation identifies the shared
 Git and primary object-store directory instances; it is not a repository UUID.
 History written without that scan-level evidence stays attached to its original
 target and scan IDs. Older clients' history is not retroactively shared across
-worktrees. Explicit comparisons between independently verified copies of the same
+worktrees. Ordinary database opens do not retry unrelated unscanned targets;
+eligible targets are bound when explicitly registered. On older Git, primary
+`.git` files also need a repository-side `core.worktree` record identifying the
+checkout. Layouts without that reverse record retain target-local history.
+Explicit comparisons between independently verified copies of the same
 repository remain available without joining their finding histories. Findings
 indicate whether they were confirmed in the repository's latest completed scan
 across those linked worktrees. Finding confirmation and
