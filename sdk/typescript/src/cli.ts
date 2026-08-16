@@ -51,6 +51,10 @@ import {
 } from "./api.js";
 import { accountStatus } from "./auth.js";
 import {
+  isFullMarkdownManifest,
+  renderFullMarkdownManifest,
+} from "./cli-manifest.js";
+import {
   createBulkScanDiscoveryDependencies,
   runBulkScanWizard,
   type BulkScanDiscoveryDependencies,
@@ -143,6 +147,7 @@ const CHILD_TERMINATION_GRACE_MS = 1_000;
 const PUBLICATION_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
+const DOCUMENTATION_FLAGS = new Set(["--help", "-h", "--llms", "--llms-full"]);
 
 type Writable = Pick<NodeJS.WriteStream, "write"> & {
   on?(event: "error", listener: (error: Error) => void): unknown;
@@ -230,7 +235,9 @@ const VALUE_OPTIONS = new Set([
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
-  .describe("Inference provider for scans.");
+  .describe(
+    "Inference provider; non-OpenAI providers require an explicit model.",
+  );
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
@@ -525,31 +532,39 @@ const DEEP_SCAN_OPTION_SCHEMAS = {
     .int()
     .positive()
     .optional()
-    .describe("Maximum concurrent deep-scan discovery workers."),
+    .describe(
+      "Maximum concurrent deep-scan discovery workers (bundled default: 4).",
+    ),
   subagents: z
     .number()
     .int()
     .nonnegative()
     .optional()
-    .describe("Subagents available to each deep-scan worker."),
+    .describe(
+      "Subagents available to each deep-scan worker (bundled default: 3).",
+    ),
   stopAfterNoNew: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe("Stop after this many runs find no new issues."),
+    .describe(
+      "Stop after this many runs find no new issues (bundled default: 4).",
+    ),
   maxDiscoveryRuns: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe("Maximum deep-scan discovery runs."),
+    .describe("Maximum deep-scan discovery runs (bundled default: 40)."),
   maxTimeHours: z
     .number()
     .positive()
     .max(96)
     .optional()
-    .describe("Maximum deep-scan discovery hours (default: 96; maximum: 96)."),
+    .describe(
+      "Maximum deep-scan discovery hours (bundled default: 96; maximum: 96).",
+    ),
 };
 
 async function readPromptFiles(
@@ -1275,7 +1290,7 @@ export async function main(
         scanRoot: z
           .string()
           .optional()
-          .describe("Include scans whose output is under ROOT."),
+          .describe("Include indexed scans whose output is under ROOT."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
@@ -1466,6 +1481,7 @@ export async function main(
           .default(false)
           .describe("Recompute an existing semantic finding comparison."),
       }),
+      hint: "Provide two scan identifiers, or use --all without identifiers.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         try {
@@ -1921,7 +1937,7 @@ export async function main(
           model: optionValue("--model")
             .optional()
             .describe(
-              `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+              `Model identifier for the selected provider (OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
             ),
           effort: effortOption(),
           provider: PROVIDER_OPTION,
@@ -2018,6 +2034,10 @@ export async function main(
           },
         },
       ],
+      hint:
+        "--path, --diff, and --working-tree are mutually exclusive. " +
+        "Deep-scan settings require --mode deep. Use --json for scan results; " +
+        "--dry-run checks local inputs without verifying authentication or model access.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
@@ -2099,8 +2119,10 @@ export async function main(
       }),
       output: z
         .object({
-          hook: z.string(),
-          failOnSeverity: z.enum(REPORTABLE_SEVERITIES),
+          hook: z.string().describe("Installed pre-commit hook path."),
+          failOnSeverity: z
+            .enum(REPORTABLE_SEVERITIES)
+            .describe("Finding severity threshold that blocks commits."),
         })
         .optional(),
       async run({ args, options }) {
@@ -2200,7 +2222,7 @@ export async function main(
         model: optionValue("--model")
           .optional()
           .describe(
-            `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            `Model identifier for each repository's provider (OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
           ),
         effort: effortOption(),
         provider: PROVIDER_OPTION,
@@ -2235,10 +2257,10 @@ export async function main(
         },
       ],
       hint:
-        "CSV example:\n" +
-        "  codex-security bulk-scan repositories.csv " +
+        "A repository CSV requires --output-dir. For example: " +
+        "`codex-security bulk-scan repositories.csv " +
         "--output-dir /path/outside/repositories/results " +
-        "--workers 4 --max-attempts 3",
+        "--workers 4 --max-attempts 3`.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
@@ -2363,7 +2385,7 @@ export async function main(
           sourceRoot: optionValue("--source-root")
             .optional()
             .describe(
-              "Repository checkout used for SARIF source-line fingerprints.",
+              "Repository checkout used for source-line fingerprints; requires --export-format sarif.",
             ),
           python: optionValue("--python")
             .optional()
@@ -2614,16 +2636,22 @@ export async function main(
         },
       },
       output: z.object({
-        sdkVersion: z.string(),
-        bundledPluginVersion: z.string(),
-        scanMcp: z.literal(false),
-        cancellationNote: z.string(),
-        cliVersion: z.string(),
-        codexVersion: z.string(),
-        codexSdkVersion: z.string(),
-        model: z.string(),
-        reasoningEffort: z.string(),
-        nextStep: z.string(),
+        sdkVersion: z.string().describe("Codex Security package version."),
+        bundledPluginVersion: z
+          .string()
+          .describe("Bundled security plugin version."),
+        scanMcp: z
+          .literal(false)
+          .describe("Whether scans are available over MCP; always false."),
+        cancellationNote: z.string().describe("Why scans are CLI-only."),
+        cliVersion: z.string().describe("Codex Security CLI version."),
+        codexVersion: z.string().describe("Bundled Codex executable version."),
+        codexSdkVersion: z.string().describe("Bundled Codex SDK version."),
+        model: z.string().describe("Default scan model."),
+        reasoningEffort: z.string().describe("Default scan reasoning effort."),
+        nextStep: z
+          .string()
+          .describe("Suggested first local preflight command."),
       }),
       run() {
         return {
@@ -2642,13 +2670,18 @@ export async function main(
     });
 
   let notice: UpdateNotice | undefined;
+  const frameworkArguments = argv.flatMap((argument) =>
+    argument.startsWith("--format=")
+      ? ["--format", argument.slice("--format=".length)]
+      : [argument],
+  );
+  const markdownManifest =
+    !process.env["COMPLETE"] && isFullMarkdownManifest(frameworkArguments);
   try {
     await cli.serve(
-      argv.flatMap((argument) =>
-        argument.startsWith("--format=")
-          ? ["--format", argument.slice("--format=".length)]
-          : [argument],
-      ),
+      markdownManifest
+        ? [...frameworkArguments, "--format", "json"]
+        : frameworkArguments,
       {
         stdout: (value) => {
           frameworkOutput += value;
@@ -2674,6 +2707,12 @@ export async function main(
   }
   if (frameworkOutput.length === 0) return exitCode;
   try {
+    if (markdownManifest) {
+      frameworkOutput = renderFullMarkdownManifest(
+        cli,
+        JSON.parse(frameworkOutput),
+      );
+    }
     await writeCliOutput(
       output,
       renderedPublication ?? renderedHistory ?? frameworkOutput,
@@ -2693,8 +2732,7 @@ function defaultListCommand(argv: readonly string[]): readonly string[] {
   if (
     commandIndex < 0 ||
     !["scans", "findings"].includes(argv[commandIndex]!) ||
-    argv.includes("--help") ||
-    argv.includes("-h")
+    argv.some((argument) => DOCUMENTATION_FLAGS.has(argument))
   ) {
     return argv;
   }
@@ -2853,7 +2891,9 @@ function validateCliArguments(
   argv: readonly string[],
   positionals: string[],
 ): string | undefined {
-  if (argv.includes("--help") || argv.includes("-h")) return undefined;
+  if (argv.some((argument) => DOCUMENTATION_FLAGS.has(argument))) {
+    return undefined;
+  }
   const commandIndex = argv.findIndex((value) =>
     [
       "scan",

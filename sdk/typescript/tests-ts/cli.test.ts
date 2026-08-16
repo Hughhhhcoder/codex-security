@@ -412,6 +412,28 @@ describe("CLI", () => {
         maxTimeHours: number;
       };
       expect(defaults.workers).toBe(4);
+      const schema = capture();
+      expect(
+        await main(
+          ["scan", "--schema", "--format", "json"],
+          schema.stream,
+          capture().stream,
+          dependencies(),
+        ),
+      ).toBe(0);
+      const scanOptions = JSON.parse(schema.text()).options
+        .properties as Record<string, { description: string }>;
+      for (const name of [
+        "workers",
+        "subagents",
+        "stopAfterNoNew",
+        "maxDiscoveryRuns",
+        "maxTimeHours",
+      ] as const) {
+        expect(scanOptions[name]?.description).toContain(
+          `bundled default: ${defaults[name]}`,
+        );
+      }
       const documentedDeepScan = documentedConfigs.find(
         (config) =>
           typeof config["deep_scan"] === "object" &&
@@ -2189,7 +2211,7 @@ describe("CLI", () => {
       "--provider <openai|openrouter|fireworks|amazon-bedrock>",
     );
     expect(help.text()).toContain(
-      `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+      `OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}`,
     );
     expect(help.text()).toContain(
       "--effort <minimal|low|medium|high|xhigh|max>",
@@ -2227,7 +2249,7 @@ describe("CLI", () => {
     ).toBe(0);
     expect(help.text()).toContain("--model <string>");
     expect(help.text()).toContain(
-      `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+      `OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}`,
     );
     expect(help.text()).toContain(
       "--effort <minimal|low|medium|high|xhigh|max>",

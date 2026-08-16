@@ -164,6 +164,7 @@ const distFiles = new Set(
     "auth",
     "bulk-scan-discovery",
     "cli",
+    "cli-manifest",
     "config",
     "contract",
     "cost",

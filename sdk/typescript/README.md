@@ -711,7 +711,10 @@ treated as resolved when the later scan is incomplete or does not cover their
 original scope.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
-and structured output. Inspect the command manifest with `--llms`, inspect a
+and structured output. Use `--llms` for a command index or `--llms-full` for
+the full Markdown reference, including accepted flags, values, and operating
+notes. Add `--format json` to read the original structured manifest, or scope
+either manifest to a command or group, such as `scans --llms-full`. Inspect a
 command schema with `scan --schema --format json`, register the CLI as an MCP
 server with `mcp add`, sync agent skills with `skills add`, or generate shell
 completions with `completions bash|zsh|fish`. Scan results support
