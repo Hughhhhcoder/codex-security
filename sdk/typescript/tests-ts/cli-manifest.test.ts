@@ -5,6 +5,7 @@ import { main } from "../src/cli.js";
 import {
   fullMarkdownManifestArguments,
   INCUR_VALUE_OPTIONS,
+  parseIncurArguments,
   renderFullMarkdownManifest,
 } from "../src/cli-manifest.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
@@ -284,6 +285,37 @@ describe("full CLI manifest", () => {
       expect(markdown).not.toContain("\n## Authentication\n");
       expect([...commandSections(markdown).keys()]).toEqual([command.name]);
     }
+  });
+
+  test("keeps built-in operands out of the shared command-argument view", () => {
+    for (const [option, value] of [
+      ["--format", "md"],
+      ["--filter-output", "scan"],
+      ["--token-limit", "100000"],
+      ["--token-offset", "0"],
+    ] as const) {
+      expect(
+        parseIncurArguments([option, value, "scans", "show", "--llms-full"]),
+      ).toEqual({
+        commandArguments: ["scans", "show"],
+        commandIndex: 2,
+        format: option === "--format" ? value : undefined,
+      });
+    }
+    expect(
+      parseIncurArguments([
+        "scans",
+        "compare",
+        "before",
+        "after",
+        "--filter-output",
+        "summary",
+      ]),
+    ).toEqual({
+      commandArguments: ["scans", "compare", "before", "after"],
+      commandIndex: 0,
+      format: undefined,
+    });
   });
 
   test("preserves scoped paths when global discovery flags come first or between commands", async () => {
