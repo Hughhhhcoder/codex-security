@@ -6,6 +6,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 const probe = String.raw`
 import argparse
 import ctypes
+import errno
 import hashlib
 import io
 import json
@@ -25,6 +26,8 @@ import workbench_native_indexes as indexes
 import workbench_target_state as state
 import workbench_feedback as feedback_module
 import workbench_db as workbench
+import workbench_scan_start as scan_start
+import deep_scan_workbench as deep_workbench
 from workbench_feedback import get_scan_feedback
 from workbench_schema import MIGRATIONS, apply_migrations
 
@@ -53,6 +56,7 @@ missing = set()
 resolution_errors = {}
 probes = Counter()
 origins = Counter()
+real_identity_details = state._repository_identity_details
 description = SimpleNamespace(
     st_mode=stat.S_IFREG, st_dev=44, st_ino=55, st_ctime_ns=66
 )
@@ -81,7 +85,11 @@ def add_target(name, stored, live=None, relative=".", birth=1_000_000_000):
     return details[path]
 
 
-def add_scan(scan_id, target, owner="current", started=timestamp, created=timestamp):
+current_generation = object()
+
+
+def add_scan(scan_id, target, owner="current", started=timestamp, created=timestamp,
+             generation=current_generation, status="complete"):
     path = paths[target]
     device, inode = metadata[path].st_dev, metadata[path].st_ino
     if owner == "missing":
@@ -93,14 +101,26 @@ def add_scan(scan_id, target, owner="current", started=timestamp, created=timest
         "VALUES (?, ?, ?, ?, ?)",
         ("workspace-" + scan_id, path, target, timestamp, timestamp),
     )
+    supports_generation = any(
+        row["name"] == "repository_generation"
+        for row in connection.execute("PRAGMA table_info(scans)")
+    )
+    if generation is current_generation:
+        generation = connection.execute(
+            "SELECT repository_identity FROM security_targets WHERE id = ?", (target,)
+        ).fetchone()[0] if state.supports_repository_identity(connection) else None
+    include_generation = supports_generation and generation is not None
+    generation_column = ", repository_generation" if include_generation else ""
+    generation_placeholder = ", ?" if include_generation else ""
     connection.execute(
         "INSERT INTO scans (id, workspace_id, target_path, target_id, target_device, "
         "target_inode, target_revision, scope, mode, scan_dir, status, phase, "
-        "started_at, completed_at, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"started_at, completed_at, created_at, updated_at{generation_column}) "
+        f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{generation_placeholder})",
         (scan_id, "workspace-" + scan_id, path, target, device, inode, "synthetic",
-         ".", "standard", str(root / "scans" / scan_id), "complete", "reporting",
-         started, created, created, created),
+         ".", "standard", str(root / "scans" / scan_id), status, "reporting",
+         started, created if status == "complete" else None, created, created,
+         *((generation,) if include_generation else ())),
     )
     connection.execute(
         "INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)",
@@ -150,7 +170,7 @@ def resolve_path(path, *args, **kwargs):
 def stat_path(path, *args, **kwargs):
     value = str(path)
     if value in missing:
-        raise FileNotFoundError(value)
+        raise FileNotFoundError(errno.ENOENT, "Synthetic missing path", value)
     return metadata[value] if value in metadata else original_stat(path, *args, **kwargs)
 
 
@@ -203,7 +223,169 @@ with ExitStack() as stack:
     stack.enter_context(patch.object(Path, "lstat", lstat_path))
     stack.enter_context(patch.object(state, "_repository_identity_details", identity_details))
     stack.enter_context(patch.object(state, "repository_origin", origin))
-    if scenario == "birth-time":
+    if scenario == "generation-metadata":
+        main = root / "main\ncheckout"
+        linked = root / "linked\ncheckout"
+        common = main / ".git"
+        admin = common / "worktrees" / "linked"
+        objects = common / "objects"
+        active = {"root": main, "gitdir": common, "nul": False}
+        commands = []
+        directory = lambda inode, birth: SimpleNamespace(
+            st_mode=stat.S_IFDIR, st_dev=7, st_ino=inode, st_birthtime_ns=birth
+        )
+        records = {
+            str(common): directory(20, 100), str(objects): directory(21, 200),
+            str(admin): directory(22, 300),
+            str(linked / ".git"): SimpleNamespace(st_mode=stat.S_IFREG),
+        }
+        files = {
+            str(linked / ".git"): b"gitdir: " + os.fsencode(admin) + b"\n",
+            str(admin / "gitdir"): os.fsencode(linked / ".git") + b"\n",
+        }
+        def git_bytes(target, *arguments):
+            commands.append(arguments)
+            if arguments == ("worktree", "list", "--porcelain", "-z"):
+                return b"worktree " + os.fsencode(active["root"]) + b"\0\0" if active["nul"] else None
+            paths_by_command = {
+                ("rev-parse", "--show-toplevel"): active["root"],
+                ("rev-parse", "--path-format=absolute", "--git-common-dir"): common,
+                ("rev-parse", "--absolute-git-dir"): active["gitdir"],
+                ("rev-parse", "--path-format=absolute", "--git-path", "objects"): objects,
+            }
+            value = paths_by_command.get(arguments)
+            return os.fsencode(value) + b"\n" if value is not None else None
+        with patch.object(state, "git_bytes", git_bytes), \
+             patch.object(os.path, "realpath", side_effect=os.path.abspath), \
+             patch.object(Path, "stat", lambda path, *a, **k: records[str(path)]), \
+             patch.object(Path, "lstat", lambda path, *a, **k: records[str(path)]), \
+             patch.object(Path, "read_bytes", lambda path: files[str(path)]), \
+             patch.object(state, "_repository_birth_time_ns", side_effect=lambda path, value: value.st_birthtime_ns):
+            first = real_identity_details(main)
+            same = real_identity_details(main)
+            active.update(root=linked, gitdir=admin)
+            old_linked = real_identity_details(linked)
+            files[str(admin / "gitdir")] = os.fsencode(main / ".git") + b"\n"
+            wrong_backlink = real_identity_details(linked)
+            files[str(admin / "gitdir")] = os.fsencode(linked / ".git") + b"\n"
+            active["nul"] = True
+            nul_linked = real_identity_details(linked)
+            records[str(objects)] = directory(23, 400)
+            changed = real_identity_details(linked)
+        print(json.dumps({
+            "oldMain": first is not None,
+            "oldLinkedMatches": old_linked.value == first.value,
+            "nulMatches": nul_linked.value == first.value,
+            "wrongBacklink": wrong_backlink,
+            "unchanged": same.value == first.value,
+            "objectInstanceChangesGeneration": changed.value != first.value,
+            "legacyMaterialUnchanged": changed.legacy_value == first.legacy_value,
+            "domainSeparated": first.value != first.legacy_value,
+            "actualObjectLookup": ("rev-parse", "--path-format=absolute", "--git-path", "objects") in commands,
+        }))
+    elif scenario == "scan-generation":
+        for name, value in (("requested", "generation-current"), ("alias", "generation-current"),
+                            ("clone", "generation-clone")):
+            add_target(name, value)
+        add_scan("requested-new", "requested")
+        add_scan("alias-proved", "alias")
+        add_scan("alias-old-client", "alias", generation=None)
+        add_scan("requested-legacy", "requested", generation=None)
+        add_scan("clone-scan", "clone")
+        proved = add_finding("alias-proved", "proved-review", closed=True)
+        ignored = add_finding("alias-old-client", "unproved-review", closed=True)
+        current = add_finding("requested-new", "current-open")
+        add_finding("requested-legacy", "local-review", closed=True)
+        connection.execute("INSERT INTO scan_comparisons VALUES (?, ?, ?, ?, ?)",
+                           ("alias-old-client", "requested-new", "{}", timestamp, timestamp))
+        connection.execute("INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, ?)",
+                           ("alias-old-client", "requested-new", ignored, current, "Synthetic match"))
+        cache = state.RepositoryIdentityCache(connection)
+        scope = cache.scope("requested")
+        clause, values = scope.sql()
+        selected = sorted(row[0] for row in connection.execute(f"SELECT id FROM scans WHERE {clause}", values))
+        feedback = get_scan_feedback(connection, connection.execute("SELECT * FROM scans WHERE id = 'requested-new'").fetchone())
+        indexed = findings("requested")
+        with patch.object(state, "repository_origin", return_value=("example.test", "same-repository")):
+            rows = {row["id"]: history._scan_with_repository_identity(connection, row) for row in connection.execute("SELECT * FROM scans")}
+            explicit_clones = history._same_repository(connection, rows["requested-new"], rows["clone-scan"])
+            explicit_legacy = history._same_repository(connection, rows["alias-old-client"], rows["clone-scan"])
+            contradictory = dict(rows["clone-scan"], repository_generation="different-snapshot")
+            own_contradiction = history._same_repository(connection, rows["requested-new"], contradictory)
+        legacy = add_target("weak", None, "generation-strong")
+        connection.execute("UPDATE security_targets SET repository_identity = ? WHERE id = 'weak'", (legacy.legacy_value,))
+        add_scan("weak-history", "weak", generation=None)
+        registration = state.register_security_target(connection, paths["weak"])
+        add_finding("requested-new", "shared-decision", closed=True)
+        add_finding("alias-proved", "shared-decision")
+        missing.add(paths["alias"])
+        absent_findings = sum(row["status"] == "open" for row in findings("alias"))
+        absent_repository = next(row for row in indexes.list_repositories(connection)["repositories"] if row["targetId"] == "alias")
+        print(json.dumps({
+            "selected": selected,
+            "predicate": {"binds": len(values), "ors": clause.count(" OR ")},
+            "feedback": sorted(row["findingId"] for row in feedback["falsePositives"]),
+            "findings": sorted((row["findingId"], row["occurrenceCount"], row["status"]) for row in indexed),
+            "oldClientGeneration": rows["alias-old-client"]["repository_generation"],
+            "explicitClones": explicit_clones, "explicitLegacy": explicit_legacy,
+            "ownContradiction": own_contradiction,
+            "weakRegistration": registration.repository_generation,
+            "weakHistory": connection.execute("SELECT repository_generation FROM scans WHERE id = 'weak-history'").fetchone()[0],
+            "weakBindingPreserved": connection.execute("SELECT repository_identity FROM security_targets WHERE id = 'weak'").fetchone()[0] == legacy.legacy_value,
+            "absentExactCounts": [absent_findings, absent_repository["openFindingsCount"]],
+        }))
+    elif scenario == "scan-writers":
+        add_target("writer", "generation-writer")
+        target = Path(paths["writer"])
+        connection.execute("INSERT INTO workspaces (id, target_id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                           ("current-workspace", "writer", str(target), timestamp, timestamp))
+        connection.commit()
+        checks = []
+        def register(database, path):
+            checks.append(database.in_transaction)
+            return state.register_security_target(database, path)
+        connection.execute("BEGIN IMMEDIATE")
+        registration = register(connection, str(target))
+        scan_start.insert_running_scan(
+            connection, scan_id="current-writer", workspace=connection.execute("SELECT * FROM workspaces WHERE id = 'current-workspace'").fetchone(),
+            target=target, scope=".", diff_target=None,
+            target_identity=("synthetic", None, 7, metadata[str(target)].st_ino),
+            repository_generation=registration.repository_generation,
+            target_root=root / "artifacts", target_summary=None, scope_file_count=0,
+            timestamp=timestamp, scan_dir=root / "artifacts" / "current",
+        )
+        connection.commit()
+        add_scan("old-writer", "writer", generation=None)
+        connection.commit()
+        with ExitStack() as mocks:
+            for name, value in {
+                "require_target": target, "require_remediation_target": target,
+                "require_scope": ".", "existing_deep_scan_for_target": None,
+                "terminal_deep_scan_for_target_snapshot": None, "git_revision": "synthetic",
+                "worktree_content_digest": "snapshot", "directory_snapshot_regular_file_count": 0,
+                "effective_deep_scan_config": {}, "now": timestamp,
+                "compact_timestamp": "synthetic", "state_dir": root,
+            }.items():
+                mocks.enter_context(patch.object(deep_workbench, name, return_value=value))
+            mocks.enter_context(patch.object(deep_workbench, "require_scannable_target"))
+            mocks.enter_context(patch.object(deep_workbench, "safe_segment", side_effect=lambda value: value))
+            mocks.enter_context(patch.object(deep_workbench, "register_security_target", side_effect=register))
+            mocks.enter_context(patch.object(deep_workbench, "require_scan", side_effect=lambda database, scan_id: database.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()))
+            mocks.enter_context(patch.object(deep_workbench, "ensure_deep_scan_run"))
+            mocks.enter_context(patch.object(deep_workbench, "deep_scan_result", side_effect=lambda database, scan_id, **kwargs: {"scanId": scan_id}))
+            mocks.enter_context(patch.object(Path, "mkdir"))
+            mocks.enter_context(patch.object(Path, "resolve", lambda path, *a, **k: path))
+            mocks.enter_context(patch.object(deep_workbench.tempfile, "mkdtemp", return_value=str(root / "artifacts" / "deep")))
+            deep = deep_workbench.begin_deep_scan_for_target(connection, argparse.Namespace(
+                target_path=str(target), scope=".", workflow_version="synthetic", scan_root=str(root / "artifacts"),
+                user_context=None, model=None, reasoning_effort=None,
+            ), "synthetic-thread")
+        print(json.dumps({
+            "generations": {row["id"]: row["repository_generation"] for row in connection.execute("SELECT id, repository_generation FROM scans")},
+            "deepId": deep["scanId"], "registeredInsideTransaction": checks,
+            "generationIndex": connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'scans_by_repository_generation'").fetchone() is not None,
+        }))
+    elif scenario == "birth-time":
         path = "/synthetic repository/.git"
         real_sizeof = ctypes.sizeof
 
@@ -346,7 +528,10 @@ with ExitStack() as stack:
         feedback_scope = []
         feedback_queries = []
         def scoped_index(database, **kwargs):
-            feedback_scope.extend(sorted(kwargs["target_ids"]))
+            clause, values = kwargs["scan_scope"].sql()
+            feedback_scope.extend(sorted(row[0] for row in database.execute(
+                f"SELECT DISTINCT target_id FROM scans WHERE {clause}", values
+            )))
             return indexes._indexed_findings(database, **kwargs)
         connection.set_trace_callback(feedback_queries.append)
         with patch.object(feedback_module, "_indexed_findings", side_effect=scoped_index):
@@ -369,7 +554,7 @@ with ExitStack() as stack:
             "feedback": [row["findingId"] for row in feedback["falsePositives"]],
             "feedbackScope": feedback_scope,
             "feedbackIndexQueriesScoped": len(index_queries) == 3 and all(
-                "target_id IN (" in query for query in index_queries
+                "repository_generation = " in query for query in index_queries
             ),
             "listingRequestedProbes": listing_probes.get(paths["requested"], 0),
             "matchingRequestedProbes": matching_probes.get(paths["requested"], 0),
@@ -391,13 +576,9 @@ with ExitStack() as stack:
         add_scan("legacy-a", "first", started="2026-07-31T02:00:00Z", created="2026-07-31T04:00:00Z")
         add_scan("legacy-missing", "first", started="2026-07-31T03:00:00Z")
         connection.execute("UPDATE scans SET completed_at = NULL WHERE id = 'legacy-missing'")
-        add_scan("visible-last", "first", started="2026-08-01T01:00:00Z")
-        add_scan("visible-first", "second", started="2026-08-01T02:00:00Z")
-        connection.execute(
-            "UPDATE scans SET status = 'running', completed_at = NULL "
-            "WHERE id IN ('visible-last', 'visible-first')"
-        )
         apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
+        add_scan("visible-last", "first", started="2026-08-01T01:00:00Z", status="running")
+        add_scan("visible-first", "second", started="2026-08-01T02:00:00Z", status="running")
         def sequences():
             return {row["id"]: row["completion_sequence"] for row in connection.execute(
                 "SELECT id, completion_sequence FROM scans ORDER BY completion_sequence, id"
@@ -433,6 +614,9 @@ with ExitStack() as stack:
         apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
         print(json.dumps({
             "legacy": legacy,
+            "legacyGenerationsNull": all(row[0] is None for row in connection.execute(
+                "SELECT repository_generation FROM scans WHERE id LIKE 'legacy-%'"
+            )),
             "firstPredecessors": first_predecessors,
             "lastPredecessors": last_predecessors,
             "reciprocalPredecessors": reciprocal_predecessors,
@@ -538,11 +722,11 @@ with ExitStack() as stack:
         stack.enter_context(patch.object(workbench, "scan_target_identity", return_value=("synthetic", None, 7, metadata[str(target)].st_ino)))
         stack.enter_context(patch.object(workbench, "scan_target_root", return_value=target_root))
         checks = []
-        original_ensure = workbench.ensure_security_target
-        def ensure(database, target_path):
+        original_register = workbench.register_security_target
+        def register(database, target_path):
             checks.append({"transaction": database.in_transaction, "path": target_path})
-            return original_ensure(database, target_path)
-        stack.enter_context(patch.object(workbench, "ensure_security_target", side_effect=ensure))
+            return original_register(database, target_path)
+        stack.enter_context(patch.object(workbench, "register_security_target", side_effect=register))
         class StartAccepted(Exception):
             pass
         stack.enter_context(patch.object(workbench, "insert_running_scan", side_effect=StartAccepted))
@@ -816,9 +1000,24 @@ with ExitStack() as stack:
                 accepted.append(compared["afterScanId"] == after and saved["beforeScanId"] == before)
         conflicting = history._same_repository(
             connection,
-            {"target_id": "same-target", "repository_identity": "repository-first"},
-            {"target_id": "same-target", "repository_identity": "repository-second"},
+            {"target_id": "same-target", "repository_generation": "repository-first"},
+            {"target_id": "same-target", "repository_generation": "repository-second"},
             identities=Mock(),
+        )
+        targetless = {"target_id": None, "target_path": paths["legacy"]}
+        healthy = state.RepositoryTargetState(
+            "", paths["legacy"], None, resolved_path=paths["legacy"], ownership_matches=True
+        )
+        refused_targetless = state.RepositoryTargetState(
+            "", paths["legacy"], None, resolved_path=paths["legacy"]
+        )
+        healthy_path = history._same_repository(
+            connection, targetless, targetless,
+            identities=Mock(for_row=Mock(return_value=healthy)),
+        )
+        refused_path = history._same_repository(
+            connection, targetless, targetless,
+            identities=Mock(for_row=Mock(return_value=refused_targetless)),
         )
         add_target("unregistered", None)
         connection.execute("DELETE FROM security_targets WHERE id = 'unregistered'")
@@ -837,6 +1036,7 @@ with ExitStack() as stack:
                 automatic_rejected = False
         print(json.dumps({
             "accepted": accepted, "conflictingIdentitiesAccepted": conflicting,
+            "healthyTargetless": healthy_path, "refusedTargetless": refused_path,
             "savedCount": connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone()[0],
             "unregisteredAutomaticRequesterRejected": automatic_rejected,
         }))
@@ -866,9 +1066,11 @@ with ExitStack() as stack:
                 add_scan(name + "-scan", name, owner, "invalid" if name == "invalid-time" else timestamp)
             if name == "unavailable":
                 missing.add(paths[name])
-            expected[name] = identity.value if name in {
-                "old-basic", "old-description", "current", "no-scans", "scope-upper", "scope-lower"
-            } else None
+            expected[name] = (
+                identity.value if name == "current" else identity.legacy_value if name in {
+                    "old-basic", "old-description", "no-scans", "scope-upper", "scope-lower"
+                } else None
+            )
         apply_migrations(connection, MIGRATIONS, lambda: timestamp, state.backfill_security_targets)
         first = {
             row["id"]: row["repository_identity"]
@@ -900,6 +1102,55 @@ function run(scenario: string): Record<string, unknown> {
   expect(execution.status, execution.stderr).toBe(0);
   return JSON.parse(execution.stdout) as Record<string, unknown>;
 }
+
+test("uses registered old-Git paths and stable object-directory generation evidence", () => {
+  expect(run("generation-metadata")).toEqual({
+    oldMain: true,
+    oldLinkedMatches: true,
+    nulMatches: true,
+    wrongBacklink: null,
+    unchanged: true,
+    objectInstanceChangesGeneration: true,
+    legacyMaterialUnchanged: true,
+    domainSeparated: true,
+    actualObjectLookup: true,
+  });
+});
+
+test("keeps automatic history bounded by saved scan generation", () => {
+  const result = run("scan-generation");
+  expect(result["selected"]).toEqual([
+    "alias-proved",
+    "requested-legacy",
+    "requested-new",
+  ]);
+  expect(result["predicate"]).toEqual({ binds: 2, ors: 1 });
+  expect(result["feedback"]).toEqual(["local-review", "proved-review"]);
+  expect(result["findings"]).toEqual([
+    ["current-open", 1, "open"],
+    ["local-review", 1, "closed"],
+    ["proved-review", 1, "closed"],
+  ]);
+  expect(result["oldClientGeneration"]).toBeNull();
+  expect(result["explicitClones"]).toBe(true);
+  expect(result["explicitLegacy"]).toBe(true);
+  expect(result["ownContradiction"]).toBe(false);
+  expect(result["weakRegistration"]).toBe("generation-strong");
+  expect(result["weakHistory"]).toBeNull();
+  expect(result["weakBindingPreserved"]).toBe(true);
+  expect(result["absentExactCounts"]).toEqual([1, 1]);
+});
+
+test("records generation explicitly in both transactional parent scan writers", () => {
+  const result = run("scan-writers");
+  expect(result["generations"]).toEqual({
+    "current-writer": "generation-writer",
+    "old-writer": null,
+    [result["deepId"] as string]: "generation-writer",
+  });
+  expect(result["registeredInsideTransaction"]).toEqual([true, true]);
+  expect(result["generationIndex"]).toBe(true);
+});
 
 test("reads precise Linux birth time through supported native interfaces", () => {
   const result = run("birth-time");
@@ -973,8 +1224,8 @@ test("reuses established aliases and probes each saved target once per request",
   expect(result["feedbackIndexQueriesScoped"]).toBe(true);
   expect(result["listingRequestedProbes"]).toBe(1);
   expect(result["matchingRequestedProbes"]).toBe(1);
-  expect(result["matchingUnrelatedProbes"]).toBe(1);
-  expect(result["matchingUnrelatedOrigins"]).toBe(1);
+  expect(result["matchingUnrelatedProbes"]).toBe(0);
+  expect(result["matchingUnrelatedOrigins"]).toBe(0);
   expect(result["indexingMaxProbes"]).toBe(1);
   expect(result["feedbackMaxProbes"]).toBe(1);
   expect(result["legacyStored"]).toBe("repository-current");
@@ -991,6 +1242,7 @@ test("orders completed history by database visibility across legacy and current 
     "legacy-a": 2,
     "legacy-b": 3,
   });
+  expect(result["legacyGenerationsNull"]).toBe(true);
   expect(result["firstPredecessors"]).not.toContain("visible-last");
   expect(result["lastPredecessors"]).toContain("visible-first");
   expect(result["reciprocalPredecessors"]).not.toContain("visible-last");
@@ -1136,6 +1388,8 @@ test("compares sealed history from persisted evidence without weakening automati
 
   expect(result["accepted"]).toEqual([true, true]);
   expect(result["conflictingIdentitiesAccepted"]).toBe(false);
+  expect(result["healthyTargetless"]).toBe(true);
+  expect(result["refusedTargetless"]).toBe(false);
   expect(result["savedCount"]).toBe(2);
   expect(result["unregisteredAutomaticRequesterRejected"]).toBe(true);
 });
@@ -1183,11 +1437,8 @@ test("quarantines unproved public-v30 bindings without discarding historical rec
   });
   expect(result["recordsPreserved"]).toBe(true);
   expect(result["targetIdsPreserved"]).toBe(true);
-  expect(result["aliases"]).toEqual(["current-owner", "removed-valid"]);
+  expect(result["aliases"]).toEqual(["current-owner"]);
   expect(result["removedExact"]).toEqual(["removed-old-scan"]);
-  expect(result["visibleFindings"]).toEqual([
-    "current-owner-finding",
-    "removed-valid-finding",
-  ]);
+  expect(result["visibleFindings"]).toEqual(["current-owner-finding"]);
   expect(result["oldRegistrationRejected"]).toBe(true);
 });

@@ -11,13 +11,14 @@ from typing import Any, Callable
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from filesystem_identity import serialize_filesystem_identity
 from report_projection import SEVERITY_ORDER
 from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target_state import (
     RepositoryIdentityCache,
     _timestamp_ns,
+    scan_repository_generation,
+    scan_repository_group,
     supports_repository_identity,
 )
 
@@ -29,12 +30,8 @@ def _same_repository(
     *,
     identities: RepositoryIdentityCache | None = None,
 ) -> bool:
-    before_stored = (
-        before["repository_identity"] if "repository_identity" in before.keys() else None
-    )
-    after_stored = (
-        after["repository_identity"] if "repository_identity" in after.keys() else None
-    )
+    before_stored = scan_repository_generation(before)
+    after_stored = scan_repository_generation(after)
     if before_stored is not None and before_stored == after_stored:
         return True
     if before["target_id"] and before["target_id"] == after["target_id"]:
@@ -42,16 +39,21 @@ def _same_repository(
     identities = identities or RepositoryIdentityCache(connection)
     before_state = identities.for_row(before)
     after_state = identities.for_row(after)
-    if before_state.resolved_path is None or after_state.resolved_path is None:
+    if (
+        not before_state.ownership_matches or not after_state.ownership_matches
+        or before_stored is not None and before_stored != before_state.live_identity
+        or after_stored is not None and after_stored != after_state.live_identity
+    ):
         return False
-    before_group = before_stored or before_state.verified_identity
-    after_group = after_stored or after_state.verified_identity
-    if before_group is not None and before_group == after_group:
-        return True
-    if before_state.resolved_path == after_state.resolved_path:
+    if (
+        before_state.resolved_path is not None
+        and before_state.resolved_path == after_state.resolved_path
+    ):
         return before_stored is None or after_stored is None
-    before_identity = before_state.verified_identity
-    after_identity = after_state.verified_identity
+    if before_state.repository is None or after_state.repository is None:
+        return False
+    before_identity = before_state.live_identity
+    after_identity = after_state.live_identity
     if before_identity is not None and before_identity == after_identity:
         return True
     if before_identity is None or after_identity is None:
@@ -72,33 +74,11 @@ def list_scans(
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
         identities = RepositoryIdentityCache(connection)
-        requested = identities.for_path(str(repository))
-        check_ownership = {"target_device", "target_inode"} <= identities.scan_columns
-        identity_matches = (
-            requested.resolved_path is not None
-            and (
-                requested.stored_identity is None
-                or requested.missing
-                or requested.stored_identity == requested.live_identity
-            )
+        clause, scope_values = identities.scope_for_path(str(repository)).sql(
+            supports_generation=identities.supports_generation
         )
-        repository_clauses = [
-            _owned_scan_clause(
-                repository,
-                check_ownership and not requested.relaxed_directory_ownership,
-                values,
-            )
-        ] if identity_matches else ["0"]
-        requested_identity = requested.verified_identity
-        if requested_identity is not None:
-            for target_id in identities.targets:
-                if target_id == requested.target_id or identities.group(target_id) != (
-                    "repository", requested_identity
-                ):
-                    continue
-                repository_clauses.append("scans.target_id = ?")
-                values.append(target_id)
-        clauses.append(f"({' OR '.join(repository_clauses)})")
+        clauses.append(clause)
+        values.extend(scope_values)
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
         prefix = scan_root.rstrip(os.sep) + os.sep
@@ -211,33 +191,6 @@ def list_scans(
     return result
 
 
-def _owned_scan_clause(
-    target: Path,
-    check_ownership: bool,
-    values: list[Any],
-) -> str:
-    values.append(str(target))
-    target_clause = "scans.target_path = ?"
-    if not check_ownership:
-        return target_clause
-    try:
-        metadata = target.stat()
-    except OSError:
-        return target_clause
-    values.extend(
-        (
-            serialize_filesystem_identity(metadata.st_dev),
-            serialize_filesystem_identity(metadata.st_ino),
-        )
-    )
-    return (
-        f"({target_clause} AND ("
-        "(scans.target_device IS NULL AND scans.target_inode IS NULL) "
-        "OR (scans.target_device = ? AND scans.target_inode = ?)"
-        "))"
-    )
-
-
 def _scan_completion_order(scan: sqlite3.Row) -> tuple[int, int, str]:
     sequence = scan["completion_sequence"] if "completion_sequence" in scan.keys() else None
     if sequence is not None:
@@ -261,23 +214,13 @@ def list_unmatched_scan_pairs(
     requested = identities.for_path(str(repository))
     if identities.supports_identity:
         requested.require_owner()
-    requested_row = {
-        "target_id": requested.target_id,
-        "target_path": requested.target_path,
-        "repository_identity": requested.stored_identity,
-    }
-    scan_query = (
-        "SELECT scans.*, targets.repository_identity "
-        "FROM scans LEFT JOIN security_targets AS targets ON targets.id = scans.target_id "
-        "WHERE scans.status = 'complete' ORDER BY scans.started_at, scans.id"
-        if identities.supports_identity
-        else "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
+    clause, values = identities.scope_for_path(str(repository)).sql(
+        supports_generation=identities.supports_generation
     )
-    selected = [
-        scan
-        for scan in connection.execute(scan_query)
-        if _same_repository(connection, scan, requested_row, identities=identities)
-    ]
+    selected = connection.execute(
+        "SELECT * FROM scans WHERE status = 'complete' "
+        f"AND {clause} ORDER BY started_at, id", values
+    ).fetchall()
 
     available = []
     for scan in selected:
@@ -302,7 +245,10 @@ def list_unmatched_scan_pairs(
     for index, after in enumerate(available):
         if focus_scan_id is not None and after["id"] != focus_scan_id:
             continue
-        candidates = available[:index]
+        candidates = [
+            before for before in available[:index]
+            if scan_repository_group(before) == scan_repository_group(after)
+        ]
         previous = [
             before
             for before in candidates

@@ -3,7 +3,6 @@
 import argparse
 import sqlite3
 import sys
-from collections import Counter
 from collections.abc import Iterator
 from itertools import islice
 from pathlib import Path
@@ -13,7 +12,11 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
 from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
-from workbench_target_state import RepositoryIdentityCache
+from workbench_target_state import (
+    RepositoryIdentityCache,
+    RepositoryScanScope,
+    scan_repository_group,
+)
 from workbench_validation import bounded_output_text
 
 
@@ -38,17 +41,17 @@ def list_global_findings(
     if repository is not None:
         repository = str(Path(repository).expanduser().resolve())
         requested = identities.for_path(repository)
-        target_ids = identities.target_ids_for_path(repository)
+        scan_scope = identities.scope_for_path(repository)
     else:
-        target_ids = (
-            None if args.target_id is None else identities.target_ids(args.target_id)
+        scan_scope = (
+            None if args.target_id is None else identities.scope(args.target_id)
         )
         target = identities.targets.get(args.target_id)
         if identities.supports_identity and target is not None:
             requested = identities.for_row(target)
     findings = (
         row
-        for row in _indexed_findings(connection, identities=identities, target_ids=target_ids)
+        for row in _indexed_findings(connection, identities=identities, scan_scope=scan_scope)
         if (args.severity is None or row["severity"] == args.severity)
         and (args.status is None or row["status"] == args.status)
         and (
@@ -102,19 +105,21 @@ def _indexed_findings(
     connection: sqlite3.Connection,
     *,
     identities: RepositoryIdentityCache | None = None,
-    target_ids: set[str] | None = None,
+    scan_scope: RepositoryScanScope | None = None,
 ) -> Iterator[dict[str, Any]]:
-    if target_ids is not None and not target_ids:
-        return
     identities = identities or RepositoryIdentityCache(connection)
-    target_values = tuple(sorted(target_ids)) if target_ids is not None else ()
-    placeholders = ", ".join("?" for _ in target_values)
-    target_filter = f"scans.target_id IN ({placeholders})" if target_ids is not None else "1"
-    match_filter = (
-        f"before_scans.target_id IN ({placeholders}) "
-        f"AND after_scans.target_id IN ({placeholders})"
-        if target_ids is not None else "1"
-    )
+
+    def scope_sql(alias: str) -> tuple[str, tuple[str, ...]]:
+        return scan_scope.sql(
+            alias, supports_generation=identities.supports_generation
+        ) if scan_scope is not None else ("1", ())
+
+    def generation_sql(alias: str) -> str:
+        return f"{alias}.repository_generation" if identities.supports_generation else "NULL"
+
+    target_filter, target_values = scope_sql("scans")
+    before_filter, before_values = scope_sql("before_scans")
+    after_filter, after_values = scope_sql("after_scans")
     parents: dict[
         tuple[tuple[str, str], str], tuple[tuple[str, str], str]
     ] = {}
@@ -128,6 +133,8 @@ def _indexed_findings(
         f"""
         SELECT before_scans.target_id AS before_target_id,
             after_scans.target_id AS after_target_id,
+            {generation_sql("before_scans")} AS before_generation,
+            {generation_sql("after_scans")} AS after_generation,
             before.finding_id AS before_finding_id,
             after.finding_id AS after_finding_id
         FROM scan_comparison_matches AS matches
@@ -137,12 +144,18 @@ def _indexed_findings(
         JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
         JOIN security_targets AS after_targets ON after_targets.id = after_scans.target_id
-        WHERE {match_filter}
+        WHERE {before_filter} AND {after_filter}
         """,
-        (*target_values, *target_values),
+        (*before_values, *after_values),
     ):
-        before_repository = identities.group(match["before_target_id"])
-        after_repository = identities.group(match["after_target_id"])
+        before_repository = scan_repository_group({
+            "target_id": match["before_target_id"],
+            "repository_generation": match["before_generation"],
+        })
+        after_repository = scan_repository_group({
+            "target_id": match["after_target_id"],
+            "repository_generation": match["after_generation"],
+        })
         if before_repository != after_repository:
             continue
         before = group(
@@ -168,11 +181,12 @@ def _indexed_findings(
         "scans.completed_at" if "completed_at" in identities.scan_columns else "NULL"
     )
     latest_scan_by_repository = {
-        identities.group(row["target_id"]): row["id"]
+        scan_repository_group(row): row["id"]
         for row in sorted(
             connection.execute(
                 f"""
                 SELECT scans.target_id, scans.id, scans.started_at,
+                    {generation_sql("scans")} AS repository_generation,
                     {completed_at_column} AS completed_at,
                     {completion_column} AS completion_sequence
                 FROM scans
@@ -196,6 +210,7 @@ def _indexed_findings(
             scans.id AS scan_id,
             scans.started_at AS scan_started_at,
             scans.target_id,
+            {generation_sql("scans")} AS repository_generation,
             targets.current_path AS target_path,
             scans.scope,
             MAX(scans.updated_at, COALESCE(triage.updated_at, '')) AS updated_at,
@@ -224,7 +239,7 @@ def _indexed_findings(
         grouped.setdefault(
             group(
                 (
-                    identities.group(row["target_id"]),
+                    scan_repository_group(row),
                     row["finding_id"],
                 )
             ),
@@ -247,7 +262,7 @@ def _indexed_findings(
         ):
             status = "open"
         scans = sorted({(row["scan_started_at"], row["scan_id"]) for row in occurrences})
-        latest_scan_id = latest_scan_by_repository.get(identities.group(latest["target_id"]))
+        latest_scan_id = latest_scan_by_repository.get(scan_repository_group(latest))
         findings.append(
             {
                 **dict(latest),
@@ -299,19 +314,33 @@ def list_repositories(
 
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
 
-    open_findings_by_repository = Counter(
-        identities.group(row["target_id"])
-        for row in _indexed_findings(connection, identities=identities)
+    scan_evidence = {
+        row["id"]: row for row in connection.execute("SELECT * FROM scans")
+    }
+    open_findings = [
+        row for row in _indexed_findings(connection, identities=identities)
         if row["status"] == "open"
-    )
+    ]
+
+    def open_findings_count(target_id: str) -> int:
+        scope = identities.scope(target_id)
+        if scope.exact_target:
+            return sum(
+                row["status"] == "open"
+                for row in _indexed_findings(
+                    connection, identities=identities, scan_scope=scope
+                )
+            )
+        return sum(
+            any(scope.contains(scan_evidence[scan_id]) for scan_id in row["known_scan_ids"])
+            for row in open_findings
+        )
     repositories = [
         {
             "checkoutAvailable": Path(target["current_path"]).is_dir(),
             "displayName": target["display_name"],
             "latestScan": latest_scan,
-            "openFindingsCount": open_findings_by_repository.get(
-                identities.group(target_id), 0
-            ),
+            "openFindingsCount": open_findings_count(target_id),
             "scanCount": scan_count_by_target[target_id],
             "targetId": target_id,
             "targetPath": target["current_path"],

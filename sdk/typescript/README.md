@@ -666,12 +666,15 @@ const directPublication = await publishScan("/path/to/completed-scan", {
 ### Scan history and reruns
 
 `scans` or `scans list` lists scans for the current repository. Linked Git
-worktrees are discovered automatically and grouped when they share the selected
-state database. History written without a recorded Git generation stays attached
-to its original target and scan IDs. If an older client creates and scans a
-target before its identity can be recorded, later clients do not retroactively
-share that history across worktrees. Findings indicate whether they were confirmed
-in the repository's latest completed scan across those linked worktrees. Finding confirmation and
+worktrees are discovered automatically when their scans record the same Git
+generation in the selected state database. The generation identifies the shared
+Git and primary object-store directory instances; it is not a repository UUID.
+History written without that scan-level evidence stays attached to its original
+target and scan IDs. Older clients' history is not retroactively shared across
+worktrees. Explicit comparisons between independently verified copies of the same
+repository remain available without joining their finding histories. Findings
+indicate whether they were confirmed in the repository's latest completed scan
+across those linked worktrees. Finding confirmation and
 automatic matching use the order in which completed scans become visible in the
 workbench; sealed report timestamps are unchanged. Pass a repository path to
 inspect another checkout. `--scan-root DIR` only filters scans already recorded

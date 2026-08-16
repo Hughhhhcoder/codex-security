@@ -694,6 +694,12 @@ MIGRATIONS = (
         ON security_targets(repository_identity);
 
         ALTER TABLE scans
+        ADD COLUMN repository_generation TEXT;
+
+        CREATE INDEX scans_by_repository_generation
+        ON scans(repository_generation);
+
+        ALTER TABLE scans
         ADD COLUMN completion_sequence INTEGER CHECK (completion_sequence >= 1);
 
         CREATE UNIQUE INDEX scans_completion_sequence
@@ -1339,10 +1345,13 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
             add_column_if_missing(connection, "security_targets", "repository_identity", "TEXT")
             continue
         if statement.startswith("ALTER TABLE scans"):
-            add_column_if_missing(
-                connection, "scans", "completion_sequence",
-                "INTEGER CHECK (completion_sequence >= 1)",
-            )
+            if "ADD COLUMN repository_generation " in statement:
+                add_column_if_missing(connection, "scans", "repository_generation", "TEXT")
+            else:
+                add_column_if_missing(
+                    connection, "scans", "completion_sequence",
+                    "INTEGER CHECK (completion_sequence >= 1)",
+                )
             continue
         for prefix in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TRIGGER "):
             if statement.startswith(prefix):

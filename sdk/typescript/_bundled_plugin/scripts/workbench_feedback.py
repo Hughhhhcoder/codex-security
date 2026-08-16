@@ -17,24 +17,29 @@ from workbench_constants import (
     FINDING_TITLE_BYTES,
 )
 from workbench_native_indexes import _indexed_findings
-from workbench_target_state import RepositoryIdentityCache
+from workbench_target_state import RepositoryIdentityCache, scan_repository_group
 from workbench_validation import bounded_output_text
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
     identities = RepositoryIdentityCache(connection)
-    target_ids = sorted(identities.target_ids(scan["target_id"]))
-    if not target_ids:
+    scope = identities.scope_for_scan(scan)
+    if not scope.available:
         return {"scanId": scan["id"], "targetId": scan["target_id"], "falsePositives": []}
 
     indexed_findings = {
-        finding_id: finding
+        (scan_repository_group(finding), finding_id): finding
         for finding in _indexed_findings(
-            connection, identities=identities, target_ids=set(target_ids)
+            connection, identities=identities, scan_scope=scope
         )
         for finding_id in finding["matched_finding_ids"]
     }
-    target_placeholders = ", ".join("?" for _ in target_ids)
+    source_filter, source_values = scope.sql(
+        "source_scans", supports_generation=identities.supports_generation
+    )
+    source_generation = (
+        "source_scans.repository_generation" if identities.supports_generation else "NULL"
+    )
     rows = connection.execute(
         f"""
         WITH ranked_decisions AS (
@@ -44,10 +49,13 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                 triage.close_reason, triage.note,
                 COALESCE(triage.updated_at, source_scans.completed_at) AS updated_at,
                 source_scans.id AS source_scan_id,
+                source_scans.target_id,
+                {source_generation} AS repository_generation,
                 source_scans.completed_at AS source_completed_at,
                 locations.relative_path, locations.start_line, locations.end_line, locations.role,
                 ROW_NUMBER() OVER (
-                    PARTITION BY findings.id
+                    PARTITION BY findings.id, {source_generation},
+                        CASE WHEN {source_generation} IS NULL THEN source_scans.target_id END
                     ORDER BY COALESCE(triage.updated_at, source_scans.completed_at) DESC,
                         source_scans.completed_at DESC,
                         source_scans.id DESC, occurrences.id DESC
@@ -64,7 +72,7 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
                     candidate.sort_order
                 LIMIT 1
             )
-            WHERE source_scans.target_id IN ({target_placeholders})
+            WHERE {source_filter}
                 AND source_scans.id != ?
                 AND source_scans.status = 'complete'
         )
@@ -77,12 +85,12 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             AND trim(note) != ''
         ORDER BY updated_at DESC, source_completed_at DESC, source_scan_id DESC, finding_id DESC
         """,
-        (*target_ids, scan["id"]),
+        (*source_values, scan["id"]),
     )
     false_positives = []
     reviewed_components: set[str] = set()
     for row in rows:
-        finding = indexed_findings.get(row["finding_id"])
+        finding = indexed_findings.get((scan_repository_group(row), row["finding_id"]))
         if (
             finding is None
             or finding["status"] != "closed"

@@ -117,7 +117,12 @@ from workbench_target import (
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
-from workbench_target_state import backfill_security_targets, ensure_security_target
+from workbench_target_state import (
+    RepositoryScanScope,
+    backfill_security_targets,
+    ensure_security_target,
+    register_security_target,
+)
 from workbench_validation import (
     bounded_output_text,
     optional_text,
@@ -885,7 +890,8 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "This Codex thread already has an active Deep Scan for the selected "
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
-        if ensure_security_target(connection, str(current_target)) != workspace["target_id"]:
+        registration = register_security_target(connection, str(current_target))
+        if registration.target_id != workspace["target_id"]:
             raise SystemExit(
                 "The saved workspace no longer matches the selected repository target."
             )
@@ -897,6 +903,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            repository_generation=registration.repository_generation,
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
@@ -1019,7 +1026,8 @@ def _start_prompt_driven_scan(
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = now()
-        target_id = ensure_security_target(connection, target_path)
+        registration = register_security_target(connection, target_path)
+        target_id = registration.target_id
         connection.execute(
             """
             INSERT INTO workspaces (
@@ -1052,6 +1060,7 @@ def _start_prompt_driven_scan(
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            repository_generation=registration.repository_generation,
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
@@ -1652,10 +1661,13 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     connection.execute("BEGIN IMMEDIATE")
     try:
         archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
-        target_id = ensure_security_target(connection, str(repository))
+        registration = register_security_target(connection, str(repository))
+        target_id = registration.target_id
         if parent_scan_id is not None:
             parent = require_scan(connection, parent_scan_id)
-            if parent["target_id"] not in native_indexes.repository_target_ids(connection, target_id):
+            if not RepositoryScanScope(
+                registration.repository_generation, target_id
+            ).contains(parent):
                 raise SystemExit("A rerun must belong to the same repository as its parent scan.")
 
         connection.execute(
@@ -1687,6 +1699,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            repository_generation=registration.repository_generation,
             target_root=scan_dir.parent,
             target_summary=None,
             scope_file_count=scope_file_count,
@@ -3833,7 +3846,7 @@ def main() -> None:
             require_remediation_target=require_remediation_target,
             require_scannable_target=require_scannable_target,
             require_scope=require_scope,
-            ensure_security_target=ensure_security_target,
+            register_security_target=register_security_target,
             require_canonical_scan_directory=require_canonical_scan_directory,
             safe_segment=safe_segment,
             compact_timestamp=compact_timestamp,

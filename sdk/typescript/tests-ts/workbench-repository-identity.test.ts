@@ -91,6 +91,7 @@ from workbench_target_state import (
     backfill_repository_identities,
     backfill_security_targets,
     ensure_security_target,
+    register_security_target,
     repository_identity,
     repository_relative_path,
     stable_target_id,
@@ -122,9 +123,10 @@ def git(target, *args):
 
 def add_scan(scan_id, target, ownership="current", verify_ownership=True):
     target = Path(target)
-    target_id = ensure_security_target(
+    registration = register_security_target(
         connection, str(target), verify_ownership=verify_ownership
     )
+    target_id = registration.target_id
     metadata = target.stat()
     device = serialize_filesystem_identity(metadata.st_dev)
     inode = serialize_filesystem_identity(metadata.st_ino)
@@ -142,12 +144,12 @@ def add_scan(scan_id, target, ownership="current", verify_ownership=True):
         (workspace_id, str(target), target_id, timestamp, timestamp),
     )
     connection.execute(
-        "INSERT INTO scans (id, workspace_id, target_path, target_id, target_device, "
+        "INSERT INTO scans (id, workspace_id, target_path, target_id, repository_generation, target_device, "
         "target_inode, target_revision, scope, mode, scan_dir, status, phase, "
         "started_at, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            scan_id, workspace_id, str(target), target_id, device, inode,
+            scan_id, workspace_id, str(target), target_id, registration.repository_generation, device, inode,
             "synthetic-revision", ".", "standard", str(root / "scans" / scan_id),
             "complete", "reporting", timestamp, timestamp, timestamp,
         ),
@@ -230,7 +232,7 @@ if scenario == "identity":
     custom_template.mkdir()
     git(custom_template, "init", "-q", "--template=")
     markerless_repository_identity = repository_identity(custom_template)
-    with patch("workbench_target_state._repository_birth_time_ns", side_effect=(41, 42)):
+    with patch("workbench_target_state._repository_birth_time_ns", side_effect=(41, 100, 42, 100)):
         recycled_inode_distinguished = (
             repository_identity(repository) != repository_identity(repository)
         )
@@ -606,6 +608,9 @@ elif scenario == "candidate-generation":
             "UPDATE security_targets SET repository_identity = NULL WHERE id = ?",
             (legacy_id,),
         )
+        connection.execute(
+            "UPDATE scans SET repository_generation = NULL WHERE id = ?", ("trusted-alias",)
+        )
         verified_legacy = automatic_history()
         connection.execute(
             "UPDATE scans SET target_device = NULL, target_inode = NULL WHERE id = ?",
@@ -779,8 +784,8 @@ describe("durable workbench repository identities", () => {
     expect(before["serviceB"]).toEqual(["canonical-b"]);
     expect(after["root"]).toEqual(["canonical-root", "linked-root"]);
     expect(after["serviceA"]).toEqual(["canonical-a", "linked-a"]);
-    expect(result["matchedScanCount"]).toBe(3);
-    expect(result["matchingBatches"]).toBe(2);
+    expect(result["matchedScanCount"]).toBe(2);
+    expect(result["matchingBatches"]).toBe(1);
     expect(result["unavailableScans"]).toBe(1);
     expect(result["compared"]).toBe(true);
     expect(result["saved"]).toBe(true);
@@ -887,7 +892,7 @@ describe("durable workbench repository identities", () => {
     const result = runProbe("unverified-owner", fixture());
 
     expect(result["before"]).toEqual(["trusted-alias"]);
-    expect(result["after"]).toEqual(["unverified-owner"]);
+    expect(result["after"]).toEqual([]);
   }, 30_000);
 
   test("keeps non-Git paths isolated and never equates unrelated null target IDs", () => {
@@ -896,8 +901,8 @@ describe("durable workbench repository identities", () => {
     expect(result["firstIdentity"]).toBeNull();
     expect(result["secondIdentity"]).toBeNull();
     expect(result["differentNullIdsMatch"]).toBe(false);
-    expect(result["sameNullPathMatches"]).toBe(true);
-    expect(result["firstScans"]).toEqual(["legacy-a", "plain-a"]);
+    expect(result["sameNullPathMatches"]).toBe(false);
+    expect(result["firstScans"]).toEqual([]);
     expect(result["secondScans"]).toEqual(["plain-b"]);
   }, 30_000);
 });
