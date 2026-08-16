@@ -438,6 +438,12 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
     return [scan["scope"]]
 
 
+def public_scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
+    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+    recipe.pop("_codexSecurityFileScopes", None)
+    return recipe
+
+
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target = Path(scan["target_path"])
     target_contract = {
@@ -1609,6 +1615,12 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     recipe = parse_scan_recipe(args.recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
+    stored_recipe = {
+        **recipe,
+        "_codexSecurityFileScopes": [
+            path for path in paths if (repository / path).is_file()
+        ],
+    }
     scope = paths[0] if len(paths) == 1 else "."
     diff_target = None
     if requested_target["kind"] in {"refs", "working_tree"}:
@@ -1693,7 +1705,9 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         connection.execute(
             "UPDATE scans SET recipe_json = ?, parent_scan_id = ? WHERE id = ?",
             (
-                json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
+                json.dumps(
+                    stored_recipe, allow_nan=False, separators=(",", ":"), sort_keys=True
+                ),
                 parent_scan_id,
                 scan_id,
             ),
@@ -1780,7 +1794,7 @@ def get_scan_recipe(connection: sqlite3.Connection, args: argparse.Namespace) ->
         raise SystemExit("This scan does not have a saved launch recipe.")
     return {
         "parentScanId": scan["parent_scan_id"],
-        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
+        "recipe": public_scan_recipe(scan),
         "scanId": scan["id"],
     }
 
@@ -3173,7 +3187,7 @@ def scan_context(
     }
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
-        context["recipe"] = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        context["recipe"] = public_scan_recipe(scan)
     return context
 
 
@@ -3450,7 +3464,8 @@ def finding_result(
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
 ) -> dict[str, Any]:
-    details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
+    stored_details = read_finding_details(occurrence["details_json"])
+    details = bounded_finding_details(stored_details)
     confidence = details.get("confidence")
     confidence = confidence if isinstance(confidence, dict) else {}
     severity = details.get("severity")
@@ -3514,7 +3529,15 @@ def finding_result(
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
     result.pop("artifactPaths", None)
-    source_excerpt = finding_source_excerpt(scan, target, locations)
+    stored_locations = stored_details.get("locations")
+    excerpt_locations = (
+        [location for location in stored_locations if isinstance(location, dict)]
+        if isinstance(stored_locations, list)
+        else locations
+    )
+    source_excerpt = finding_source_excerpt(
+        scan, target, excerpt_locations, requested_scan_paths(scan)
+    )
     if source_excerpt:
         result["sourceExcerpt"] = source_excerpt
     artifact_paths = finding_artifact_paths(Path(scan["scan_dir"]), details)

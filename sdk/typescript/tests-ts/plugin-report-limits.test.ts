@@ -21,6 +21,7 @@ describe("bundled scan report and source limits", () => {
       "    finalizer.validate_against_schema({'safe': True}, schema)",
       "    source = b'x' * (1024 * 1024 + 1)",
       "    excerpts.git_bytes = lambda *args: source",
+      "    excerpts.git_worktree_context = lambda target: (target, '.')",
       "    target = pathlib.Path(directory).resolve()",
       "    excerpt = excerpts.scanned_source_text({'target_revision': 'deadbeef', 'target_snapshot_digest': None}, target, 'large.py')",
       "    hashes = finalizer._github_line_hashes(io.StringIO('line\\n' * 100001), {100001})",
