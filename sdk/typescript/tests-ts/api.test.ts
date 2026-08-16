@@ -68,6 +68,12 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
 const TEST_SNAPSHOT_DIGEST = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
+const RESET_BUDGET_USAGE = {
+  input_tokens: 1_200,
+  cached_input_tokens: 200,
+  cache_write_input_tokens: 0,
+  output_tokens: 25,
+};
 const SHELL_ENVIRONMENT_PREFIX = process.platform === "win32" ? "$env:" : "$";
 
 function shellEnvironmentReference(name: string, suffix = ""): string {
@@ -234,11 +240,12 @@ async function writeUsageSession(
   threadId: string,
   usage: Record<string, number>,
   parentThreadId?: string,
-): Promise<void> {
+): Promise<string> {
   const directory = join(codexHome, "sessions", "2026", "07", "26");
   await mkdir(directory, { recursive: true });
+  const path = join(directory, `rollout-${threadId}.jsonl`);
   await writeFile(
-    join(directory, `rollout-${threadId}.jsonl`),
+    path,
     [
       JSON.stringify({
         type: "session_meta",
@@ -259,6 +266,7 @@ async function writeUsageSession(
       "",
     ].join("\n"),
   );
+  return path;
 }
 
 async function* completedEvents(): AsyncGenerator<ThreadEvent> {
@@ -3350,6 +3358,7 @@ describe("CodexSecurity orchestration", () => {
 
   test.each([
     ["live polling", "live"],
+    ["a smaller cleanup counter snapshot", "reset"],
     ["turn completion", "completed"],
     ["turn completion after a tracking failure", "tracking-failure"],
     ["failure cleanup after a tracking failure", "cleanup"],
@@ -3368,6 +3377,7 @@ describe("CodexSecurity orchestration", () => {
       const costs: number[] = [];
       const cancellation = new AbortController();
       const userCanceled = costSource === "canceled";
+      const liveUsage = costSource === "live" || costSource === "reset";
       let turns = 0;
       let rejectPoll: ((error: unknown) => void) | undefined;
       const rootUsage: Record<string, number> =
@@ -3377,7 +3387,7 @@ describe("CodexSecurity orchestration", () => {
               cached_input_tokens: 200,
               output_tokens: 30,
             }
-          : costSource === "live"
+          : liveUsage
             ? {
                 input_tokens: 500,
                 cached_input_tokens: 100,
@@ -3388,9 +3398,9 @@ describe("CodexSecurity orchestration", () => {
         costSource === "cleanup"
           ? {}
           : {
-              input_tokens: costSource === "live" ? 750 : 250,
+              input_tokens: liveUsage ? 750 : 250,
               cached_input_tokens: 100,
-              output_tokens: costSource === "live" ? 20 : 10,
+              output_tokens: liveUsage ? 20 : 10,
             };
       const cost = {
         model: "gpt-5.6-sol",
@@ -3446,7 +3456,7 @@ describe("CodexSecurity orchestration", () => {
                     rejectPoll?.(new Error("session read failed"));
                     rejectPoll = undefined;
                   }
-                  if (costSource !== "live" && costSource !== "cleanup") {
+                  if (!liveUsage && costSource !== "cleanup") {
                     await copyCompletedScan(root);
                     yield {
                       type: "turn.completed",
@@ -3485,7 +3495,25 @@ describe("CodexSecurity orchestration", () => {
       // The fake Codex stream has no process handle to keep its unref'ed poll alive.
       const keepEventLoopAlive = setTimeout(() => {}, 10_000);
       const originalRefresh = ScanCostTracker.prototype.refresh;
+      const originalStop = ScanCostTracker.prototype.stop;
       let firstRefresh = true;
+      const stop =
+        costSource === "reset"
+          ? spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+              async function (
+                this: ScanCostTracker,
+                ...args: Parameters<ScanCostTracker["stop"]>
+              ) {
+                const snapshot = await originalStop.apply(this, args);
+                return args.length === 0
+                  ? {
+                      usage: RESET_BUDGET_USAGE,
+                      cost: estimateScanCost("gpt-5.6-sol", RESET_BUDGET_USAGE),
+                    }
+                  : snapshot;
+              },
+            )
+          : null;
       const refresh =
         costSource === "tracking-failure" ||
         costSource === "cleanup" ||
@@ -3532,6 +3560,7 @@ describe("CodexSecurity orchestration", () => {
           });
         }
       } finally {
+        stop?.mockRestore();
         refresh?.mockRestore();
         clearTimeout(keepEventLoopAlive);
       }
@@ -3574,6 +3603,8 @@ describe("CodexSecurity orchestration", () => {
     ["invalid", "live"],
     ["unavailable", "live"],
     ["partial", "completed"],
+    ["partial", "reset"],
+    ["partial", "flushed"],
   ] as const)(
     "recovers exhausted deep-scan budget when completion is %s using %s usage",
     async (completion, costSource) => {
@@ -3588,7 +3619,9 @@ describe("CodexSecurity orchestration", () => {
       ]);
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
+      const expectedCostUsd = costSource === "flushed" ? 0.0078 : 0.00625;
       let turns = 0;
+      let workerSession: string | null = null;
       const client = new TestClient(
         {},
         {
@@ -3642,8 +3675,8 @@ describe("CodexSecurity orchestration", () => {
                 turns += 1;
                 async function* events(): AsyncGenerator<ThreadEvent> {
                   yield { type: "thread.started", thread_id: "scan-thread" };
-                  if (costSource === "completed") {
-                    await Promise.all([
+                  if (costSource === "completed" || costSource === "flushed") {
+                    const sessions = await Promise.all([
                       writeUsageSession(codexHome, "scan-thread", {
                         input_tokens: 100,
                         output_tokens: 1,
@@ -3659,6 +3692,7 @@ describe("CodexSecurity orchestration", () => {
                         "scan-thread",
                       ),
                     ]);
+                    workerSession = sessions[1]!;
                     yield {
                       type: "turn.completed",
                       usage: {
@@ -3697,6 +3731,61 @@ describe("CodexSecurity orchestration", () => {
         },
       );
       const keepAlive = setTimeout(() => {}, 10_000);
+      const originalStop = ScanCostTracker.prototype.stop;
+      const stop =
+        costSource === "reset" || costSource === "flushed"
+          ? spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+              async function (
+                this: ScanCostTracker,
+                ...args: Parameters<ScanCostTracker["stop"]>
+              ) {
+                try {
+                  const snapshot = await originalStop.apply(this, args);
+                  return costSource === "reset" && args.length === 0
+                    ? {
+                        usage: RESET_BUDGET_USAGE,
+                        cost: estimateScanCost(
+                          "gpt-5.6-sol",
+                          RESET_BUDGET_USAGE,
+                        ),
+                      }
+                    : snapshot;
+                } finally {
+                  if (
+                    costSource === "flushed" &&
+                    args.length > 0 &&
+                    workerSession !== null
+                  ) {
+                    const path = workerSession;
+                    workerSession = null;
+                    await appendFile(
+                      path,
+                      [
+                        JSON.stringify({
+                          type: "event_msg",
+                          payload: {
+                            type: "token_count",
+                            info: {
+                              total_token_usage: {
+                                input_tokens: 500,
+                                cached_input_tokens: 100,
+                                output_tokens: 20,
+                              },
+                            },
+                          },
+                        }),
+                        JSON.stringify({
+                          type: "event_msg",
+                          payload: { type: "task_complete" },
+                        }),
+                        "",
+                      ].join("\n"),
+                    );
+                  }
+                }
+              },
+            )
+          : null;
       try {
         const result = client.run(repository, {
           mode: "deep",
@@ -3721,9 +3810,9 @@ describe("CodexSecurity orchestration", () => {
           expect(recovered.coverage.completeness).toBe(completion);
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
-          expect(recovered.cost?.estimatedUsd).toBe(0.00625);
+          expect(recovered.cost?.estimatedUsd).toBe(expectedCostUsd);
           expect(warnings).toEqual([
-            `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
+            `Scan stopped: estimated cost $${expectedCostUsd} exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
         }
@@ -3733,7 +3822,11 @@ describe("CodexSecurity orchestration", () => {
         );
         expect(recovery?.includes("--cost-json")).toBe(true);
         expect(recovery?.includes("--message")).toBe(true);
+        expect(
+          JSON.parse(recovery![recovery!.indexOf("--cost-json") + 1]!),
+        ).toMatchObject({ estimatedUsd: expectedCostUsd });
       } finally {
+        stop?.mockRestore();
         clearTimeout(keepAlive);
         await client.close();
       }

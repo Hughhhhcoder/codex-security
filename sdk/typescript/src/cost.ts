@@ -85,6 +85,7 @@ interface ScanCostSnapshot {
 interface ObservedSessionUsage {
   root: ScanTokenUsage | null;
   workers: ScanTokenUsage | null;
+  completedRoot: ScanTokenUsage | null;
   rootCompleted: boolean;
   unverified: boolean;
   unfinishedWorkers: boolean;
@@ -111,7 +112,14 @@ export class ScanCostTracker {
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #finalSnapshot: ScanCostSnapshot | null = null;
-  #observedUsage: ObservedSessionUsage | null = null;
+  #observedUsage: ObservedSessionUsage = {
+    root: null,
+    workers: null,
+    completedRoot: null,
+    rootCompleted: false,
+    unverified: false,
+    unfinishedWorkers: false,
+  };
   #lastCost: number | null = null;
   #rootOnlyReadError = false;
   #highestFilesCompleted = 0;
@@ -178,7 +186,7 @@ export class ScanCostTracker {
       clearInterval(this.#timer);
       this.#timer = null;
     }
-    const completedRoot = tokenUsage(fallbackUsage);
+    const suppliedRoot = tokenUsage(fallbackUsage);
     let refreshFailure: { error: unknown } | null = null;
     try {
       await this.refresh();
@@ -186,25 +194,20 @@ export class ScanCostTracker {
       refreshFailure = { error };
     }
     const observed = this.#observedUsage;
-    const observedRoot = observed?.root ?? null;
-    const completedRootCost = estimateScanCost(
+    const completedRoot = higherCostUsage(
       this.#options.model,
+      observed.completedRoot,
+      suppliedRoot,
+    );
+    observed.completedRoot = completedRoot;
+    const rootUsage = higherCostUsage(
+      this.#options.model,
+      observed.root,
       completedRoot,
     );
-    const observedRootCost = estimateScanCost(
-      this.#options.model,
-      observedRoot,
-    );
-    const rootUsage =
-      completedRoot === null ||
-      (observedRootCost !== null &&
-        completedRootCost !== null &&
-        observedRootCost.estimatedUsd >= completedRootCost.estimatedUsd)
-        ? observedRoot
-        : completedRoot;
     let completedUsage: unknown =
-      rootUsage === completedRoot ? fallbackUsage : rootUsage;
-    const workerUsage = observed?.workers ?? null;
+      rootUsage === suppliedRoot ? fallbackUsage : rootUsage;
+    const workerUsage = observed.workers;
     if (workerUsage !== null) {
       completedUsage =
         rootUsage === null
@@ -219,13 +222,12 @@ export class ScanCostTracker {
           this.#snapshot.cost.estimatedUsd >= cost.estimatedUsd))
         ? this.#snapshot
         : { usage: completedUsage ?? null, cost };
+    this.#snapshot = snapshot;
     if (
       this.#options.maxCostUsd !== undefined &&
       snapshot.cost !== null &&
       snapshot.cost.estimatedUsd > this.#options.maxCostUsd
     ) {
-      this.#snapshot = snapshot;
-      this.#finalSnapshot = snapshot;
       this.#reportCost(snapshot.cost);
       if (!finalizing) return snapshot;
     }
@@ -245,10 +247,10 @@ export class ScanCostTracker {
       this.#options.maxCostUsd !== undefined &&
       (rootUsage === null ||
         cost === null ||
-        observed?.unverified ||
+        observed.unverified ||
         (finalizing &&
-          ((completedRoot === null && !observed?.rootCompleted) ||
-            observed?.unfinishedWorkers)))
+          ((completedRoot === null && !observed.rootCompleted) ||
+            observed.unfinishedWorkers)))
     ) {
       throw (
         refreshFailure?.error ??
@@ -257,8 +259,7 @@ export class ScanCostTracker {
         )
       );
     }
-    this.#snapshot = snapshot;
-    this.#finalSnapshot = snapshot;
+    if (finalizing) this.#finalSnapshot = snapshot;
     this.#reportCost(snapshot.cost);
     return snapshot;
   }
@@ -391,6 +392,7 @@ export class ScanCostTracker {
     const observed: ObservedSessionUsage = {
       root: null,
       workers: null,
+      completedRoot: this.#observedUsage.completedRoot,
       rootCompleted: false,
       unverified: hasUnverifiedWorkerAttribution,
       unfinishedWorkers: false,
@@ -424,8 +426,13 @@ export class ScanCostTracker {
           : addTokenUsage(observed.root, observed.workers);
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
-    this.#snapshot = { usage, cost };
-    this.#reportCost(cost);
+    if (
+      this.#snapshot.cost === null ||
+      (cost !== null && cost.estimatedUsd >= this.#snapshot.cost.estimatedUsd)
+    ) {
+      this.#snapshot = { usage, cost };
+    }
+    this.#reportCost(this.#snapshot.cost);
   }
 
   #reportWorkerActivities(session: SessionUsage): void {
@@ -968,6 +975,21 @@ function tokenUsage(value: unknown): ScanTokenUsage | null {
     reasoning_output_tokens: reasoning,
     total_tokens: input + output,
   };
+}
+
+function higherCostUsage(
+  model: string,
+  previous: ScanTokenUsage | null,
+  next: ScanTokenUsage | null,
+): ScanTokenUsage | null {
+  if (next === null) return previous;
+  const previousCost = estimateScanCost(model, previous);
+  const nextCost = estimateScanCost(model, next);
+  return previousCost !== null &&
+    nextCost !== null &&
+    previousCost.estimatedUsd >= nextCost.estimatedUsd
+    ? previous
+    : next;
 }
 
 function addTokenUsage(

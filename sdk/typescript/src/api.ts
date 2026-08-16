@@ -1328,23 +1328,47 @@ export class CodexSecurity {
       // Recorded first: everything below can throw a different error for this same failed
       // scan, and cleanup must treat all of those as a failure it is not allowed to mask.
       scanFailure = true;
-      const snapshot = await costTracker?.stop().catch(() => null);
+      const trackedSnapshot = await costTracker?.stop().catch(() => null);
+      const signaledOverage =
+        signal.reason instanceof ScanCostLimitExceededError
+          ? signal.reason
+          : null;
+      const trackedCost = trackedSnapshot?.cost;
+      const snapshot =
+        signaledOverage !== null &&
+        (trackedCost === undefined ||
+          trackedCost === null ||
+          signaledOverage.cost.estimatedUsd > trackedCost.estimatedUsd)
+          ? {
+              cost: signaledOverage.cost,
+              usage: {
+                input_tokens: signaledOverage.cost.inputTokens,
+                cached_input_tokens: signaledOverage.cost.cachedInputTokens,
+                cache_write_input_tokens:
+                  signaledOverage.cost.cacheWriteInputTokens,
+                output_tokens: signaledOverage.cost.outputTokens,
+              },
+            }
+          : trackedSnapshot;
       const knownCost = snapshot?.cost;
-      const failure =
+      let failure: unknown = signaledOverage ?? error;
+      if (
         options.maxCostUsd !== undefined &&
         knownCost !== undefined &&
         knownCost !== null &&
         knownCost.estimatedUsd > options.maxCostUsd &&
-        !this.#abortController.signal.aborted &&
-        options.signal?.aborted !== true
-          ? new ScanCostLimitExceededError(
-              options.maxCostUsd,
-              knownCost,
-              scanDir,
-            )
-          : signal.reason instanceof ScanCostLimitExceededError
-            ? signal.reason
-            : error;
+        (signaledOverage !== null ||
+          (!this.#abortController.signal.aborted &&
+            options.signal?.aborted !== true)) &&
+        (signaledOverage === null ||
+          knownCost.estimatedUsd > signaledOverage.cost.estimatedUsd)
+      ) {
+        failure = new ScanCostLimitExceededError(
+          options.maxCostUsd,
+          knownCost,
+          scanDir,
+        );
+      }
       if (
         failure instanceof ScanCostLimitExceededError &&
         budgetRecovery !== null &&

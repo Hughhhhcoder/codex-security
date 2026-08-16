@@ -1666,6 +1666,38 @@ describe("live scan cost tracking", () => {
     });
   });
 
+  test("retains the larger observed cost after a token-counter reset", async () => {
+    const home = await codexHome();
+    const root = await writeSession(home, "scan-thread", {
+      input_tokens: 1_000,
+      output_tokens: 100,
+    });
+    const costs: number[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+      maxCostUsd: 0.001,
+      onCost: (cost) => costs.push(cost.estimatedUsd),
+    });
+    tracker.start("scan-thread");
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.0032);
+    await appendFile(
+      root,
+      `${JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 500, output_tokens: 50 },
+          },
+        },
+      })}\n`,
+    );
+
+    expect((await tracker.stop()).cost?.estimatedUsd).toBe(0.0032);
+    expect(costs).toEqual([0.0032]);
+  });
+
   test("retains a partial event across incremental reads", async () => {
     const home = await codexHome();
     const path = await writeSession(home, "scan-thread", {
@@ -2245,6 +2277,7 @@ describe("live scan cost tracking", () => {
         maxCostUsd: 0.001,
         onCost: (cost) => reportedCosts.push(cost.estimatedUsd),
       });
+      const refresh = tracker.refresh.bind(tracker);
       expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
       if (evidence === "incomplete") {
         await appendIncompleteTokenUsage(worker);
@@ -2267,6 +2300,17 @@ describe("live scan cost tracking", () => {
         outputTokens: 110,
         estimatedUsd: 0.00352,
       });
+      tracker.refresh = refresh;
+      if (evidence !== "incomplete") {
+        await appendIncompleteTokenUsage(worker);
+      }
+      await appendFile(worker, `}\n${taskEvent("task_complete")}\n`);
+      expect((await tracker.stop()).cost).toMatchObject({
+        inputTokens: 11_000,
+        outputTokens: 1_100,
+        estimatedUsd: 0.0352,
+      });
+      expect(reportedCosts.at(-1)).toBe(0.0352);
     },
   );
 
