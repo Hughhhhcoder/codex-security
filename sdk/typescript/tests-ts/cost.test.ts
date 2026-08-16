@@ -637,7 +637,9 @@ describe("live scan cost tracking", () => {
   test.each([
     ["root metadata is missing", "missing", "independent", 1, true],
     ["root timing is missing", "untimed", "independent", 1, true],
+    ["root timing is invalid", "invalid", "independent", 1, true],
     ["worker timing is missing", "timed", "untimed", 1, true],
+    ["worker timing is invalid", "timed", "invalid", 1, true],
     ["the worker parent is unobserved", "missing", "orphaned", 1, true],
     ["the worker has a parent", "missing", "parented", 1, false],
     ["the worker is unrelated", "missing", "unrelated", 1, false],
@@ -655,7 +657,11 @@ describe("live scan cost tracking", () => {
           { input_tokens: 100, output_tokens: 10 },
           undefined,
           scanDirectory,
-          rootState === "timed" ? "2026-07-26T12:00:00Z" : undefined,
+          rootState === "timed"
+            ? "2026-07-26T12:00:00Z"
+            : rootState === "invalid"
+              ? "not a timestamp"
+              : undefined,
         );
       }
       if (workerState !== "none") {
@@ -678,7 +684,11 @@ describe("live scan cost tracking", () => {
                 "worker",
                 "output",
               ),
-          workerState === "untimed" ? undefined : "2026-07-26T12:01:00Z",
+          workerState === "untimed"
+            ? undefined
+            : workerState === "invalid"
+              ? "not a timestamp"
+              : "2026-07-26T12:01:00Z",
           true,
         );
       }
@@ -2226,6 +2236,40 @@ describe("live scan cost tracking", () => {
     expect(exceeded.signal.aborted).toBe(true);
   });
 
+  test.each(["incomplete", "unfinished", "unreadable"] as const)(
+    "preserves a definitive overage when final worker evidence is %s",
+    async (evidence) => {
+      const reportedCosts: number[] = [];
+      const { worker, tracker } = await workerScan({
+        workerCompleted: evidence !== "unfinished",
+        maxCostUsd: 0.001,
+        onCost: (cost) => reportedCosts.push(cost.estimatedUsd),
+      });
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(200);
+      if (evidence === "incomplete") {
+        await appendIncompleteTokenUsage(worker);
+      } else if (evidence === "unreadable") {
+        tracker.refresh = async () => {
+          throw new Error("session read failed");
+        };
+      }
+
+      await expect(
+        tracker.stop({ input_tokens: 1_000, output_tokens: 100 }),
+      ).rejects.toThrow(
+        evidence === "unreadable"
+          ? "session read failed"
+          : "The scan cost limit could not be verified",
+      );
+      expect(reportedCosts).toEqual([0.00064, 0.00352]);
+      expect((await tracker.stop()).cost).toMatchObject({
+        inputTokens: 1_100,
+        outputTokens: 110,
+        estimatedUsd: 0.00352,
+      });
+    },
+  );
+
   test("preserves higher observed root usage when completed-turn usage is stale", async () => {
     const { tracker } = await workerScan({
       rootUsage: { input_tokens: 1_000, output_tokens: 100 },
@@ -2262,15 +2306,18 @@ describe("live scan cost tracking", () => {
       output_tokens: 10,
     });
     const reportedCosts: number[] = [];
+    const reportedErrors: unknown[] = [];
+    const refreshError = new Error("session read failed");
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
       onCost: (cost) => reportedCosts.push(cost.estimatedUsd),
+      onError: (error) => reportedErrors.push(error),
     });
     tracker.start("scan-thread");
     expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.00032);
     tracker.refresh = async () => {
-      throw new Error("session read failed");
+      throw refreshError;
     };
     const usage = { input_tokens: 1_000, output_tokens: 100 };
 
@@ -2279,6 +2326,7 @@ describe("live scan cost tracking", () => {
       cost: { inputTokens: 1_000, estimatedUsd: 0.0032 },
     });
     expect(reportedCosts).toEqual([0.00032, 0.0032]);
+    expect(reportedErrors).toEqual([refreshError]);
   });
 
   test("adds observed worker usage to the completed root after a failed refresh", async () => {

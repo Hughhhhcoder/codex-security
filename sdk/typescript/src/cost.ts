@@ -179,18 +179,11 @@ export class ScanCostTracker {
       this.#timer = null;
     }
     const completedRoot = tokenUsage(fallbackUsage);
-    let refreshError: unknown;
+    let refreshFailure: { error: unknown } | null = null;
     try {
       await this.refresh();
     } catch (error) {
-      if (
-        fallbackUsage === undefined ||
-        (this.#options.maxCostUsd !== undefined &&
-          (completedRoot === null || !this.#rootOnlyReadError))
-      ) {
-        throw error;
-      }
-      refreshError = error;
+      refreshFailure = { error };
     }
     const observed = this.#observedUsage;
     const observedRoot = observed?.root ?? null;
@@ -219,6 +212,34 @@ export class ScanCostTracker {
           : addTokenUsage(workerUsage, rootUsage);
     }
     const cost = estimateScanCost(this.#options.model, completedUsage);
+    const snapshot =
+      this.#snapshot.usage !== null &&
+      (cost === null ||
+        (this.#snapshot.cost !== null &&
+          this.#snapshot.cost.estimatedUsd >= cost.estimatedUsd))
+        ? this.#snapshot
+        : { usage: completedUsage ?? null, cost };
+    if (
+      this.#options.maxCostUsd !== undefined &&
+      snapshot.cost !== null &&
+      snapshot.cost.estimatedUsd > this.#options.maxCostUsd
+    ) {
+      this.#snapshot = snapshot;
+      this.#finalSnapshot = snapshot;
+      this.#reportCost(snapshot.cost);
+    }
+    if (refreshFailure !== null) {
+      if (
+        fallbackUsage === undefined ||
+        (this.#options.maxCostUsd !== undefined &&
+          (completedRoot === null || !this.#rootOnlyReadError))
+      ) {
+        throw refreshFailure.error;
+      }
+      if (this.#options.maxCostUsd === undefined) {
+        this.#options.onError?.(refreshFailure.error);
+      }
+    }
     if (
       this.#options.maxCostUsd !== undefined &&
       (rootUsage === null ||
@@ -229,25 +250,16 @@ export class ScanCostTracker {
             observed?.unfinishedWorkers)))
     ) {
       throw (
-        refreshError ??
+        refreshFailure?.error ??
         new Error(
           "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
         )
       );
     }
-    if (
-      this.#snapshot.usage !== null &&
-      (cost === null ||
-        (this.#snapshot.cost !== null &&
-          this.#snapshot.cost.estimatedUsd >= cost.estimatedUsd))
-    ) {
-      this.#finalSnapshot = this.#snapshot;
-      return this.#finalSnapshot;
-    }
-    this.#snapshot = { usage: completedUsage ?? null, cost };
-    this.#reportCost(cost);
-    this.#finalSnapshot = this.#snapshot;
-    return this.#finalSnapshot;
+    this.#snapshot = snapshot;
+    this.#finalSnapshot = snapshot;
+    this.#reportCost(snapshot.cost);
+    return snapshot;
   }
 
   async #readSessions(): Promise<void> {
@@ -610,7 +622,10 @@ function readSessionEvent(
       session.workingDirectory = payload["cwd"];
     }
     if (typeof payload["timestamp"] === "string") {
-      session.startedAt = Math.floor(Date.parse(payload["timestamp"]) / 1_000);
+      const startedAt = Date.parse(payload["timestamp"]);
+      session.startedAt = Number.isFinite(startedAt)
+        ? Math.floor(startedAt / 1_000)
+        : null;
     }
     const source = payload["source"];
     const subagent = isRecord(source) ? source["subagent"] : undefined;
