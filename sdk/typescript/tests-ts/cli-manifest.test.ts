@@ -195,7 +195,7 @@ describe("full CLI manifest", () => {
     ]) {
       expect(markdown).toContain(value);
     }
-    for (const key of Object.keys(fakeResult().toJSON())) {
+    for (const key of [...Object.keys(fakeResult().toJSON()), "warnings"]) {
       expect(markdown).toContain(`\`${key}\``);
     }
   });

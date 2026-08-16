@@ -748,6 +748,9 @@ diagnostics go to stderr. Completed-result fields are `manifest`, `findings`,
 `sarifPath`, `threadId`, `cost`, and `turn`. `sarifPath` and `cost` may be null;
 `repositoryFindings` may be absent. `findings` describes this scan;
 `repositoryFindings`, when available, includes open findings across scans.
+If the target changes during execution, the result also includes a `warnings`
+array of strings and the CLI exits with code `2`. Those results do not describe
+the current checkout.
 
 JSON scans never use interactive terminal controls, even when stderr is a TTY.
 The `validate`, `patch`, `login`, and `logout` commands reject JSON and JSONL
