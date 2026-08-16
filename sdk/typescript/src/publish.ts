@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import {
   appendFile,
   mkdir,
@@ -149,10 +149,14 @@ export async function publishScanInternal(
     options.linearApiKey?.trim() ||
     environment["CODEX_SECURITY_LINEAR_API_KEY"]?.trim() ||
     undefined;
-  if (options.assigneeId !== undefined && linearApiKey === undefined) {
-    throw new ConfigurationError(
-      "A Linear API key is required to select a publication assignee.",
-    );
+  let approvedAssignee: { id: string; key: string } | undefined;
+  if (options.assigneeId !== undefined) {
+    if (linearApiKey === undefined) {
+      throw new ConfigurationError(
+        "A Linear API key is required to select a publication assignee.",
+      );
+    }
+    approvedAssignee = { id: options.assigneeId, key: linearApiKey };
   }
 
   const fullPublication = await (
@@ -163,7 +167,7 @@ export async function publishScanInternal(
     fullPublication,
     options.findingIds,
   );
-  const payloadDigest = publicationPayloadDigest(prepared, options.assigneeId);
+  const payloadDigest = publicationPayloadDigest(prepared, approvedAssignee);
   if (
     options.expectedDigest !== undefined &&
     options.expectedDigest !== payloadDigest
@@ -424,20 +428,24 @@ function selectPublicationFindings(
 
 function publicationPayloadDigest(
   publication: PreparedScanPublication,
-  assigneeId: string | undefined,
+  assignee: { id: string; key: string } | undefined,
 ): string {
   const { destination } = publication;
-  return createHash("sha256")
+  const digest =
+    assignee === undefined
+      ? createHash("sha256")
+      : createHmac("sha256", assignee.key);
+  return digest
     .update(
       JSON.stringify({
-        version: 1,
+        version: assignee === undefined ? 1 : 2,
         scanId: publication.scanId,
         destination: {
           type: destination.type,
           teamId: destination.teamId,
           projectId: destination.projectId ?? null,
         },
-        assigneeId: assigneeId ?? null,
+        assigneeId: assignee?.id ?? null,
         issues: publication.issues.map((issue) => ({
           findingId: issue.findingId,
           occurrenceId: issue.occurrenceId,

@@ -600,9 +600,12 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
 
 The digest covers the selected issue content, destination, scan identity, and
 requested assignee. A mismatch stops publication before any local publication
-state or Linear issues are created. Keep the same assignee option when
-publishing; previews do not echo assignee identities or credentials. The digest
-is not a permissions check or a remote readback.
+state or Linear issues are created. When an assignee is selected, the digest
+uses HMAC-SHA-256 keyed by the selected Linear API credential. Keep the same
+assignee and credential when publishing; changing either requires a new preview.
+Unassigned previews remain credential-independent. Previews do not echo
+assignee identities or credentials. The digest is not a permissions check or a
+remote readback.
 Keep saved previews private: they contain the full finding descriptions and
 source snippets. Descriptions omit a wall-clock upload timestamp so an unchanged
 scan and selection produce the same preview; Linear records issue creation time.

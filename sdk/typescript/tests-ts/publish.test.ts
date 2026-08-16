@@ -614,24 +614,82 @@ describe("connected Linear publication", () => {
     expect(started).toBe(false);
   });
 
-  test("binds the requested assignee without exposing it or credentials in the preview", async () => {
+  test("keys assigned approvals without exposing the assignee or credential", async () => {
     const publication = preparedPublication();
-    const preview = (linearApiKey: string) =>
+    const preview = (
+      linearApiKey: string,
+      assigneeId = "reviewer@example.test",
+    ) =>
       publishScanInternal(
         publication.scanDirectory,
         {
           ...OPTIONS,
           linearApiKey,
-          assigneeId: "reviewer@example.test",
+          assigneeId,
           dryRun: true,
         },
         dependencies(publication),
       );
     const first = await preview("synthetic-first-key");
+    const repeated = await preview("synthetic-first-key");
     const rotated = await preview("synthetic-rotated-key");
-    expect(rotated.payloadDigest).toBe(first.payloadDigest);
+    const reassigned = await preview(
+      "synthetic-first-key",
+      "another@example.test",
+    );
+    expect(repeated.payloadDigest).toBe(first.payloadDigest);
+    expect(rotated.payloadDigest).not.toBe(first.payloadDigest);
+    expect(reassigned.payloadDigest).not.toBe(first.payloadDigest);
     expect(JSON.stringify(first)).not.toContain("synthetic-first-key");
     expect(JSON.stringify(first)).not.toContain("reviewer@example.test");
+
+    const unassigned = (linearApiKey: string) =>
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...OPTIONS, linearApiKey, dryRun: true },
+        dependencies(publication),
+      );
+    expect((await unassigned("synthetic-first-key")).payloadDigest).toBe(
+      (await unassigned("synthetic-rotated-key")).payloadDigest,
+    );
+
+    const approved = {
+      ...OPTIONS,
+      linearApiKey: "synthetic-first-key",
+      assigneeId: "reviewer@example.test",
+      expectedDigest: first.payloadDigest!,
+    };
+    expect(
+      (
+        await publishScanInternal(
+          publication.scanDirectory,
+          { ...approved, dryRun: true },
+          dependencies(publication),
+        )
+      ).payloadDigest,
+    ).toBe(first.payloadDigest);
+    let started = false;
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        { ...approved, linearApiKey: "synthetic-rotated-key" },
+        dependencies(
+          publication,
+          {},
+          {
+            preparePublicationStore: async () => {
+              started = true;
+            },
+            linearClient: linearApiClient(publication, {
+              configured: () => {
+                started = true;
+              },
+            }),
+          },
+        ),
+      ),
+    ).rejects.toThrow("does not match the expected digest");
+    expect(started).toBe(false);
   });
 
   test("rejects pre-aborted publication before preparing scans or touching local state", async () => {

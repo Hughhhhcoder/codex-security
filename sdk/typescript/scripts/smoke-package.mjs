@@ -498,37 +498,39 @@ try {
       ),
     /does not match the expected digest/u,
   );
+  const directPublicationArgs = [
+    "--require",
+    networkGuard,
+    launcher,
+    "publish",
+    "scan",
+    publicationScan,
+    "--to",
+    "linear",
+    "--linear-team",
+    "team-example",
+    "--project",
+    "project-example",
+    "--linear-api-key",
+    "lin_api_SYNTHETIC_INSTALLED_OVERRIDE",
+    "--linear-assignee",
+    "security@example.test",
+    "--dry-run",
+    "--json",
+  ];
+  const directPublicationOptions = {
+    cwd: consumer,
+    capture: true,
+    env: {
+      ...process.env,
+      CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+      CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_INSTALLED_ENV",
+    },
+  };
   const directPublicationText = run(
     process.execPath,
-    [
-      "--require",
-      networkGuard,
-      launcher,
-      "publish",
-      "scan",
-      publicationScan,
-      "--to",
-      "linear",
-      "--linear-team",
-      "team-example",
-      "--project",
-      "project-example",
-      "--linear-api-key",
-      "lin_api_SYNTHETIC_INSTALLED_OVERRIDE",
-      "--linear-assignee",
-      "security@example.test",
-      "--dry-run",
-      "--json",
-    ],
-    {
-      cwd: consumer,
-      capture: true,
-      env: {
-        ...process.env,
-        CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
-        CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_INSTALLED_ENV",
-      },
-    },
+    directPublicationArgs,
+    directPublicationOptions,
   );
   const directPublication = JSON.parse(directPublicationText);
   assert.equal(directPublication.scanId, publication.scanId);
@@ -538,6 +540,44 @@ try {
   assert.doesNotMatch(
     directPublicationText,
     /lin_api_|security@example\.test/u,
+  );
+  assert.deepEqual(
+    JSON.parse(
+      run(
+        process.execPath,
+        [
+          ...directPublicationArgs,
+          "--expect-digest",
+          directPublication.payloadDigest,
+        ],
+        directPublicationOptions,
+      ),
+    ),
+    directPublication,
+  );
+  const rotatedPublicationArgs = [...directPublicationArgs];
+  rotatedPublicationArgs[
+    rotatedPublicationArgs.indexOf("--linear-api-key") + 1
+  ] = "lin_api_SYNTHETIC_INSTALLED_ROTATED";
+  const rotatedPublication = JSON.parse(
+    run(process.execPath, rotatedPublicationArgs, directPublicationOptions),
+  );
+  assert.notEqual(
+    rotatedPublication.payloadDigest,
+    directPublication.payloadDigest,
+  );
+  assert.throws(
+    () =>
+      run(
+        process.execPath,
+        [
+          ...rotatedPublicationArgs,
+          "--expect-digest",
+          directPublication.payloadDigest,
+        ],
+        directPublicationOptions,
+      ),
+    /does not match the expected digest/u,
   );
 
   await smokeNestedDeepScanWorker(installedRoot, consumer);
