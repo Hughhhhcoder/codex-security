@@ -51,6 +51,8 @@ interface SessionUsage {
   workingDirectory: string | null;
   startedAt: number | null;
   inheritedUsage: ScanTokenUsage | null;
+  previousRawUsage: ScanTokenUsage | null;
+  accumulatedOwnUsage: ScanTokenUsage | null;
   replaying: boolean;
   accounting: { usage: ScanTokenUsage; cost: ScanCost | null } | null;
   accountingError: Error | null;
@@ -287,6 +289,8 @@ export class ScanCostTracker {
           workingDirectory: null,
           startedAt: null,
           inheritedUsage: null,
+          previousRawUsage: null,
+          accumulatedOwnUsage: null,
           replaying: false,
           accounting: null,
           accountingError: null,
@@ -750,7 +754,10 @@ function readSessionEvent(
     if (event["type"] !== "event_msg") return;
     if (payload["type"] === "token_count" && isRecord(payload["info"])) {
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
-      if (usage !== null) session.inheritedUsage = usage;
+      if (usage !== null) {
+        session.inheritedUsage = usage;
+        session.previousRawUsage = usage;
+      }
     }
     if (
       payload["type"] === "task_started" &&
@@ -909,6 +916,14 @@ function readSessionEvent(
     return;
   }
   const usage = tokenUsage(payload["info"]["total_token_usage"]);
+  const accumulated =
+    usage === null
+      ? null
+      : accumulateTokenUsage(
+          session.previousRawUsage,
+          session.accumulatedOwnUsage,
+          usage,
+        );
   const ownUsage =
     usage === null
       ? null
@@ -916,21 +931,41 @@ function readSessionEvent(
         ? usage
         : subtractTokenUsage(usage, session.inheritedUsage);
   const cost = ownUsage === null ? null : estimateScanCost(model, ownUsage);
-  if (cost === null) {
+  const accumulatedUsage = accumulated ?? session.accumulatedOwnUsage;
+  const accumulatedCost = estimateScanCost(model, accumulatedUsage);
+  if (
+    accumulated === null ||
+    accumulatedCost === null ||
+    (ownUsage !== null && cost === null)
+  ) {
     session.accountingError ??= new Error(
       "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
     );
   }
-  if (ownUsage !== null) {
+  if (usage === null) return;
+  session.previousRawUsage = usage;
+  if (accumulated !== null) session.accumulatedOwnUsage = accumulated;
+  for (const candidate of [
+    ownUsage === null ? null : { usage: ownUsage, cost },
+    accumulatedUsage === null
+      ? null
+      : { usage: accumulatedUsage, cost: accumulatedCost },
+  ]) {
+    if (candidate === null) continue;
+    const previous = session.accounting;
     if (
-      session.accounting?.cost == null ||
-      (cost !== null &&
-        cost.estimatedUsd >= session.accounting.cost.estimatedUsd)
+      previous === null ||
+      (candidate.cost !== null
+        ? previous.cost === null ||
+          candidate.cost.estimatedUsd >= previous.cost.estimatedUsd
+        : previous.cost === null &&
+          higherCostUsage(model, previous.usage, candidate.usage) ===
+            candidate.usage)
     ) {
-      session.accounting = { usage: ownUsage, cost };
+      session.accounting = candidate;
     }
-    session.taskCompleted = false;
   }
+  session.taskCompleted = false;
 }
 
 function readSessionReasoning(
@@ -1111,6 +1146,41 @@ function higherCostUsage(
     previousCost.estimatedUsd >= nextCost.estimatedUsd
     ? previous
     : next;
+}
+
+function accumulateTokenUsage(
+  previousRaw: ScanTokenUsage | null,
+  accumulated: ScanTokenUsage | null,
+  next: ScanTokenUsage,
+): ScanTokenUsage | null {
+  const previousTotal =
+    BigInt(previousRaw?.input_tokens ?? 0) +
+    BigInt(previousRaw?.output_tokens ?? 0);
+  const nextTotal = BigInt(next.input_tokens) + BigInt(next.output_tokens);
+  const totalDelta =
+    nextTotal >= previousTotal ? nextTotal - previousTotal : nextTotal;
+  if (totalDelta === 0n) {
+    return accumulated ?? tokenUsage({ input_tokens: 0, output_tokens: 0 });
+  }
+  const addDelta = (
+    field: Exclude<keyof ScanTokenUsage, "total_tokens">,
+  ): number | null => {
+    const previous = BigInt(previousRaw?.[field] ?? 0);
+    const value = BigInt(next[field]);
+    const delta = value >= previous ? value - previous : value;
+    const total = BigInt(accumulated?.[field] ?? 0) + delta;
+    return total <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(total) : null;
+  };
+  const usage = {
+    input_tokens: addDelta("input_tokens"),
+    cached_input_tokens: addDelta("cached_input_tokens"),
+    cache_write_input_tokens: addDelta("cache_write_input_tokens"),
+    output_tokens: addDelta("output_tokens"),
+    reasoning_output_tokens: addDelta("reasoning_output_tokens"),
+  };
+  return Object.values(usage).some((value) => value === null)
+    ? null
+    : tokenUsage(usage);
 }
 
 function addTokenUsage(

@@ -2086,7 +2086,7 @@ describe("live scan cost tracking", () => {
     });
   });
 
-  test("retains the larger observed cost after a token-counter reset", async () => {
+  test("accumulates usage after a token-counter reset", async () => {
     const home = await codexHome();
     const root = await writeSession(home, "scan-thread", {
       input_tokens: 1_000,
@@ -2114,8 +2114,133 @@ describe("live scan cost tracking", () => {
       })}\n`,
     );
 
-    expect((await tracker.stop()).cost?.estimatedUsd).toBe(0.0032);
-    expect(costs).toEqual([0.0032]);
+    expect((await tracker.stop()).cost?.estimatedUsd).toBe(0.0048);
+    expect(costs).toEqual([0.0032, 0.0048]);
+  });
+
+  test("accumulates mocked owned reset epochs without double counting", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "accumulates mocked owned reset epochs without double counting",
+      )
+    ) {
+      return;
+    }
+    const completed = { type: "event_msg", payload: { type: "task_complete" } };
+    const initialRoot = { input_tokens: 100, output_tokens: 10 };
+    const loggedRoot = { input_tokens: 280, output_tokens: 28 };
+    const inherited = {
+      input_tokens: 1_000,
+      cached_input_tokens: 400,
+      cache_write_input_tokens: 100,
+      output_tokens: 100,
+      reasoning_output_tokens: 20,
+    };
+    const latestWorker = {
+      input_tokens: 140,
+      cached_input_tokens: 30,
+      cache_write_input_tokens: 15,
+      output_tokens: 25,
+      reasoning_output_tokens: 7,
+    };
+    const withWorkers = (root: typeof initialRoot) => ({
+      input_tokens: root.input_tokens + 340,
+      cached_input_tokens: 80,
+      cache_write_input_tokens: 35,
+      output_tokens: root.output_tokens + 65,
+      reasoning_output_tokens: 17,
+      total_tokens: root.input_tokens + root.output_tokens + 405,
+    });
+    for (const [authoritative, expectedRoot] of [
+      [{ input_tokens: 200, output_tokens: 20 }, loggedRoot],
+      [
+        { input_tokens: 400, output_tokens: 40 },
+        { input_tokens: 400, output_tokens: 40 },
+      ],
+    ] as const) {
+      const costs: number[] = [];
+      await withMockAccountingSessions(
+        {
+          "scan-thread": accountingSession("scan-thread", [
+            accountingEvent(initialRoot),
+          ]),
+          "worker-thread": accountingSession(
+            "worker-thread",
+            [
+              { type: "session_meta", payload: { id: "inherited-thread" } },
+              accountingEvent(inherited),
+              {
+                type: "event_msg",
+                payload: { type: "task_started", started_at: 1_785_067_320 },
+              },
+              accountingEvent({
+                input_tokens: 1_200,
+                cached_input_tokens: 450,
+                cache_write_input_tokens: 120,
+                output_tokens: 140,
+                reasoning_output_tokens: 30,
+              }),
+            ],
+            "scan-thread",
+            { timestamp: "2026-07-26T12:02:00Z" },
+          ),
+        },
+        {
+          model: "gpt-5.6-terra",
+          maxCostUsd: 1,
+          onCost: (cost) => costs.push(cost.estimatedUsd),
+        },
+        async (tracker, append) => {
+          const initial = await tracker.stop();
+          expect(initial.usage).toMatchObject({
+            input_tokens: 300,
+            output_tokens: 50,
+          });
+          append("scan-thread", [
+            accountingEvent({ input_tokens: 200, output_tokens: 20 }),
+            accountingEvent({ input_tokens: 50, output_tokens: 5 }),
+            accountingEvent({ input_tokens: 80, output_tokens: 8 }),
+            accountingEvent({ input_tokens: 80, output_tokens: 8 }),
+            completed,
+          ]);
+          append("worker-thread", [
+            accountingEvent({
+              input_tokens: 100,
+              cached_input_tokens: 20,
+              cache_write_input_tokens: 10,
+              output_tokens: 20,
+              reasoning_output_tokens: 5,
+            }),
+            accountingEvent(latestWorker),
+            completed,
+          ]);
+          const current = await tracker.refresh();
+          expect(current.usage).toEqual(withWorkers(loggedRoot));
+          expect(await tracker.refresh()).toEqual(current);
+
+          append("worker-thread", [accountingEvent(latestWorker)]);
+          await expect(tracker.stop(authoritative)).rejects.toThrow(
+            "The scan cost limit could not be verified",
+          );
+          append("worker-thread", [completed]);
+          const final = await tracker.stop(authoritative);
+          const expected = withWorkers(expectedRoot);
+          expect(final.usage).toEqual(expected);
+          expect(final.cost).toEqual(
+            estimateScanCost("gpt-5.6-terra", expected),
+          );
+          expect(await tracker.stop()).toBe(final);
+          expect(costs).toEqual([
+            initial.cost!.estimatedUsd,
+            current.cost!.estimatedUsd,
+            ...(final.cost!.estimatedUsd === current.cost!.estimatedUsd
+              ? []
+              : [final.cost!.estimatedUsd]),
+          ]);
+        },
+      );
+    }
   });
 
   test("keeps mocked parse errors scoped to included budgeted sessions", async () => {
@@ -2209,103 +2334,175 @@ describe("live scan cost tracking", () => {
     ) {
       return;
     }
-    const inherited = {
-      input_tokens: 1_000,
-      cached_input_tokens: 500,
-      cache_write_input_tokens: 100,
-      output_tokens: 100,
-      reasoning_output_tokens: 20,
+    type Usage = Record<string, number> & {
+      input_tokens: number;
+      output_tokens: number;
     };
-    const completed = { type: "event_msg", payload: { type: "task_complete" } };
-    const costs: number[] = [];
-    await withMockAccountingSessions(
+    const reclassified: Usage[] = [
+      { input_tokens: 100, cached_input_tokens: 100, output_tokens: 0 },
+      { input_tokens: 100, cached_input_tokens: 0, output_tokens: 0 },
+      { input_tokens: 90, cached_input_tokens: 0, output_tokens: 10 },
+      { input_tokens: 100, cached_input_tokens: 0, output_tokens: 10 },
+    ];
+    const equalPrice: Usage[] = [
+      { input_tokens: 100, output_tokens: 1 },
       {
-        "scan-thread": accountingSession("scan-thread", [
-          accountingEvent({ input_tokens: 100, output_tokens: 100 }),
-          accountingEvent({
-            input_tokens: 1_000,
-            cached_input_tokens: 1_000,
-            output_tokens: 0,
-          }),
-        ]),
-        "worker-thread": [
+        input_tokens: 101,
+        cache_write_input_tokens: 20,
+        output_tokens: 0,
+      },
+    ];
+    const cases: Array<{
+      model: string;
+      samples: Usage[];
+      expected: Usage;
+      inherited?: Usage;
+    }> = [
+      {
+        model: "gpt-5.6-terra",
+        samples: [
           {
-            type: "session_meta",
-            payload: {
-              id: "worker-thread",
-              parent_thread_id: "scan-thread",
-              timestamp: "2026-07-26T12:02:00.000Z",
-            },
+            input_tokens: 100,
+            cached_input_tokens: 20,
+            cache_write_input_tokens: 10,
+            output_tokens: 50,
+            reasoning_output_tokens: 10,
           },
-          { type: "session_meta", payload: { id: "scan-thread" } },
-          accountingEvent(inherited),
           {
-            type: "event_msg",
-            payload: { type: "task_started", started_at: 1_785_067_320 },
+            input_tokens: 150,
+            cached_input_tokens: 10,
+            cache_write_input_tokens: 20,
+            output_tokens: 30,
+            reasoning_output_tokens: 5,
           },
-          accountingEvent({
-            input_tokens: 1_200,
-            cached_input_tokens: 500,
-            cache_write_input_tokens: 150,
-            output_tokens: 120,
-            reasoning_output_tokens: 25,
-          }),
-          accountingEvent({
-            input_tokens: 1_500,
-            cached_input_tokens: 1_000,
-            cache_write_input_tokens: 100,
-            output_tokens: 101,
-            reasoning_output_tokens: 20,
-          }),
-          completed,
         ],
+        expected: {
+          input_tokens: 150,
+          cached_input_tokens: 30,
+          cache_write_input_tokens: 20,
+          output_tokens: 80,
+          reasoning_output_tokens: 15,
+        },
       },
       {
         model: "gpt-5.6-terra",
-        maxCostUsd: 0.001,
-        onCost: (cost) => costs.push(cost.estimatedUsd),
+        samples: reclassified,
+        expected: { input_tokens: 100, output_tokens: 10 },
       },
-      async (tracker, append) => {
-        const initialUsage = {
-          input_tokens: 300,
-          cached_input_tokens: 0,
-          cache_write_input_tokens: 50,
-          output_tokens: 120,
-          reasoning_output_tokens: 5,
-          total_tokens: 420,
-        };
-        const initial = await tracker.refresh();
-        expect(initial.usage).toEqual(initialUsage);
-        expect(initial.cost?.estimatedUsd).toBe(0.002065);
-        expect((await tracker.stop()).usage).toEqual(initialUsage);
-
-        append("worker-thread", [
-          accountingEvent({
-            input_tokens: 1_300,
-            cached_input_tokens: 600,
-            cache_write_input_tokens: 150,
-            output_tokens: 140,
-            reasoning_output_tokens: 30,
-          }),
-          completed,
-        ]);
-        const final = await tracker.stop({
-          input_tokens: 200,
-          output_tokens: 200,
-        });
-        expect(final.usage).toEqual({
-          input_tokens: 500,
+      {
+        model: "unknown-model",
+        samples: reclassified,
+        expected: {
+          input_tokens: 110,
           cached_input_tokens: 100,
-          cache_write_input_tokens: 50,
-          output_tokens: 240,
-          reasoning_output_tokens: 10,
-          total_tokens: 740,
-        });
-        expect(final.cost?.estimatedUsd).toBe(0.003725);
-        expect(await tracker.stop()).toEqual(final);
-        expect(costs).toEqual([0.002065, 0.002325, 0.003725]);
+          output_tokens: 0,
+        },
       },
-    );
+      {
+        model: "gpt-5.6-terra",
+        samples: equalPrice,
+        expected: { input_tokens: 100, output_tokens: 1 },
+      },
+      {
+        model: "unknown-model",
+        samples: equalPrice,
+        expected: { input_tokens: 100, output_tokens: 1 },
+      },
+      {
+        model: "unknown-model",
+        samples: [
+          { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 2 },
+          { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1 },
+        ],
+        expected: {
+          input_tokens: Number.MAX_SAFE_INTEGER,
+          output_tokens: 3,
+        },
+      },
+      {
+        model: "unknown-model",
+        samples: [
+          { input_tokens: Number.MAX_SAFE_INTEGER - 5, output_tokens: 0 },
+          { input_tokens: 10, output_tokens: 0 },
+          { input_tokens: 11, output_tokens: 0 },
+        ],
+        expected: {
+          input_tokens: Number.MAX_SAFE_INTEGER - 4,
+          output_tokens: 0,
+        },
+      },
+      {
+        model: "unknown-model",
+        inherited: {
+          input_tokens: Number.MAX_SAFE_INTEGER,
+          cached_input_tokens: Number.MAX_SAFE_INTEGER,
+          output_tokens: 0,
+        },
+        samples: [
+          {
+            input_tokens: Number.MAX_SAFE_INTEGER - 1,
+            cached_input_tokens: Number.MAX_SAFE_INTEGER - 2,
+            output_tokens: 0,
+          },
+          {
+            input_tokens: Number.MAX_SAFE_INTEGER - 1,
+            cached_input_tokens: 3,
+            output_tokens: 1,
+          },
+          {
+            input_tokens: Number.MAX_SAFE_INTEGER - 1,
+            cached_input_tokens: 3,
+            output_tokens: 2,
+          },
+        ],
+        expected: {
+          input_tokens: Number.MAX_SAFE_INTEGER - 1,
+          cached_input_tokens: Number.MAX_SAFE_INTEGER - 2,
+          output_tokens: 1,
+        },
+      },
+    ];
+    for (const { model, samples, expected, inherited } of cases) {
+      const events: MockAccountingEvent[] = [
+        ...(inherited === undefined
+          ? []
+          : [
+              {
+                type: "session_meta",
+                payload: { id: "inherited-thread" },
+              },
+              accountingEvent(inherited),
+              {
+                type: "event_msg",
+                payload: { type: "task_started", started_at: 1_785_067_320 },
+              },
+            ]),
+        ...samples.map(accountingEvent),
+      ];
+      await withMockAccountingSessions(
+        {
+          "scan-thread": accountingSession("scan-thread", events, undefined, {
+            timestamp: "2026-07-26T12:02:00Z",
+          }),
+        },
+        {
+          model,
+          ...(model === "unknown-model" ? {} : { maxCostUsd: 1 }),
+        },
+        async (tracker) => {
+          const final = await tracker.stop(undefined);
+          expect(final.usage).toEqual({
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            ...expected,
+            total_tokens: expected.input_tokens + expected.output_tokens,
+          });
+          expect(final.cost).toEqual(estimateScanCost(model, expected));
+          expect(await tracker.stop()).toBe(final);
+        },
+      );
+    }
   });
 
   test("keeps mocked unverified evidence separate from known cost floors", async () => {
@@ -2322,10 +2519,10 @@ describe("live scan cost tracking", () => {
       input_tokens: Number.MAX_SAFE_INTEGER,
       output_tokens: 0,
     });
-    for (const evidence of [
-      new SyntaxError("mock parser diagnostic"),
-      unpriceable,
-    ]) {
+    for (const [evidence, expectedInput, expectedCost] of [
+      [new SyntaxError("mock parser diagnostic"), 1_200, 0.00384],
+      [unpriceable, 1_100, 0.00352],
+    ] as const) {
       const reports: Array<number | "error"> = [];
       await withMockAccountingSessions(
         {
@@ -2353,11 +2550,11 @@ describe("live scan cost tracking", () => {
             "The scan cost limit could not be verified",
           );
           expect((await tracker.stop()).cost).toMatchObject({
-            inputTokens: 1_100,
-            outputTokens: 110,
-            estimatedUsd: 0.00352,
+            inputTokens: expectedInput,
+            outputTokens: expectedInput / 10,
+            estimatedUsd: expectedCost,
           });
-          expect(reports[0]).toBe(0.00352);
+          expect(reports[0]).toBe(expectedCost);
           expect(reports).toContain("error");
         },
       );
@@ -2420,18 +2617,23 @@ describe("live scan cost tracking", () => {
       type: "event_msg",
       payload: { type: "token_count", info: null },
     };
-    for (const unavailable of [
-      accountingEvent(null),
-      accountingEvent({ input_tokens: 900, output_tokens: 90 }),
-    ]) {
-      for (const [scope, maxCostUsd, expectedInput] of [
-        ["worker", 0.001, null],
-        ["first-error", 0.001, null],
-        ["worker", undefined, 1_100],
-        ["unrelated", 1, 100],
-        ["root", 1, 1_200],
-        ["replay", 1, 1_100],
+    for (const [unavailable, invalid] of [
+      [accountingEvent(null), true],
+      [accountingEvent({ input_tokens: 900, output_tokens: 90 }), false],
+    ] as const) {
+      for (const [scope, maxCostUsd] of [
+        ["worker", 0.001],
+        ["first-error", 0.001],
+        ["worker", undefined],
+        ["unrelated", 1],
+        ["root", 1],
+        ["replay", 1],
       ] as const) {
+        const rejects =
+          scope === "first-error" ||
+          (scope === "worker" && maxCostUsd !== undefined && invalid);
+        const expectedInput =
+          scope === "unrelated" ? 100 : scope === "root" ? 2_100 : 2_200;
         const events =
           scope === "replay"
             ? [
@@ -2490,22 +2692,140 @@ describe("live scan cost tracking", () => {
                 ? { input_tokens: 1_200, output_tokens: 120 }
                 : rootUsage,
             );
-            if (expectedInput === null) {
+            if (rejects) {
               await expect(completed).rejects.toThrow(
                 scope === "first-error"
                   ? "tracked session record could not be read"
                   : "model pricing or token usage is unavailable",
               );
               expect((await tracker.stop()).cost).toMatchObject({
-                inputTokens: 1_100,
-                outputTokens: 110,
-                estimatedUsd: 0.00352,
+                inputTokens: 2_200,
+                outputTokens: 220,
+                estimatedUsd: 0.00704,
               });
-              expect(costs[0]).toBe(0.00352);
+              expect(costs[0]).toBe(0.00704);
             } else {
               expect((await completed).cost).toMatchObject({
                 inputTokens: expectedInput,
                 outputTokens: expectedInput / 10,
+              });
+            }
+          },
+        );
+      }
+    }
+  });
+
+  test("keeps mocked invalid accumulated usage fail closed", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "keeps mocked invalid accumulated usage fail closed",
+      )
+    ) {
+      return;
+    }
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const inherited = {
+      input_tokens: 1_000,
+      cached_input_tokens: 800,
+      output_tokens: 0,
+    };
+    for (const [middle, latest, expectedInput] of [
+      [
+        accountingEvent(null),
+        { input_tokens: 120, cached_input_tokens: 80, output_tokens: 0 },
+        120,
+      ],
+      [
+        accountingEvent({
+          input_tokens: 110,
+          cached_input_tokens: 50,
+          output_tokens: 0,
+        }),
+        { input_tokens: 160, cached_input_tokens: 50, output_tokens: 0 },
+        150,
+      ],
+    ] as const) {
+      for (const [scope, maxCostUsd] of [
+        ["worker", 0.0001],
+        ["worker", undefined],
+        ["unrelated", 1],
+        ["root", 1],
+      ] as const) {
+        const events: MockAccountingEvent[] = [
+          { type: "session_meta", payload: { id: "inherited-thread" } },
+          accountingEvent(inherited),
+          {
+            type: "event_msg",
+            payload: { type: "task_started", started_at: 1_785_067_320 },
+          },
+          accountingEvent({
+            input_tokens: 100,
+            cached_input_tokens: 80,
+            output_tokens: 0,
+          }),
+          middle,
+          accountingEvent(latest),
+        ];
+        const metadata = { timestamp: "2026-07-26T12:02:00Z" };
+        const sessions: Record<string, MockAccountingEvent[]> =
+          scope === "root"
+            ? {
+                "scan-thread": accountingSession(
+                  "scan-thread",
+                  events,
+                  undefined,
+                  metadata,
+                ),
+              }
+            : {
+                "scan-thread": accountingSession("scan-thread", [
+                  accountingEvent(rootUsage),
+                ]),
+                "worker-thread": accountingSession(
+                  "worker-thread",
+                  events,
+                  scope === "unrelated" ? undefined : "scan-thread",
+                  metadata,
+                ),
+              };
+        const authoritative =
+          scope === "root"
+            ? { input_tokens: 200, output_tokens: 20 }
+            : rootUsage;
+        const expected =
+          scope === "root" || scope === "unrelated"
+            ? authoritative
+            : {
+                input_tokens: expectedInput + rootUsage.input_tokens,
+                cached_input_tokens: 80,
+                output_tokens: rootUsage.output_tokens,
+              };
+        const expectedCost = estimateScanCost("gpt-5.6-terra", expected);
+        const reports: number[] = [];
+        await withMockAccountingSessions(
+          sessions,
+          {
+            model: "gpt-5.6-terra",
+            maxCostUsd,
+            onCost: (cost) => reports.push(cost.estimatedUsd),
+          },
+          async (tracker) => {
+            const final = tracker.stop(authoritative);
+            if (scope === "worker" && maxCostUsd !== undefined) {
+              await expect(final).rejects.toThrow(
+                "model pricing or token usage is unavailable",
+              );
+              expect((await tracker.stop()).cost).toEqual(expectedCost);
+              expect(reports[0]).toBe(expectedCost!.estimatedUsd);
+              await expect(tracker.stop(authoritative)).rejects.toThrow(
+                "model pricing or token usage is unavailable",
+              );
+            } else {
+              await expect(final).resolves.toMatchObject({
+                usage: expected,
+                cost: expectedCost,
               });
             }
           },
