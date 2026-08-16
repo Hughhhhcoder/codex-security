@@ -384,6 +384,13 @@ export class ScanCostTracker {
         ) {
           continue;
         }
+        if (
+          scanStartedAt !== null &&
+          session.startedAt !== null &&
+          session.startedAt < scanStartedAt
+        ) {
+          continue;
+        }
         const owner = knownOwner(session.threadId);
         if (owner === null) {
           ambiguousWorkers.add(session.threadId);
@@ -394,7 +401,7 @@ export class ScanCostTracker {
           ambiguousWorkers.add(session.threadId);
           continue;
         }
-        if (session.startedAt >= scanStartedAt) included.add(session.threadId);
+        included.add(session.threadId);
       }
     }
     let changed = true;
@@ -689,9 +696,11 @@ function readSessionEvent(
   try {
     event = JSON.parse(line) as unknown;
   } catch {
-    session.accountingError ??= new Error(
-      "The scan cost limit could not be verified because a tracked session record could not be read.",
-    );
+    if (!session.replaying) {
+      session.accountingError ??= new Error(
+        "The scan cost limit could not be verified because a tracked session record could not be read.",
+      );
+    }
     return;
   }
   if (!isRecord(event) || !isRecord(event["payload"])) return;

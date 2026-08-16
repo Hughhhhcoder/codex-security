@@ -904,6 +904,19 @@ describe("live scan cost tracking", () => {
         workerDirectory,
         "2026-07-26T11:59:00Z",
       ),
+      "older-orphan": session(
+        "older-orphan",
+        "missing-parent",
+        workerDirectory,
+        "2026-07-26T11:59:00Z",
+      ),
+      "older-cycle-a": session(
+        "older-cycle-a",
+        "older-cycle-b",
+        workerDirectory,
+        "2026-07-26T11:59:00Z",
+      ),
+      "older-cycle-b": session("older-cycle-b", "older-cycle-a"),
     };
     await withMockAccountingSessions(
       {
@@ -913,7 +926,7 @@ describe("live scan cost tracking", () => {
           "current-child",
           "current-independent",
           workerDirectory,
-          undefined,
+          "2026-07-26T11:59:00Z",
           300,
         ),
         "current-independent": session(
@@ -963,7 +976,12 @@ describe("live scan cost tracking", () => {
         "cycle-b": session("cycle-b", "cycle-a"),
       },
       {
-        "conflict-a": session("conflict", "scan-thread", workerDirectory),
+        "conflict-a": session(
+          "conflict",
+          "scan-thread",
+          workerDirectory,
+          "2026-07-26T11:59:00Z",
+        ),
         "conflict-b": session("conflict", "previous-root"),
       },
       {
@@ -1041,6 +1059,72 @@ describe("live scan cost tracking", () => {
           } else {
             expect((await stopped).cost?.inputTokens).toBe(expectedInput);
           }
+        },
+      );
+    }
+  });
+
+  test("keeps mocked replay errors outside owned accounting", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "keeps mocked replay errors outside owned accounting",
+      )
+    ) {
+      return;
+    }
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    for (const location of ["replay", "owned-before", "owned-after"] as const) {
+      const costs: number[] = [];
+      await withMockAccountingSessions(
+        {
+          "scan-thread": accountingSession("scan-thread", [
+            accountingEvent(rootUsage),
+          ]),
+          "worker-thread": [
+            {
+              type: "session_meta",
+              payload: {
+                id: "worker-thread",
+                parent_thread_id: "scan-thread",
+                timestamp: "2026-07-26T12:02:00Z",
+              },
+            },
+            ...(location === "owned-before"
+              ? [new SyntaxError("mock owned parser diagnostic")]
+              : []),
+            { type: "session_meta", payload: { id: "scan-thread" } },
+            new SyntaxError("mock replay parser diagnostic"),
+            accountingEvent({ input_tokens: 1_000, output_tokens: 100 }),
+            {
+              type: "event_msg",
+              payload: { type: "task_started", started_at: 1_785_067_320 },
+            },
+            ...(location === "owned-after"
+              ? [new SyntaxError("mock owned parser diagnostic")]
+              : []),
+            accountingEvent({ input_tokens: 1_200, output_tokens: 120 }),
+            { type: "event_msg", payload: { type: "task_complete" } },
+          ],
+        },
+        {
+          model: "gpt-5.6-terra",
+          maxCostUsd: 1,
+          onCost: (cost) => costs.push(cost.estimatedUsd),
+        },
+        async (tracker) => {
+          const stopped = tracker.stop(rootUsage);
+          if (location === "replay") {
+            await expect(stopped).resolves.toMatchObject({
+              usage: { input_tokens: 300, output_tokens: 30 },
+              cost: { estimatedUsd: 0.00096 },
+            });
+          } else {
+            await expect(stopped).rejects.toThrow(
+              "tracked session record could not be read",
+            );
+          }
+          expect(costs).toEqual([0.00096]);
         },
       );
     }
