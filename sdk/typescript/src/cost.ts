@@ -52,7 +52,8 @@ interface SessionUsage {
   startedAt: number | null;
   inheritedUsage: ScanTokenUsage | null;
   replaying: boolean;
-  usage: ScanTokenUsage | null;
+  accounting: { usage: ScanTokenUsage; cost: ScanCost | null } | null;
+  accountingError: Error | null;
   taskCompleted: boolean;
   calls: Map<string, ScanActivity>;
   activities: ScanActivity[];
@@ -285,7 +286,8 @@ export class ScanCostTracker {
           startedAt: null,
           inheritedUsage: null,
           replaying: false,
-          usage: null,
+          accounting: null,
+          accountingError: null,
           taskCompleted: false,
           calls: new Map(),
           activities: [],
@@ -304,6 +306,7 @@ export class ScanCostTracker {
           !(await readSessionUsage(
             path,
             session,
+            this.#options.model,
             this.#options.repository,
             this.#options.maxCostUsd !== undefined,
           ))
@@ -378,15 +381,13 @@ export class ScanCostTracker {
         }
       }
     }
+    let readFailure: { session: SessionUsage; error: unknown } | null = null;
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) {
-        this.#rootOnlyReadError =
-          session.threadId === this.#threadId &&
-          included.size === 1 &&
-          !hasUnverifiedWorkerAttribution;
-        throw error;
+        readFailure ??= { session, error };
+      } else if (isSessionAccessDenied(error)) {
+        quarantineSession(session, error);
       }
-      if (isSessionAccessDenied(error)) quarantineSession(session, error);
     }
 
     const observed: ObservedSessionUsage = {
@@ -399,17 +400,24 @@ export class ScanCostTracker {
     };
     for (const session of this.#sessions.values()) {
       if (session.threadId !== null && included.has(session.threadId)) {
+        if (
+          this.#options.maxCostUsd !== undefined &&
+          session.accountingError !== null
+        ) {
+          readFailure ??= { session, error: session.accountingError };
+        }
         if (session.pendingLineBytes > 0) observed.unverified = true;
+        const usage = session.accounting?.usage ?? null;
         if (session.threadId === this.#threadId) {
           observed.rootCompleted = session.taskCompleted;
-          if (session.usage !== null) {
-            observed.root = addTokenUsage(observed.root, session.usage);
+          if (usage !== null) {
+            observed.root = addTokenUsage(observed.root, usage);
           }
         } else {
-          if (session.usage === null) {
+          if (usage === null) {
             observed.unverified = true;
           } else {
-            observed.workers = addTokenUsage(observed.workers, session.usage);
+            observed.workers = addTokenUsage(observed.workers, usage);
           }
           if (!session.taskCompleted) observed.unfinishedWorkers = true;
           this.#reportWorkerActivities(session);
@@ -424,15 +432,23 @@ export class ScanCostTracker {
         : observed.workers === null
           ? observed.root
           : addTokenUsage(observed.root, observed.workers);
-    if (usage === null) return;
-    const cost = estimateScanCost(this.#options.model, usage);
-    if (
-      this.#snapshot.cost === null ||
-      (cost !== null && cost.estimatedUsd >= this.#snapshot.cost.estimatedUsd)
-    ) {
-      this.#snapshot = { usage, cost };
+    if (usage !== null) {
+      const cost = estimateScanCost(this.#options.model, usage);
+      if (
+        this.#snapshot.cost === null ||
+        (cost !== null && cost.estimatedUsd >= this.#snapshot.cost.estimatedUsd)
+      ) {
+        this.#snapshot = { usage, cost };
+      }
+      this.#reportCost(this.#snapshot.cost);
     }
-    this.#reportCost(this.#snapshot.cost);
+    if (readFailure !== null) {
+      this.#rootOnlyReadError =
+        readFailure.session.threadId === this.#threadId &&
+        included.size === 1 &&
+        !hasUnverifiedWorkerAttribution;
+      throw readFailure.error;
+    }
   }
 
   #reportWorkerActivities(session: SessionUsage): void {
@@ -521,6 +537,7 @@ export async function* sessionFiles(directory: string): AsyncGenerator<string> {
 async function readSessionUsage(
   path: string,
   session: SessionUsage,
+  model: string,
   repository?: string,
   requireReadableSessions = false,
 ): Promise<boolean> {
@@ -550,7 +567,12 @@ async function readSessionUsage(
       if (bytesRead === 0) return true;
       session.offset += bytesRead;
       try {
-        readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
+        readSessionChunk(
+          buffer.subarray(0, bytesRead),
+          session,
+          model,
+          repository,
+        );
       } catch (error) {
         quarantineSession(session, error);
         throw error;
@@ -570,6 +592,7 @@ function quarantineSession(session: SessionUsage, error: unknown): void {
 function readSessionChunk(
   contents: Buffer,
   session: SessionUsage,
+  model: string,
   repository?: string,
 ): void {
   let lineStart = 0;
@@ -588,12 +611,13 @@ function readSessionChunk(
     }
 
     if (session.pendingLineBytes === 0) {
-      readSessionEvent(fragment.toString("utf8"), session, repository);
+      readSessionEvent(fragment.toString("utf8"), session, model, repository);
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
         Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
         session,
+        model,
         repository,
       );
       session.pendingLine = [];
@@ -606,6 +630,7 @@ function readSessionChunk(
 function readSessionEvent(
   line: string,
   session: SessionUsage,
+  model: string,
   repository?: string,
 ): void {
   if (line.length === 0) return;
@@ -613,6 +638,9 @@ function readSessionEvent(
   try {
     event = JSON.parse(line) as unknown;
   } catch {
+    session.accountingError ??= new Error(
+      "The scan cost limit could not be verified because a tracked session record could not be read.",
+    );
     return;
   }
   if (!isRecord(event) || !isRecord(event["payload"])) return;
@@ -813,7 +841,19 @@ function readSessionEvent(
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
   if (ownUsage !== null) {
-    session.usage = ownUsage;
+    const cost = estimateScanCost(model, ownUsage);
+    if (cost === null) {
+      session.accountingError ??= new Error(
+        "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+      );
+    }
+    if (
+      session.accounting?.cost == null ||
+      (cost !== null &&
+        cost.estimatedUsd >= session.accounting.cost.estimatedUsd)
+    ) {
+      session.accounting = { usage: ownUsage, cost };
+    }
     session.taskCompleted = false;
   }
 }

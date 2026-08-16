@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import * as fsPromises from "node:fs/promises";
 import {
   appendFile,
   chmod,
@@ -10,10 +11,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import type { ScanProgress } from "../src/worker-progress.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 const temporaryDirectories: string[] = [];
 const testPosix =
@@ -107,6 +109,120 @@ function taskEvent(
       ...(type === "turn_aborted" ? { reason: "interrupted" } : {}),
     },
   });
+}
+
+type MockAccountingEvent = Readonly<Record<string, unknown>> | Error;
+
+function accountingEvent(
+  usage: Readonly<Record<string, number>>,
+): MockAccountingEvent {
+  return {
+    type: "event_msg",
+    payload: { type: "token_count", info: { total_token_usage: usage } },
+  };
+}
+
+function accountingSession(
+  threadId: string,
+  events: readonly MockAccountingEvent[],
+  parentThreadId?: string,
+): MockAccountingEvent[] {
+  return [
+    {
+      type: "session_meta",
+      payload: { id: threadId, parent_thread_id: parentThreadId },
+    },
+    ...events,
+    { type: "event_msg", payload: { type: "task_complete" } },
+  ];
+}
+
+async function withMockAccountingSessions(
+  sessions: Readonly<Record<string, readonly MockAccountingEvent[]>>,
+  options: Omit<ConstructorParameters<typeof ScanCostTracker>[0], "codexHome">,
+  check: (
+    tracker: ScanCostTracker,
+    append: (threadId: string, events: readonly MockAccountingEvent[]) => void,
+  ) => Promise<void>,
+): Promise<void> {
+  const home = join(tmpdir(), "codex-security-mock-cost");
+  const directory = join(home, "sessions");
+  const files = new Map<string, Buffer>();
+  const events = new Map<string, MockAccountingEvent>();
+  const append = (
+    threadId: string,
+    next: readonly MockAccountingEvent[],
+  ): void => {
+    const path = join(directory, `rollout-${threadId}.jsonl`);
+    const lines = next.map((event) => {
+      // The reader sees valid markers; decoded events and errors stay in memory.
+      const marker = JSON.stringify({ mockSessionEvent: events.size });
+      events.set(marker, event);
+      return `${marker}\n`;
+    });
+    files.set(
+      path,
+      Buffer.concat([
+        files.get(path) ?? Buffer.alloc(0),
+        Buffer.from(lines.join("")),
+      ]),
+    );
+  };
+  for (const [threadId, initial] of Object.entries(sessions)) {
+    append(threadId, initial);
+  }
+  const originalOpen = fsPromises.open;
+  const originalReaddir = fsPromises.readdir;
+  const originalParse = JSON.parse;
+  mock.module("node:fs/promises", () => ({
+    ...fsPromises,
+    readdir: async (path: unknown) => {
+      if (String(path) !== directory)
+        throw new Error("Unexpected session directory");
+      return [...files.keys()].map((path) => ({
+        name: path.slice(directory.length + 1),
+        isDirectory: () => false,
+        isFile: () => true,
+      }));
+    },
+    open: async (path: unknown) => {
+      const contents = files.get(String(path));
+      if (contents === undefined) throw new Error("Unexpected session file");
+      return {
+        read: async (
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ) => ({
+          bytesRead:
+            position >= contents.length
+              ? 0
+              : contents.copy(buffer, offset, position, position + length),
+          buffer,
+        }),
+        close: async () => {},
+      };
+    },
+  }));
+  const parse = spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+    const event = events.get(text);
+    if (event instanceof Error) throw event;
+    return event ?? originalParse(text, reviver);
+  });
+  const tracker = new ScanCostTracker({ ...options, codexHome: home });
+  tracker.start("scan-thread");
+  try {
+    await check(tracker, append);
+  } finally {
+    await tracker.stop().catch(() => {});
+    parse.mockRestore();
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      open: originalOpen,
+      readdir: originalReaddir,
+    }));
+  }
 }
 
 async function workerScan({
@@ -1696,6 +1812,282 @@ describe("live scan cost tracking", () => {
 
     expect((await tracker.stop()).cost?.estimatedUsd).toBe(0.0032);
     expect(costs).toEqual([0.0032]);
+  });
+
+  test("keeps mocked parse errors scoped to included budgeted sessions", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "keeps mocked parse errors scoped to included budgeted sessions",
+      )
+    ) {
+      return;
+    }
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const workerUsage = { input_tokens: 200, output_tokens: 20 };
+    for (const [
+      failedSession,
+      withWorker,
+      maxCostUsd,
+      authoritative,
+      rejects,
+    ] of [
+      ["worker-thread", true, 1, true, true],
+      ["scan-thread", true, 1, true, true],
+      ["unrelated-thread", true, 1, true, false],
+      ["worker-thread", true, undefined, true, false],
+      ["scan-thread", false, undefined, false, false],
+      ["scan-thread", false, 1, true, false],
+      ["scan-thread", false, 1, false, true],
+    ] as const) {
+      const sessions: Record<string, MockAccountingEvent[]> = {
+        "scan-thread": accountingSession("scan-thread", [
+          accountingEvent(rootUsage),
+        ]),
+        "unrelated-thread": accountingSession("unrelated-thread", [
+          accountingEvent(workerUsage),
+        ]),
+      };
+      if (withWorker) {
+        sessions["worker-thread"] = accountingSession(
+          "worker-thread",
+          [accountingEvent(workerUsage)],
+          "scan-thread",
+        );
+      }
+      sessions[failedSession]!.unshift(
+        new SyntaxError("mock parser diagnostic"),
+      );
+      const costs: number[] = [];
+      await withMockAccountingSessions(
+        sessions,
+        {
+          model: "gpt-5.6-terra",
+          maxCostUsd,
+          onCost: (cost) => costs.push(cost.estimatedUsd),
+        },
+        async (tracker) => {
+          const refresh = tracker.refresh();
+          if (
+            maxCostUsd !== undefined &&
+            failedSession !== "unrelated-thread"
+          ) {
+            await expect(refresh).rejects.toThrow(
+              "tracked session record could not be read",
+            );
+          } else {
+            await expect(refresh).resolves.toMatchObject({
+              cost: { inputTokens: withWorker ? 300 : 100 },
+            });
+          }
+          const completed = tracker.stop(authoritative ? rootUsage : undefined);
+          if (rejects) {
+            await expect(completed).rejects.toThrow(
+              "tracked session record could not be read",
+            );
+          } else {
+            await expect(completed).resolves.toMatchObject({
+              cost: { inputTokens: withWorker ? 300 : 100 },
+            });
+          }
+          expect(costs).toEqual([withWorker ? 0.00096 : 0.00032]);
+        },
+      );
+    }
+  });
+
+  test("retains mocked per-session priced high-water snapshots", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "retains mocked per-session priced high-water snapshots",
+      )
+    ) {
+      return;
+    }
+    const inherited = {
+      input_tokens: 1_000,
+      cached_input_tokens: 500,
+      cache_write_input_tokens: 100,
+      output_tokens: 100,
+      reasoning_output_tokens: 20,
+    };
+    const completed = { type: "event_msg", payload: { type: "task_complete" } };
+    const costs: number[] = [];
+    await withMockAccountingSessions(
+      {
+        "scan-thread": accountingSession("scan-thread", [
+          accountingEvent({ input_tokens: 100, output_tokens: 100 }),
+          accountingEvent({
+            input_tokens: 1_000,
+            cached_input_tokens: 1_000,
+            output_tokens: 0,
+          }),
+        ]),
+        "worker-thread": [
+          {
+            type: "session_meta",
+            payload: {
+              id: "worker-thread",
+              parent_thread_id: "scan-thread",
+              timestamp: "2026-07-26T12:02:00.000Z",
+            },
+          },
+          { type: "session_meta", payload: { id: "scan-thread" } },
+          accountingEvent(inherited),
+          {
+            type: "event_msg",
+            payload: { type: "task_started", started_at: 1_785_067_320 },
+          },
+          accountingEvent({
+            input_tokens: 1_200,
+            cached_input_tokens: 500,
+            cache_write_input_tokens: 150,
+            output_tokens: 120,
+            reasoning_output_tokens: 25,
+          }),
+          accountingEvent({
+            input_tokens: 1_500,
+            cached_input_tokens: 1_000,
+            cache_write_input_tokens: 100,
+            output_tokens: 101,
+            reasoning_output_tokens: 20,
+          }),
+          completed,
+        ],
+      },
+      {
+        model: "gpt-5.6-terra",
+        maxCostUsd: 0.001,
+        onCost: (cost) => costs.push(cost.estimatedUsd),
+      },
+      async (tracker, append) => {
+        const initialUsage = {
+          input_tokens: 300,
+          cached_input_tokens: 0,
+          cache_write_input_tokens: 50,
+          output_tokens: 120,
+          reasoning_output_tokens: 5,
+          total_tokens: 420,
+        };
+        const initial = await tracker.refresh();
+        expect(initial.usage).toEqual(initialUsage);
+        expect(initial.cost?.estimatedUsd).toBe(0.002065);
+        expect((await tracker.stop()).usage).toEqual(initialUsage);
+
+        append("worker-thread", [
+          accountingEvent({
+            input_tokens: 1_300,
+            cached_input_tokens: 600,
+            cache_write_input_tokens: 150,
+            output_tokens: 140,
+            reasoning_output_tokens: 30,
+          }),
+          completed,
+        ]);
+        const final = await tracker.stop({
+          input_tokens: 200,
+          output_tokens: 200,
+        });
+        expect(final.usage).toEqual({
+          input_tokens: 500,
+          cached_input_tokens: 100,
+          cache_write_input_tokens: 50,
+          output_tokens: 240,
+          reasoning_output_tokens: 10,
+          total_tokens: 740,
+        });
+        expect(final.cost?.estimatedUsd).toBe(0.003725);
+        expect(await tracker.stop()).toEqual(final);
+        expect(costs).toEqual([0.002065, 0.002325, 0.003725]);
+      },
+    );
+  });
+
+  test("keeps mocked unverified evidence separate from known cost floors", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "keeps mocked unverified evidence separate from known cost floors",
+      )
+    ) {
+      return;
+    }
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const unpriceable = accountingEvent({
+      input_tokens: Number.MAX_SAFE_INTEGER,
+      output_tokens: 0,
+    });
+    for (const evidence of [
+      new SyntaxError("mock parser diagnostic"),
+      unpriceable,
+    ]) {
+      const reports: Array<number | "error"> = [];
+      await withMockAccountingSessions(
+        {
+          "scan-thread": accountingSession("scan-thread", [
+            accountingEvent(rootUsage),
+          ]),
+          "worker-thread": accountingSession(
+            "worker-thread",
+            [
+              accountingEvent({ input_tokens: 1_000, output_tokens: 100 }),
+              evidence,
+              accountingEvent(rootUsage),
+            ],
+            "scan-thread",
+          ),
+        },
+        {
+          model: "gpt-5.6-terra",
+          maxCostUsd: 0.001,
+          onCost: (cost) => reports.push(cost.estimatedUsd),
+          onError: () => reports.push("error"),
+        },
+        async (tracker) => {
+          await expect(tracker.stop(rootUsage)).rejects.toThrow(
+            "The scan cost limit could not be verified",
+          );
+          expect((await tracker.stop()).cost).toMatchObject({
+            inputTokens: 1_100,
+            outputTokens: 110,
+            estimatedUsd: 0.00352,
+          });
+          expect(reports[0]).toBe(0.00352);
+          expect(reports).toContain("error");
+        },
+      );
+    }
+    await withMockAccountingSessions(
+      {
+        "scan-thread": accountingSession("scan-thread", [
+          accountingEvent(rootUsage),
+          unpriceable,
+        ]),
+      },
+      { model: "gpt-5.6-terra", maxCostUsd: 1 },
+      async (tracker) => {
+        expect(
+          (await tracker.stop({ input_tokens: 1_000, output_tokens: 100 })).cost
+            ?.estimatedUsd,
+        ).toBe(0.0032);
+      },
+    );
+    await withMockAccountingSessions(
+      {
+        "scan-thread": accountingSession("scan-thread", [
+          accountingEvent(rootUsage),
+          accountingEvent({ input_tokens: 200, output_tokens: 20 }),
+        ]),
+      },
+      { model: "unknown-model" },
+      async (tracker) => {
+        expect(await tracker.stop(undefined)).toMatchObject({
+          usage: { input_tokens: 200, output_tokens: 20 },
+          cost: null,
+        });
+      },
+    );
   });
 
   test("retains a partial event across incremental reads", async () => {
