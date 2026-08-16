@@ -121,23 +121,29 @@ describe("full CLI manifest", () => {
           .find((line) => line.startsWith(`| \`${flag(name)}\` |`));
         expect(row).toBeDefined();
         expect(row).toContain(field.description!);
-        for (const value of field.enum ??
-          (field.const === undefined ? [] : [field.const])) {
-          expect(row).toContain(`\`${String(value)}\``);
-        }
         const details = row!.slice(
           row!.indexOf(field.description!) + field.description!.length,
         );
-        for (const constraint of [
-          "minimum",
-          "exclusiveMinimum",
-          "maximum",
-          "exclusiveMaximum",
-          "minLength",
-          "maxLength",
-        ] as const) {
-          if (typeof field[constraint] === "number") {
-            expect(details).toContain(String(field[constraint]));
+        const schemas = [field];
+        if (typeof field.items === "object" && !Array.isArray(field.items)) {
+          schemas.push(field.items);
+        }
+        for (const schema of schemas) {
+          for (const value of schema.enum ??
+            (schema.const === undefined ? [] : [schema.const])) {
+            expect(details).toContain(`\`${String(value)}\``);
+          }
+          for (const constraint of [
+            "minimum",
+            "exclusiveMinimum",
+            "maximum",
+            "exclusiveMaximum",
+            "minLength",
+            "maxLength",
+          ] as const) {
+            if (typeof schema[constraint] === "number") {
+              expect(details).toContain(String(schema[constraint]));
+            }
           }
         }
         const required =
@@ -285,6 +291,9 @@ describe("full CLI manifest", () => {
       ["--llms-full", "--format", "md", "scans", "show"],
       ["scans", "--llms-full", "--token-count", "show"],
       ["--filter-output", "scan", "scans", "show", "--llms-full"],
+      ["--filter-output=scan", "scans", "show", "--llms-full"],
+      ["--token-limit=100000", "scans", "show", "--llms-full"],
+      ["scans", "--token-offset=0", "show", "--llms-full"],
     ]) {
       const markdown = await invoke(args);
       expect(markdown).toStartWith("# codex-security scans show\n");

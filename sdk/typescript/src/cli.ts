@@ -1065,11 +1065,13 @@ export async function main(
   const completing = Boolean(process.env["COMPLETE"]);
   if (!completing) {
     argv = defaultListCommand(
-      argv.flatMap((argument) =>
-        argument.startsWith("--format=")
-          ? ["--format", argument.slice("--format=".length)]
-          : [argument],
-      ),
+      argv.flatMap((argument) => {
+        const equals = argument.indexOf("=");
+        const option = argument.slice(0, equals);
+        return equals >= 0 && INCUR_VALUE_OPTIONS.has(option)
+          ? [option, argument.slice(equals + 1)]
+          : [argument];
+      }),
     );
   }
   const positionals: string[] = [];

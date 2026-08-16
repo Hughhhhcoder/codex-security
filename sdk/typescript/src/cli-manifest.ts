@@ -163,29 +163,21 @@ function documentInputs(
           {}) as z.core.JSONSchema.JSONSchema;
         const details = [field.description ?? ""];
         if (options && required.has(name)) details.push("Required.");
-        const values =
-          property.enum ??
-          (property.const === undefined ? undefined : [property.const]);
-        if (values !== undefined) {
-          details.push(`Allowed values: ${values.map(codeValue).join(", ")}.`);
-        }
-        if (property.type === "integer") details.push("Must be an integer.");
+        details.push(...describeConstraints(property));
         if (options && property.type === "array") {
           details.push("Repeat this flag for multiple values.");
           if (Array.isArray(property.default)) {
             details.push(`Default: ${codeValue(property.default)}.`);
           }
         }
-        for (const [key, label] of [
-          ["minimum", "Minimum"],
-          ["exclusiveMinimum", "Must be greater than"],
-          ["maximum", "Maximum"],
-          ["exclusiveMaximum", "Must be less than"],
-          ["minLength", "Minimum length"],
-          ["maxLength", "Maximum length"],
-        ] as const) {
-          if (property[key] !== undefined) {
-            details.push(`${label}: ${property[key]}.`);
+        if (
+          property.type === "array" &&
+          typeof property.items === "object" &&
+          !Array.isArray(property.items)
+        ) {
+          const itemDetails = describeConstraints(property.items);
+          if (itemDetails.length > 0) {
+            details.push(`Each value: ${itemDetails.join(" ")}`);
           }
         }
         const key = options
@@ -195,6 +187,30 @@ function documentInputs(
       }),
     ),
   );
+}
+
+function describeConstraints(property: z.core.JSONSchema.JSONSchema): string[] {
+  const details: string[] = [];
+  const values =
+    property.enum ??
+    (property.const === undefined ? undefined : [property.const]);
+  if (values !== undefined) {
+    details.push(`Allowed values: ${values.map(codeValue).join(", ")}.`);
+  }
+  if (property.type === "integer") details.push("Must be an integer.");
+  for (const [key, label] of [
+    ["minimum", "Minimum"],
+    ["exclusiveMinimum", "Must be greater than"],
+    ["maximum", "Maximum"],
+    ["exclusiveMaximum", "Must be less than"],
+    ["minLength", "Minimum length"],
+    ["maxLength", "Maximum length"],
+  ] as const) {
+    if (property[key] !== undefined) {
+      details.push(`${label}: ${property[key]}.`);
+    }
+  }
+  return details;
 }
 
 function codeValue(value: unknown): string {
