@@ -4,13 +4,14 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   realpath,
   rm,
   stat,
   symlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -59,7 +60,7 @@ test("direct workbench initialization creates and pins private state", async () 
   );
   for (const mask of [0o002, 0o700]) {
     const nested = `nested-${mask.toString(8)}`;
-    const state = join(alias, nested, "state");
+    const state = `${alias}${sep}.${sep}${nested}${sep}state`;
     const canonical = join(actual, nested, "state");
     const result = runPython(state, [
       "-c",
@@ -167,3 +168,142 @@ testPosix(
     expect(existsSync(join(shared, "missing"))).toBe(false);
   },
 );
+
+testPosix(
+  "direct workbench rejects unsafe lexical and chained state aliases",
+  async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "state");
+    const shared = join(root, "shared");
+    const trusted = join(root, "trusted");
+    const unsafeLink = join(shared, "state-link");
+    const nextLink = join(trusted, "next-link");
+    const alias = join(root, "alias");
+    const dottedAlias = join(root, "dotted-alias");
+    const dottedState = `${shared}${sep}..${sep}state`;
+    const missing = join(alias, "missing", "state");
+    await mkdir(state, { mode: 0o700 });
+    await mkdir(shared, { mode: 0o700 });
+    await mkdir(trusted, { mode: 0o700 });
+    await chmod(shared, 0o775);
+    await symlink(state, unsafeLink, "dir");
+    await symlink(unsafeLink, nextLink, "dir");
+    await symlink(`${nextLink}${sep}`, alias, "dir");
+    await symlink(dottedState, dottedAlias, "dir");
+    const command = [
+      join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+      "list-scans",
+      "--repository",
+      root,
+    ];
+
+    for (const path of [
+      unsafeLink,
+      nextLink,
+      alias,
+      dottedAlias,
+      dottedState,
+      missing,
+    ]) {
+      const result = runPython(path, command);
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("state directory is unsafe");
+      expect(result.stderr).toContain("group- or world-writable");
+    }
+    expect((await stat(shared)).mode & 0o7777).toBe(0o775);
+    expect((await stat(state)).mode & 0o7777).toBe(0o700);
+    expect(await readdir(state)).toEqual([]);
+    expect(await readdir(shared)).toEqual(["state-link"]);
+    expect(await readdir(trusted)).toEqual(["next-link"]);
+    expect(existsSync(missing)).toBe(false);
+  },
+);
+
+testPosix(
+  "direct workbench rejects untrusted state-link ownership before creation",
+  async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "state");
+    const alias = join(root, "alias");
+    await mkdir(state, { mode: 0o700 });
+    await symlink(state, alias, "dir");
+    const result = runPython(alias, [
+      "-c",
+      [
+        "import os, sys",
+        "from pathlib import Path",
+        "from unittest.mock import patch",
+        "sys.path.insert(0, sys.argv[1])",
+        "import workbench_db as workbench",
+        "original_lstat = os.lstat",
+        "def synthetic_lstat(path, *args, **kwargs):",
+        "    metadata = original_lstat(path, *args, **kwargs)",
+        "    if os.fspath(path) == sys.argv[2]:",
+        "        values = list(metadata)",
+        "        values[4] = os.geteuid() + 1",
+        "        return os.stat_result(values)",
+        "    return metadata",
+        "with (",
+        '    patch.object(os, "lstat", synthetic_lstat),',
+        '    patch.object(Path, "mkdir", side_effect=AssertionError("unexpected creation")),',
+        '    patch.object(workbench.sqlite3, "connect", side_effect=AssertionError("unexpected database access")),',
+        "):",
+        "    try:",
+        "        workbench.connect()",
+        "    except SystemExit as error:",
+        "        print(error)",
+        "    else:",
+        '        raise AssertionError("untrusted state link was accepted")',
+      ].join("\n"),
+      join(PLUGIN_ROOT, "scripts"),
+      alias,
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain("state directory is unsafe");
+    expect(result.stdout).toContain("trusted owner");
+    expect((await stat(state)).mode & 0o7777).toBe(0o700);
+    expect(await readdir(state)).toEqual([]);
+  },
+);
+
+test("direct workbench preserves unresolved home expansion failures", () => {
+  const result = runPython("", [
+    "-c",
+    [
+      "import json, os, sys",
+      "from pathlib import Path",
+      "from unittest.mock import patch",
+      "sys.path.insert(0, sys.argv[1])",
+      "import workbench_db as workbench",
+      "errors = []",
+      "with (",
+      '    patch.object(os.path, "expanduser", side_effect=lambda path: path),',
+      '    patch.object(Path, "mkdir", side_effect=AssertionError("unexpected creation")),',
+      '    patch.object(workbench.sqlite3, "connect", side_effect=AssertionError("unexpected database access")),',
+      "):",
+      "    for environment in (",
+      '        {"CODEX_SECURITY_STATE_DIR": "~unresolved/state"},',
+      '        {"CODEX_SECURITY_STATE_DIR": "", "CODEX_HOME": "~/home"},',
+      "    ):",
+      "        with patch.dict(os.environ, environment, clear=True):",
+      "            for select in (workbench.state_dir, workbench.connect):",
+      "                try:",
+      "                    select()",
+      "                except RuntimeError as error:",
+      "                    errors.append(str(error))",
+      "                else:",
+      '                    raise AssertionError("unresolved home was accepted")',
+      "print(json.dumps(errors))",
+    ].join("\n"),
+    join(PLUGIN_ROOT, "scripts"),
+  ]);
+
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(JSON.parse(result.stdout)).toEqual(
+    Array(4).fill("Could not determine home directory."),
+  );
+});

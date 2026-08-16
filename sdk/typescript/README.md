@@ -672,8 +672,9 @@ parent directory must be owned by the current user or root. A group- or
 world-writable parent is accepted only when it has the sticky bit. The state
 directory itself must be private; the sticky-bit exception applies only to its
 parents. History, sign-in, and publication operations use the same private-state
-rule. New state directories are created privately; existing directories are not
-automatically changed.
+rule. State-directory aliases must have trusted link owners and trusted lexical
+and resolved parents. New state directories are created privately; existing
+directories are not automatically changed.
 
 An error that names a parent with mode `0775` refers to that parent, not just
 the final output directory. Creating a `0700` child beneath it does not stop

@@ -146,16 +146,61 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
     )
 
 
-def state_dir() -> Path:
+def requested_state_dir() -> str:
     state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
     if state_dir:
-        return Path(state_dir).expanduser().resolve()
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return (codex_home / "state" / "plugins" / "codex-security").resolve()
+        requested = state_dir
+    else:
+        codex_home = os.environ.get("CODEX_HOME", "~/.codex")
+        requested = os.path.join(codex_home, "state", "plugins", "codex-security")
+    requested = os.path.expanduser(requested)
+    if requested.startswith("~"):
+        raise RuntimeError("Could not determine home directory.")
+    return requested if os.path.isabs(requested) else os.path.join(os.getcwd(), requested)
+
+
+def state_dir() -> Path:
+    return Path(requested_state_dir()).resolve()
 
 
 def database_path() -> Path:
     return state_dir() / "workbench.sqlite3"
+
+
+def require_secure_state_ancestry(path: str) -> None:
+    if os.name == "nt":
+        return
+    geteuid = getattr(os, "geteuid", None)
+    effective_uid = geteuid() if geteuid is not None else None
+    pending = [path]
+    checked: set[str] = set()
+    while pending:
+        current = pending.pop()
+        while True:
+            current = current.rstrip(os.sep) or os.sep
+            if current in checked:
+                break
+            checked.add(current)
+            parent = os.path.dirname(current)
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError:
+                metadata = None
+            if metadata is not None:
+                if stat.S_ISLNK(metadata.st_mode):
+                    require_trusted_output_owner(metadata, effective_uid)
+                    canonical = os.path.realpath(current, strict=True)
+                    target = os.readlink(current)
+                    # Preserve dot segments until the filesystem resolves the target.
+                    lexical_target = (
+                        target if os.path.isabs(target) else os.path.join(parent, target)
+                    )
+                    pending.extend((canonical, lexical_target))
+                else:
+                    require_trusted_output_ancestor(current, effective_uid)
+            if parent == current:
+                break
+            current = parent
 
 
 @contextmanager
@@ -223,9 +268,11 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 
 def connect() -> sqlite3.Connection:
-    path = database_path()
-    root = path.parent
+    requested = requested_state_dir()
+    root = Path(requested)
     try:
+        require_secure_state_ancestry(requested)
+        root = root.resolve()
         missing = []
         existing = root
         while True:
@@ -257,12 +304,12 @@ def connect() -> sqlite3.Connection:
             ):
                 directory.chmod(0o700)
         root = require_canonical_scan_directory(root)
-    except (OSError, SystemExit) as exc:
+    except (OSError, RuntimeError, SystemExit) as exc:
         raise SystemExit(
             f"Codex Security state directory is unsafe: {root}. {exc}"
         ) from exc
     os.environ["CODEX_SECURITY_STATE_DIR"] = str(root)
-    path = root / path.name
+    path = root / "workbench.sqlite3"
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         connection = sqlite3.connect(path, timeout=5)
         try:
@@ -3790,15 +3837,19 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
     return resolved
 
 
-def require_trusted_output_ancestor(parent: Path, effective_uid: int | None) -> None:
+def require_trusted_output_owner(metadata: os.stat_result, effective_uid: int | None) -> None:
+    if effective_uid is not None and metadata.st_uid not in {0, effective_uid}:
+        raise SystemExit("Scan output parent must have a trusted owner.")
+
+
+def require_trusted_output_ancestor(parent: Path | str, effective_uid: int | None) -> None:
     try:
-        metadata = parent.lstat()
+        metadata = os.lstat(parent)
     except OSError as exc:
         raise SystemExit("Scan output parent could not be inspected.") from exc
     if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
         raise SystemExit("Scan output parent must be a non-symlink directory.")
-    if effective_uid is not None and metadata.st_uid not in {0, effective_uid}:
-        raise SystemExit("Scan output parent must have a trusted owner.")
+    require_trusted_output_owner(metadata, effective_uid)
     if stat.S_IMODE(metadata.st_mode) & 0o022 and not metadata.st_mode & stat.S_ISVTX:
         raise SystemExit(
             "Scan output parent must not be group- or world-writable without the sticky bit."
