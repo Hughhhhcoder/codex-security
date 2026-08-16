@@ -224,7 +224,45 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 def connect() -> sqlite3.Connection:
     path = database_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    root = path.parent
+    try:
+        missing = []
+        existing = root
+        while True:
+            try:
+                metadata = existing.lstat()
+                break
+            except FileNotFoundError:
+                missing.append(existing)
+                parent = existing.parent
+                if parent == existing:
+                    raise
+                existing = parent
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise SystemExit("State path must use real directories.")
+        if os.name != "nt":
+            geteuid = getattr(os, "geteuid", None)
+            effective_uid = geteuid() if geteuid is not None else None
+            for parent in (existing, *existing.parents):
+                require_trusted_output_ancestor(parent, effective_uid)
+        for directory in reversed(missing):
+            try:
+                directory.mkdir(mode=0o700)
+            except FileExistsError:
+                require_canonical_scan_directory(directory)
+                continue
+            if (
+                os.name != "nt"
+                and stat.S_IMODE(directory.stat().st_mode) & 0o700 != 0o700
+            ):
+                directory.chmod(0o700)
+        root = require_canonical_scan_directory(root)
+    except (OSError, SystemExit) as exc:
+        raise SystemExit(
+            f"Codex Security state directory is unsafe: {root}. {exc}"
+        ) from exc
+    os.environ["CODEX_SECURITY_STATE_DIR"] = str(root)
+    path = root / path.name
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         connection = sqlite3.connect(path, timeout=5)
         try:
@@ -3752,6 +3790,21 @@ def artifact_path(scan_dir: Path, file_name: str, *, required: bool) -> Path | N
     return resolved
 
 
+def require_trusted_output_ancestor(parent: Path, effective_uid: int | None) -> None:
+    try:
+        metadata = parent.lstat()
+    except OSError as exc:
+        raise SystemExit("Scan output parent could not be inspected.") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit("Scan output parent must be a non-symlink directory.")
+    if effective_uid is not None and metadata.st_uid not in {0, effective_uid}:
+        raise SystemExit("Scan output parent must have a trusted owner.")
+    if stat.S_IMODE(metadata.st_mode) & 0o022 and not metadata.st_mode & stat.S_ISVTX:
+        raise SystemExit(
+            "Scan output parent must not be group- or world-writable without the sticky bit."
+        )
+
+
 def require_canonical_scan_directory(scan_dir: Path) -> Path:
     scan_dir = scan_dir.absolute()
     try:
@@ -3777,26 +3830,7 @@ def require_canonical_scan_directory(scan_dir: Path) -> Path:
         if effective_uid is not None and metadata.st_uid != effective_uid:
             raise SystemExit("Scan directory must be owned by the current user.")
         for parent in scan_dir.parents:
-            try:
-                parent_metadata = parent.lstat()
-            except OSError as exc:
-                raise SystemExit("Scan output parent could not be inspected.") from exc
-            if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(
-                parent_metadata.st_mode
-            ):
-                raise SystemExit("Scan output parent must be a non-symlink directory.")
-            if effective_uid is not None and parent_metadata.st_uid not in {
-                0,
-                effective_uid,
-            }:
-                raise SystemExit("Scan output parent must have a trusted owner.")
-            if (
-                stat.S_IMODE(parent_metadata.st_mode) & 0o022
-                and not parent_metadata.st_mode & stat.S_ISVTX
-            ):
-                raise SystemExit(
-                    "Scan output parent must not be group- or world-writable without the sticky bit."
-                )
+            require_trusted_output_ancestor(parent, effective_uid)
     return scan_dir
 
 

@@ -40,6 +40,7 @@ import {
   createMarketplace,
   extractPluginZip,
   importAmbientAuth,
+  OutputDirectoryError,
   pluginExecutionEnvironment,
   PluginBootstrapError,
   PluginPythonUnavailableError,
@@ -61,6 +62,7 @@ import {
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
+  prepareCodexSecurityStateDirectory,
   preparePersistentScanRoot,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
@@ -1963,6 +1965,7 @@ describe("runtime directories and plugin Python boundary", () => {
       await expect(
         requireSecureOutputAncestry(join(shared, "state")),
       ).rejects.toThrow("sticky bit");
+      expect(existsSync(join(shared, "state"))).toBe(false);
     },
   );
 
@@ -2082,7 +2085,7 @@ describe("runtime directories and plugin Python boundary", () => {
   test("identifies a credential home that already exists as a regular file", async () => {
     const root = await temporaryDirectory();
     const stateDirectory = join(root, "state");
-    await mkdir(stateDirectory);
+    await mkdir(stateDirectory, { mode: 0o700 });
     await writeFile(join(stateDirectory, "codex-home"), "not a directory\n");
 
     await expect(
@@ -3616,6 +3619,66 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  test("prepares a canonical private state root without replacing existing data", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "missing", "state");
+    const alias = join(root, "state-alias");
+    expect(await prepareCodexSecurityStateDirectory(state)).toBe(state);
+    await writeFile(join(state, "preserved.txt"), "preserved\n");
+    await symlink(
+      state,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    expect(await prepareCodexSecurityStateDirectory(alias)).toBe(state);
+    expect(await readFile(join(state, "preserved.txt"), "utf8")).toBe(
+      "preserved\n",
+    );
+    if (process.platform !== "win32") {
+      expect((await stat(state)).mode & 0o7777).toBe(0o700);
+    }
+  });
+
+  testPosix(
+    "changes owner permissions only on newly created state roots",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      const previousUmask = process.umask(0o777);
+      try {
+        expect(await prepareCodexSecurityStateDirectory(state)).toBe(state);
+      } finally {
+        process.umask(previousUmask);
+      }
+      expect((await stat(state)).mode & 0o7777).toBe(0o700);
+      await chmod(state, 0o755);
+      await expect(prepareCodexSecurityStateDirectory(state)).rejects.toThrow(
+        "Configured Codex Security state directory must be private",
+      );
+      expect((await stat(state)).mode & 0o7777).toBe(0o755);
+    },
+  );
+
+  testPosix(
+    "rejects non-private state before preparing credentials or scan roots",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      await mkdir(state, { mode: 0o700 });
+      await chmod(state, 0o755);
+
+      await expect(
+        prepareCodexSecurityCredentialHome({ CODEX_SECURITY_STATE_DIR: state }),
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      await expect(
+        preparePersistentScanRoot(state, "repository"),
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      expect((await stat(state)).mode & 0o7777).toBe(0o755);
+      expect(await readdir(state)).toEqual([]);
+    },
+  );
+
   testPosix(
     "requires existing configured state roots to be private",
     async () => {
@@ -3648,6 +3711,64 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  testPosix(
+    "reports foreign-owned state roots without permission-change advice",
+    async () => {
+      if (
+        runMockInSubprocess(
+          import.meta.path,
+          "reports foreign-owned state roots without permission-change advice",
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      await mkdir(state, { mode: 0o700 });
+      const originalLstat = fsPromises.lstat;
+      const originalMetadata = await originalLstat(state);
+      const foreignUid = originalMetadata.uid === 0 ? 1 : 0;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: async (...args: Parameters<typeof originalLstat>) => {
+          const metadata = await originalLstat(...args);
+          if (String(args[0]) === state) {
+            Object.defineProperty(metadata, "uid", { value: foreignUid });
+          }
+          return metadata;
+        },
+      }));
+
+      try {
+        const failure = await validateCodexSecurityStateDirectory(state).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(failure).toBeInstanceOf(OutputDirectoryError);
+        if (!(failure instanceof OutputDirectoryError)) {
+          throw new Error("foreign-owned state must be rejected");
+        }
+        expect(failure.message).toContain("must be owned by the current user");
+        expect(failure.message).toContain(`${state} (mode 0700)`);
+        expect(failure.message).toContain("CODEX_SECURITY_STATE_DIR");
+        expect(failure.message).not.toContain("chmod");
+        expect(failure.message).not.toContain("permissions to 0700");
+        expect(failure.cause).toBeInstanceOf(OutputDirectoryError);
+        expect(failure.cause).toMatchObject({
+          message: expect.stringContaining("must be owned by the current user"),
+        });
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          lstat: originalLstat,
+        }));
+      }
+      expect((await originalLstat(state)).uid).toBe(originalMetadata.uid);
+      expect((await originalLstat(state)).mode & 0o7777).toBe(0o700);
+      expect(await readdir(state)).toEqual([]);
+    },
+  );
+
   testPosix("rejects unsafe lexical and chained state aliases", async () => {
     const root = await temporaryDirectory();
     const state = join(root, "state");
@@ -3667,6 +3788,9 @@ describe("runtime directories and plugin Python boundary", () => {
 
     for (const path of [unsafeLink, nextLink, alias, missing]) {
       await expect(validateCodexSecurityStateDirectory(path)).rejects.toThrow(
+        `${shared} (mode 0775)`,
+      );
+      await expect(prepareCodexSecurityStateDirectory(path)).rejects.toThrow(
         `${shared} (mode 0775)`,
       );
     }
@@ -3689,7 +3813,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ] as const) {
       const state = join(root, `state-${name}`);
       const linked = join(state, path);
-      await mkdir(dirname(linked), { recursive: true });
+      await mkdir(dirname(linked), { recursive: true, mode: 0o700 });
       await symlink(
         external,
         linked,
@@ -3893,6 +4017,7 @@ describe("runtime directories and plugin Python boundary", () => {
         pluginRoot,
         environment: {
           PATH: process.env["PATH"],
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "must-not-reach-python",
           CODEX_API_KEY: "also-must-not-reach-python",
           OPENROUTER_API_KEY: "openrouter-must-not-reach-python",
@@ -3905,13 +4030,78 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result["details"]).toHaveLength(5 * 1024 * 1024);
   });
 
+  test("prepares canonical state only for database-backed workbench commands", async () => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "plugin");
+    const state = join(root, "state");
+    const alias = join(root, "state-alias");
+    await mkdir(join(pluginRoot, "scripts"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, "scripts", "workbench_db.py"),
+      [
+        "import json, os, sys",
+        "print(json.dumps({'command': sys.argv[1], 'state': os.environ.get('CODEX_SECURITY_STATE_DIR'), 'stateKeys': sorted(name for name in os.environ if name.upper() == 'CODEX_SECURITY_STATE_DIR')}))",
+      ].join("\n"),
+    );
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const options = {
+      python: python!,
+      pluginRoot,
+      environment: { CODEX_SECURITY_STATE_DIR: state },
+    };
+
+    for (const command of ["inspect-target", "inspect-setup"]) {
+      expect(await runWorkbench(options, [command])).toMatchObject({
+        command,
+        state,
+      });
+      expect(existsSync(state)).toBe(false);
+    }
+    expect(await runWorkbench(options, ["list-scans"])).toMatchObject({
+      state,
+      stateKeys: ["CODEX_SECURITY_STATE_DIR"],
+    });
+    expect(await readdir(state)).toEqual([]);
+    await symlink(
+      state,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const aliased = {
+      ...options,
+      environment: {
+        CODEX_SECURITY_STATE_DIR: alias,
+        codex_security_state_dir: join(root, "unused"),
+      },
+    };
+    expect(await runWorkbench(aliased, ["list-scans"])).toMatchObject({
+      state,
+      stateKeys: ["CODEX_SECURITY_STATE_DIR"],
+    });
+    expect(aliased.environment.CODEX_SECURITY_STATE_DIR).toBe(alias);
+    expect(existsSync(join(root, "unused"))).toBe(false);
+    if (process.platform !== "win32") {
+      expect((await stat(state)).mode & 0o7777).toBe(0o700);
+      await chmod(state, 0o755);
+      await expect(
+        runWorkbench(options, ["list-scans"]),
+      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      expect(await runWorkbench(options, ["inspect-target"])).toMatchObject({
+        state,
+      });
+      expect((await stat(state)).mode & 0o7777).toBe(0o755);
+      expect(await readdir(state)).toEqual([]);
+    }
+  });
+
   test("upgrades colliding legacy execution-profile and public CLI migrations", async () => {
     const root = await temporaryDirectory("codex-security-legacy-migrations-");
     const repository = join(root, "repository");
     const stateDirectory = join(root, "state");
     const scanDirectory = join(root, "scan");
     await mkdir(repository);
-    await mkdir(stateDirectory);
+    await mkdir(stateDirectory, { mode: 0o700 });
     await mkdir(scanDirectory, { mode: 0o700 });
 
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -4073,7 +4263,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "codex-security-migration-history-",
       );
       const stateDirectory = join(root, "state");
-      await mkdir(stateDirectory);
+      await mkdir(stateDirectory, { mode: 0o700 });
       const database = join(stateDirectory, "workbench.sqlite3");
       const python = Bun.which("python3") ?? Bun.which("python");
       expect(python).not.toBeNull();
@@ -4193,7 +4383,7 @@ describe("runtime directories and plugin Python boundary", () => {
     const stateDirectory = join(root, "state");
     const scanDirectory = join(root, "scan");
     await mkdir(repository);
-    await mkdir(stateDirectory);
+    await mkdir(stateDirectory, { mode: 0o700 });
     await mkdir(scanDirectory, { mode: 0o700 });
 
     const python = Bun.which("python3") ?? Bun.which("python");

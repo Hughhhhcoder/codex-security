@@ -1625,6 +1625,11 @@ export class CodexSecurity {
       this.#runtime?.environment ?? this.#dependencies.environment,
       "chatgpt",
     );
+    if (this.#runtime?.persistentCredentialHome === true) {
+      await validateCodexSecurityStateDirectory(
+        codexSecurityStateDirectory(environment),
+      );
+    }
     const codexHome =
       this.#runtime?.codexHome ??
       (await prepareCodexSecurityCredentialHome(environment));

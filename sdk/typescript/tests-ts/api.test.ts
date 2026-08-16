@@ -4006,6 +4006,66 @@ describe("CodexSecurity orchestration", () => {
     expect(existsSync(join(result.scanDir, "scan-manifest.json"))).toBe(true);
   });
 
+  test("preflights state initialized by a history command", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const stateDirectory = join(root, "state");
+    const outputDir = join(root, "output");
+    await mkdir(repository);
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const environment = {
+      PATH: process.env["PATH"],
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+    };
+    const history = execFileSync(
+      python!,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import os, runpy, sys",
+          "os.umask(0o022)",
+          "sys.argv = sys.argv[1:]",
+          "sys.path.insert(0, os.path.dirname(sys.argv[0]))",
+          'runpy.run_path(sys.argv[0], run_name="__main__")',
+        ].join("\n"),
+        join(PLUGIN_ROOT, "scripts", "workbench_db.py"),
+        "list-scans",
+        "--repository",
+        repository,
+      ],
+      { encoding: "utf8", env: environment },
+    );
+    expect(JSON.parse(history)).toMatchObject({ scans: [] });
+    if (process.platform !== "win32") {
+      expect((await stat(stateDirectory)).mode & 0o777).toBe(0o700);
+    }
+    const initialize = mock(() => {
+      throw new Error("runtime must not initialize");
+    });
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: initialize,
+        resolvePluginPython: initialize,
+        createCodex: initialize,
+      },
+    );
+
+    try {
+      await expect(
+        client.preflight(repository, { outputDir }),
+      ).resolves.toMatchObject({ outputDir });
+      expect(initialize).not.toHaveBeenCalled();
+      expect(existsSync(outputDir)).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("rejects state directories overlapping the selected repository", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -4242,6 +4302,65 @@ describe("CodexSecurity orchestration", () => {
     ).rejects.toThrow("original scan used plugin version 0.0.1");
     await client.close();
   });
+
+  testPosix(
+    "revalidates state before reusing cached persistent authentication",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const stateDirectory = join(root, "state");
+      const codexHome = join(stateDirectory, "codex-home");
+      const outputDir = join(root, "output");
+      await mkdir(repository);
+      await mkdir(codexHome, { recursive: true, mode: 0o700 });
+      const authenticationCommand = mock(() => {
+        throw new Error("authentication command must not start");
+      });
+      const initialize = mock(() => {
+        throw new Error("scan must not start");
+      });
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          prepareRuntime: async () => ({
+            ...preparedRuntime(codexHome),
+            persistentCredentialHome: true,
+            environment: {
+              CODEX_HOME: codexHome,
+              CODEX_SECURITY_STATE_DIR: stateDirectory,
+            },
+          }),
+          resolveCodexCommand: authenticationCommand,
+          resolvePluginPython: initialize,
+          createCodex: initialize,
+        },
+      );
+
+      try {
+        await expect(
+          client.run(repository, { outputDir, expectedPluginVersion: "0.0.0" }),
+        ).rejects.toThrow("original scan used plugin version");
+        await chmod(stateDirectory, 0o755);
+        for (const operation of [
+          () => client.account(),
+          () => client.logout(),
+          () => client.loginApiKey("synthetic-key"),
+        ]) {
+          await expect(operation()).rejects.toThrow(
+            "Configured Codex Security state directory must be private",
+          );
+        }
+        expect(authenticationCommand).not.toHaveBeenCalled();
+        expect(initialize).not.toHaveBeenCalled();
+        expect((await stat(stateDirectory)).mode & 0o7777).toBe(0o755);
+        expect(await readdir(codexHome)).toEqual([]);
+        expect(existsSync(outputDir)).toBe(false);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test("keeps a private preflight snapshot isolated from persistent credentials", async () => {
     const root = await temporaryDirectory();

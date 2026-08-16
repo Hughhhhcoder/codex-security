@@ -162,11 +162,18 @@ export async function validateCodexSecurityStateDirectory(
           `Configured Codex Security state path must be a directory: ${canonical}`,
         );
       }
+      const effectiveUid = process.geteuid?.();
       try {
-        requirePrivateOutputDirectory(metadata, canonical);
+        requirePrivateOutputDirectory(metadata, canonical, effectiveUid);
       } catch (error) {
         if (!(error instanceof OutputDirectoryError)) throw error;
         const mode = (metadata.mode & 0o7777).toString(8).padStart(4, "0");
+        if (effectiveUid !== undefined && metadata.uid !== effectiveUid) {
+          throw new OutputDirectoryError(
+            `Configured Codex Security state directory must be owned by the current user: ${canonical} (mode ${mode}). Set CODEX_SECURITY_STATE_DIR to a private directory owned by the current user.`,
+            { cause: error },
+          );
+        }
         throw new OutputDirectoryError(
           `Configured Codex Security state directory must be private to the current user: ${canonical} (mode ${mode}). Set CODEX_SECURITY_STATE_DIR to a private directory, or set this directory's permissions to 0700 only if you own it and can safely change it.`,
           { cause: error },
@@ -179,6 +186,32 @@ export async function validateCodexSecurityStateDirectory(
     if (error instanceof OutputDirectoryError) throw error;
     throw new OutputDirectoryError(
       `Unable to inspect configured Codex Security state directory: ${requested}`,
+      { cause: error },
+    );
+  }
+}
+
+export async function prepareCodexSecurityStateDirectory(
+  path: string,
+  validateLocation?: (canonical: string) => void,
+): Promise<string> {
+  const canonical = await validateCodexSecurityStateDirectory(
+    path,
+    validateLocation,
+  );
+  try {
+    const created = await mkdir(canonical, { recursive: true, mode: 0o700 });
+    if (created !== undefined && (process.umask() & 0o700) !== 0) {
+      await chmod(canonical, 0o700);
+    }
+    return await validateCodexSecurityStateDirectory(
+      canonical,
+      validateLocation,
+    );
+  } catch (error) {
+    if (error instanceof OutputDirectoryError) throw error;
+    throw new OutputDirectoryError(
+      `Unable to prepare configured Codex Security state directory: ${canonical}`,
       { cause: error },
     );
   }
@@ -237,7 +270,13 @@ export async function prepareCodexSecurityCredentialHome(
   environment: ProcessEnvironment = process.env,
   validateLocation?: (path: string) => void,
 ): Promise<string> {
-  const path = codexSecurityCredentialHome(environment);
+  const stateDirectory = await prepareCodexSecurityStateDirectory(
+    codexSecurityStateDirectory(environment),
+    validateLocation === undefined
+      ? undefined
+      : (canonical) => validateLocation(join(canonical, "codex-home")),
+  );
+  const path = join(stateDirectory, "codex-home");
   try {
     try {
       await mkdir(path, { recursive: true, mode: 0o700 });
@@ -1381,8 +1420,7 @@ export async function preparePersistentScanRoot(
   stateDirectory: string,
   repositoryName: string,
 ): Promise<string> {
-  await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-  let root = await realpath(stateDirectory);
+  let root = await prepareCodexSecurityStateDirectory(stateDirectory);
   for (const directory of ["scans", safePrefix(repositoryName)]) {
     root = join(root, directory);
     await mkdir(root, { recursive: true, mode: 0o700 });
@@ -1399,6 +1437,27 @@ export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
 ): Promise<JsonObject> {
+  const stateDirectory = ["inspect-target", "inspect-setup"].includes(
+    args[0] ?? "",
+  )
+    ? undefined
+    : await prepareCodexSecurityStateDirectory(
+        codexSecurityStateDirectory(options.environment),
+      );
+  const environment = Object.fromEntries(
+    Object.entries(options.environment).filter(
+      ([name]) =>
+        name.toUpperCase() !== "OPENAI_API_KEY" &&
+        name.toUpperCase() !== "CODEX_API_KEY" &&
+        name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+        name.toUpperCase() !== "FIREWORKS_API_KEY" &&
+        (stateDirectory === undefined ||
+          name.toUpperCase() !== "CODEX_SECURITY_STATE_DIR"),
+    ),
+  );
+  if (stateDirectory !== undefined) {
+    environment["CODEX_SECURITY_STATE_DIR"] = stateDirectory;
+  }
   let stdout: string;
   try {
     ({ stdout } = await execFile(
@@ -1410,15 +1469,7 @@ export async function runWorkbench(
         ...args,
       ],
       {
-        env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY" &&
-              name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-              name.toUpperCase() !== "FIREWORKS_API_KEY",
-          ),
-        ),
+        env: environment,
         encoding: "utf8",
         maxBuffer: Infinity,
         windowsHide: true,
@@ -1437,7 +1488,7 @@ export async function runWorkbench(
     throw new CodexSecurityError(
       databaseFailure
         ? `${failure}: cannot open the workbench database at ${join(
-            codexSecurityStateDirectory(options.environment),
+            stateDirectory ?? codexSecurityStateDirectory(options.environment),
             "workbench.sqlite3",
           )}. Ensure the state directory and SQLite journal files are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside the scanned repository.`
         : `${failure}: ${detail}`,
