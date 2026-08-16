@@ -1814,7 +1814,12 @@ export async function extractPluginZip(
   } catch (error) {
     await rm(staging, { recursive: true, force: true }).catch(() => undefined);
     throwIfSignalAborted(signal);
-    if (error instanceof PluginBootstrapError) throw error;
+    if (
+      error instanceof PluginBootstrapError ||
+      error instanceof ConfigurationError
+    ) {
+      throw error;
+    }
     throw new PluginBootstrapError(`Invalid plugin ZIP: ${archivePath}`, {
       cause: error,
     });
