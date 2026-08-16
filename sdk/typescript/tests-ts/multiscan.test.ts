@@ -25,6 +25,7 @@ import { zipSync } from "fflate";
 import Papa from "papaparse";
 import { main } from "../src/cli.js";
 import { loadContract } from "../src/contract.js";
+import * as contract from "../src/contract.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
@@ -2266,7 +2267,7 @@ describe("multiscan", () => {
     expect(calls).toBe(1);
   });
 
-  test("preserves earned receipts when report recovery fails", async () => {
+  test("skips sealed report recovery and preserves earned receipts on recovery failure", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "report-recovery");
     await writeFile(
@@ -2287,6 +2288,20 @@ describe("multiscan", () => {
       new Error("Python unavailable: sk-proj-SYNTHETIC_REPORT_RECOVERY_123"),
     );
     try {
+      const reportSealed = spyOn(contract, "hasSealedReport").mockResolvedValue(
+        true,
+      );
+      try {
+        await expect(
+          runMultiscan(options(paths, security)),
+        ).resolves.toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+        expect(reportSealed).toHaveBeenCalledTimes(1);
+        expect(resolvePython).not.toHaveBeenCalled();
+        expect(attempts).toBe(1);
+        expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
+      } finally {
+        reportSealed.mockRestore();
+      }
       await expect(runMultiscan(options(paths, security))).rejects.toThrow(
         "Multiscan report recovery is required: [redacted]",
       );

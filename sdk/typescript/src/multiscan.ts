@@ -27,7 +27,7 @@ import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
-import { loadContract } from "./contract.js";
+import { hasSealedReport, loadContract } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
@@ -288,20 +288,22 @@ async function runCampaign(
       }
       const checkout = join(output, "checkouts", task.id);
       const schemaPluginRoot = await resolveResumePluginRoot();
-      const coverage = await loadResumableCoverage(
+      const resumed = await loadResumableScan(
         artifactOutput,
         schemaPluginRoot,
         receipt,
         checkout,
         options.signal,
       );
-      if (coverage !== undefined) {
-        await restoreReport(canonicalArtifactOutput, schemaPluginRoot);
+      if (resumed !== undefined) {
+        if (!resumed.reportSealed) {
+          await restoreReport(canonicalArtifactOutput, schemaPluginRoot);
+        }
         await rm(checkout, {
           recursive: true,
           force: true,
         }).catch(() => undefined);
-        if (coverage === "complete") completed += 1;
+        if (resumed.completeness === "complete") completed += 1;
         else {
           incomplete += 1;
           notifyProgress(options, {
@@ -310,7 +312,7 @@ async function runCampaign(
             attempt: receipt.attempt,
             warning:
               receipt.warning ??
-              `Scan coverage is ${coverage}; results may be incomplete.`,
+              `Scan coverage is ${resumed.completeness}; results may be incomplete.`,
           });
         }
         continue;
@@ -911,13 +913,19 @@ async function readReceipts(
   return { receipts, warnedIds };
 }
 
-async function loadResumableCoverage(
+async function loadResumableScan(
   path: string,
   pluginRoot: string,
   receipt: MultiscanReceipt,
   checkout: string,
   signal?: AbortSignal,
-): Promise<CoverageDocument["completeness"] | undefined> {
+): Promise<
+  | {
+      completeness: CoverageDocument["completeness"];
+      reportSealed: boolean;
+    }
+  | undefined
+> {
   try {
     const { manifest, coverage } = await loadContract(path, {
       pluginRoot,
@@ -964,7 +972,12 @@ async function loadResumableCoverage(
             (receipt.coverage ?? completeness) === completeness) ||
           (receipt.status === "failed" &&
             receipt.error === "Multiscan repository coverage is incomplete.");
-    return matchesOutcome ? completeness : undefined;
+    return matchesOutcome
+      ? {
+          completeness,
+          reportSealed: await hasSealedReport(path, manifest, signal),
+        }
+      : undefined;
   } catch {
     if (signal?.aborted === true) signal.throwIfAborted();
     return undefined;

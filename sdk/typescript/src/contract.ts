@@ -291,6 +291,53 @@ export async function requireScanFile(
   ).path;
 }
 
+// The manifest must already have passed loadContract's seal validation.
+export async function hasSealedReport(
+  scanDirectory: string,
+  manifest: ScanManifest,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  try {
+    throwIfAborted(signal);
+    const artifactPaths = manifest.scan.artifacts.map((artifact, index) =>
+      safeRelativePath(artifact.path, `manifest.scan.artifacts[${index}].path`),
+    );
+    if (artifactPaths.includes("report.md")) return true;
+
+    const scanRoot = await requireScanRoot(scanDirectory, signal);
+    const report = await requireCheckedScanFile(
+      scanRoot.path,
+      "report.md",
+      "report.md",
+      signal,
+      scanRoot,
+    );
+    for (const artifactPath of artifactPaths) {
+      const file = await openCheckedScanFile(
+        scanRoot.path,
+        artifactPath,
+        `sealed artifact ${artifactPath}`,
+        signal,
+        scanRoot,
+      );
+      try {
+        const sameFile = await sameCheckedFileDevice(
+          file,
+          report,
+          await file.stat(),
+        );
+        throwIfAborted(signal);
+        if (sameFile) return true;
+      } finally {
+        await file.close();
+      }
+    }
+  } catch {
+    throwIfAborted(signal);
+  }
+  return false;
+}
+
 async function requireCheckedScanFile(
   scanDirectory: string,
   relativePath: string,
