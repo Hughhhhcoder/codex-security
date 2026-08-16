@@ -40,9 +40,7 @@ export function fullMarkdownManifestArguments(
     const argument = argv[index]!;
     if (argument === "--json") format = "json";
     else if (argument === "--format") format = argv[++index];
-    else if (argument.startsWith("--format=")) {
-      format = argument.slice("--format=".length);
-    } else if (MANIFEST_FLAGS.has(argument)) continue;
+    else if (MANIFEST_FLAGS.has(argument)) continue;
     else if (
       INCUR_VALUE_OPTIONS.has(argument) &&
       argv[index + 1] !== undefined

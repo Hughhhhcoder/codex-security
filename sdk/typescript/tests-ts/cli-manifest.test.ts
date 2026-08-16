@@ -16,15 +16,8 @@ import {
 } from "../src/version.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 
-interface Field {
-  description?: string;
-  default?: unknown;
-  const?: unknown;
-  enum?: unknown[];
-}
-
 interface ObjectSchema {
-  properties?: Record<string, Field>;
+  properties?: Record<string, z.core.JSONSchema.JSONSchema>;
   required?: string[];
 }
 
@@ -132,10 +125,25 @@ describe("full CLI manifest", () => {
           (field.const === undefined ? [] : [field.const])) {
           expect(row).toContain(`\`${String(value)}\``);
         }
+        const details = row!.slice(
+          row!.indexOf(field.description!) + field.description!.length,
+        );
+        for (const constraint of [
+          "minimum",
+          "exclusiveMinimum",
+          "maximum",
+          "exclusiveMaximum",
+          "minLength",
+          "maxLength",
+        ] as const) {
+          if (typeof field[constraint] === "number") {
+            expect(details).toContain(String(field[constraint]));
+          }
+        }
         const required =
           command.schema?.options?.required?.includes(name) === true &&
           field.default === undefined;
-        expect(row!.includes("Required.")).toBe(required);
+        expect(/\brequired\b/iu.test(details)).toBe(required);
       }
       for (const example of command.examples ?? []) {
         expect(section).toContain(`codex-security ${example.command}`);
@@ -143,15 +151,9 @@ describe("full CLI manifest", () => {
     }
 
     expect(sections.get("info")).toContain("| `sdkVersion` |");
-    expect(sections.get("scan")).toContain("--max-time-hours");
-    expect(sections.get("scan")).toContain("Maximum: 96");
-    expect(sections.get("findings false-positive")).toContain(
-      "Maximum length: 2400",
-    );
     expect(sections.get("bulk-scan")).toContain(
       "--output-dir /path/outside/repositories/results",
     );
-    expect(sections.get("publish scan")).toContain("Allowed values: `linear`");
   });
 
   test("includes current metadata and the packaged operating guide", async () => {
@@ -314,7 +316,7 @@ describe("full CLI manifest", () => {
     ).toEqual(schema);
   });
 
-  test("rejects missing global values before discovery can dispatch a command", async () => {
+  test("rejects missing or empty global values before discovery", async () => {
     const rejectsMissingValue = async (
       args: readonly string[],
       option: string,
@@ -334,7 +336,12 @@ describe("full CLI manifest", () => {
     };
     for (const option of INCUR_VALUE_OPTIONS) {
       await rejectsMissingValue([option], option);
+      await rejectsMissingValue([option, "", "scans", "--llms-full"], option);
     }
+    await rejectsMissingValue(
+      ["scans", "--llms-full", "--format="],
+      "--format",
+    );
     for (const command of ["scan", "logout"]) {
       for (const discovery of ["--llms", "--llms-full", "--schema"]) {
         await rejectsMissingValue(

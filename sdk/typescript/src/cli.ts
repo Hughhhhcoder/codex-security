@@ -1062,7 +1062,13 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
-  argv = defaultListCommand(argv);
+  argv = defaultListCommand(
+    argv.flatMap((argument) =>
+      argument.startsWith("--format=")
+        ? ["--format", argument.slice("--format=".length)]
+        : [argument],
+    ),
+  );
   const positionals: string[] = [];
   const argumentError = validateCliArguments(argv, positionals);
   if (argumentError !== undefined) {
@@ -2668,20 +2674,13 @@ export async function main(
     });
 
   let notice: UpdateNotice | undefined;
-  const frameworkArguments = argv.flatMap((argument) =>
-    argument.startsWith("--format=")
-      ? ["--format", argument.slice("--format=".length)]
-      : [argument],
-  );
   const manifestArguments = process.env["COMPLETE"]
     ? undefined
-    : fullMarkdownManifestArguments(frameworkArguments);
+    : fullMarkdownManifestArguments(argv);
   const markdownManifest = manifestArguments !== undefined;
   try {
     await cli.serve(
-      markdownManifest
-        ? [...frameworkArguments, "--format", "json"]
-        : frameworkArguments,
+      [...argv, ...(markdownManifest ? ["--format", "json"] : [])],
       {
         stdout: (value) => {
           frameworkOutput += value;
@@ -2890,7 +2889,12 @@ function scanArgumentsFromRecipe(
 
 function hasFlagValue(argv: readonly string[], index: number): boolean {
   const next = argv[index + 1];
-  return next !== undefined && !next.startsWith("--") && next !== "-h";
+  return (
+    next !== undefined &&
+    next.length > 0 &&
+    !next.startsWith("--") &&
+    next !== "-h"
+  );
 }
 
 function validateCliArguments(
@@ -2932,13 +2936,8 @@ function validateCliArguments(
   const structuredOutput = argv.some(
     (value, index) =>
       value === "--json" ||
-      ((value === "--format" ||
-        value === "--format=json" ||
-        value === "--format=jsonl") &&
-        (value.endsWith("=json") ||
-          value.endsWith("=jsonl") ||
-          argv[index + 1] === "json" ||
-          argv[index + 1] === "jsonl")),
+      (value === "--format" &&
+        (argv[index + 1] === "json" || argv[index + 1] === "jsonl")),
   );
   if (
     structuredOutput &&
@@ -2973,9 +2972,7 @@ function validateCliArguments(
     }
     if (
       argv.some(
-        (value, index) =>
-          value === "--format=md" ||
-          (value === "--format" && argv[index + 1] === "md"),
+        (value, index) => value === "--format" && argv[index + 1] === "md",
       )
     ) {
       return "Markdown output is not supported for scan results.";
