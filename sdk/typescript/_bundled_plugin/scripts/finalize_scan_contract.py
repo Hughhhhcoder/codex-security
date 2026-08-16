@@ -27,6 +27,7 @@ from urllib.parse import quote, urlsplit
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
 FINGERPRINT_ALGORITHM = "codex-security/v1"
+REPORT_NAME_RE = re.compile(r"report\.md", re.IGNORECASE | re.ASCII)
 SARIF_SCHEMA = "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json"
 SEVERITIES = {"critical", "high", "medium", "low", "informational"}
 CONFIDENCES = {"high", "medium", "low"}
@@ -1907,6 +1908,7 @@ def _read_sealed_scan(
 
 def write_report_projection(scan_dir: Path, schema_dir: Path | None = None) -> None:
     """Refresh only an unsealed report, preserving authenticated historical reports."""
+    scan_dir = _require_scan_directory(scan_dir)
     manifest, findings, coverage, _ = _read_sealed_scan(
         scan_dir, schema_dir, "report projection"
     )
@@ -1922,6 +1924,7 @@ def write_report_projection(scan_dir: Path, schema_dir: Path | None = None) -> N
         output_metadata = None
     except OSError as exc:
         raise ContractError("report.md: unable to inspect report output") from exc
+    same_file_artifacts: list[str] = []
     if output_metadata is not None:
         for artifact_path in artifact_paths:
             descriptor = open_scan_local_file_descriptor(
@@ -1932,7 +1935,48 @@ def write_report_projection(scan_dir: Path, schema_dir: Path | None = None) -> N
             finally:
                 os.close(descriptor)
             if os.path.samestat(output_metadata, artifact_metadata):
+                same_file_artifacts.append(artifact_path)
+    if output_metadata is not None and same_file_artifacts:
+        try:
+            entries = set(os.listdir(scan_dir))
+            report_entries = [name for name in entries if REPORT_NAME_RE.fullmatch(name)]
+            report_entry = None
+            if "report.md" in entries:
+                report_entry = "report.md"
+            elif len(report_entries) == 1:
+                report_entry = report_entries[0]
+            if report_entry is not None and report_entry != "report.md":
+                descriptor = open_scan_local_file_descriptor(
+                    scan_dir, report_entry, "report directory entry"
+                )
+                try:
+                    if not os.path.samestat(output_metadata, os.fstat(descriptor)):
+                        report_entry = None
+                finally:
+                    os.close(descriptor)
+            if (
+                report_entry is not None
+                and len(report_entries) == 1
+                and any(REPORT_NAME_RE.fullmatch(path) for path in same_file_artifacts)
+            ):
                 return
+            root_metadata = scan_dir.stat(follow_symlinks=False)
+            for artifact_path in same_file_artifacts:
+                artifact = PurePosixPath(artifact_path)
+                parent = _require_scan_directory(scan_dir.joinpath(*artifact.parts[:-1]))
+                if not os.path.samestat(root_metadata, parent.stat(follow_symlinks=False)):
+                    continue
+                if (
+                    report_entry is not None
+                    and artifact.name in entries
+                    and artifact.name != report_entry
+                ):
+                    continue
+                raise ContractError(
+                    "report.md: cannot safely replace an ambiguous sealed artifact alias"
+                )
+        except OSError as exc:
+            raise ContractError("report.md: unable to inspect sealed artifact aliases") from exc
     write_scan_local_bytes(
         scan_dir, "report.md", _generate_report_projection(manifest, findings, coverage)
     )
