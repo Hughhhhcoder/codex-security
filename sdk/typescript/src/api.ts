@@ -1329,10 +1329,22 @@ export class CodexSecurity {
       // scan, and cleanup must treat all of those as a failure it is not allowed to mask.
       scanFailure = true;
       const snapshot = await costTracker?.stop().catch(() => null);
+      const knownCost = snapshot?.cost;
       const failure =
-        signal.reason instanceof ScanCostLimitExceededError
-          ? signal.reason
-          : error;
+        options.maxCostUsd !== undefined &&
+        knownCost !== undefined &&
+        knownCost !== null &&
+        knownCost.estimatedUsd > options.maxCostUsd &&
+        !this.#abortController.signal.aborted &&
+        options.signal?.aborted !== true
+          ? new ScanCostLimitExceededError(
+              options.maxCostUsd,
+              knownCost,
+              scanDir,
+            )
+          : signal.reason instanceof ScanCostLimitExceededError
+            ? signal.reason
+            : error;
       if (
         failure instanceof ScanCostLimitExceededError &&
         budgetRecovery !== null &&

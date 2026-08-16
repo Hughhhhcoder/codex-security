@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -44,7 +44,11 @@ import {
   OPENROUTER_CODEX_PROVIDER,
   type JsonObject,
 } from "../src/config.js";
-import { estimateScanCost, type ScanCost } from "../src/cost.js";
+import {
+  estimateScanCost,
+  type ScanCost,
+  ScanCostTracker,
+} from "../src/cost.js";
 import {
   resolveCodexCommand,
   runWorkbench,
@@ -3344,9 +3348,14 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each(["live", "completed"] as const)(
-    "stops and records a scan when its %s cost exceeds the limit",
-    async (costSource) => {
+  test.each([
+    ["live polling", "live"],
+    ["turn completion", "completed"],
+    ["turn completion after a tracking failure", "tracking-failure"],
+    ["turn completion after user cancellation", "canceled"],
+  ] as const)(
+    "stops and records a scan with over-budget usage from %s",
+    async (_description, costSource) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const codexHome = join(root, "codex-home");
@@ -3356,6 +3365,8 @@ describe("CodexSecurity orchestration", () => {
       await mkdir(scanDir, { mode: 0o700 });
       const commands: Array<readonly string[]> = [];
       const costs: number[] = [];
+      const cancellation = new AbortController();
+      const userCanceled = costSource === "canceled";
       let turns = 0;
       const cost = {
         model: "gpt-5.6-sol",
@@ -3414,7 +3425,7 @@ describe("CodexSecurity orchestration", () => {
                       "scan-thread",
                     ),
                   ]);
-                  if (costSource === "completed") {
+                  if (costSource !== "live") {
                     await copyCompletedScan(root);
                     yield {
                       type: "turn.completed",
@@ -3452,21 +3463,54 @@ describe("CodexSecurity orchestration", () => {
 
       // The fake Codex stream has no process handle to keep its unref'ed poll alive.
       const keepEventLoopAlive = setTimeout(() => {}, 10_000);
+      const originalRefresh = ScanCostTracker.prototype.refresh;
+      let firstRefresh = true;
+      let rejectPoll: ((error: unknown) => void) | undefined;
+      const refresh =
+        costSource === "tracking-failure" || userCanceled
+          ? spyOn(ScanCostTracker.prototype, "refresh").mockImplementation(
+              function (this: ScanCostTracker) {
+                if (firstRefresh) {
+                  firstRefresh = false;
+                  return new Promise<
+                    Awaited<ReturnType<ScanCostTracker["refresh"]>>
+                  >((_resolve, reject) => {
+                    rejectPoll = reject;
+                  });
+                }
+                if (rejectPoll !== undefined) {
+                  if (userCanceled) cancellation.abort();
+                  rejectPoll(new Error("session read failed"));
+                  rejectPoll = undefined;
+                }
+                return originalRefresh.call(this);
+              },
+            )
+          : null;
       try {
-        await expect(
-          client.run(repository, {
-            maxCostUsd: 0.005,
-            postScanPrompt: "Record the scan cost.",
-            onCost: (cost) => costs.push(cost.estimatedUsd),
-            signal: AbortSignal.timeout(5_000),
-          }),
-        ).rejects.toMatchObject({
-          name: ScanCostLimitExceededError.name,
+        const scan = client.run(repository, {
           maxCostUsd: 0.005,
-          scanDir,
-          cost,
+          postScanPrompt: "Record the scan cost.",
+          onCost: (cost) => costs.push(cost.estimatedUsd),
+          signal: AbortSignal.any([
+            cancellation.signal,
+            AbortSignal.timeout(5_000),
+          ]),
         });
+        if (userCanceled) {
+          const failure = await scan.catch((error: unknown) => error);
+          expect(failure).toBeInstanceOf(ScanInterruptedError);
+          expect(failure).not.toBeInstanceOf(ScanCostLimitExceededError);
+        } else {
+          await expect(scan).rejects.toMatchObject({
+            name: ScanCostLimitExceededError.name,
+            maxCostUsd: 0.005,
+            scanDir,
+            cost,
+          });
+        }
       } finally {
+        refresh?.mockRestore();
         clearTimeout(keepEventLoopAlive);
       }
       expect(turns).toBe(1);
@@ -3483,15 +3527,20 @@ describe("CodexSecurity orchestration", () => {
         "--thread-id",
         "scan-thread",
       ]);
-      expect(commands[3]).toEqual([
-        "fail-scan",
-        "--scan-id",
-        "scan_example_001",
-        "--message",
-        `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
-        "--cost-json",
-        JSON.stringify(cost),
-      ]);
+      if (userCanceled) {
+        expect(commands[3]?.[0]).toBe("fail-scan");
+        expect(commands[3]).toContain(JSON.stringify(cost));
+      } else {
+        expect(commands[3]).toEqual([
+          "fail-scan",
+          "--scan-id",
+          "scan_example_001",
+          "--message",
+          `Scan stopped: estimated cost $0.00625 exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
+          "--cost-json",
+          JSON.stringify(cost),
+        ]);
+      }
       expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
       await expect(stat(scanDir)).resolves.toBeDefined();
       await client.close();
