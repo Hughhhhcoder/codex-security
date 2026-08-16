@@ -83,6 +83,7 @@ from workbench_scan_start import (
     archive_scan,
     compact_timestamp,
     insert_running_scan,
+    restore_cli_scan_archive,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -1660,7 +1661,6 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
 
     connection.execute("BEGIN IMMEDIATE")
     try:
-        archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
         registration = register_security_target(connection, str(repository))
         target_id = registration.target_id
         if parent_scan_id is not None:
@@ -1669,6 +1669,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
                 registration.repository_generation, target_id
             ).contains(parent):
                 raise SystemExit("A rerun must belong to the same repository as its parent scan.")
+
+        scan_dir = require_canonical_scan_directory(scan_dir)
+        if next(scan_dir.iterdir(), None) is not None:
+            raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+        archive_scan(connection, args, scan_dir, timestamp, require_canonical_scan_directory)
 
         connection.execute(
             """
@@ -3905,6 +3910,10 @@ def main() -> None:
             )
         elif args.command == "register-cli-scan":
             result = register_cli_scan(connection, args)
+        elif args.command == "restore-cli-scan-archive":
+            result = restore_cli_scan_archive(
+                connection, args, require_canonical_scan_directory
+            )
         elif args.command == "set-scan-thread":
             result = set_scan_thread(connection, args)
         elif args.command == "get-scan-recipe":

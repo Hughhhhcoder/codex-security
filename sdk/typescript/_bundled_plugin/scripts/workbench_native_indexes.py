@@ -180,24 +180,25 @@ def _indexed_findings(
     completed_at_column = (
         "scans.completed_at" if "completed_at" in identities.scan_columns else "NULL"
     )
+    completed_scans = sorted(
+        connection.execute(
+            f"""
+            SELECT scans.target_id, scans.id, scans.started_at,
+                {generation_sql("scans")} AS repository_generation,
+                {completed_at_column} AS completed_at,
+                {completion_column} AS completion_sequence
+            FROM scans
+            JOIN security_targets AS targets ON targets.id = scans.target_id
+            WHERE scans.status = 'complete' AND {target_filter}
+            """,
+            target_values,
+        ),
+        key=scan_history._scan_completion_order,
+    )
     latest_scan_by_repository = {
-        scan_repository_group(row): row["id"]
-        for row in sorted(
-            connection.execute(
-                f"""
-                SELECT scans.target_id, scans.id, scans.started_at,
-                    {generation_sql("scans")} AS repository_generation,
-                    {completed_at_column} AS completed_at,
-                    {completion_column} AS completion_sequence
-                FROM scans
-                JOIN security_targets AS targets ON targets.id = scans.target_id
-                WHERE scans.status = 'complete' AND {target_filter}
-                """,
-                target_values,
-            ),
-            key=scan_history._scan_completion_order,
-        )
+        scan_repository_group(row): row["id"] for row in completed_scans
     }
+    selected_latest_scan_id = completed_scans[-1]["id"] if completed_scans else None
 
     grouped: dict[tuple[tuple[str, str], str], list[sqlite3.Row]] = {}
     for row in connection.execute(
@@ -262,7 +263,10 @@ def _indexed_findings(
         ):
             status = "open"
         scans = sorted({(row["scan_started_at"], row["scan_id"]) for row in occurrences})
-        latest_scan_id = latest_scan_by_repository.get(scan_repository_group(latest))
+        latest_scan_id = (
+            selected_latest_scan_id if scan_scope is not None
+            else latest_scan_by_repository.get(scan_repository_group(latest))
+        )
         findings.append(
             {
                 **dict(latest),

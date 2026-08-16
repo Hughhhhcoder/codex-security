@@ -569,6 +569,166 @@ with ExitStack() as stack:
                 "SELECT repository_identity FROM security_targets WHERE id = 'changed'"
             ).fetchone()[0],
         }))
+    elif scenario == "selected-latest":
+        add_target("requested", "repository-current")
+        add_target("linked", "repository-current")
+        add_target("unrelated", "repository-other")
+        add_scan("legacy", "requested", generation=None)
+        add_finding("legacy", "legacy-only")
+        add_finding("legacy", "same-key", closed=True)
+        add_scan("bound", "linked")
+        add_finding("bound", "bound-only")
+        add_finding("bound", "same-key")
+        add_scan("other", "unrelated")
+        add_finding("other", "other-only")
+        selected = findings("requested")
+        unscoped = list(indexes._indexed_findings(connection))
+        print(json.dumps({
+            "selected": {row["occurrenceId"]: [row["confirmedInLatestScan"], row["status"], row["occurrenceCount"]] for row in selected},
+            "unscoped": {row["occurrence_id"]: row["confirmed_in_latest_scan"] for row in unscoped},
+        }))
+    elif scenario == "archive-recovery":
+        database = sqlite3.connect(":memory:")
+        database.row_factory = sqlite3.Row
+        database.execute("CREATE TABLE scans(id TEXT PRIMARY KEY, scan_dir TEXT UNIQUE)")
+        scan_dir = root / "outputs" / "scan"
+        archive = scan_dir.with_name(scan_dir.name + ".previous-synthetic")
+
+        def recover(*, expected="previous", owner="previous", archived_owner=None,
+                    original_exists=True, nonempty=False, invalid_sibling=False,
+                    invalid_directory=False, rename_fails=False):
+            selected_archive = archive if not invalid_sibling else scan_dir.with_name("unrelated")
+            database.execute("DELETE FROM scans")
+            if owner is not None:
+                database.execute("INSERT INTO scans VALUES (?, ?)", (owner, str(scan_dir)))
+            if archived_owner is not None:
+                database.execute("INSERT INTO scans VALUES (?, ?)", (archived_owner, str(selected_archive)))
+            database.commit()
+            present = {selected_archive, *((scan_dir,) if original_exists else ())}
+            operations = []
+            lock_checks = []
+
+            def canonical(path):
+                lock_checks.append(database.in_transaction)
+                if path not in present or invalid_directory:
+                    raise SystemExit("Synthetic invalid scan directory")
+                return path
+
+            def lstat(path):
+                if path not in present:
+                    raise FileNotFoundError(errno.ENOENT, "Synthetic missing path", str(path))
+                return SimpleNamespace(st_mode=stat.S_IFDIR)
+
+            def rmdir(path):
+                lock_checks.append(database.in_transaction)
+                if nonempty:
+                    raise OSError(errno.ENOTEMPTY, "Synthetic nonempty output")
+                present.remove(path)
+                operations.append("rmdir")
+
+            def rename(path, destination):
+                lock_checks.append(database.in_transaction)
+                if rename_fails:
+                    raise OSError("Synthetic rename failure")
+                assert destination not in present
+                present.remove(path)
+                present.add(destination)
+                operations.append("rename")
+
+            with patch.object(Path, "resolve", lambda path, *a, **k: path), \
+                 patch.object(Path, "lstat", lstat), \
+                 patch.object(Path, "rmdir", rmdir), \
+                 patch.object(Path, "rename", rename):
+                try:
+                    result = scan_start.restore_cli_scan_archive(database, argparse.Namespace(
+                        scan_dir=str(scan_dir), archived_scan_dir=str(selected_archive),
+                        previous_scan_id=expected, previous_scan_absent=expected is None,
+                    ), canonical)["disposition"]
+                except (SystemExit, OSError):
+                    result = "error"
+            return {
+                "disposition": result, "operations": operations,
+                "originalPresent": scan_dir in present, "archivePresent": selected_archive in present,
+                "locked": all(lock_checks), "transactionClosed": not database.in_transaction,
+                "owners": dict(database.execute("SELECT scan_dir, id FROM scans")),
+            }
+
+        base = ["workbench", "restore-cli-scan-archive", "--scan-dir", str(scan_dir), "--archived-scan-dir", str(archive)]
+        parser_accepts = []
+        for flags in (["--previous-scan-id", "previous"], ["--previous-scan-absent"], [], ["--previous-scan-id", "previous", "--previous-scan-absent"]):
+            with patch.object(sys, "argv", [*base, *flags]), redirect_stderr(io.StringIO()):
+                try:
+                    workbench.parse_args("Synthetic archive recovery")
+                except SystemExit:
+                    parser_accepts.append(False)
+                else:
+                    parser_accepts.append(True)
+        cases = {
+            "recorded": recover(),
+            "unrecorded": recover(expected=None, owner=None),
+            "missingOriginal": recover(original_exists=False),
+            "committed": recover(owner="new", archived_owner="previous"),
+            "changedOwner": recover(owner="other"),
+            "unexpectedOwner": recover(expected=None),
+            "nonempty": recover(nonempty=True),
+            "invalidSibling": recover(invalid_sibling=True),
+            "invalidDirectory": recover(invalid_directory=True),
+            "renameFailure": recover(rename_fails=True),
+        }
+        print(json.dumps({"cases": cases, "parserAccepts": parser_accepts, "scanDir": str(scan_dir), "archiveDir": str(archive)}))
+    elif scenario == "archive-registration":
+        target = root / "requested"
+        scan_dir = root / "outputs" / "scan"
+        cases = {}
+        class ReadyToInsert(Exception):
+            pass
+        for case in ("valid", "owner-refused", "parent-refused", "nonempty", "noncanonical"):
+            events = []
+            def canonical(path):
+                events.append(["canonical", connection.in_transaction])
+                if case == "noncanonical" and connection.in_transaction:
+                    raise SystemExit("Synthetic changed output")
+                return path
+            def entries(path):
+                assert path == scan_dir
+                events.append(["empty", connection.in_transaction])
+                return iter(["retained-artifact"] if case == "nonempty" and connection.in_transaction else [])
+            def register(database, path):
+                events.append(["owner", database.in_transaction])
+                if case == "owner-refused":
+                    raise SystemExit("Synthetic refused owner")
+                return state.RegisteredRepositoryTarget("requested", "current")
+            def parent(database, scan_id):
+                events.append(["parent", database.in_transaction])
+                return {"target_id": "requested", "repository_generation": "other" if case == "parent-refused" else "current"}
+            def archive_scan(database, *args):
+                events.append(["archive", database.in_transaction])
+                raise ReadyToInsert()
+            with ExitStack() as mocks:
+                for name, value in {
+                    "require_target": target,
+                    "parse_scan_recipe": {"target": {"kind": "repository", "paths": []}, "mode": "standard"},
+                    "scan_target_identity": ("synthetic", None, 7, 8),
+                    "directory_snapshot_regular_file_count": 0,
+                }.items():
+                    mocks.enter_context(patch.object(workbench, name, return_value=value))
+                mocks.enter_context(patch.object(workbench, "require_scannable_target"))
+                mocks.enter_context(patch.object(workbench, "require_uuid", side_effect=lambda value, label: value))
+                mocks.enter_context(patch.object(workbench, "require_canonical_scan_directory", side_effect=canonical))
+                mocks.enter_context(patch.object(workbench, "register_security_target", side_effect=register))
+                mocks.enter_context(patch.object(workbench, "require_scan", side_effect=parent))
+                mocks.enter_context(patch.object(workbench, "archive_scan", side_effect=archive_scan))
+                mocks.enter_context(patch.object(Path, "iterdir", entries))
+                try:
+                    workbench.register_cli_scan(connection, argparse.Namespace(
+                        repository=str(target), scan_dir=str(scan_dir), recipe_json="{}", parent_scan_id="parent",
+                    ))
+                except ReadyToInsert:
+                    accepted = True
+                except SystemExit:
+                    accepted = False
+            cases[case] = {"accepted": accepted, "events": events, "transactionClosed": not connection.in_transaction}
+        print(json.dumps(cases))
     elif scenario == "completion-order":
         add_target("first", "repository-current")
         add_target("second", "repository-current")
@@ -1264,6 +1424,106 @@ test("orders completed history by database visibility across legacy and current 
     "visible-first": "2026-08-01T04:00:00Z",
     "visible-last": "2026-08-01T03:00:00Z",
   });
+});
+
+test("confirms findings against the latest selected scan without merging legacy groups", () => {
+  expect(run("selected-latest")).toEqual({
+    selected: {
+      "legacy:legacy-only": [false, "open", 1],
+      "legacy:same-key": [false, "closed", 1],
+      "bound:bound-only": [true, "open", 1],
+      "bound:same-key": [true, "open", 1],
+    },
+    unscoped: {
+      "legacy:legacy-only": true,
+      "legacy:same-key": true,
+      "bound:bound-only": true,
+      "bound:same-key": true,
+      "other:other-only": true,
+    },
+  });
+});
+
+test("restores only an unclaimed empty scan output under the workbench writer lock", () => {
+  const result = run("archive-recovery");
+  const cases = result["cases"] as Record<string, Record<string, unknown>>;
+  expect(result["parserAccepts"]).toEqual([true, true, false, false]);
+  for (const name of ["recorded", "unrecorded", "missingOriginal"]) {
+    expect(cases[name]).toMatchObject({
+      disposition: "restored",
+      operations: name === "missingOriginal" ? ["rename"] : ["rmdir", "rename"],
+      originalPresent: true,
+      archivePresent: false,
+    });
+  }
+  expect(cases["committed"]).toMatchObject({
+    disposition: "already-recorded",
+    operations: [],
+    owners: {
+      [String(result["scanDir"])]: "new",
+      [String(result["archiveDir"])]: "previous",
+    },
+  });
+  for (const name of ["changedOwner", "unexpectedOwner"]) {
+    expect(cases[name]).toMatchObject({
+      disposition: "ownership-changed",
+      operations: [],
+      originalPresent: true,
+      archivePresent: true,
+    });
+  }
+  for (const name of ["nonempty", "invalidSibling", "invalidDirectory"]) {
+    expect(cases[name]).toMatchObject({
+      disposition: "error",
+      operations: [],
+      originalPresent: true,
+      archivePresent: true,
+    });
+  }
+  expect(cases["renameFailure"]).toMatchObject({
+    disposition: "error",
+    operations: ["rmdir"],
+    archivePresent: true,
+  });
+  for (const value of Object.values(cases)) {
+    expect(value).toMatchObject({ locked: true, transactionClosed: true });
+  }
+});
+
+test("rechecks scan output inside registration after owner and parent validation", () => {
+  const result = run("archive-registration") as Record<
+    string,
+    {
+      accepted: boolean;
+      events: Array<[string, boolean]>;
+      transactionClosed: boolean;
+    }
+  >;
+  expect(result["valid"]).toEqual({
+    accepted: true,
+    events: [
+      ["canonical", false],
+      ["empty", false],
+      ["owner", true],
+      ["parent", true],
+      ["canonical", true],
+      ["empty", true],
+      ["archive", true],
+    ],
+    transactionClosed: true,
+  });
+  for (const name of [
+    "owner-refused",
+    "parent-refused",
+    "nonempty",
+    "noncanonical",
+  ]) {
+    expect(result[name]?.accepted).toBe(false);
+    expect(result[name]?.events.some(([event]) => event === "archive")).toBe(
+      false,
+    );
+    expect(result[name]?.transactionClosed).toBe(true);
+  }
 });
 
 test("keeps authenticated historical aliases visible without trusting a replacement checkout", () => {

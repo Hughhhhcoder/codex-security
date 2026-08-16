@@ -6,9 +6,9 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 test("reuses reviewed feedback only across matching persisted repository identities", () => {
   const python = (Bun.which("python3") ?? Bun.which("python"))!;
   const probe = `
-import json, os, sqlite3, sys, tempfile
+import json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
-from filesystem_identity import serialize_filesystem_identity
+import workbench_target_state as state
 from workbench_feedback import get_scan_feedback
 
 scenario = sys.argv[2]
@@ -16,7 +16,7 @@ connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
 connection.executescript("""
 CREATE TABLE security_targets(id TEXT, current_path TEXT, display_name TEXT, origin TEXT);
-CREATE TABLE scans(id TEXT, target_id TEXT, status TEXT, completed_at TEXT, started_at TEXT, updated_at TEXT, scope TEXT);
+CREATE TABLE scans(id TEXT, target_id TEXT, target_path TEXT, repository_generation TEXT, status TEXT, completed_at TEXT, started_at TEXT, updated_at TEXT, scope TEXT);
 CREATE TABLE findings(id TEXT PRIMARY KEY, fingerprint TEXT, rule_id TEXT, identity_anchor TEXT, identity_instance TEXT);
 CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, scan_id TEXT, title TEXT, summary TEXT, severity TEXT, created_at TEXT);
 CREATE TABLE finding_triage(occurrence_id TEXT, status TEXT, close_reason TEXT, note TEXT, updated_at TEXT);
@@ -25,6 +25,15 @@ CREATE TABLE scan_comparison_matches(before_occurrence_id TEXT, after_occurrence
 """)
 if scenario == "identities":
     connection.execute("ALTER TABLE security_targets ADD COLUMN repository_identity TEXT")
+refused = set()
+def inspect(database, target_id, path, stored, **kwargs):
+    repository = state.GitRepositoryIdentity(stored, ".", "synthetic", 1, 2, 3) if stored else None
+    return state.RepositoryTargetState(
+        target_id, path, stored, resolved_path=path, repository=repository,
+        ownership_matches=target_id not in refused, strict_owner_matches=True,
+        has_historical_scans=True,
+    )
+state._inspect_repository_target = inspect
 
 origin = "https://example.invalid/synthetic/repository"
 for target, identity in [
@@ -48,7 +57,8 @@ for target, identity in [
 def add_scan(scan_id, target, day, status="complete"):
     timestamp = f"2026-03-{day:02d}T00:00:00Z"
     completed_at = timestamp if status == "complete" else None
-    connection.execute("INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?)", (scan_id, target, status, completed_at, timestamp, timestamp, "repository"))
+    generation = connection.execute("SELECT repository_identity FROM security_targets WHERE id = ?", (target,)).fetchone()[0] if scenario == "identities" else None
+    connection.execute("INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (scan_id, target, f"/{target}", generation, status, completed_at, timestamp, timestamp, "repository"))
 
 def add_finding(scan_id, finding_id, day, *, status="closed", reason="false_positive", note="Reviewed and safe"):
     occurrence_id = f"{scan_id}:{finding_id}"
@@ -115,26 +125,9 @@ result = {
     "unknownSecond": feedback("unknown-second"),
 }
 if scenario == "identities":
-    connection.execute("ALTER TABLE scans ADD COLUMN target_path TEXT")
-    connection.execute("ALTER TABLE scans ADD COLUMN target_device INTEGER")
-    connection.execute("ALTER TABLE scans ADD COLUMN target_inode INTEGER")
-    with tempfile.TemporaryDirectory() as reused_path:
-        metadata = os.stat(reused_path)
-        connection.execute(
-            "UPDATE security_targets SET current_path = ? WHERE id = ?",
-            (reused_path, "primary"),
-        )
-        connection.execute(
-            "UPDATE scans SET target_path = ?, target_device = ?, target_inode = ? WHERE target_id = ?",
-            (
-                reused_path,
-                serialize_filesystem_identity(metadata.st_dev),
-                serialize_filesystem_identity(metadata.st_ino + 1),
-                "primary",
-            ),
-        )
-        result["reusedPath"] = feedback("primary")
-        result["deletedAlias"] = feedback("linked")
+    refused.add("primary")
+    result["reusedPath"] = feedback("primary")
+    result["deletedAlias"] = feedback("linked")
 print(json.dumps(result))
 `;
 

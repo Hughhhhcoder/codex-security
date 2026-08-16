@@ -118,16 +118,16 @@ print(json.dumps(result))
 test("shares findings only between explicitly identified repository and scope aliases", () => {
   const python = (Bun.which("python3") ?? Bun.which("python"))!;
   const probe = `
-import argparse, json, os, sqlite3, sys, tempfile
+import argparse, json, sqlite3, sys
 sys.path.insert(0, sys.argv[1])
-from filesystem_identity import serialize_filesystem_identity
 import workbench_native_indexes as indexes
+import workbench_target_state as state
 
 connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
 connection.executescript("""
 CREATE TABLE security_targets(id TEXT, current_path TEXT, display_name TEXT, repository_identity TEXT, origin TEXT);
-CREATE TABLE scans(id TEXT, target_id TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT);
+CREATE TABLE scans(id TEXT, target_id TEXT, target_path TEXT, repository_generation TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT);
 CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, severity TEXT, created_at TEXT, scan_id TEXT, title TEXT, summary TEXT);
 CREATE TABLE finding_triage(occurrence_id TEXT, status TEXT, updated_at TEXT, close_reason TEXT);
 CREATE TABLE finding_locations(occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
@@ -143,10 +143,21 @@ connection.executemany("INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)", [
     ("unknown-first", "/unknown-first", "Unknown first", None, origin),
     ("unknown-second", "/unknown-second", "Unknown second", None, origin),
 ])
+refused = set()
+def inspect(database, target_id, path, stored, **kwargs):
+    repository = state.GitRepositoryIdentity(stored, ".", "synthetic", 1, 2, 3) if stored else None
+    return state.RepositoryTargetState(
+        target_id, path, stored, resolved_path=path, repository=repository,
+        ownership_matches=target_id not in refused, strict_owner_matches=True,
+        has_historical_scans=True,
+    )
+state._inspect_repository_target = inspect
+indexes.Path.is_dir = lambda path: True
 
 def add_scan(scan_id, target, day):
     timestamp = f"2026-02-{day:02d}T00:00:00Z"
-    connection.execute("INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?)", (scan_id, target, "repository", timestamp, "complete", timestamp))
+    saved = connection.execute("SELECT current_path, repository_identity FROM security_targets WHERE id = ?", (target,)).fetchone()
+    connection.execute("INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (scan_id, target, saved["current_path"], saved["repository_identity"], "repository", timestamp, "complete", timestamp))
 
 def add_finding(occurrence, finding, scan, severity="high"):
     started = connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan,)).fetchone()[0]
@@ -246,26 +257,9 @@ connection.execute(
     ("same-id-linked", "open", "2026-02-06T00:00:00Z", None),
 )
 result["sameIdReopened"] = findings("primary")
-connection.execute("ALTER TABLE scans ADD COLUMN target_path TEXT")
-connection.execute("ALTER TABLE scans ADD COLUMN target_device INTEGER")
-connection.execute("ALTER TABLE scans ADD COLUMN target_inode INTEGER")
-with tempfile.TemporaryDirectory() as reused_path:
-    metadata = os.stat(reused_path)
-    connection.execute(
-        "UPDATE security_targets SET current_path = ? WHERE id = ?",
-        (reused_path, "primary"),
-    )
-    connection.execute(
-        "UPDATE scans SET target_path = ?, target_device = ?, target_inode = ? WHERE target_id = ?",
-        (
-            reused_path,
-            serialize_filesystem_identity(metadata.st_dev),
-            serialize_filesystem_identity(metadata.st_ino + 1),
-            "primary",
-        ),
-    )
-    result["reusedPath"] = findings("primary")
-    result["deletedAlias"] = findings("linked")
+refused.add("primary")
+result["reusedPath"] = findings("primary")
+result["deletedAlias"] = findings("linked")
 print(json.dumps(result))
 `;
 

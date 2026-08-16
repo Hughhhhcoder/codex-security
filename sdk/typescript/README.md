@@ -732,9 +732,12 @@ the same reason still applies.
 Pass `SCAN_ID` to rerun another scan.
 
 `scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
-cause; `scans match --all` matches all completed scans of the current repository,
-including other worktrees and clones. Saved matches appear in `scans show` and
-are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
+cause. `scans match --all` matches eligible completed scans in the current
+repository generation, including linked worktrees; legacy history without a
+saved generation stays target-local. Explicit comparisons between separately
+verified clones remain available without sharing their history. Saved matches
+appear in `scans show` and are reused unless `--force` is passed. Scans without
+sealed artifacts are skipped.
 
 `scans compare` compares the two latest completed scans. Pass one scan ID to
 compare it with the latest completed scan, or two IDs to select both scans. It
