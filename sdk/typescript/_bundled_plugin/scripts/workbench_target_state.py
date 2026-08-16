@@ -250,7 +250,8 @@ class RepositoryTargetState:
     repository: GitRepositoryIdentity | None = None
     ownership_matches: bool = False
     strict_owner_matches: bool = False
-    generation_matches_history: bool = False
+    generation_predates_history: bool = False
+    has_historical_scans: bool = False
     missing: bool = False
 
     @property
@@ -262,9 +263,12 @@ class RepositoryTargetState:
         if not self.ownership_matches or self.repository is None:
             return None
         if self.stored_identity is None:
+            # Checkout ownership and repository age cannot identify an older Git generation.
             return (
                 self.live_identity
-                if self.strict_owner_matches and self.generation_matches_history
+                if self.strict_owner_matches
+                and self.generation_predates_history
+                and not self.has_historical_scans
                 else None
             )
         return self.live_identity if self.live_identity == self.stored_identity else None
@@ -320,7 +324,7 @@ def _inspect_repository_target(
     malformed_owner = False
     mismatch = False
     strict_owner_matches = False
-    generation_matches_history = False
+    generation_predates_history = False
     ownership_matches = True
     if {"target_id", "target_path"} <= scan_columns:
         if not {"target_device", "target_inode"} <= scan_columns:
@@ -329,7 +333,7 @@ def _inspect_repository_target(
                 (target_id, target_path),
             ).fetchone() is not None
             strict_owner_matches = not historical_scan
-            generation_matches_history = repository is not None and not historical_scan
+            generation_predates_history = repository is not None and not historical_scan
         else:
             strict_owner_matches = True
             timestamps = ", started_at, created_at" if {
@@ -342,7 +346,7 @@ def _inspect_repository_target(
                 """,
                 (target_id, target_path),
             ).fetchall()
-            generation_matches_history = (
+            generation_predates_history = (
                 repository is not None and _repository_predates_history(repository, scans)
             )
             for scan in scans:
@@ -381,11 +385,11 @@ def _inspect_repository_target(
                 or stored_identity is None
                 and repository is not None
                 and historical_scan
-                and not generation_matches_history
+                and not generation_predates_history
             )
     return RepositoryTargetState(
         target_id, target_path, stored_identity, resolved_path, metadata, repository,
-        ownership_matches, strict_owner_matches, generation_matches_history,
+        ownership_matches, strict_owner_matches, generation_predates_history, historical_scan,
     )
 
 
@@ -576,14 +580,36 @@ def normalize_pre_release_repository_identities(connection: sqlite3.Connection) 
             )
 
 
+def _bind_unscanned_repository_identity(
+    connection: sqlite3.Connection, target_id: str, target_path: str, identity: str
+) -> bool:
+    return connection.execute(
+        """
+        UPDATE security_targets
+        SET repository_identity = ?
+        WHERE id = ? AND current_path = ? AND repository_identity IS NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM scans
+                WHERE scans.target_id = security_targets.id
+                    OR scans.target_path = security_targets.current_path
+            )
+        """,
+        (identity, target_id, target_path),
+    ).rowcount == 1
+
+
 def backfill_repository_identities(connection: sqlite3.Connection) -> None:
     if not supports_repository_identity(connection):
         return
     targets = connection.execute(
         """
-        SELECT id, current_path
-        FROM security_targets
-        WHERE repository_identity IS NULL
+        SELECT targets.id, targets.current_path
+        FROM security_targets AS targets
+        WHERE targets.repository_identity IS NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM scans
+                WHERE scans.target_id = targets.id OR scans.target_path = targets.current_path
+            )
         """
     ).fetchall()
     for target in targets:
@@ -591,13 +617,8 @@ def backfill_repository_identities(connection: sqlite3.Connection) -> None:
             connection, str(target["id"]), target["current_path"]
         )
         if identity is not None:
-            connection.execute(
-                """
-                UPDATE security_targets
-                SET repository_identity = ?
-                WHERE id = ? AND repository_identity IS NULL
-                """,
-                (identity, target["id"]),
+            _bind_unscanned_repository_identity(
+                connection, str(target["id"]), target["current_path"], identity
             )
 
 
@@ -627,45 +648,16 @@ def ensure_security_target(
     connection: sqlite3.Connection, target_path: str, *, verify_ownership: bool = True
 ) -> str:
     supports_identity = supports_repository_identity(connection)
-    existing = connection.execute(
+    target_query = (
         "SELECT id, repository_identity FROM security_targets WHERE current_path = ?"
         if supports_identity
-        else "SELECT id FROM security_targets WHERE current_path = ?",
-        (target_path,),
-    ).fetchone()
-    if existing is not None:
-        target_id = str(existing["id"])
-        if supports_identity:
-            state = _inspect_repository_target(
-                connection, target_id, target_path, existing["repository_identity"]
-            )
-            if verify_ownership:
-                state.require_owner()
-        if supports_identity and existing["repository_identity"] is None:
-            identity = state.verified_identity
-            if identity is not None:
-                connection.execute(
-                    """
-                    UPDATE security_targets
-                    SET repository_identity = ?
-                    WHERE id = ? AND repository_identity IS NULL
-                    """,
-                    (identity, target_id),
-                )
-        return target_id
-    target_id = stable_target_id(Path(target_path))
-    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    if supports_identity:
-        identity = verified_repository_identity(connection, target_id, target_path)
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO security_targets (
-                id, current_path, display_name, created_at, updated_at, repository_identity
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (target_id, target_path, Path(target_path).name, timestamp, timestamp, identity),
-        )
-    else:
+        else "SELECT id FROM security_targets WHERE current_path = ?"
+    )
+    existing = connection.execute(target_query, (target_path,)).fetchone()
+    if existing is None:
+        target_id = stable_target_id(Path(target_path))
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        # Leave repository_identity NULL until the guarded binding below succeeds.
         connection.execute(
             """
             INSERT OR IGNORE INTO security_targets (
@@ -674,6 +666,31 @@ def ensure_security_target(
             """,
             (target_id, target_path, Path(target_path).name, timestamp, timestamp),
         )
+        existing = connection.execute(target_query, (target_path,)).fetchone()
+        if existing is None:
+            raise SystemExit("The repository target changed while it was being registered.")
+    target_id = str(existing["id"])
+    if not supports_identity:
+        return target_id
+    state = _inspect_repository_target(
+        connection, target_id, target_path, existing["repository_identity"]
+    )
+    if verify_ownership:
+        state.require_owner()
+    if existing["repository_identity"] is None:
+        identity = state.verified_identity
+        if identity is not None and not _bind_unscanned_repository_identity(
+            connection, target_id, target_path, identity
+        ):
+            # A writer may have registered history or bound this target after inspection.
+            existing = connection.execute(target_query, (target_path,)).fetchone()
+            if existing is None:
+                raise SystemExit("The repository target changed while it was being registered.")
+            target_id = str(existing["id"])
+            if verify_ownership:
+                _inspect_repository_target(
+                    connection, target_id, target_path, existing["repository_identity"]
+                ).require_owner()
     return target_id
 
 

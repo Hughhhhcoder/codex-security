@@ -1240,13 +1240,18 @@ export async function main(
         args.repository ?? ".",
       );
       return presentHistory(
-        await history(async () => ({
-          repository,
-          findings:
-            (await listRepositoryFindings(dependencies.runWorkbench, {
-              repository,
-            })) ?? [],
-        })),
+        await history(async () => {
+          const findings = await listRepositoryFindings(
+            dependencies.runWorkbench,
+            { repository },
+          );
+          if (findings === undefined) {
+            throw new CodexSecurityError(
+              "Repository findings are unavailable for the requested checkout.",
+            );
+          }
+          return { repository, findings };
+        }),
         "findings",
         format,
         { repository },

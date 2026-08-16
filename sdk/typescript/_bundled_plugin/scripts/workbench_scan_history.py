@@ -29,13 +29,17 @@ def _same_repository(
     *,
     identities: RepositoryIdentityCache | None = None,
 ) -> bool:
-    identities = identities or RepositoryIdentityCache(connection)
     before_stored = (
         before["repository_identity"] if "repository_identity" in before.keys() else None
     )
     after_stored = (
         after["repository_identity"] if "repository_identity" in after.keys() else None
     )
+    if before_stored is not None and before_stored == after_stored:
+        return True
+    if before["target_id"] and before["target_id"] == after["target_id"]:
+        return before_stored is None or after_stored is None
+    identities = identities or RepositoryIdentityCache(connection)
     before_state = identities.for_row(before)
     after_state = identities.for_row(after)
     if before_state.resolved_path is None or after_state.resolved_path is None:
@@ -44,10 +48,7 @@ def _same_repository(
     after_group = after_stored or after_state.verified_identity
     if before_group is not None and before_group == after_group:
         return True
-    if (
-        before_state.target_id and before_state.target_id == after_state.target_id
-        or before_state.resolved_path == after_state.resolved_path
-    ):
+    if before_state.resolved_path == after_state.resolved_path:
         return before_stored is None or after_stored is None
     before_identity = before_state.verified_identity
     after_identity = after_state.verified_identity
@@ -258,7 +259,7 @@ def list_unmatched_scan_pairs(
     repository = Path(args.repository).expanduser().resolve()
     identities = RepositoryIdentityCache(connection)
     requested = identities.for_path(str(repository))
-    if identities.supports_identity and requested.target_id:
+    if identities.supports_identity:
         requested.require_owner()
     requested_row = {
         "target_id": requested.target_id,

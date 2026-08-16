@@ -787,10 +787,10 @@ describe("durable workbench repository identities", () => {
     expect(result["explicitCloneCompared"]).toBe(true);
   }, 30_000);
 
-  test("backfills only current owners and preserves every existing target ID", () => {
+  test("leaves unproved historical identities unbound and preserves every target ID", () => {
     const result = runProbe("backfill", fixture());
 
-    expect(result["valid"]).toMatch(/^repository_sha256_[a-f0-9]{64}$/);
+    expect(result["valid"]).toBeNull();
     expect(result["reused"]).toBeNull();
     expect(result["mixed"]).toBeNull();
     expect(result["malformed"]).toBeNull();
@@ -839,12 +839,13 @@ describe("durable workbench repository identities", () => {
     };
 
     expect(result["persisted"]).toEqual(verified);
-    expect(result["verifiedLegacy"]).toEqual(verified);
-    expect(result["unverifiedLegacy"]).toEqual({
+    const isolated = {
       scans: ["requested-scan"],
       matchingScanCount: 1,
       matchingScanIds: [],
-    });
+    };
+    expect(result["verifiedLegacy"]).toEqual(isolated);
+    expect(result["unverifiedLegacy"]).toEqual(isolated);
     expect(result["candidateIdentityPreserved"]).toBe(true);
   }, 30_000);
 

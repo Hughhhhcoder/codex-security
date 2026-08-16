@@ -129,7 +129,11 @@ describe("CLI workbench", () => {
         dependencies({
           onWorkbench: (args) => {
             calls.push(args);
-            return { findings: [], nextOffset: null };
+            return {
+              findings: [],
+              nextOffset: null,
+              projectionAvailable: true,
+            };
           },
         }),
       ),
@@ -138,6 +142,47 @@ describe("CLI workbench", () => {
       ["list-global-findings", "--repository", repository, "--status", "open"],
     ]);
     expect(JSON.parse(stdout.text())).toEqual({ repository, findings: [] });
+  });
+
+  test("reports unavailable findings on any page instead of claiming an empty repository", async () => {
+    for (const laterPage of [false, true]) {
+      for (const json of [false, true]) {
+        const stdout = capture(!json);
+        const stderr = capture();
+        const responses: JsonObject[] = [
+          ...(laterPage
+            ? [
+                {
+                  findings: [{ title: "Synthetic finding" }],
+                  nextOffset: 1,
+                  projectionAvailable: true,
+                },
+              ]
+            : []),
+          {
+            findings: [],
+            nextOffset: null,
+            projectionAvailable: false,
+          },
+        ];
+        const calls: Array<readonly string[]> = [];
+        expect(
+          await main(
+            ["findings", "list", ...(json ? ["--json"] : [])],
+            stdout.stream,
+            stderr.stream,
+            dependencies({
+              onWorkbench: (args) => responses[calls.push(args) - 1]!,
+            }),
+          ),
+        ).toBe(2);
+        expect(calls).toHaveLength(laterPage ? 2 : 1);
+        expect(stderr.text()).toContain("findings are unavailable");
+        expect(stdout.text()).not.toContain("0 open findings");
+        expect(stdout.text()).not.toContain("Synthetic finding");
+        expect(stdout.text()).not.toContain('"findings": []');
+      }
+    }
   });
 
   test("lists repository and scan-root history without starting Codex", async () => {

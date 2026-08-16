@@ -41,9 +41,9 @@ legacy_identity_migration = (
 )
 initial = (
     (*tuple(item for item in MIGRATIONS if item[0] <= 28), legacy_identity_migration)
-    if scenario in ("migration", "v30-current") else
+    if scenario in ("migration", "v30-current", "completion-order") else
     tuple(item for item in MIGRATIONS if item[0] <= 30)
-    if scenario in ("null-history", "completion-order") else MIGRATIONS
+    if scenario == "null-history" else MIGRATIONS
 )
 apply_migrations(connection, initial, lambda: timestamp, lambda database: None)
 paths = {}
@@ -307,6 +307,7 @@ with ExitStack() as stack:
             ("changed", "repository-previous", "repository-current"),
         ]:
             add_target(name, stored, live)
+        state.ensure_security_target(connection, paths["legacy"])
         for name in paths:
             add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
         for number in range(5):
@@ -456,6 +457,8 @@ with ExitStack() as stack:
             ("unrelated", "repository-other", None),
         ]:
             add_target(name, stored, live)
+            if name == "legacy":
+                state.ensure_security_target(connection, paths[name])
             add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
         for name, identity in [("fresh", "repository-current"), ("empty", "repository-empty")]:
             add_target(name, identity)
@@ -690,6 +693,153 @@ with ExitStack() as stack:
                 "SELECT target_inode FROM scans WHERE id = 'newer-scan'"
             ).fetchone()[0] == metadata[paths["newer"]].st_ino,
         }))
+    elif scenario == "late-null":
+        add_target("requested", "repository-current")
+        add_scan("requested-scan", "requested")
+        add_target("unscanned", None, "repository-current")
+        add_target("historical", None, "repository-current")
+        add_scan("historical-scan", "historical")
+        add_finding("historical-scan", "historical-finding", closed=True)
+        probes.clear()
+        backfill = Mock(wraps=state.backfill_security_targets)
+        apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
+        apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
+        maintenance_probes = dict(probes)
+        historical_id = state.ensure_security_target(connection, paths["historical"])
+        add_scan("established-scan", "unscanned")
+        missing.update((paths["unscanned"], paths["historical"]))
+        print(json.dumps({
+            "stored": {row["id"]: row["repository_identity"] for row in connection.execute(
+                "SELECT id, repository_identity FROM security_targets"
+            )},
+            "fullBackfillCalls": backfill.call_count,
+            "maintenanceProbes": {name: maintenance_probes.get(path, 0) for name, path in paths.items()},
+            "historicalRegistrationId": historical_id,
+            "aliases": sorted(indexes.repository_target_ids(connection, "requested")),
+            "scans": listed("requested"),
+            "historicalExact": listed("historical"),
+            "feedback": get_scan_feedback(
+                connection, connection.execute("SELECT * FROM scans WHERE id = 'requested-scan'").fetchone()
+            )["falsePositives"],
+        }))
+    elif scenario == "binding":
+        for name, stored in (
+            ("eligible", None), ("id-history", None), ("path-history", None),
+            ("donor", None), ("bound", "repository-bound"),
+        ):
+            add_target(name, stored, "repository-current")
+        add_scan("id-history-scan", "id-history")
+        connection.execute("UPDATE scans SET target_path = ? WHERE id = 'id-history-scan'", (paths["donor"],))
+        add_scan("path-history-scan", "donor")
+        connection.execute("UPDATE scans SET target_path = ? WHERE id = 'path-history-scan'", (paths["path-history"],))
+        def bind(name, path=None):
+            return state._bind_unscanned_repository_identity(
+                connection, name, path or paths[name], "repository-current"
+            )
+        guarded = {
+            "idHistory": bind("id-history"),
+            "pathHistory": bind("path-history"),
+            "wrongPath": bind("eligible", paths["donor"]),
+            "alreadyBound": bind("bound"),
+            "eligible": bind("eligible"),
+            "repeat": bind("eligible"),
+        }
+        path = paths["eligible"]
+        def inspected(target_id, stored=None, *, historical=False, owner=True):
+            return state.RepositoryTargetState(
+                target_id, path, stored, resolved_path=path, repository=details[path],
+                ownership_matches=owner, strict_owner_matches=True,
+                generation_predates_history=True, has_historical_scans=historical,
+            )
+        def cursor(row):
+            return SimpleNamespace(fetchone=lambda: row)
+        ignored = Mock()
+        ignored.execute.side_effect = [cursor(None), None, cursor({
+            "id": "actual-target", "repository_identity": None,
+        })]
+        with patch.object(state, "supports_repository_identity", return_value=True), \
+             patch.object(state, "stable_target_id", return_value="proposed-target"), \
+             patch.object(state, "_inspect_repository_target", return_value=inspected("actual-target", historical=True)) as inspect, \
+             patch.object(state, "_bind_unscanned_repository_identity") as guarded_bind:
+            ignored_id = state.ensure_security_target(ignored, path)
+            ignored_reselected = inspect.call_args.args[1:] == ("actual-target", path, None)
+            ignored_unbound = guarded_bind.call_count == 0
+        insert = ignored.execute.call_args_list[1].args
+        def lost_binding(stored, owner):
+            database = Mock()
+            database.execute.side_effect = [
+                cursor({"id": "actual-target", "repository_identity": None}),
+                cursor({"id": "actual-target", "repository_identity": stored}),
+            ]
+            with patch.object(state, "supports_repository_identity", return_value=True), \
+                 patch.object(state, "_inspect_repository_target", side_effect=[
+                     inspected("actual-target"),
+                     inspected("actual-target", stored, historical=True, owner=owner),
+                 ]) as inspect, \
+                 patch.object(state, "_bind_unscanned_repository_identity", return_value=False) as guarded_bind:
+                try:
+                    accepted = state.ensure_security_target(database, path) == "actual-target"
+                except SystemExit:
+                    accepted = False
+                return {
+                    "accepted": accepted,
+                    "rechecked": inspect.call_count == 2 and inspect.call_args.args[1:] == ("actual-target", path, stored),
+                    "guarded": guarded_bind.call_args.args[1:] == ("actual-target", path, "repository-current"),
+                }
+        print(json.dumps({
+            "guarded": guarded,
+            "stored": {row["id"]: row["repository_identity"] for row in connection.execute(
+                "SELECT id, repository_identity FROM security_targets"
+            )},
+            "ignoredInsert": {
+                "id": ignored_id, "reselected": ignored_reselected, "unbound": ignored_unbound,
+                "insertsNull": "INSERT OR IGNORE" in insert[0] and "repository_identity" not in insert[0] and len(insert[1]) == 5,
+            },
+            "lostToHistory": lost_binding(None, True),
+            "lostToConflictingIdentity": lost_binding("repository-other", False),
+        }))
+    elif scenario == "sealed-comparison":
+        for name, stored in (("legacy", None), ("first", "repository-saved"), ("second", "repository-saved")):
+            add_target(name, stored)
+        for scan_id, target in (("legacy-before", "legacy"), ("legacy-after", "legacy"), ("first-scan", "first"), ("second-scan", "second")):
+            add_scan(scan_id, target)
+        resolution_errors.update({paths["legacy"]: RuntimeError, paths["first"]: OSError, paths["second"]: RuntimeError})
+        connection.commit()
+        require_scan = lambda database, scan_id: database.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        coverage = lambda scan: {"completeness": "complete"}
+        accepted = []
+        with patch.object(state, "_inspect_repository_target", side_effect=AssertionError("Sealed comparison inspected the live target")):
+            for before, after in (("legacy-before", "legacy-after"), ("first-scan", "second-scan")):
+                args = argparse.Namespace(before_scan_id=before, after_scan_id=after, matches_json='{"matches":[],"uncertain":[]}')
+                compared = history.compare_scans(connection, args, require_scan=require_scan, read_coverage=coverage)
+                saved = history.save_scan_comparison(connection, args, now=lambda: timestamp, require_scan=require_scan, read_coverage=coverage)
+                accepted.append(compared["afterScanId"] == after and saved["beforeScanId"] == before)
+        conflicting = history._same_repository(
+            connection,
+            {"target_id": "same-target", "repository_identity": "repository-first"},
+            {"target_id": "same-target", "repository_identity": "repository-second"},
+            identities=Mock(),
+        )
+        add_target("unregistered", None)
+        connection.execute("DELETE FROM security_targets WHERE id = 'unregistered'")
+        refused = state.RepositoryTargetState("", paths["unregistered"], None)
+        cache = Mock(supports_identity=True)
+        cache.for_path.return_value = refused
+        with patch.object(history, "RepositoryIdentityCache", return_value=cache):
+            try:
+                history.list_unmatched_scan_pairs(
+                    connection, argparse.Namespace(repository=paths["unregistered"], force=False),
+                    backfill_finding_details=lambda *_: None, read_coverage=coverage,
+                )
+            except SystemExit:
+                automatic_rejected = True
+            else:
+                automatic_rejected = False
+        print(json.dumps({
+            "accepted": accepted, "conflictingIdentitiesAccepted": conflicting,
+            "savedCount": connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone()[0],
+            "unregisteredAutomaticRequesterRejected": automatic_rejected,
+        }))
     else:
         stack.enter_context(patch.object(os.path, "normcase", lambda value: os.fspath(value).lower()))
         originals = {}
@@ -790,7 +940,7 @@ test("reads precise Linux birth time through supported native interfaces", () =>
   }
 });
 
-test("reuses verified legacy aliases and probes each saved target once per request", () => {
+test("reuses established aliases and probes each saved target once per request", () => {
   const result = run("cache");
 
   expect(result["scans"]).toEqual([
@@ -827,7 +977,7 @@ test("reuses verified legacy aliases and probes each saved target once per reque
   expect(result["matchingUnrelatedOrigins"]).toBe(1);
   expect(result["indexingMaxProbes"]).toBe(1);
   expect(result["feedbackMaxProbes"]).toBe(1);
-  expect(result["legacyStored"]).toBeNull();
+  expect(result["legacyStored"]).toBe("repository-current");
   expect(result["changedStored"]).toBe("repository-previous");
 });
 
@@ -909,12 +1059,12 @@ test("upgrades only independently verified pre-release repository hashes", () =>
   );
 });
 
-test("does not assign legacy history to a newer or indeterminate Git generation", () => {
+test("keeps unproved legacy history unbound and rejects newer or indeterminate owners", () => {
   const result = run("null-history");
 
   expect(result["sameCheckoutMetadata"]).toBe(true);
   expect(result["stored"]).toEqual({
-    unchanged: "current-unchanged",
+    unchanged: null,
     newer: null,
     "invalid-time": null,
     "no-history": "current-no-history",
@@ -924,13 +1074,79 @@ test("does not assign legacy history to a newer or indeterminate Git generation"
   expect(result["aliases"]).toEqual(["replacement-alias"]);
 });
 
+test("revisits only eligible late NULL identities on ordinary database opens", () => {
+  const result = run("late-null");
+
+  expect(result["stored"]).toEqual({
+    requested: "repository-current",
+    unscanned: "repository-current",
+    historical: null,
+  });
+  expect(result["fullBackfillCalls"]).toBe(0);
+  expect(result["maintenanceProbes"]).toEqual({
+    requested: 0,
+    unscanned: 1,
+    historical: 0,
+  });
+  expect(result["historicalRegistrationId"]).toBe("historical");
+  expect(result["aliases"]).toEqual(["requested", "unscanned"]);
+  expect(result["scans"]).toEqual(["established-scan", "requested-scan"]);
+  expect(result["historicalExact"]).toEqual(["historical-scan"]);
+  expect(result["feedback"]).toEqual([]);
+});
+
+test("guards identity binding at the database write and rechecks lost bindings", () => {
+  const result = run("binding");
+
+  expect(result["guarded"]).toEqual({
+    idHistory: false,
+    pathHistory: false,
+    wrongPath: false,
+    alreadyBound: false,
+    eligible: true,
+    repeat: false,
+  });
+  expect(result["stored"]).toEqual({
+    eligible: "repository-current",
+    "id-history": null,
+    "path-history": null,
+    donor: null,
+    bound: "repository-bound",
+  });
+  expect(result["ignoredInsert"]).toEqual({
+    id: "actual-target",
+    reselected: true,
+    unbound: true,
+    insertsNull: true,
+  });
+  expect(result["lostToHistory"]).toEqual({
+    accepted: true,
+    rechecked: true,
+    guarded: true,
+  });
+  expect(result["lostToConflictingIdentity"]).toEqual({
+    accepted: false,
+    rechecked: true,
+    guarded: true,
+  });
+});
+
+test("compares sealed history from persisted evidence without weakening automatic requesters", () => {
+  const result = run("sealed-comparison");
+
+  expect(result["accepted"]).toEqual([true, true]);
+  expect(result["conflictingIdentitiesAccepted"]).toBe(false);
+  expect(result["savedCount"]).toBe(2);
+  expect(result["unregisteredAutomaticRequesterRejected"]).toBe(true);
+});
+
 test("admits rerun lineage only through the verified repository and exact scope", () => {
   const result = run("lineage");
 
   expect(result["accepted"]).toEqual({
     requested: true,
     removed: true,
-    legacy: true,
+    legacy: false,
     unverified: false,
     clone: false,
     scope: false,
