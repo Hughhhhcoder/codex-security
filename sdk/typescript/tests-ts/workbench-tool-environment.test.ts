@@ -57,16 +57,19 @@ function runPythonMocks(source: string): void {
       "-B",
       "-c",
       `
-import argparse, io, os, subprocess, sys
+import argparse, io, json, os, subprocess, sys
 from pathlib import Path
 from unittest.mock import patch
+os.environ.clear()
+os.environ.update(json.loads(sys.argv[2]))
 sys.path.insert(0, sys.argv[1])
 import workbench_target as workbench
 ${source}
 `,
       join(PLUGIN_ROOT, "scripts"),
+      JSON.stringify(childEnvironment(dirname(python!))),
     ],
-    { encoding: "utf8", env: childEnvironment(dirname(python!)) },
+    { encoding: "utf8" },
   );
   expect(result.status, result.stderr).toBe(0);
 }
