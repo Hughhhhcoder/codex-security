@@ -1,5 +1,6 @@
 import {
   appendFile,
+  chmod,
   copyFile,
   cp,
   mkdir,
@@ -63,6 +64,7 @@ type ScanObserverName = Parameters<
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const temporaryDirectories: string[] = [];
+const testPosix = process.platform === "win32" ? test.skip : test;
 const TEST_SNAPSHOT_DIGEST = `codex-security-snapshot/v1:sha256:${"a".repeat(64)}`;
 const SHELL_ENVIRONMENT_PREFIX = process.platform === "win32" ? "$env:" : "$";
 
@@ -4044,6 +4046,120 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     }
   });
+
+  testPosix(
+    "rejects unsafe output and state ancestry before runtime initialization",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const shared = join(root, "shared");
+      const privateChild = join(shared, "private");
+      const linkedParent = join(root, "linked-parent");
+      const safeState = join(root, "state");
+      const missingState = join(privateChild, "state");
+      const linkedState = join(linkedParent, "private", "missing", "state");
+      const safeOutput = join(root, "output");
+      const unsafeOutput = join(privateChild, "output");
+      await mkdir(repository);
+      await mkdir(privateChild, { recursive: true, mode: 0o700 });
+      await chmod(shared, 0o775);
+      await symlink(shared, linkedParent, "dir");
+
+      for (const [stateDirectory, outputDir] of [
+        [safeState, unsafeOutput],
+        [shared, undefined],
+        [shared, safeOutput],
+        [missingState, undefined],
+        [missingState, safeOutput],
+        [linkedState, safeOutput],
+      ] as const) {
+        const initialize = mock(() => {
+          throw new Error("runtime must not initialize");
+        });
+        const client = new TestClient(
+          {},
+          {
+            environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+            prepareRuntime: initialize,
+            resolvePluginPython: initialize,
+            createCodex: initialize,
+          },
+        );
+
+        try {
+          for (const operation of ["preflight", "run"] as const) {
+            await expect(
+              client[operation](repository, { outputDir }),
+            ).rejects.toMatchObject({
+              name: OutputDirectoryError.name,
+              message: expect.stringContaining(`${shared} (mode 0775)`),
+            });
+          }
+          expect(initialize).not.toHaveBeenCalled();
+        } finally {
+          await client.close();
+        }
+      }
+
+      expect((await stat(shared)).mode & 0o7777).toBe(0o775);
+      expect((await stat(privateChild)).mode & 0o7777).toBe(0o700);
+      expect(await readdir(shared)).toEqual(["private"]);
+      expect(await readdir(privateChild)).toEqual([]);
+      for (const path of [
+        safeState,
+        missingState,
+        linkedState,
+        safeOutput,
+        unsafeOutput,
+      ]) {
+        expect(existsSync(path)).toBe(false);
+      }
+    },
+  );
+
+  testPosix(
+    "preflights persistent state under a sticky shared parent without creating it",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const outputDir = join(root, "output");
+      let stickyParent = join(root, "shared");
+      await mkdir(repository);
+      await mkdir(stickyParent, { mode: 0o1777 });
+      await chmod(stickyParent, 0o1777);
+      if (((await stat(stickyParent)).mode & 0o1000) === 0) {
+        stickyParent = await realpath(tmpdir());
+        if (((await stat(stickyParent)).mode & 0o1000) === 0) return;
+      }
+      const parentMode = (await stat(stickyParent)).mode & 0o7777;
+      const stateDirectory = join(stickyParent, `${basename(root)}-state`);
+      temporaryDirectories.push(stateDirectory);
+      const initialize = mock(() => {
+        throw new Error("runtime must not initialize");
+      });
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          prepareRuntime: initialize,
+          resolvePluginPython: initialize,
+          createCodex: initialize,
+        },
+      );
+
+      try {
+        await expect(
+          client.preflight(repository, { outputDir }),
+        ).resolves.toMatchObject({ outputDir });
+        expect(initialize).not.toHaveBeenCalled();
+        expect((await stat(stickyParent)).mode & 0o7777).toBe(parentMode);
+        expect(existsSync(stateDirectory)).toBe(false);
+        expect(existsSync(outputDir)).toBe(false);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test("rejects reruns when the original plugin version is unavailable", async () => {
     const root = await temporaryDirectory();

@@ -4493,6 +4493,34 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   testPosix(
+    "explains unsafe ancestry above a private output directory without changing it",
+    async () => {
+      const root = await temporaryDirectory();
+      const shared = join(root, "shared");
+      const privateChild = join(shared, "private");
+      const output = join(privateChild, "results");
+      await mkdir(privateChild, { recursive: true, mode: 0o700 });
+      await chmod(shared, 0o775);
+
+      await expect(validateOutputDir(privateChild)).rejects.toThrow(
+        `${shared} (mode 0775)`,
+      );
+      await expect(validateOutputDir(output)).rejects.toThrow(
+        "A private child directory does not make an unsafe ancestor safe",
+      );
+      await expect(prepareOutputDir(output, "repository")).rejects.toThrow(
+        "Choose a location with secure parent directories",
+      );
+      await expect(requireSecureOutputAncestry(output)).rejects.toThrow(
+        "only if you own it and can safely change it",
+      );
+      expect((await lstat(shared)).mode & 0o7777).toBe(0o775);
+      expect((await lstat(privateChild)).mode & 0o7777).toBe(0o700);
+      expect(existsSync(output)).toBe(false);
+    },
+  );
+
+  testPosix(
     "accepts scan output under a sticky shared parent directory",
     async () => {
       const root = await temporaryDirectory();

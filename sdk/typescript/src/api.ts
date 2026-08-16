@@ -95,6 +95,7 @@ import {
   prepareOutputDir,
   preparePersistentScanRoot,
   requireModelSafeOutputDir,
+  requireSecureOutputAncestry,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
@@ -1803,6 +1804,9 @@ export class CodexSecurity {
       }
     }
     requireOutputOutsideRepository(protectedRoot, canonicalStateDirectory);
+    await requireSecureOutputAncestry(
+      join(canonicalStateDirectory, "codex-home"),
+    );
     return {
       repository: repo,
       target: normalized,

@@ -1630,8 +1630,9 @@ export function requireTrustedOutputAncestor(
   }
   if ((metadata.mode & 0o022) === 0) return;
   if ((metadata.mode & 0o1000) === 0) {
+    const mode = (metadata.mode & 0o7777).toString(8).padStart(4, "0");
     throw new OutputDirectoryError(
-      `Scan output parent must not be group- or world-writable without the sticky bit: ${path}`,
+      `Scan output parent must not be group- or world-writable without the sticky bit: ${path} (mode ${mode}). A private child directory does not make an unsafe ancestor safe. Choose a location with secure parent directories, or remove group- and world-write permissions from this ancestor only if you own it and can safely change it.`,
     );
   }
 }

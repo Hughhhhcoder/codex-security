@@ -35,6 +35,7 @@ import {
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
+import { requireTrustedOutputAncestor } from "../src/runtime.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
@@ -3960,6 +3961,52 @@ describe("CLI", () => {
       expect(stderr.text()).not.toContain("cannot access the configured model");
       expect(stderr.text()).not.toContain("Authentication failed");
       expect(stderr.text()).not.toContain("reached its rate limit");
+    }
+  });
+
+  test("keeps unsafe ancestry errors local and off JSON stdout", async () => {
+    const failure = (() => {
+      try {
+        requireTrustedOutputAncestor(
+          { mode: 0o40775, uid: 1000 },
+          join("fixture", "shared"),
+          1000,
+        );
+      } catch (error) {
+        if (error instanceof OutputDirectoryError) return error;
+        throw error;
+      }
+      throw new Error("unsafe ancestor must be rejected");
+    })();
+
+    for (const extraArgs of [[], ["--dry-run"]]) {
+      const stdout = capture();
+      const stderr = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw failure;
+        },
+        preflight: async () => {
+          throw failure;
+        },
+        close: async () => {},
+      });
+
+      expect(
+        await main(
+          ["scan", ".", "--json", "--verbose", ...extraArgs],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(`${failure.message}\n`);
+      expect(stderr.text()).toContain('scan.failed classification="local"');
+      expect(stderr.text()).not.toContain("cannot access the configured model");
+      expect(stderr.text()).not.toContain("Authentication failed");
+      expect(stderr.text()).not.toContain("model service could not be reached");
     }
   });
 

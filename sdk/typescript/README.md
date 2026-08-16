@@ -316,7 +316,9 @@ reduction and result delivery, including at the 96-hour maximum.
 `bulk-scan --workers` controls how many repositories are scanned concurrently.
 
 On macOS/Linux, an existing output directory must be private to the current
-user (`chmod 700`).
+user (`chmod 700`) and have trusted parent directories. See [output and state
+directory permissions](#output-and-state-directory-permissions) if a parent is
+group- or world-writable.
 
 If the output directory already contains results, add `--archive-existing`.
 The CLI moves them to `<output-dir>.previous-<timestamp>-<id>` and starts the
@@ -662,6 +664,36 @@ const directPublication = await publishScan("/path/to/completed-scan", {
   assigneeId: "teammate@example.com",
 });
 ```
+
+### Output and state directory permissions
+
+On macOS and Linux, scan output must be private to the current user. Every
+parent directory must be owned by the current user or root. A group- or
+world-writable parent is accepted only when it has the sticky bit. These checks
+also protect persistent state and stored sign-in credentials.
+
+An error that names a parent with mode `0775` refers to that parent, not just
+the final output directory. Creating a `0700` child beneath it does not stop
+another user from renaming or replacing that child. Choose a location with
+trusted parents, or remove group- and world-write access from the named parent
+only if you own it and it is safe to change. Do not change a shared home,
+workspace, mount, or system directory merely to suppress the error.
+
+Use the setting for the location that failed:
+
+- For explicitly selected scan results, choose another `--output-dir` (SDK
+  `outputDir`) outside the scanned repository.
+- For persistent history, default artifacts, and stored sign-in, choose a
+  private `CODEX_SECURITY_STATE_DIR` outside the repository. Selecting a new
+  state directory does not move existing history, results, or credentials.
+- For temporary runtime files, choose a suitable `TMPDIR` (`TEMP` on Windows).
+  A fresh private child under a trusted, sticky system temporary directory is
+  suitable for temporary work; it is not a replacement for persistent history.
+
+The CLI does not automatically change parent permissions or move an explicitly
+selected directory. `scan --dry-run` checks the ancestry of an explicitly
+selected output directory and the configured state root without creating scan
+output or initializing the runtime.
 
 ### Scan history and reruns
 
