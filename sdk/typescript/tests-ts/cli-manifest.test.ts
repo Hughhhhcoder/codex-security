@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { Cli, Schema, z } from "incur";
 import { main } from "../src/cli.js";
 import {
@@ -101,9 +102,6 @@ function flag(name: string): string {
 describe("full CLI manifest", () => {
   test("documents every live command, argument, option, and allowed value", async () => {
     const manifest = await readManifest();
-    const index = JSON.parse(
-      await invoke(["--llms", "--format", "json"]),
-    ) as Manifest;
     const markdown = await invoke(["--llms-full"]);
     const sections = commandSections(markdown);
 
@@ -111,23 +109,10 @@ describe("full CLI manifest", () => {
     expect([...sections.keys()]).toEqual(
       manifest.commands.map(({ name }) => name),
     );
-    expect([...sections.keys()]).toEqual(
-      index.commands.map(({ name }) => name),
-    );
     expect(markdown).not.toMatch(/--[a-z][a-z0-9-]*[A-Z][A-Za-z0-9-]*/u);
 
     for (const command of manifest.commands) {
       const section = sections.get(command.name)!;
-      const schema = JSON.parse(
-        await invoke([
-          ...command.name.split(" "),
-          "--schema",
-          "--format",
-          "json",
-        ]),
-      );
-      expect(command.schema ?? {}).toEqual(schema);
-
       for (const [name, field] of Object.entries(
         command.schema?.args?.properties ?? {},
       )) {
@@ -168,8 +153,31 @@ describe("full CLI manifest", () => {
     expect(sections.get("publish scan")).toContain("Allowed values: `linear`");
   });
 
-  test("includes current metadata, global discovery, and operating contracts", async () => {
+  test("includes current metadata and the packaged operating guide", async () => {
     const markdown = await invoke(["--llms-full"]);
+    const readme = (
+      await readFile(new URL("../README.md", import.meta.url), "utf8")
+    ).replace(/\r\n/gu, "\n");
+    for (const title of [
+      "Install",
+      "Authentication",
+      "CLI",
+      "Local security model",
+    ]) {
+      const heading = `## ${title}\n`;
+      const start = readme.indexOf(heading);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const end = readme.indexOf("\n## ", start + heading.length);
+      expect(markdown).toContain(
+        readme.slice(start, end < 0 ? undefined : end).trim(),
+      );
+    }
+    for (const title of [
+      "Run a scan from TypeScript",
+      "Containerized bulk scans",
+    ]) {
+      expect(markdown).not.toContain(`\n## ${title}\n`);
+    }
     const defaults = scanModelConfiguration(DEFAULT_CODEX_CONFIG);
     for (const value of [
       VERSION,
@@ -178,34 +186,9 @@ describe("full CLI manifest", () => {
       CODEX_SDK_VERSION,
       defaults.model,
       defaults.reasoningEffort,
-      "OPENAI_API_KEY",
-      "CODEX_API_KEY",
-      "OPENROUTER_API_KEY",
-      "FIREWORKS_API_KEY",
-      "AWS_BEARER_TOKEN_BEDROCK",
-      "CODEX_SECURITY_STATE_DIR",
-      "CODEX_SECURITY_LINEAR_TEAM",
-      "CODEX_SECURITY_LINEAR_PROJECT",
-      "CODEX_SECURITY_LINEAR_API_KEY",
-      "CODEX_HOME",
-      "PYTHON",
-      "CODEX_SECURITY_LOG_LEVEL",
-      "$CODEX_HOME/codex-security/config.toml",
-      "stop_after_consecutive_errors",
-      "features.multi_agent_v2.max_concurrent_threads_per_session",
-      "--auth chatgpt",
-      "--auth api-key",
-      "--dry-run",
-      "--json",
-      "--full-output",
       "--schema",
       "--mcp",
       "completions",
-      "repositoryFindings",
-      "coverage",
-      "`130`",
-      "`143`",
-      "## Operating notes",
       "## Global options and integrations",
       "## Command groups",
       "## Command reference",

@@ -495,6 +495,7 @@ try {
 
   const manifest = runInstalledCli("--llms-full");
   assert.match(manifest, /^# codex-security$/mu);
+  assert.match(manifest, /^## Authentication$/mu);
   assert.match(manifest, /\| `--working-tree` \|/u);
   assert.doesNotMatch(manifest, /--[a-z][a-z0-9-]*[A-Z][A-Za-z0-9-]*/u);
 
