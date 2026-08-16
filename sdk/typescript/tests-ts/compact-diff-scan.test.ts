@@ -534,6 +534,8 @@ describe("compact diff scan", () => {
         securityObjectives: ["Keep each result bound to its selected input."],
         assumptions: ["A shared-service deployment has not been established."],
       };
+      const markdownFact =
+        "Selected input stays separate from private state (src/handler.py:1).";
       const savedModelPath = join(
         scanDir,
         "artifacts",
@@ -543,8 +545,7 @@ describe("compact diff scan", () => {
       mkdirSync(dirname(savedModelPath), { recursive: true, mode: 0o700 });
       writeFileSync(
         savedModelPath,
-        "# Saved threat model\n\n" +
-          "Selected input stays separate from private state (src/handler.py:1).\n",
+        `# Saved threat model\n\n${markdownFact}\n`,
       );
       const threatModel =
         format === "Markdown"
@@ -618,10 +619,11 @@ describe("compact diff scan", () => {
       expect(contract.coverage.openQuestions).toEqual(openQuestions);
       expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
       const report = readFileSync(join(scanDir, "report.md"), "utf8");
-      for (const fact of Object.values(threatModel)
-        .flat()
-        .flatMap((value) => value.split("\n"))
-        .filter(Boolean)) {
+      const modelFacts =
+        format === "Markdown"
+          ? [markdownFact]
+          : Object.values(canonicalModel).flat();
+      for (const fact of modelFacts) {
         expect(report).toContain(fact);
       }
       expect(report).toContain(openQuestions[0]!.question);
@@ -630,10 +632,7 @@ describe("compact diff scan", () => {
 
       const terminalDir = join(root, "terminal-scan");
       mkdirSync(terminalDir, { mode: 0o700 });
-      const markdownModel =
-        "# Existing threat model\n\n" +
-        "## Assumptions\n\n" +
-        "Selected input stays separate from private state (src/handler.py:1).\n";
+      const markdownModel = `# Existing threat model\n\n## Assumptions\n\n${markdownFact}\n`;
       const terminalManifest = structuredClone(
         completed["manifest"],
       ) as JsonObject;
@@ -673,9 +672,7 @@ describe("compact diff scan", () => {
         join(terminalDir, "report.md"),
         "utf8",
       );
-      for (const line of markdownModel.split("\n").filter(Boolean)) {
-        expect(terminalReport).toContain(line);
-      }
+      expect(terminalReport).toContain(markdownFact);
       expect(terminalReport.match(/^#{1,2} .+$/gm)).toEqual(
         report.match(/^#{1,2} .+$/gm),
       );
