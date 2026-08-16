@@ -3,6 +3,55 @@ import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 describe("bundled scan report and source limits", () => {
+  test("refreshes only unsealed report projections", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const program = [
+      "import json, os, pathlib, stat, sys",
+      "from unittest.mock import Mock, patch",
+      "sys.path.insert(0, sys.argv[1])",
+      "import finalize_scan_contract as finalizer",
+      "scan_dir, schema_dir = pathlib.Path('saved-scan'), pathlib.Path('selected-schemas')",
+      "manifest = {'scan': {'artifacts': [{'path': 'findings.json'}, {'path': 'coverage.json'}]}}",
+      "findings, coverage = {}, {}",
+      "reader = Mock(return_value=(manifest, findings, coverage, b'canonical'))",
+      "project = Mock(return_value=b'projected report\\n')",
+      "writer = Mock()",
+      "with patch.object(finalizer, '_read_sealed_scan', reader), patch.object(finalizer, '_generate_report_projection', project), patch.object(finalizer, 'write_scan_local_bytes', writer), patch.object(pathlib.Path, 'stat', side_effect=FileNotFoundError):",
+      "    finalizer.write_report_projection(scan_dir, schema_dir)",
+      "    reader.assert_called_once_with(scan_dir, schema_dir, 'report projection')",
+      "    project.assert_called_once_with(manifest, findings, coverage)",
+      "    writer.assert_called_once_with(scan_dir, 'report.md', b'projected report\\n')",
+      "    reader.return_value = ({'scan': {'artifacts': [{'path': './report.md'}]}}, findings, coverage, b'canonical')",
+      "    project.reset_mock(); writer.reset_mock()",
+      "    finalizer.write_report_projection(scan_dir, schema_dir)",
+      "    project.assert_not_called(); writer.assert_not_called()",
+      "metadata = os.stat_result((stat.S_IFREG, 7, 11, 1, 0, 0, 0, 0, 0, 0))",
+      "reader.return_value = ({'scan': {'artifacts': [{'path': 'REPORT.md'}]}}, findings, coverage, b'canonical')",
+      "with patch.object(finalizer, '_read_sealed_scan', reader), patch.object(finalizer, '_generate_report_projection', project), patch.object(finalizer, 'write_scan_local_bytes', writer), patch.object(pathlib.Path, 'stat', return_value=metadata), patch.object(finalizer, 'open_scan_local_file_descriptor', return_value=42) as opened, patch.object(finalizer.os, 'fstat', return_value=metadata), patch.object(finalizer.os, 'close') as closed:",
+      "    finalizer.write_report_projection(scan_dir, schema_dir)",
+      "    opened.assert_called_once_with(scan_dir, 'REPORT.md', 'sealed artifact REPORT.md')",
+      "    closed.assert_called_once_with(42)",
+      "    project.assert_not_called(); writer.assert_not_called()",
+      "with patch.object(finalizer, 'write_report_projection') as report_only, patch.object(finalizer, 'finalize_scan') as full_finalizer, patch.object(finalizer, 'build_findings_export') as export, patch.object(finalizer, 'build_sarif_projection') as sarif, patch.object(sys, 'argv', ['finalizer', '--scan-dir', str(scan_dir), '--schema-dir', str(schema_dir), '--report-only']):",
+      "    assert finalizer.main() == 0",
+      "    report_only.assert_called_once_with(scan_dir, schema_dir)",
+      "    full_finalizer.assert_not_called(); export.assert_not_called(); sarif.assert_not_called()",
+      "print(json.dumps({'reportOnly': True, 'sealedReportPreserved': True, 'sealedAliasPreserved': True}))",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      [python!, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+      reportOnly: true,
+      sealedReportPreserved: true,
+      sealedAliasPreserved: true,
+    });
+  });
+
   test("accepts large reports, schemas, source files, and late source lines", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();

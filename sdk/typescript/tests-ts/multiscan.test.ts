@@ -28,6 +28,7 @@ import { loadContract } from "../src/contract.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
+import * as runtime from "../src/runtime.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -1239,7 +1240,9 @@ describe("multiscan", () => {
     await mkdir(checkout);
 
     const recovered = await runMultiscan(options(paths, security));
-    expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+    expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+    expect(await results(recovered.resultsPath)).toEqual([receipt!]);
+    await access(join(receipt!["outputDir"] as string, "report.md"));
     expect(await readdir(join(paths.output, "checkouts"))).toEqual([]);
     await expect(access(lock)).rejects.toThrow();
   });
@@ -2187,7 +2190,7 @@ describe("multiscan", () => {
     ).toBe(false);
   });
 
-  test("resumes complete bundles, repairs missing output, and rejects manifest drift", async () => {
+  test("resumes complete bundles, repairs missing reports, and rejects manifest drift", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "resume");
     const csv = `id,repository,revision\nresume,${source.path},${source.revision}\n`;
@@ -2215,19 +2218,98 @@ describe("multiscan", () => {
     expect(calls).toBe(1);
 
     const [receipt] = await results(initial.resultsPath);
-    await rm(join(receipt!["outputDir"] as string, "report.md"));
-    const repaired = await runMultiscan(options(paths, security));
-    expect(repaired).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
-    expect(calls).toBe(2);
-    expect((await results(repaired.resultsPath)).at(-1)?.["outputDir"]).toBe(
-      join(paths.output, "artifacts", "resume", "attempt-2"),
+    const outputDir = receipt!["outputDir"] as string;
+    const reportPath = join(outputDir, "report.md");
+    const report = await readFile(reportPath);
+    const canonicalPaths = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+    ].map((name) => join(outputDir, name));
+    const canonical = await Promise.all(
+      canonicalPaths.map((path) => readFile(path)),
     );
+    const ledger = await readFile(initial.resultsPath, "utf8");
+    await rm(reportPath);
+    const repaired = await runMultiscan(options(paths, security));
+    expect(repaired).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+    expect(calls).toBe(1);
+    expect(await readFile(reportPath)).toEqual(report);
+    expect(
+      await Promise.all(canonicalPaths.map((path) => readFile(path))),
+    ).toEqual(canonical);
+    expect(await readFile(repaired.resultsPath, "utf8")).toBe(ledger);
 
     await writeFile(paths.input, csv.replace("resume,", "changed,"));
     await expect(runMultiscan(options(paths, security))).rejects.toThrow(
       "manifest does not match",
     );
-    expect(calls).toBe(2);
+    expect(calls).toBe(1);
+  });
+
+  test("preserves earned receipts when report recovery fails", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "report-recovery");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nreport-recovery,${source.path},${source.revision}\n`,
+    );
+    let attempts = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      attempts += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const first = await runMultiscan(options(paths, security));
+    const ledger = await readFile(first.resultsPath, "utf8");
+    const resolvePython = spyOn(
+      runtime,
+      "resolvePluginPython",
+    ).mockRejectedValue(
+      new Error("Python unavailable: sk-proj-SYNTHETIC_REPORT_RECOVERY_123"),
+    );
+    try {
+      await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+        "Multiscan report recovery is required: [redacted]",
+      );
+      expect(attempts).toBe(1);
+      expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
+    } finally {
+      resolvePython.mockRestore();
+    }
+  });
+
+  test("preserves cancellation during report recovery", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "cancel-report-recovery");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nreport-recovery,${source.path},${source.revision}\n`,
+    );
+    let attempts = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      attempts += 1;
+      return await completedScan(scanOptions.outputDir!);
+    });
+    const first = await runMultiscan(options(paths, security));
+    const ledger = await readFile(first.resultsPath, "utf8");
+    const controller = new AbortController();
+    const reason = new Error("Report recovery cancelled.");
+    const resolvePython = spyOn(
+      runtime,
+      "resolvePluginPython",
+    ).mockImplementation(async () => {
+      controller.abort(reason);
+      throw reason;
+    });
+    try {
+      await expect(
+        runMultiscan(options(paths, security, { signal: controller.signal })),
+      ).rejects.toBe(reason);
+      expect(attempts).toBe(1);
+      expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
+    } finally {
+      resolvePython.mockRestore();
+    }
   });
 
   test("ignores repository-local Git shims while preserving credential configuration", async () => {

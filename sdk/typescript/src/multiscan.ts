@@ -31,7 +31,12 @@ import { loadContract } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
-import { requireSecureOutputAncestry, resolvePluginPath } from "./runtime.js";
+import {
+  bundledPluginRoot,
+  requireSecureOutputAncestry,
+  resolvePluginPath,
+  resolvePluginPython,
+} from "./runtime.js";
 import type { ScanMode } from "./targets.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -172,6 +177,47 @@ async function runCampaign(
   await ensureManifest(join(output, "manifest.json"), tasks, options);
   const { receipts, warnedIds } = await readReceipts(ledger, tasks);
   const pending: MultiscanTask[] = [];
+  let reportRuntime: Promise<[string, string]> | undefined;
+  const restoreReport = async (
+    scanDir: string,
+    schemaPluginRoot: string,
+  ): Promise<void> => {
+    try {
+      // Configured historical archives may contain schemas without helper scripts.
+      const [python, helperRoot] = await (reportRuntime ??= Promise.all([
+        resolvePluginPython({
+          configuredPath: options.config.pythonPath,
+          protectedRoot: output,
+          signal: options.signal,
+        }),
+        bundledPluginRoot(),
+      ]));
+      await execFile(
+        python,
+        [
+          "-I",
+          "-B",
+          join(helperRoot, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+          "--schema-dir",
+          join(schemaPluginRoot, "schemas"),
+          "--report-only",
+        ],
+        {
+          maxBuffer: Infinity,
+          windowsHide: true,
+          signal: options.signal,
+        },
+      );
+      options.signal?.throwIfAborted();
+    } catch (error) {
+      if (options.signal?.aborted) options.signal.throwIfAborted();
+      throw new Error(
+        `Multiscan report recovery is required: ${safeErrorMessage(error)}`,
+      );
+    }
+  };
   let completed = 0;
   let incomplete = 0;
   for (const task of tasks) {
@@ -191,19 +237,20 @@ async function runCampaign(
       `attempt-${receipt.attempt}`,
     );
     if (
-      (receipt.outputDir === artifactOutput ||
-        receipt.outputDir === selectedArtifactOutput) &&
-      (await hasArtifacts(artifactOutput))
+      receipt.outputDir === artifactOutput ||
+      receipt.outputDir === selectedArtifactOutput
     ) {
       const checkout = join(output, "checkouts", task.id);
+      const schemaPluginRoot = await resolveResumePluginRoot();
       const coverage = await loadResumableCoverage(
         artifactOutput,
-        await resolveResumePluginRoot(),
+        schemaPluginRoot,
         receipt,
         checkout,
         options.signal,
       );
       if (coverage !== undefined) {
+        await restoreReport(artifactOutput, schemaPluginRoot);
         await rm(checkout, {
           recursive: true,
           force: true,

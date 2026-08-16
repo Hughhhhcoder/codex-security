@@ -1904,6 +1904,39 @@ def _read_sealed_scan(
     return manifest, findings, coverage, findings_bytes
 
 
+def write_report_projection(scan_dir: Path, schema_dir: Path | None = None) -> None:
+    """Refresh only an unsealed report, preserving authenticated historical reports."""
+    manifest, findings, coverage, _ = _read_sealed_scan(
+        scan_dir, schema_dir, "report projection"
+    )
+    artifact_paths = {
+        _require_safe_relative_path(artifact["path"], "sealed artifact path")
+        for artifact in manifest["scan"]["artifacts"]
+    }
+    if "report.md" in artifact_paths:
+        return
+    try:
+        output_metadata = (scan_dir / "report.md").stat(follow_symlinks=False)
+    except FileNotFoundError:
+        output_metadata = None
+    except OSError as exc:
+        raise ContractError("report.md: unable to inspect report output") from exc
+    if output_metadata is not None:
+        for artifact_path in artifact_paths:
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, artifact_path, f"sealed artifact {artifact_path}"
+            )
+            try:
+                artifact_metadata = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            if os.path.samestat(output_metadata, artifact_metadata):
+                return
+    write_scan_local_bytes(
+        scan_dir, "report.md", _generate_report_projection(manifest, findings, coverage)
+    )
+
+
 def build_sarif_projection(
     scan_dir: Path, source_root: Path | None = None, schema_dir: Path | None = None
 ) -> dict[str, Any]:
@@ -2316,18 +2349,27 @@ def main() -> int:
     parser.add_argument("--schema-dir", type=Path)
     parser.add_argument("--source-root", type=Path)
     parser.add_argument("--sarif-only", action="store_true")
+    parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--sarif-output", type=Path)
     parser.add_argument("--export-format", choices=sorted(EXPORT_PATHS))
     parser.add_argument("--export-output", type=Path)
     args = parser.parse_args()
     try:
+        if args.report_only and (
+            args.sarif_only or args.export_format is not None or args.source_root is not None
+        ):
+            parser.error(
+                "--report-only cannot be combined with SARIF, export, or source-root options"
+            )
         if args.sarif_only and args.export_format is not None:
             parser.error("--sarif-only cannot be combined with --export-format")
         if args.export_output is not None and args.export_format is None:
             parser.error("--export-output requires --export-format")
         if args.sarif_output is not None and not args.sarif_only:
             parser.error("--sarif-output requires --sarif-only")
-        if args.export_format is not None:
+        if args.report_only:
+            write_report_projection(args.scan_dir, args.schema_dir)
+        elif args.export_format is not None:
             contents = build_findings_export(
                 args.scan_dir, args.export_format, args.source_root, args.schema_dir
             )
