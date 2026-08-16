@@ -39,7 +39,7 @@ Keep hypotheses separate from validated vulnerabilities. Independent source-back
 
 ## Use Within A Scan
 
-Apply this method inside the caller's existing audit and worker allowance; do not start another scan, worker pool, or report. Preserve a supplied schema-valid threat-model object unchanged. Preserve supplied text exactly as `{ "summary": "<original supplied text>" }`.
+Apply this method inside the caller's existing audit and worker allowance; do not start another scan, worker pool, or report. Keep scan-specific context and knowledge-base facts in the per-scan result, not the shared repository-model cache, unless the user separately requests a reusable-model update and the host permits it. Preserve a supplied schema-valid threat-model object unchanged. Preserve supplied text exactly as `{ "summary": "<original supplied text>" }`.
 
 Build the generated canonical `threatModel` while mapping the architecture. Carry it through the audit and update it when evidence changes; do not replace it at final assembly with an uncited synopsis. Use the existing fields:
 
