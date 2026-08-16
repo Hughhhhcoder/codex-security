@@ -565,6 +565,62 @@ elif scenario == "recreated-directory":
         "recreatedRootAliases": sorted(repository_target_ids(connection, root_target_id)),
     }))
 
+elif scenario == "candidate-generation":
+    add_scan("requested-scan", repository)
+    legacy_id = add_scan("trusted-alias", worktree)
+    candidate_id = add_scan("previous-generation", clone)
+    requested_identity = repository_identity(repository)
+    candidate_identity = repository_identity(clone)
+
+    def live_identity(target):
+        return requested_identity if Path(target) == clone else repository_identity(target)
+
+    def automatic_history():
+        matching = history.list_unmatched_scan_pairs(
+            connection,
+            argparse.Namespace(repository=str(repository), force=False),
+            backfill_finding_details=lambda _connection, _scan: None,
+            read_coverage=lambda _scan: {},
+        )
+        matching_ids = {
+            batch["afterScanId"] for batch in matching["batches"]
+        } | {
+            scan["scanId"]
+            for batch in matching["batches"]
+            for scan in batch["beforeScans"]
+        }
+        return {
+            "scans": listed(repository),
+            "matchingScanCount": matching["scanCount"],
+            "matchingScanIds": sorted(matching_ids),
+        }
+
+    with (
+        patch("workbench_target_state.repository_identity", side_effect=live_identity),
+        patch("workbench_scan_history.repository_identity", side_effect=live_identity),
+    ):
+        persisted = automatic_history()
+        connection.execute(
+            "UPDATE security_targets SET repository_identity = NULL WHERE id = ?",
+            (legacy_id,),
+        )
+        verified_legacy = automatic_history()
+        connection.execute(
+            "UPDATE scans SET target_device = NULL, target_inode = NULL WHERE id = ?",
+            ("trusted-alias",),
+        )
+        unverified_legacy = automatic_history()
+
+    print(json.dumps({
+        "persisted": persisted,
+        "verifiedLegacy": verified_legacy,
+        "unverifiedLegacy": unverified_legacy,
+        "candidateIdentityPreserved": connection.execute(
+            "SELECT repository_identity FROM security_targets WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()[0] == candidate_identity,
+    }))
+
 elif scenario == "git-replacement":
     add_scan("original-repository", repository)
     add_scan("original-alias", worktree)
@@ -632,8 +688,8 @@ elif scenario == "nongit":
     print(json.dumps({
         "firstIdentity": repository_identity(first),
         "secondIdentity": repository_identity(second),
-        "differentNullIdsMatch": history._same_repository(before, after),
-        "sameNullPathMatches": history._same_repository(before, same),
+        "differentNullIdsMatch": history._same_repository(connection, before, after),
+        "sameNullPathMatches": history._same_repository(connection, before, same),
         "firstScans": listed(first),
         "secondScans": listed(second),
     }))
@@ -770,6 +826,24 @@ describe("durable workbench repository identities", () => {
     expect(result["registrationError"]).toContain(
       "refusing to reuse its target",
     );
+  }, 30_000);
+
+  test("does not discover historical targets through a conflicting live generation", () => {
+    const result = runProbe("candidate-generation", fixture());
+    const verified = {
+      scans: ["requested-scan", "trusted-alias"],
+      matchingScanCount: 2,
+      matchingScanIds: ["requested-scan", "trusted-alias"],
+    };
+
+    expect(result["persisted"]).toEqual(verified);
+    expect(result["verifiedLegacy"]).toEqual(verified);
+    expect(result["unverifiedLegacy"]).toEqual({
+      scans: ["requested-scan"],
+      matchingScanCount: 1,
+      matchingScanIds: [],
+    });
+    expect(result["candidateIdentityPreserved"]).toBe(true);
   }, 30_000);
 
   test("rescans recreated directories when their Git repository and scope are unchanged", () => {

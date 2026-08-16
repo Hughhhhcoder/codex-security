@@ -123,14 +123,26 @@ def supports_repository_identity(connection: sqlite3.Connection) -> bool:
     )
 
 
-def _verified_repository_identity(
-    connection: sqlite3.Connection, target_id: str, target_path: str
+def verified_repository_identity(
+    connection: sqlite3.Connection,
+    target_id: str,
+    target_path: str,
+    *,
+    stored_identity: str | None = None,
 ) -> str | None:
     target = Path(target_path)
     try:
         metadata = target.stat()
     except OSError:
         return None
+
+    if stored_identity is not None:
+        try:
+            _require_current_target_owner(connection, target_id, target_path, stored_identity)
+        except SystemExit:
+            return None
+        identity = repository_identity(target)
+        return identity if identity == stored_identity else None
 
     scan_columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(scans)")
@@ -234,7 +246,7 @@ def backfill_repository_identities(connection: sqlite3.Connection) -> None:
         """
     ).fetchall()
     for target in targets:
-        identity = _verified_repository_identity(
+        identity = verified_repository_identity(
             connection, str(target["id"]), target["current_path"]
         )
         if identity is not None:
@@ -287,7 +299,7 @@ def ensure_security_target(
                 connection, target_id, target_path, existing["repository_identity"]
             )
         if supports_identity and existing["repository_identity"] is None:
-            identity = _verified_repository_identity(connection, target_id, target_path)
+            identity = verified_repository_identity(connection, target_id, target_path)
             if identity is not None:
                 connection.execute(
                     """
@@ -301,7 +313,7 @@ def ensure_security_target(
     target_id = stable_target_id(Path(target_path))
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if supports_identity:
-        identity = _verified_repository_identity(connection, target_id, target_path)
+        identity = verified_repository_identity(connection, target_id, target_path)
         connection.execute(
             """
             INSERT OR IGNORE INTO security_targets (

@@ -22,22 +22,20 @@ from workbench_target_state import (
     repository_identity,
     repository_relative_path,
     supports_repository_identity,
+    verified_repository_identity,
 )
 
 
 def _same_repository(
+    connection: sqlite3.Connection,
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
     after_identity: tuple[str | None, tuple[str, str] | None, str | None] | None = None,
 ) -> bool:
     before_target_id = before["target_id"]
-    if before_target_id and before_target_id == after["target_id"]:
-        return True
     before_target = Path(before["target_path"])
     after_target = Path(after["target_path"])
-    if str(before_target.resolve()) == str(after_target.resolve()):
-        return True
     before_stored_identity = (
         before["repository_identity"] if "repository_identity" in before.keys() else None
     )
@@ -51,12 +49,29 @@ def _same_repository(
         if after_identity is not None
         else None
     )
-    if before_stored_identity and before_stored_identity == after_grouping_identity:
+    if before_stored_identity is not None and before_stored_identity == after_grouping_identity:
         return True
+    if (
+        before_target_id and before_target_id == after["target_id"]
+        or str(before_target.resolve()) == str(after_target.resolve())
+    ):
+        return before_stored_identity is None or after_grouping_identity is None
 
-    before_live_identity = repository_identity(before_target)
+    before_live_identity = verified_repository_identity(
+        connection,
+        before_target_id or "",
+        str(before_target),
+        stored_identity=before_stored_identity,
+    )
     after_live_identity = (
-        repository_identity(after_target) if after_identity is None else after_identity[0]
+        verified_repository_identity(
+            connection,
+            after["target_id"] or "",
+            str(after_target),
+            stored_identity=after_stored_identity,
+        )
+        if after_identity is None
+        else after_identity[0]
     )
     if before_live_identity is not None and before_live_identity == after_live_identity:
         return True
@@ -147,15 +162,16 @@ def list_scans(
         )
         ownership_matches = ownership_matches and identity_matches
         requested_identity = (
-            (
-                requested_repository["repository_identity"]
-                if (
-                    identity_column
-                    and ownership_matches
-                    and requested_repository["repository_identity"] is not None
-                )
-                else live_identity
-            ),
+            verified_repository_identity(
+                connection,
+                requested_repository["target_id"],
+                str(repository),
+                stored_identity=(
+                    requested_repository["repository_identity"] if identity_column else None
+                ),
+            )
+            if ownership_matches
+            else None,
             None,
             None,
         )
@@ -169,6 +185,7 @@ def list_scans(
                     else "SELECT id AS target_id, current_path AS target_path FROM security_targets"
                 )
                 if _same_repository(
+                    connection,
                     target,
                     requested_repository,
                     after_identity=requested_identity,
@@ -416,11 +433,11 @@ def list_unmatched_scan_pairs(
         if identity_column
         else "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
     )
-    live_identity = repository_identity(repository)
-    requested_identity = (
-        requested["repository_identity"]
-        if identity_column and requested["repository_identity"] is not None
-        else live_identity
+    requested_identity = verified_repository_identity(
+        connection,
+        requested["target_id"],
+        str(repository),
+        stored_identity=requested["repository_identity"] if identity_column else None,
     )
     requested_group = (
         requested_identity,
@@ -432,6 +449,7 @@ def list_unmatched_scan_pairs(
         for scan in connection.execute(scan_query)
         if str(Path(scan["target_path"]).resolve()) == str(repository)
         or _same_repository(
+            connection,
             scan,
             requested,
             after_identity=requested_group,
@@ -511,7 +529,7 @@ def compare_scans(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after):
+    if not _same_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     cached = connection.execute(
         "SELECT result_json FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
@@ -655,7 +673,7 @@ def save_scan_comparison(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after):
+    if not _same_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     read_coverage(after)
     before_findings = _scan_findings(connection, before["id"])
