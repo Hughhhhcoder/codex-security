@@ -627,8 +627,10 @@ prepared payload. If a completed mutation cannot be verified, publication keeps
 any verified successes in local history, retains its private recovery handoff
 and available event log, and exits with the recovery path. Inspect the existing
 Linear issues before retrying. A failure to save the auxiliary event log does
-not discard verified issue records. This checks the submitted arguments; it is
-not a fresh readback of the remote issues.
+not discard verified issue records. Indeterminate receipts include an explicit
+status and the private recovery path, even when every planned issue was created.
+This checks the submitted arguments; it is not a fresh readback of the remote
+issues.
 
 Issue descriptions contain source code and vulnerability details. Select a
 Linear destination authorized to receive that information. Publication receipts

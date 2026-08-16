@@ -790,17 +790,22 @@ describe("database-backed Linear publication integration", () => {
       const receipt = JSON.parse(
         await readFile(receiptPath(completed), "utf8"),
       ) as PublishScanResult;
+      expect(receipt.indeterminate).toBe(true);
       expect(receipt.counts).toEqual({ findings: 2, created: 1, failed: 1 });
       expect(receipt.created[0]?.issueIdentifier).toBe("SEC-901");
-      expect(
-        await readFile(join(dirname(handoffFile), "events.jsonl"), "utf8"),
-      ).toBe(eventLogExists ? "Existing event log\n" : `${events}\n`);
+      const eventFiles = (await readdir(dirname(handoffFile))).filter(
+        (name) => name.startsWith("events-") && name.endsWith(".jsonl"),
+      );
+      expect(eventFiles).toHaveLength(1);
+      const eventsFile = join(dirname(handoffFile), eventFiles[0]!);
+      expect(await readFile(eventsFile, "utf8")).toBe(`${events}\n`);
+      expect(receipt.warnings).toContainEqual(
+        expect.stringContaining(eventsFile),
+      );
       if (eventLogExists) {
-        expect(receipt.warnings).toEqual([
-          expect.stringContaining(
-            "Could not preserve unverified Linear publication events",
-          ),
-        ]);
+        expect(
+          await readFile(join(dirname(handoffFile), "events.jsonl"), "utf8"),
+        ).toBe("Existing event log\n");
       }
       expect(await artifactDigests(completed.scanDirectory)).toEqual(sealed);
     },
