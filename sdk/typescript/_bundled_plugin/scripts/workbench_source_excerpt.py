@@ -161,10 +161,15 @@ def source_path_in_scope(scan: sqlite3.Row, target: Path, path: str, scope: str)
         recipe = None
     if recipe is not None:
         file_scopes = recorded_file_scopes(recipe)
-        if scope in file_scopes and len(PurePosixPath(path).parts) > len(
-            PurePosixPath(scope).parts
-        ):
-            return False
+        if len(PurePosixPath(path).parts) > len(PurePosixPath(scope).parts):
+            if scope in file_scopes:
+                return False
+            if "_codexSecurityFileScopes" not in json.loads(recipe):
+                try:
+                    if not stat.S_ISDIR((target / scope).stat().st_mode):
+                        return False
+                except OSError:
+                    return False
     if path_within_scope(path, scope):
         try:
             if PurePosixPath(path) == PurePosixPath(scope) or not scoped_path_is_file(
@@ -241,24 +246,29 @@ def filesystem_case_alias(target: Path, selected: Path, actual: Path) -> bool:
             not in {b"true", b"true\n"}
         ):
             return False
-        for directory in (target, *target.parents):
-            alternative = next(
-                (
-                    directory.name[:index]
-                    + character.swapcase()
-                    + directory.name[index + 1 :]
-                    for index, character in enumerate(directory.name)
-                    if character.isascii() and character.isalpha()
-                ),
-                None,
-            )
-            if alternative is None:
-                continue
-            try:
-                if directory.samefile(directory.with_name(alternative)):
-                    return True
-            except OSError:
-                continue
+        try:
+            with os.scandir(selected.parent) as entries:
+                for entry in entries:
+                    alternative = next(
+                        (
+                            entry.name[:index]
+                            + character.swapcase()
+                            + entry.name[index + 1 :]
+                            for index, character in enumerate(entry.name)
+                            if character.isascii() and character.isalpha()
+                        ),
+                        None,
+                    )
+                    if alternative is None or entry.is_symlink():
+                        continue
+                    try:
+                        candidate = Path(entry.path)
+                        if candidate.samefile(candidate.with_name(alternative)):
+                            return True
+                    except OSError:
+                        continue
+        except OSError:
+            return False
         return False
     try:
         normalized = normalized_path_component(selected.name)
