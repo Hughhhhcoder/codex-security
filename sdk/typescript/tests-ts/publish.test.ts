@@ -1252,6 +1252,59 @@ describe("connected Linear publication", () => {
     expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
   });
 
+  test("retains verified event evidence when an incomplete handoff is rejected", async () => {
+    const publication = preparedPublication(2);
+    const incomplete = handoffRecord(publication, publication.issues[0]!);
+    delete incomplete["issueIdentifier"];
+    const output = publication.issues
+      .map((issue) => issueEvent(issue))
+      .join("\n");
+    let handoffFile = "";
+    let persisted: string[] = [];
+    let receipt: unknown;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(input, [incomplete]);
+              return { exitCode: 0, stdout: output, stderr: "" };
+            },
+            recordPublishedIssues: async (_prepared, issues) => {
+              persisted = issues.map((issue) => issue.issueIdentifier);
+              return [...issues];
+            },
+            writeReceipt: async (result) => {
+              receipt = result;
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow("could not verify every completed mutation");
+
+    expect(persisted).toEqual(["SEC-2"]);
+    expect(receipt).toMatchObject({
+      created: [{ findingId: "finding-2", issueIdentifier: "SEC-2" }],
+      failed: [{ findingId: "finding-1" }],
+      counts: { findings: 2, created: 1, failed: 1 },
+    });
+    expect(
+      await readFile(join(dirname(handoffFile), "events.jsonl"), "utf8"),
+    ).toBe(`${output}\n`);
+    const recovery = (await readFile(handoffFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(recovery[0]).toEqual(incomplete);
+    expect(recovery[1]?.["issueIdentifier"]).toBe("SEC-2");
+  });
+
   test("retains verified issue mappings after model-authored failures if the publication database fails", async () => {
     const publication = preparedPublication(2);
     let handoffFile: string | undefined;

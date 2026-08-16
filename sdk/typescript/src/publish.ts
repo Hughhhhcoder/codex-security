@@ -671,7 +671,7 @@ async function collectPublicationHandoff(
     events.created.map((issue) => [issue.findingId, issue]),
   );
   const claimedIssues: Array<{ findingId: unknown; issueIdentifier: string }> =
-    [];
+    [...events.created];
 
   for (const line of content.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
