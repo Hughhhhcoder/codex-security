@@ -655,7 +655,6 @@ interface ScanOutcome {
   exitCode: number;
   data?: Record<string, unknown>;
   error?: string;
-  safeError?: string;
 }
 
 interface ExportArguments {
@@ -1409,27 +1408,27 @@ export async function main(
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
-        const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
-        if (scanId === undefined) return;
-        let scanArguments: ScanArguments;
+        let scanArguments: ScanArguments | undefined;
         try {
-          const { recipe } = await dependencies.runWorkbench([
-            "get-scan-recipe",
-            "--scan-id",
-            scanId,
-          ]);
-          scanArguments = scanArgumentsFromRecipe(recipe, scanId);
-          scanArguments.verbose = options.verbose;
+          const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+          if (scanId !== undefined) {
+            const { recipe } = await dependencies.runWorkbench([
+              "get-scan-recipe",
+              "--scan-id",
+              scanId,
+            ]);
+            scanArguments = scanArgumentsFromRecipe(recipe, scanId);
+            scanArguments.verbose = options.verbose;
+          }
         } catch (error) {
-          const message = errorMessage(error);
-          errorOutput.write(`codex-security: ${message}\n`);
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+        }
+        if (scanArguments === undefined) {
           exitCode = 2;
           structuredScanFailure = format === "json" || format === "jsonl";
           return incurError({
             code: "SCAN_REPLAY_UNAVAILABLE",
-            message: structuredScanFailure
-              ? "The saved scan could not be replayed."
-              : message,
+            message: "The saved scan could not be replayed.",
             exitCode,
           });
         }
@@ -1439,9 +1438,7 @@ export async function main(
           structuredScanFailure = format === "json" || format === "jsonl";
           return incurError({
             code: "SCAN_FAILED",
-            message: structuredScanFailure
-              ? safeErrorMessage(outcome.safeError ?? outcome.error)
-              : outcome.error,
+            message: outcome.error,
             exitCode,
           });
         }
@@ -2076,9 +2073,7 @@ export async function main(
           structuredScanFailure = format === "json" || format === "jsonl";
           return incurError({
             code: "SCAN_FAILED",
-            message: structuredScanFailure
-              ? safeErrorMessage(outcome.safeError ?? outcome.error)
-              : outcome.error,
+            message: outcome.error,
             exitCode,
           });
         }
@@ -4027,7 +4022,6 @@ async function executeScan(
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
         : scanFailureMessage(failure, selectedAuthentication);
-    const safeFailure = structuredScanFailureMessage(failure, message);
     diagnostic("scan.failed", {
       classification:
         costLimitFailure !== undefined
@@ -4045,7 +4039,7 @@ async function executeScan(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );
     }
-    return { exitCode: 2, error: message, safeError: safeFailure };
+    return { exitCode: 2, error: structuredScanFailureMessage(failure) };
   }
   if (preflight !== null) {
     const effectivePreflight: ScanPreflight = {
@@ -4219,23 +4213,22 @@ function scanFailureMessage(
   }
 }
 
-function structuredScanFailureMessage(error: unknown, message: string): string {
+function structuredScanFailureMessage(error: unknown): string {
   if (error instanceof OutputInsideProtectedRootError) {
     return protectedRootErrorMessage(error, false);
   }
-  if (safeErrorMessage(message) === "[redacted]") return "[redacted]";
   if (error instanceof ScanCostLimitExceededError) {
     return "The scan exceeded its configured cost limit.";
   }
+  if (isLocalScanFailure(error)) {
+    return "The scan could not complete because a local input or filesystem operation failed.";
+  }
   if (
     /flagged for possible cybersecurity risk|trusted access for cyber|cybersecurity policy/iu.test(
-      message,
+      errorMessage(error),
     )
   ) {
     return "The scan was blocked by a cybersecurity policy. Trusted Access for Cyber may be required.";
-  }
-  if (isLocalScanFailure(error)) {
-    return "The scan could not complete because a local input or filesystem operation failed.";
   }
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":

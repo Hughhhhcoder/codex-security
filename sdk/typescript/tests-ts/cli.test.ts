@@ -3956,8 +3956,10 @@ describe("CLI", () => {
         ),
       ],
       [
-        "path target naming a 403 directory",
-        new InvalidTargetError("Path target does not exist: src/403/client.ts"),
+        "path target naming policy and 403 directories",
+        new InvalidTargetError(
+          "Path target does not exist: src/cybersecurity policy/403/client.ts",
+        ),
       ],
       [
         "git ref naming a forbidden branch",
@@ -3985,12 +3987,17 @@ describe("CLI", () => {
 
       expect(
         await main(
-          ["scan", ".", "--verbose"],
+          ["scan", ".", "--verbose", "--json"],
           stdout.stream,
           stderr.stream,
           deps,
         ),
       ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message:
+          "The scan could not complete because a local input or filesystem operation failed.",
+      });
       expect(stderr.text()).toContain((failure as Error).message);
       expect(stderr.text()).toContain('scan.failed classification="local"');
       expect(stderr.text()).not.toContain("cannot access the configured model");
@@ -3999,16 +4006,27 @@ describe("CLI", () => {
     }
   });
 
-  test("keeps model authorization advice for genuine transport failures", async () => {
+  test("keeps model connection advice for genuine transport failures", async () => {
     // The bypass must not swallow real 401/403 handling, and the advice must
     // still replace upstream text that can name the organization or project.
-    for (const [detail, expected] of [
-      ["401 invalid API key for org-private", "Authentication failed"],
+    for (const [detail, expected, safeMessage] of [
+      [
+        "401 invalid API key for org-private",
+        "Authentication failed",
+        "Authentication failed. Check the selected credentials.",
+      ],
       [
         "403 model access denied for org-private",
         "cannot access the configured model",
+        "The selected credentials cannot access the configured model.",
+      ],
+      [
+        "429 too many requests for org-private",
+        "reached its rate limit",
+        "The configured account reached its rate limit. Wait and retry.",
       ],
     ] as const) {
+      const stdout = capture();
       const stderr = capture();
       const deps = dependencies();
       deps.createSecurity = () => ({
@@ -4020,8 +4038,12 @@ describe("CLI", () => {
       });
 
       expect(
-        await main(["scan", "."], capture().stream, stderr.stream, deps),
+        await main(["scan", ".", "--json"], stdout.stream, stderr.stream, deps),
       ).toBe(2);
+      expect(JSON.parse(stdout.text())).toEqual({
+        code: "SCAN_FAILED",
+        message: safeMessage,
+      });
       expect(stderr.text()).toContain(expected);
       expect(stderr.text()).not.toContain("org-private");
     }
@@ -4046,7 +4068,7 @@ describe("CLI", () => {
     ).toBe(2);
     expect(JSON.parse(stdout.text())).toEqual({
       code: "SCAN_FAILED",
-      message: "[redacted]",
+      message: "The scan encountered a network or connection failure.",
     });
     expect(stdout.text()).not.toContain("SYNTHETIC_KEY_123");
     expect(stderr.text()).toContain(
@@ -5051,29 +5073,43 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("CodexSecurityError");
   });
 
-  test("emits structured scan failures for JSON and JSONL output", async () => {
-    const message =
+  test("emits structured policy failures for scans and reruns", async () => {
+    const policyMessage =
       "This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber.";
-
-    for (const arguments_ of [["--json"], ["--format", "jsonl"]]) {
+    for (const [arguments_, message, diagnostic] of [
+      [["scan", ".", "--json"], policyMessage, policyMessage],
+      [
+        ["scan", ".", "--format", "jsonl"],
+        "403 forbidden by cybersecurity policy for org-private",
+        "cannot access the configured model",
+      ],
+      [
+        ["scans", "rerun", "scan-original", "--json"],
+        policyMessage,
+        policyMessage,
+      ],
+    ] as const) {
       const stdout = capture();
       const stderr = capture();
-      const failing = dependencies();
-      failing.createSecurity = () => ({
-        run: async (_repository, options) => {
-          options?.onOutputDirReady?.("/tmp/partial-scan");
-          throw new CodexSecurityError(message);
-        },
-        close: async () => {},
-        preflight: async () => fakePreflight(),
-      });
-
       expect(
         await main(
-          ["scan", ".", ...arguments_],
+          arguments_,
           stdout.stream,
           stderr.stream,
-          failing,
+          dependencies({
+            onWorkbench: () => ({
+              recipe: {
+                repository: "/original/repository",
+                target: { kind: "repository", paths: [] },
+                mode: "standard",
+                config: {},
+              },
+            }),
+            onTurn: (_repository, options) => {
+              (options as ScanOptions).onOutputDirReady?.("/tmp/partial-scan");
+              throw new CodexSecurityError(message);
+            },
+          }),
         ),
       ).toBe(2);
       expect(JSON.parse(stdout.text())).toEqual({
@@ -5081,44 +5117,12 @@ describe("CLI", () => {
         message:
           "The scan was blocked by a cybersecurity policy. Trusted Access for Cyber may be required.",
       });
-      expect(stderr.text()).toContain(message);
+      expect(stderr.text()).toContain(diagnostic);
+      expect(stderr.text()).not.toContain("org-private");
       expect(stderr.text()).toContain(
         "Partial output was kept at /tmp/partial-scan.",
       );
     }
-  });
-
-  test("emits structured failures when a saved scan rerun fails", async () => {
-    const stdout = capture();
-    const stderr = capture();
-    const message = "The saved scan was blocked by the cybersecurity policy.";
-
-    expect(
-      await main(
-        ["scans", "rerun", "scan-original", "--format", "json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({
-          onWorkbench: () => ({
-            recipe: {
-              repository: "/original/repository",
-              target: { kind: "repository", paths: [] },
-              mode: "standard",
-              config: {},
-            },
-          }),
-          onRun: () => {
-            throw new CodexSecurityError(message);
-          },
-        }),
-      ),
-    ).toBe(2);
-    expect(JSON.parse(stdout.text())).toEqual({
-      code: "SCAN_FAILED",
-      message:
-        "The scan was blocked by a cybersecurity policy. Trusted Access for Cyber may be required.",
-    });
-    expect(stderr.text()).toContain(message);
   });
 
   test("keeps unavailable saved scan failures structured and private", async () => {
@@ -5126,21 +5130,38 @@ describe("CLI", () => {
       "Workbench failed for customer-private org-private ACCOUNT_ID=account-private request_id=req-private /private/customer/repository token=sk-proj-SYNTHETIC_REPLAY_SECRET_123";
     const cases = [
       {
-        format: ["--json"],
+        arguments: ["scan-original", "--json"],
         onWorkbench: () => ({}),
         detail: "This scan does not have a saved launch recipe.",
       },
       {
-        format: ["--format", "json"],
+        arguments: ["scan-original", "--format", "json"],
         onWorkbench: () => ({ recipe: { repository: "" } }),
         detail: "The saved scan recipe does not contain a repository.",
       },
       {
-        format: ["--format", "jsonl"],
+        arguments: ["scan-original", "--format", "jsonl"],
         onWorkbench: () => {
           throw new Error(sensitiveFailure);
         },
         detail: sensitiveFailure,
+      },
+      {
+        arguments: ["--json"],
+        onWorkbench: () => ({ scans: [] }),
+        detail: "No completed scans found for the current repository.",
+      },
+      {
+        arguments: ["--format", "jsonl"],
+        onWorkbench: () => {
+          throw new Error(sensitiveFailure);
+        },
+        detail: sensitiveFailure,
+      },
+      {
+        arguments: [],
+        onWorkbench: () => ({ scans: [] }),
+        detail: "No completed scans found for the current repository.",
       },
     ];
 
@@ -5150,27 +5171,21 @@ describe("CLI", () => {
 
       expect(
         await main(
-          ["scans", "rerun", "scan-original", ...scenario.format],
+          ["scans", "rerun", ...scenario.arguments],
           stdout.stream,
           stderr.stream,
           dependencies({ onWorkbench: scenario.onWorkbench }),
         ),
       ).toBe(2);
-      expect(JSON.parse(stdout.text())).toEqual({
-        code: "SCAN_REPLAY_UNAVAILABLE",
-        message: "The saved scan could not be replayed.",
-      });
-      expect(stderr.text()).toContain(scenario.detail);
-      for (const sensitive of [
-        "customer-private",
-        "org-private",
-        "account-private",
-        "req-private",
-        "/private/customer/repository",
-        "SYNTHETIC_REPLAY_SECRET",
-      ]) {
-        expect(stdout.text()).not.toContain(sensitive);
+      if (scenario.arguments.length === 0) {
+        expect(stdout.text()).toBe("");
+      } else {
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_REPLAY_UNAVAILABLE",
+          message: "The saved scan could not be replayed.",
+        });
       }
+      expect(stderr.text()).toBe(`codex-security: ${scenario.detail}\n`);
     }
   });
 
@@ -5396,32 +5411,44 @@ describe("CLI", () => {
 
   test("preserves retained partial-output paths", async () => {
     const path = "/private/tmp/scan_sk-proj-SYNTHETIC_PATH_KEY_123/results";
-    for (const [signal, expectedExit] of [
-      [null, 2],
-      ["SIGINT", 130],
-      ["SIGTERM", 143],
+    for (const [signal, expectedExit, message] of [
+      [null, 2, "The scan failed. See stderr for details."],
+      ["SIGINT", 130, "Scan canceled by Ctrl-C."],
+      ["SIGTERM", 143, "Scan terminated by SIGTERM."],
     ] as const) {
-      const signals = new FakeSignals();
-      const stdout = capture();
-      const stderr = capture();
-      const deps = dependencies({
-        signals,
-        onTurn: (_repository, options) => {
-          (
-            options as { onOutputDirReady?: (scanDir: string) => void }
-          ).onOutputDirReady?.(path);
-        },
-        onRun: () => {
-          if (signal !== null) signals.emit(signal);
-          throw new Error("runtime failed");
-        },
-      });
+      for (const json of [false, true]) {
+        const signals = new FakeSignals();
+        const stdout = capture();
+        const stderr = capture();
+        const deps = dependencies({
+          signals,
+          onTurn: (_repository, options) => {
+            (options as ScanOptions).onOutputDirReady?.(path);
+          },
+          onRun: () => {
+            if (signal !== null) signals.emit(signal);
+            throw new Error("runtime failed");
+          },
+        });
 
-      expect(
-        await main(["scan", "."], stdout.stream, stderr.stream, deps),
-      ).toBe(expectedExit);
-      expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(`Partial output was kept at ${path}.`);
+        expect(
+          await main(
+            json ? ["scan", ".", "--json"] : ["scan", "."],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(expectedExit);
+        if (json) {
+          expect(JSON.parse(stdout.text())).toEqual({
+            code: "SCAN_FAILED",
+            message,
+          });
+        } else {
+          expect(stdout.text()).toBe("");
+        }
+        expect(stderr.text()).toContain(`Partial output was kept at ${path}.`);
+      }
     }
   }, 30_000);
 
