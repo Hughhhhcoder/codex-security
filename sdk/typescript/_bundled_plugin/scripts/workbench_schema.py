@@ -909,6 +909,9 @@ def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: 
         repository_identity_migration is not None
         and repository_identity_migration["name"] == "persist repository identities"
     ):
+        from workbench_target_state import normalize_pre_release_repository_identities
+
+        normalize_pre_release_repository_identities(connection)
         connection.execute(
             "UPDATE schema_migrations SET version = 31 WHERE version = 30 AND name = ?",
             ("persist repository identities",),

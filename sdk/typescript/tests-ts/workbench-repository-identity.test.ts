@@ -73,6 +73,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -85,6 +86,7 @@ from workbench_native_indexes import repository_target_ids
 from workbench_schema import MIGRATIONS, apply_migrations
 from workbench_target_state import (
     _repository_birth_time_ns,
+    _repository_identity_details,
     backfill_repository_identities,
     backfill_security_targets,
     ensure_security_target,
@@ -573,7 +575,8 @@ elif scenario == "candidate-generation":
     candidate_identity = repository_identity(clone)
 
     def live_identity(target):
-        return requested_identity if Path(target) == clone else repository_identity(target)
+        details = _repository_identity_details(target)
+        return replace(details, value=requested_identity) if Path(target) == clone else details
 
     def automatic_history():
         matching = history.list_unmatched_scan_pairs(
@@ -595,10 +598,7 @@ elif scenario == "candidate-generation":
             "matchingScanIds": sorted(matching_ids),
         }
 
-    with (
-        patch("workbench_target_state.repository_identity", side_effect=live_identity),
-        patch("workbench_scan_history.repository_identity", side_effect=live_identity),
-    ):
+    with patch("workbench_target_state._repository_identity_details", side_effect=live_identity):
         persisted = automatic_history()
         connection.execute(
             "UPDATE security_targets SET repository_identity = NULL WHERE id = ?",

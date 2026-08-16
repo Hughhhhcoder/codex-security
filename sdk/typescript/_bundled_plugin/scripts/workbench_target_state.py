@@ -6,10 +6,13 @@ import argparse
 import hashlib
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -77,8 +80,21 @@ def _repository_birth_time_ns(path: str, metadata: os.stat_result) -> int | None
     return birth_time_ns if birth_time_ns > 0 else None
 
 
-def repository_identity(target: Path | str) -> str | None:
-    """Identify matching Git worktree targets without storing remote credentials."""
+@dataclass(frozen=True)
+class GitRepositoryIdentity:
+    value: str
+    relative_path: str
+    common_directory: str
+    device: int | str
+    inode: int | str
+    birth_time_ns: int
+
+
+def _identity_digest(material: str) -> str:
+    return f"repository_sha256_{hashlib.sha256(material.encode()).hexdigest()}"
+
+
+def _repository_identity_details(target: Path | str) -> GitRepositoryIdentity | None:
     target = Path(target)
     common_directory = git_output(
         target, "rev-parse", "--path-format=absolute", "--git-common-dir"
@@ -113,13 +129,179 @@ def repository_identity(target: Path | str) -> str | None:
         f"git-common-dir\0{canonical_directory}\0{device}\0{inode}\0"
         f"{birth_time_ns}\0{relative}"
     )
-    return f"repository_sha256_{hashlib.sha256(material.encode()).hexdigest()}"
+    return GitRepositoryIdentity(
+        _identity_digest(material), relative, canonical_directory, device, inode, birth_time_ns
+    )
+
+
+def repository_identity(target: Path | str) -> str | None:
+    """Identify matching Git worktree targets without storing remote credentials."""
+    identity = _repository_identity_details(target)
+    return identity.value if identity is not None else None
+
+
+def repository_origin(target: Path) -> tuple[str, str] | None:
+    remote = git_output(target, "remote", "get-url", "origin")
+    if remote is None:
+        return None
+    if "://" in remote:
+        try:
+            parsed = urlsplit(remote)
+            port = parsed.port
+        except ValueError:
+            return None
+        if parsed.scheme not in {"https", "ssh"} or parsed.hostname is None:
+            return None
+        if parsed.query or parsed.fragment:
+            return None
+        host = parsed.hostname
+        if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
+            host = f"{host}:{port}"
+        path = parsed.path
+    else:
+        authority, separator, path = remote.partition(":")
+        if not separator or "?" in path or "#" in path:
+            return None
+        host = authority.rsplit("@", 1)[-1]
+    path = path.strip("/").removesuffix(".git")
+    return (host.lower(), path) if host and path else None
 
 
 def supports_repository_identity(connection: sqlite3.Connection) -> bool:
     return any(
         row["name"] == "repository_identity"
         for row in connection.execute("PRAGMA table_info(security_targets)")
+    )
+
+
+@dataclass(frozen=True)
+class RepositoryTargetState:
+    target_id: str
+    target_path: str
+    stored_identity: str | None
+    resolved_path: str | None = None
+    metadata: os.stat_result | None = None
+    repository: GitRepositoryIdentity | None = None
+    ownership_matches: bool = False
+    strict_owner_matches: bool = False
+    missing: bool = False
+
+    @property
+    def live_identity(self) -> str | None:
+        return self.repository.value if self.repository is not None else None
+
+    @property
+    def verified_identity(self) -> str | None:
+        if not self.ownership_matches or self.repository is None:
+            return None
+        if self.stored_identity is None:
+            return self.live_identity if self.strict_owner_matches else None
+        return self.live_identity if self.live_identity == self.stored_identity else None
+
+    @property
+    def relaxed_directory_ownership(self) -> bool:
+        return (
+            self.stored_identity is not None
+            and self.verified_identity == self.stored_identity
+            and self.repository is not None
+            and self.repository.relative_path != "."
+        )
+
+    def require_owner(self) -> None:
+        if not self.ownership_matches:
+            raise SystemExit(
+                f"The repository checkout at {self.target_path} no longer matches its recorded "
+                "security scan history; refusing to reuse its target."
+            )
+
+
+def _inspect_repository_target(
+    connection: sqlite3.Connection,
+    target_id: str,
+    target_path: str,
+    stored_identity: str | None,
+    *,
+    scan_columns: set[str] | None = None,
+) -> RepositoryTargetState:
+    target = Path(target_path)
+    try:
+        resolved_path = str(target.resolve())
+    except (OSError, RuntimeError):
+        return RepositoryTargetState(target_id, target_path, stored_identity)
+    try:
+        metadata = target.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return RepositoryTargetState(
+            target_id, target_path, stored_identity,
+            resolved_path=resolved_path, ownership_matches=True, missing=True,
+        )
+    except OSError:
+        return RepositoryTargetState(
+            target_id, target_path, stored_identity, resolved_path=resolved_path
+        )
+    repository = _repository_identity_details(target)
+    if scan_columns is None:
+        scan_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(scans)")
+        }
+    historical_scan = False
+    recorded_owner = False
+    malformed_owner = False
+    mismatch = False
+    strict_owner_matches = False
+    ownership_matches = True
+    if {"target_id", "target_path"} <= scan_columns:
+        if not {"target_device", "target_inode"} <= scan_columns:
+            historical_scan = connection.execute(
+                "SELECT 1 FROM scans WHERE target_id = ? OR target_path = ? LIMIT 1",
+                (target_id, target_path),
+            ).fetchone() is not None
+            strict_owner_matches = not historical_scan
+        else:
+            strict_owner_matches = True
+            for scan in connection.execute(
+                """
+                SELECT target_device, target_inode FROM scans
+                WHERE target_id = ? OR target_path = ?
+                """,
+                (target_id, target_path),
+            ):
+                historical_scan = True
+                device, inode = scan["target_device"], scan["target_inode"]
+                if device is None and inode is None:
+                    strict_owner_matches = False
+                    continue
+                if device is None or inode is None:
+                    malformed_owner = True
+                    strict_owner_matches = False
+                    continue
+                recorded_owner = True
+                if not stored_filesystem_identity_matches(
+                    device, metadata.st_dev
+                ) or not stored_filesystem_identity_matches(inode, metadata.st_ino):
+                    mismatch = True
+                    strict_owner_matches = False
+            verified_repository = (
+                stored_identity is not None
+                and repository is not None
+                and repository.value == stored_identity
+            )
+            ownership_matches = not (
+                malformed_owner
+                or mismatch
+                and (
+                    not verified_repository
+                    or repository is None
+                    or repository.relative_path == "."
+                )
+                or stored_identity is not None
+                and (
+                    not verified_repository or historical_scan and not recorded_owner
+                )
+            )
+    return RepositoryTargetState(
+        target_id, target_path, stored_identity, resolved_path, metadata, repository,
+        ownership_matches, strict_owner_matches,
     )
 
 
@@ -130,108 +312,143 @@ def verified_repository_identity(
     *,
     stored_identity: str | None = None,
 ) -> str | None:
-    target = Path(target_path)
+    return _inspect_repository_target(
+        connection, target_id, target_path, stored_identity
+    ).verified_identity
+
+
+class RepositoryIdentityCache:
+    """One request's saved identities and verified live aliases."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        self.supports_identity = supports_repository_identity(connection)
+        self.scan_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(scans)")
+        }
+        identity_column = "repository_identity" if self.supports_identity else "NULL"
+        self.targets = {
+            row["target_id"]: row
+            for row in connection.execute(
+                "SELECT id AS target_id, current_path AS target_path, "
+                f"{identity_column} AS repository_identity FROM security_targets"
+            )
+        }
+        self.targets_by_path = {
+            row["target_path"]: row for row in self.targets.values()
+        }
+        self._states: dict[tuple[str, str, str | None], RepositoryTargetState] = {}
+        self._origins: dict[str, tuple[str, str] | None] = {}
+
+    def for_row(self, row: sqlite3.Row | dict) -> RepositoryTargetState:
+        key = (
+            row["target_id"] or "",
+            row["target_path"],
+            row["repository_identity"] if "repository_identity" in row.keys() else None,
+        )
+        if key not in self._states:
+            self._states[key] = _inspect_repository_target(
+                self.connection, *key, scan_columns=self.scan_columns
+            )
+        return self._states[key]
+
+    def for_path(self, target_path: str) -> RepositoryTargetState:
+        row = self.targets_by_path.get(target_path)
+        return self.for_row(
+            row if row is not None else {
+                "target_id": "", "target_path": target_path, "repository_identity": None,
+            }
+        )
+
+    def group(self, target_id: str) -> tuple[str, str]:
+        target = self.targets.get(target_id)
+        identity = target["repository_identity"] if target is not None else None
+        if identity is None and target is not None:
+            identity = self.for_row(target).verified_identity
+        return ("target", target_id) if identity is None else ("repository", identity)
+
+    def target_ids(self, target_id: str) -> set[str]:
+        target = self.targets.get(target_id)
+        if not self.supports_identity or target is None:
+            return {target_id}
+        requested = self.for_row(target)
+        if not requested.ownership_matches:
+            return set()
+        group = self.group(target_id)
+        if group[0] == "target":
+            return {target_id}
+        return {candidate for candidate in self.targets if self.group(candidate) == group}
+
+    def origin(self, state: RepositoryTargetState) -> tuple[str, str] | None:
+        if state.target_path not in self._origins:
+            self._origins[state.target_path] = repository_origin(Path(state.target_path))
+        return self._origins[state.target_path]
+
+
+def _pre_release_repository_identities(identity: GitRepositoryIdentity) -> set[str]:
+    directory = os.path.normcase(identity.common_directory)
+    relative = os.path.normcase(os.fspath(Path(identity.relative_path))).replace(os.sep, "/")
+    prefix = f"git-common-dir\0{directory}\0{identity.device}\0{identity.inode}\0"
+    identities = {_identity_digest(f"{prefix}{relative}")}
     try:
-        metadata = target.stat()
+        generation = (Path(identity.common_directory) / "description").lstat()
     except OSError:
-        return None
-
-    if stored_identity is not None:
-        try:
-            _require_current_target_owner(connection, target_id, target_path, stored_identity)
-        except SystemExit:
-            return None
-        identity = repository_identity(target)
-        return identity if identity == stored_identity else None
-
-    scan_columns = {
-        row["name"] for row in connection.execute("PRAGMA table_info(scans)")
-    }
-    if not {"target_id", "target_path"} <= scan_columns:
-        return None
-    if not {"target_device", "target_inode"} <= scan_columns:
-        historical_scan = connection.execute(
-            "SELECT 1 FROM scans WHERE target_id = ? OR target_path = ? LIMIT 1",
-            (target_id, target_path),
-        ).fetchone()
-        return None if historical_scan is not None else repository_identity(target)
-
-    scans = connection.execute(
-        """
-        SELECT target_device, target_inode
-        FROM scans
-        WHERE target_id = ? OR target_path = ?
-        """,
-        (target_id, target_path),
-    )
-    if any(
-        not stored_filesystem_identity_matches(scan["target_device"], metadata.st_dev)
-        or not stored_filesystem_identity_matches(scan["target_inode"], metadata.st_ino)
-        for scan in scans
-    ):
-        return None
-    return repository_identity(target)
+        return identities
+    if stat.S_ISREG(generation.st_mode):
+        identities.add(_identity_digest(
+            f"{prefix}git-description\0"
+            f"{serialize_filesystem_identity(generation.st_dev)}\0"
+            f"{serialize_filesystem_identity(generation.st_ino)}\0"
+            f"{generation.st_ctime_ns}\0{relative}"
+        ))
+    return identities
 
 
-def _require_current_target_owner(
-    connection: sqlite3.Connection,
-    target_id: str,
-    target_path: str,
-    stored_identity: str | None,
-) -> None:
-    target = Path(target_path)
+def _timestamp_ns(value: str) -> int | None:
     try:
-        metadata = target.stat()
-    except OSError:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    if timestamp.tzinfo is None:
+        return None
+    delta = timestamp - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
+
+
+def normalize_pre_release_repository_identities(connection: sqlite3.Connection) -> None:
+    """Upgrade only known old hashes whose recorded generation is still present."""
+    if not supports_repository_identity(connection):
         return
-    scan_columns = {
-        row["name"] for row in connection.execute("PRAGMA table_info(scans)")
-    }
-    if not {"target_id", "target_path", "target_device", "target_inode"} <= scan_columns:
-        return
-    scans = connection.execute(
-        """
-        SELECT target_device, target_inode
-        FROM scans
-        WHERE target_id = ? OR target_path = ?
-        """,
-        (target_id, target_path),
-    )
-    historical_scan = False
-    recorded_owner = False
-    malformed_owner = False
-    mismatch = False
-    for scan in scans:
-        historical_scan = True
-        device, inode = scan["target_device"], scan["target_inode"]
-        if device is None and inode is None:
+    for target in connection.execute(
+        "SELECT id, current_path, created_at, repository_identity FROM security_targets "
+        "WHERE repository_identity IS NOT NULL"
+    ).fetchall():
+        stored = target["repository_identity"]
+        state = _inspect_repository_target(
+            connection, target["id"], target["current_path"], stored
+        )
+        identity = state.repository
+        if (
+            identity is None
+            or identity.value == stored
+            or not state.strict_owner_matches
+            or stored not in _pre_release_repository_identities(identity)
+        ):
             continue
-        if device is None or inode is None:
-            malformed_owner = True
-            break
-        recorded_owner = True
-        if not stored_filesystem_identity_matches(
-            device, metadata.st_dev
-        ) or not stored_filesystem_identity_matches(inode, metadata.st_ino):
-            mismatch = True
-    verified_repository = (
-        stored_identity is not None and repository_identity(target) == stored_identity
-    )
-    if (
-        malformed_owner
-        or mismatch
-        and (
-            not verified_repository
-            or repository_relative_path(target) in (None, ".")
+        scans = connection.execute(
+            "SELECT started_at, created_at FROM scans WHERE target_id = ? OR target_path = ?",
+            (target["id"], target["current_path"]),
+        ).fetchall()
+        timestamps = (
+            [_timestamp_ns(scan[column]) for scan in scans for column in ("started_at", "created_at")]
+            if scans else [_timestamp_ns(target["created_at"])]
         )
-        or stored_identity is not None
-        and (
-            not verified_repository or historical_scan and not recorded_owner
-        )
-    ):
-        raise SystemExit(
-            f"The repository checkout at {target_path} no longer matches its recorded "
-            "security scan history; refusing to reuse its target."
+        if any(value is None for value in timestamps) or identity.birth_time_ns > min(timestamps):
+            continue
+        connection.execute(
+            "UPDATE security_targets SET repository_identity = ? "
+            "WHERE id = ? AND repository_identity = ?",
+            (identity.value, target["id"], stored),
         )
 
 
@@ -294,12 +511,14 @@ def ensure_security_target(
     ).fetchone()
     if existing is not None:
         target_id = str(existing["id"])
-        if verify_ownership and supports_identity:
-            _require_current_target_owner(
+        if supports_identity:
+            state = _inspect_repository_target(
                 connection, target_id, target_path, existing["repository_identity"]
             )
+            if verify_ownership:
+                state.require_owner()
         if supports_identity and existing["repository_identity"] is None:
-            identity = verified_repository_identity(connection, target_id, target_path)
+            identity = state.verified_identity
             if identity is not None:
                 connection.execute(
                     """

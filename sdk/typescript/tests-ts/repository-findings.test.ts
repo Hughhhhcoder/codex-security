@@ -227,6 +227,15 @@ result = {
     "openRepositories": indexes.list_repositories(connection, repository_arguments),
 }
 connection.execute(
+    "UPDATE finding_occurrences SET created_at = ? WHERE id = ?",
+    ("2026-02-05T00:00:00Z", "same-id-primary"),
+)
+result["overlappingCompletions"] = findings("primary", None)
+connection.execute(
+    "UPDATE finding_occurrences SET created_at = ? WHERE id = ?",
+    ("2026-02-03T00:00:00Z", "same-id-primary"),
+)
+connection.execute(
     "INSERT INTO finding_triage VALUES (?, ?, ?, ?)",
     ("same-id-primary", "closed", "2026-02-05T00:00:00Z", "false_positive"),
 )
@@ -277,6 +286,15 @@ print(json.dumps(result))
   >;
   const primary = result["primary"]!.findings;
   expect(result["linked"]!.findings).toEqual(primary);
+  expect(
+    result["overlappingCompletions"]!.findings.find(
+      (finding) => finding["findingId"] === "same-id",
+    ),
+  ).toMatchObject({
+    scanId: "primary-open",
+    confirmedInLatestScan: true,
+    knownScanIds: ["primary-open", "linked-latest"],
+  });
   expect(primary.map((finding) => finding["findingId"])).toEqual([
     "linked-only",
     "same-id",

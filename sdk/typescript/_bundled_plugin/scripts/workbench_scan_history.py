@@ -8,7 +8,6 @@ import sqlite3
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
-from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -16,13 +15,9 @@ from filesystem_identity import serialize_filesystem_identity
 from report_projection import SEVERITY_ORDER
 from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_usage import stored_scan_cost_fields
-from workbench_target import git_output
 from workbench_target_state import (
-    _require_current_target_owner,
-    repository_identity,
-    repository_relative_path,
+    RepositoryIdentityCache,
     supports_repository_identity,
-    verified_repository_identity,
 )
 
 
@@ -31,90 +26,40 @@ def _same_repository(
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    after_identity: tuple[str | None, tuple[str, str] | None, str | None] | None = None,
+    identities: RepositoryIdentityCache | None = None,
 ) -> bool:
-    before_target_id = before["target_id"]
-    before_target = Path(before["target_path"])
-    after_target = Path(after["target_path"])
-    before_stored_identity = (
+    identities = identities or RepositoryIdentityCache(connection)
+    before_stored = (
         before["repository_identity"] if "repository_identity" in before.keys() else None
     )
-    after_stored_identity = (
+    after_stored = (
         after["repository_identity"] if "repository_identity" in after.keys() else None
     )
-    after_grouping_identity = (
-        after_stored_identity
-        if after_stored_identity is not None
-        else after_identity[0]
-        if after_identity is not None
-        else None
-    )
-    if before_stored_identity is not None and before_stored_identity == after_grouping_identity:
+    before_state = identities.for_row(before)
+    after_state = identities.for_row(after)
+    if before_state.resolved_path is None or after_state.resolved_path is None:
+        return False
+    before_group = before_stored or before_state.verified_identity
+    after_group = after_stored or after_state.verified_identity
+    if before_group is not None and before_group == after_group:
         return True
     if (
-        before_target_id and before_target_id == after["target_id"]
-        or str(before_target.resolve()) == str(after_target.resolve())
+        before_state.target_id and before_state.target_id == after_state.target_id
+        or before_state.resolved_path == after_state.resolved_path
     ):
-        return before_stored_identity is None or after_grouping_identity is None
-
-    before_live_identity = verified_repository_identity(
-        connection,
-        before_target_id or "",
-        str(before_target),
-        stored_identity=before_stored_identity,
-    )
-    after_live_identity = (
-        verified_repository_identity(
-            connection,
-            after["target_id"] or "",
-            str(after_target),
-            stored_identity=after_stored_identity,
-        )
-        if after_identity is None
-        else after_identity[0]
-    )
-    if before_live_identity is not None and before_live_identity == after_live_identity:
+        return before_stored is None or after_stored is None
+    before_identity = before_state.verified_identity
+    after_identity = after_state.verified_identity
+    if before_identity is not None and before_identity == after_identity:
         return True
-    if before_live_identity is None or after_live_identity is None:
+    if before_identity is None or after_identity is None:
         return False
-
-    after_origin = (
-        _repository_origin(after_target) if after_identity is None else after_identity[1]
+    after_origin = identities.origin(after_state)
+    return (
+        after_origin is not None
+        and identities.origin(before_state) == after_origin
+        and before_state.repository.relative_path == after_state.repository.relative_path
     )
-    if after_origin is None or _repository_origin(before_target) != after_origin:
-        return False
-    before_relative = repository_relative_path(before_target)
-    after_relative = (
-        repository_relative_path(after_target) if after_identity is None else after_identity[2]
-    )
-    return before_relative is not None and before_relative == after_relative
-
-
-def _repository_origin(target: Path) -> tuple[str, str] | None:
-    remote = git_output(target, "remote", "get-url", "origin")
-    if remote is None:
-        return None
-    if "://" in remote:
-        try:
-            parsed = urlsplit(remote)
-            port = parsed.port
-        except ValueError:
-            return None
-        if parsed.scheme not in {"https", "ssh"} or parsed.hostname is None:
-            return None
-        if parsed.query or parsed.fragment:
-            return None
-        host = parsed.hostname
-        if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
-            host = f"{host}:{port}"
-        path = parsed.path
-    else:
-        authority, separator, path = remote.partition(":")
-        if not separator or "?" in path or "#" in path:
-            return None
-        host = authority.rsplit("@", 1)[-1]
-    path = path.strip("/").removesuffix(".git")
-    return (host.lower(), path) if host and path else None
 
 
 def list_scans(
@@ -124,113 +69,42 @@ def list_scans(
     values: list[Any] = []
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
-        identity_column = supports_repository_identity(connection)
-        requested_identity_column = (
-            ", (SELECT repository_identity FROM security_targets "
-            "WHERE current_path = ?) AS repository_identity"
-            if identity_column
-            else ""
-        )
-        requested_values = (
-            (str(repository), str(repository), str(repository))
-            if identity_column
-            else (str(repository), str(repository))
-        )
-        requested_repository = connection.execute(
-            f"""
-            SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
-                ? AS target_path
-                {requested_identity_column}
-            """,
-            requested_values,
-        ).fetchone()
-        scan_columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(scans)")
-        }
-        check_ownership = {"target_device", "target_inode"} <= scan_columns
-        ownership_matches = not check_ownership or _repository_ownership_matches(
-            connection,
-            repository,
-            requested_repository["target_id"],
-            requested_repository["repository_identity"] if identity_column else None,
-        )
-        live_identity = repository_identity(repository)
+        identities = RepositoryIdentityCache(connection)
+        requested = identities.for_path(str(repository))
+        check_ownership = {"target_device", "target_inode"} <= identities.scan_columns
         identity_matches = (
-            not identity_column
-            or requested_repository["repository_identity"] is None
-            or requested_repository["repository_identity"] == live_identity
-        )
-        ownership_matches = ownership_matches and identity_matches
-        requested_identity = (
-            verified_repository_identity(
-                connection,
-                requested_repository["target_id"],
-                str(repository),
-                stored_identity=(
-                    requested_repository["repository_identity"] if identity_column else None
-                ),
+            requested.resolved_path is not None
+            and (
+                requested.stored_identity is None
+                or requested.missing
+                or requested.stored_identity == requested.live_identity
             )
-            if ownership_matches
-            else None,
-            None,
-            None,
         )
-        related_targets = (
-            [
-                target
-                for target in connection.execute(
-                    "SELECT id AS target_id, current_path AS target_path, repository_identity "
-                    "FROM security_targets"
-                    if identity_column
-                    else "SELECT id AS target_id, current_path AS target_path FROM security_targets"
-                )
-                if _same_repository(
-                    connection,
-                    target,
-                    requested_repository,
-                    after_identity=requested_identity,
-                )
-            ]
-            if ownership_matches
-            else []
-        )
-        repository_clauses = (
-            [
-                _owned_scan_clause(
-                    repository,
-                    check_ownership
-                    and not (
-                        identity_column
-                        and requested_repository["repository_identity"] is not None
-                        and requested_repository["repository_identity"] == live_identity
-                        and ownership_matches
-                        and repository_relative_path(repository) not in (None, ".")
-                    ),
-                    values,
-                )
-            ]
-            if identity_matches
-            else ["0"]
-        )
-        for target in related_targets:
-            target_path = Path(target["target_path"])
-            target_identity = target["repository_identity"] if identity_column else None
-            verified_target = (
-                check_ownership
-                and target_identity is not None
-                and repository_relative_path(target_path) not in (None, ".")
-                and _repository_ownership_matches(
-                    connection, target_path, target["target_id"], target_identity
-                )
+        repository_clauses = [
+            _owned_scan_clause(
+                repository,
+                check_ownership and not requested.relaxed_directory_ownership,
+                values,
             )
-            repository_clauses.append(
-                _owned_scan_clause(
-                    target_path,
-                    check_ownership and not verified_target,
-                    values,
-                    target_id=target["target_id"],
+        ] if identity_matches else ["0"]
+        requested_identity = requested.verified_identity
+        if requested_identity is not None:
+            for target_id, target in identities.targets.items():
+                if target_id == requested.target_id or identities.group(target_id) != (
+                    "repository", requested_identity
+                ):
+                    continue
+                candidate = identities.for_row(target)
+                if candidate.resolved_path is None:
+                    continue
+                repository_clauses.append(
+                    _owned_scan_clause(
+                        Path(candidate.target_path),
+                        check_ownership and not candidate.relaxed_directory_ownership,
+                        values,
+                        target_id=target_id,
+                    )
                 )
-            )
         clauses.append(f"({' OR '.join(repository_clauses)})")
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
@@ -377,18 +251,6 @@ def _owned_scan_clause(
     )
 
 
-def _repository_ownership_matches(
-    connection: sqlite3.Connection,
-    repository: Path,
-    target_id: str | None,
-    stored_identity: str | None = None,
-) -> bool:
-    try:
-        repository.stat()
-        _require_current_target_owner(connection, target_id or "", str(repository), stored_identity)
-    except (OSError, SystemExit):
-        return False
-    return True
 
 
 def list_unmatched_scan_pairs(
@@ -399,61 +261,26 @@ def list_unmatched_scan_pairs(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
-    identity_column = supports_repository_identity(connection)
-    requested_identity_column = (
-        ", (SELECT repository_identity FROM security_targets "
-        "WHERE current_path = ?) AS repository_identity"
-        if identity_column
-        else ""
-    )
-    requested_values = (
-        (str(repository), str(repository), str(repository))
-        if identity_column
-        else (str(repository), str(repository))
-    )
-    requested = connection.execute(
-        f"""
-        SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
-            ? AS target_path
-            {requested_identity_column}
-        """,
-        requested_values,
-    ).fetchone()
-    if identity_column and requested["target_id"]:
-        _require_current_target_owner(
-            connection,
-            requested["target_id"],
-            str(repository),
-            requested["repository_identity"],
-        )
+    identities = RepositoryIdentityCache(connection)
+    requested = identities.for_path(str(repository))
+    if identities.supports_identity and requested.target_id:
+        requested.require_owner()
+    requested_row = {
+        "target_id": requested.target_id,
+        "target_path": requested.target_path,
+        "repository_identity": requested.stored_identity,
+    }
     scan_query = (
         "SELECT scans.*, targets.repository_identity "
         "FROM scans LEFT JOIN security_targets AS targets ON targets.id = scans.target_id "
         "WHERE scans.status = 'complete' ORDER BY scans.started_at, scans.id"
-        if identity_column
+        if identities.supports_identity
         else "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
-    )
-    requested_identity = verified_repository_identity(
-        connection,
-        requested["target_id"],
-        str(repository),
-        stored_identity=requested["repository_identity"] if identity_column else None,
-    )
-    requested_group = (
-        requested_identity,
-        _repository_origin(repository),
-        repository_relative_path(repository),
     )
     selected = [
         scan
         for scan in connection.execute(scan_query)
-        if str(Path(scan["target_path"]).resolve()) == str(repository)
-        or _same_repository(
-            connection,
-            scan,
-            requested,
-            after_identity=requested_group,
-        )
+        if _same_repository(connection, scan, requested_row, identities=identities)
     ]
 
     available = []

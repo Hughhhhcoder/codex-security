@@ -16,18 +16,20 @@ from workbench_constants import (
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
 )
-from workbench_native_indexes import _indexed_findings, repository_target_ids
+from workbench_native_indexes import _indexed_findings
+from workbench_target_state import RepositoryIdentityCache
 from workbench_validation import bounded_output_text
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
-    target_ids = sorted(repository_target_ids(connection, scan["target_id"]))
+    identities = RepositoryIdentityCache(connection)
+    target_ids = sorted(identities.target_ids(scan["target_id"]))
     if not target_ids:
         return {"scanId": scan["id"], "targetId": scan["target_id"], "falsePositives": []}
 
     indexed_findings = {
         finding_id: finding
-        for finding in _indexed_findings(connection)
+        for finding in _indexed_findings(connection, identities=identities)
         if finding["target_id"] in target_ids
         for finding_id in finding["matched_finding_ids"]
     }
