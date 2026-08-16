@@ -376,7 +376,7 @@ export async function publishScanInternal(
     try {
       await saveReceipt(result, environment);
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = safeErrorMessage(error);
       throw new CodexSecurityError(
         `${reason} and its partial receipt could not be saved: ${detail}. ${recoveryDetails}`,
         { cause: error },

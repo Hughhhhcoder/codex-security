@@ -1876,12 +1876,13 @@ describe("connected Linear publication", () => {
   });
 
   test.each([
-    [false, false],
-    [true, false],
-    [false, true],
+    ["none", false],
+    ["both", false],
+    ["final", false],
+    ["none", true],
   ] as const)(
     "retains mutation evidence when payload verification fails (receipt failure: %s, existing event log: %s)",
-    async (receiptFails, eventLogExists) => {
+    async (receiptFailure, eventLogExists) => {
       const publication = preparedPublication(2);
       const changed = JSON.parse(issueEvent(publication.issues[1]!));
       changed.item.arguments.team = "different-team";
@@ -1896,6 +1897,7 @@ describe("connected Linear publication", () => {
       let handoffFile: string | undefined;
       let persisted: string[] = [];
       let receipt: unknown;
+      let receiptWrites = 0;
       const updates: PublishScanProgress[] = [];
 
       await expect(
@@ -1934,17 +1936,26 @@ describe("connected Linear publication", () => {
                 return [...issues];
               },
               writeReceipt: async (result) => {
+                receiptWrites += 1;
                 receipt = result;
-                if (receiptFails)
-                  throw new Error("Receipt storage unavailable.");
+                if (
+                  receiptFailure === "both" ||
+                  (receiptFailure === "final" && receiptWrites === 2)
+                )
+                  throw new Error(
+                    "OPENAI_API_KEY=sk-proj-SYNTHETIC_RECEIPT_SECRET_123",
+                  );
               },
             },
           ),
         ),
       ).rejects.toThrow(
-        /could not verify every completed mutation.*handoff remains at.*avoid creating duplicate issues/u,
+        receiptFailure !== "none"
+          ? /could not verify every completed mutation and its partial receipt could not be saved: \[redacted\]\..*handoff remains at.*avoid creating duplicate issues/u
+          : /could not verify every completed mutation.*handoff remains at.*avoid creating duplicate issues/u,
       );
 
+      expect(receiptWrites).toBe(2);
       expect(persisted).toEqual(["SEC-1"]);
       expect(receipt).toMatchObject({
         indeterminate: true,
