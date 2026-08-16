@@ -2490,6 +2490,130 @@ describe("live scan cost tracking", () => {
     );
   });
 
+  test("prefers mocked completed usage when prices are unavailable", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "prefers mocked completed usage when prices are unavailable",
+      )
+    ) {
+      return;
+    }
+    const observedRoot = { input_tokens: 100, output_tokens: 10 };
+    const workerUsage = { input_tokens: 200, output_tokens: 20 };
+    const completedRoot = { input_tokens: 1_000, output_tokens: 100 };
+    for (const [withWorker, refreshFails] of [
+      [false, true],
+      [true, true],
+      [true, false],
+    ] as const) {
+      const sessions: Record<string, MockAccountingEvent[]> = {
+        "scan-thread": accountingSession("scan-thread", [
+          accountingEvent(observedRoot),
+        ]),
+      };
+      if (withWorker) {
+        sessions["worker-thread"] = accountingSession(
+          "worker-thread",
+          [accountingEvent(workerUsage)],
+          "scan-thread",
+        );
+      }
+      const reportedErrors: unknown[] = [];
+      const reportedCosts: number[] = [];
+      const refreshError = new Error("Mock final accounting refresh failed.");
+      await withMockAccountingSessions(
+        sessions,
+        {
+          model: "unknown-model",
+          onCost: (cost) => reportedCosts.push(cost.estimatedUsd),
+          onError: (error) => reportedErrors.push(error),
+        },
+        async (tracker) => {
+          expect((await tracker.stop()).usage).toMatchObject({
+            input_tokens: withWorker ? 300 : 100,
+          });
+          const refresh = refreshFails
+            ? spyOn(tracker, "refresh").mockRejectedValue(refreshError)
+            : null;
+          try {
+            const final = await tracker.stop(completedRoot);
+            expect(final).toMatchObject({
+              usage: {
+                input_tokens: withWorker ? 1_200 : 1_000,
+                output_tokens: withWorker ? 120 : 100,
+              },
+              cost: null,
+            });
+            if (!withWorker) expect(final.usage).toBe(completedRoot);
+            expect(await tracker.stop()).toBe(final);
+            expect(reportedErrors).toEqual(refreshFails ? [refreshError] : []);
+            expect(reportedCosts).toEqual([]);
+          } finally {
+            refresh?.mockRestore();
+          }
+        },
+      );
+    }
+    const unpriceable = {
+      input_tokens: Number.MAX_SAFE_INTEGER,
+      output_tokens: 0,
+    };
+    for (const [replacement, maxCostUsd, rejects] of [
+      [observedRoot, undefined, false],
+      [unpriceable, undefined, false],
+      [unpriceable, 1, true],
+    ] as const) {
+      const costs: number[] = [];
+      await withMockAccountingSessions(
+        {
+          "scan-thread": accountingSession("scan-thread", [
+            accountingEvent(completedRoot),
+          ]),
+        },
+        {
+          model: "gpt-5.6-terra",
+          maxCostUsd,
+          onCost: (cost) => costs.push(cost.estimatedUsd),
+        },
+        async (tracker) => {
+          const prior = await tracker.stop();
+          expect(prior.cost?.estimatedUsd).toBe(0.0032);
+          const completed = tracker.stop(replacement);
+          if (rejects) {
+            await expect(completed).rejects.toThrow(
+              "The scan cost limit could not be verified",
+            );
+          } else {
+            await expect(completed).resolves.toEqual(prior);
+          }
+          expect(costs).toEqual([0.0032]);
+        },
+      );
+    }
+    await withMockAccountingSessions(
+      {
+        "scan-thread": accountingSession("scan-thread", []),
+        "worker-thread": accountingSession(
+          "worker-thread",
+          [accountingEvent(workerUsage)],
+          "scan-thread",
+        ),
+      },
+      { model: "unknown-model" },
+      async (tracker, append) => {
+        const prior = await tracker.stop();
+        expect(prior).toMatchObject({ usage: workerUsage, cost: null });
+        append(
+          "conflicting-worker",
+          accountingSession("worker-thread", [], "another-thread"),
+        );
+        await tracker.refresh();
+        expect(await tracker.stop({})).toBe(prior);
+      },
+    );
+  });
+
   test("retains a partial event across incremental reads", async () => {
     const home = await codexHome();
     const path = await writeSession(home, "scan-thread", {

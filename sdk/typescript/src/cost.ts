@@ -218,9 +218,10 @@ export class ScanCostTracker {
     const cost = estimateScanCost(this.#options.model, completedUsage);
     const snapshot =
       this.#snapshot.usage !== null &&
-      (cost === null ||
+      ((rootUsage === null && workerUsage === null) ||
         (this.#snapshot.cost !== null &&
-          this.#snapshot.cost.estimatedUsd >= cost.estimatedUsd))
+          (cost === null ||
+            this.#snapshot.cost.estimatedUsd >= cost.estimatedUsd)))
         ? this.#snapshot
         : { usage: completedUsage ?? null, cost };
     this.#snapshot = snapshot;
