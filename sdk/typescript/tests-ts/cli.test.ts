@@ -29,6 +29,7 @@ import {
   InvalidTargetError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
+  PluginBootstrapError,
   PluginPythonUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
@@ -3973,6 +3974,12 @@ describe("CLI", () => {
         ),
       ],
       [
+        "local plugin validation failure",
+        new ConfigurationError(
+          "Invalid Codex plugin directory: /plugins/network-security",
+        ),
+      ],
+      [
         "python interpreter unavailable",
         new PluginPythonUnavailableError(
           "The configured plugin Python interpreter is unavailable or unusable: /usr/bin/python3",
@@ -4016,21 +4023,28 @@ describe("CLI", () => {
   test("keeps model connection advice for genuine transport failures", async () => {
     // The bypass must not swallow real 401/403 handling, and the advice must
     // still replace upstream text that can name the organization or project.
-    for (const [detail, expected, safeMessage] of [
+    for (const [failure, expected, safeMessage] of [
       [
-        "401 invalid API key for org-private",
+        new CodexSecurityError("401 invalid API key for org-private"),
         "Authentication failed",
         "Authentication failed. Check the selected credentials.",
       ],
       [
-        "403 model access denied for org-private",
+        new CodexSecurityError("403 model access denied for org-private"),
         "cannot access the configured model",
         "The selected credentials cannot access the configured model.",
       ],
       [
-        "429 too many requests for org-private",
+        new CodexSecurityError("429 too many requests for org-private"),
         "reached its rate limit",
         "The configured account reached its rate limit. Wait and retry.",
+      ],
+      [
+        new PluginBootstrapError(
+          "Codex plugin bootstrap failed: network ECONNRESET",
+        ),
+        "network ECONNRESET",
+        "The scan encountered a network or connection failure.",
       ],
     ] as const) {
       const stdout = capture();
@@ -4038,7 +4052,7 @@ describe("CLI", () => {
       const deps = dependencies();
       deps.createSecurity = () => ({
         run: async () => {
-          throw new CodexSecurityError(detail);
+          throw failure;
         },
         preflight: async () => fakePreflight(),
         close: async () => {},
