@@ -34,14 +34,18 @@ def list_global_findings(
     query = args.query.strip().casefold() if args.query else ""
     identities = RepositoryIdentityCache(connection)
     repository = getattr(args, "repository", None)
+    requested = None
     if repository is not None:
-        target_ids = identities.target_ids_for_path(
-            str(Path(repository).expanduser().resolve())
-        )
+        repository = str(Path(repository).expanduser().resolve())
+        requested = identities.for_path(repository)
+        target_ids = identities.target_ids_for_path(repository)
     else:
         target_ids = (
             None if args.target_id is None else identities.target_ids(args.target_id)
         )
+        target = identities.targets.get(args.target_id)
+        if identities.supports_identity and target is not None:
+            requested = identities.for_row(target)
     findings = (
         row
         for row in _indexed_findings(connection, identities=identities, target_ids=target_ids)
@@ -90,6 +94,7 @@ def list_global_findings(
         "limit": limit,
         "nextOffset": args.offset + limit if has_more else None,
         "offset": args.offset,
+        "projectionAvailable": requested is None or requested.ownership_matches,
     }
 
 

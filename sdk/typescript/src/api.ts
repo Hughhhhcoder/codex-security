@@ -1939,7 +1939,12 @@ export async function listRepositoryFindings(
       ...(status === "open" ? ["--status", "open"] : []),
       ...(offset === undefined ? [] : ["--offset", String(offset)]),
     ]);
-    if (!Array.isArray(page["findings"])) return undefined;
+    if (
+      page["projectionAvailable"] === false ||
+      !Array.isArray(page["findings"])
+    ) {
+      return undefined;
+    }
     findings.push(...(page["findings"] as JsonObject[]));
     offset =
       typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;

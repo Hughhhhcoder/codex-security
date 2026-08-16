@@ -5,6 +5,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const probe = String.raw`
 import argparse
+import ctypes
 import hashlib
 import io
 import json
@@ -16,7 +17,7 @@ from collections import Counter
 from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, sys.argv[1])
 import workbench_scan_history as history
@@ -202,7 +203,98 @@ with ExitStack() as stack:
     stack.enter_context(patch.object(Path, "lstat", lstat_path))
     stack.enter_context(patch.object(state, "_repository_identity_details", identity_details))
     stack.enter_context(patch.object(state, "repository_origin", origin))
-    if scenario == "cache":
+    if scenario == "birth-time":
+        path = "/synthetic repository/.git"
+        real_sizeof = ctypes.sizeof
+
+        def native_result(*, wrapper=True, machine="x86_64", mask=0x800,
+                          seconds=42, nanoseconds=123, status=0,
+                          pointer_size=8, long_size=8):
+            calls = []
+
+            def invoke(*arguments):
+                number = None
+                if not wrapper:
+                    number, *arguments = arguments
+                directory, encoded, flags, requested_mask, output = arguments
+                assert (directory, encoded, flags, requested_mask) == (
+                    -100, os.fsencode(path), 0, 0x800
+                )
+                value = ctypes.cast(output, ctypes.POINTER(state._LinuxStatx)).contents
+                assert not value.mask and not value.birth_time.seconds
+                value.mask = mask
+                value.birth_time.seconds = seconds
+                value.birth_time.nanoseconds = nanoseconds
+                calls.append(number)
+                return status
+
+            function = Mock(side_effect=invoke)
+            libc = SimpleNamespace(**{"statx" if wrapper else "syscall": function})
+
+            def sizeof(kind):
+                if kind is ctypes.c_void_p:
+                    return pointer_size
+                if kind is ctypes.c_long:
+                    return long_size
+                return real_sizeof(kind)
+
+            with patch.object(state.ctypes, "CDLL", return_value=libc), \
+                 patch.object(state.ctypes, "sizeof", side_effect=sizeof), \
+                 patch.object(state.platform, "machine", return_value=machine):
+                result = state._linux_repository_birth_time_ns(path)
+            expected_arguments = (
+                (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint,
+                 ctypes.POINTER(state._LinuxStatx)) if wrapper else
+                (ctypes.c_long, ctypes.c_long, ctypes.c_char_p, ctypes.c_long,
+                 ctypes.c_ulong, ctypes.POINTER(state._LinuxStatx))
+            )
+            return {
+                "value": result, "calls": calls,
+                "typed": not calls or function.argtypes == expected_arguments
+                    and function.restype is (ctypes.c_int if wrapper else ctypes.c_long),
+            }
+
+        cases = {
+            "wrapper": native_result(),
+            "x86_64": native_result(wrapper=False),
+            "aarch64": native_result(wrapper=False, machine="aarch64"),
+            "unknown-abi": native_result(wrapper=False, machine="unknown"),
+            "pointer32": native_result(wrapper=False, pointer_size=4),
+            "long32": native_result(wrapper=False, long_size=4),
+            "missing-mask": native_result(mask=0),
+            "invalid-nanoseconds": native_result(nanoseconds=1_000_000_000),
+            "zero": native_result(seconds=0, nanoseconds=0),
+            "negative": native_result(seconds=-1, nanoseconds=999_999_999),
+            "failed": native_result(status=-1),
+        }
+        with patch.object(state.ctypes, "CDLL", return_value=SimpleNamespace()), \
+             patch.object(state.platform, "machine", return_value="x86_64"):
+            cases["missing-symbols"] = state._linux_repository_birth_time_ns(path)
+        with patch.object(state.ctypes, "CDLL", side_effect=OSError("unavailable")):
+            cases["missing-libc"] = state._linux_repository_birth_time_ns(path)
+        with patch.object(state.ctypes, "sizeof", return_value=255), \
+             patch.object(state.ctypes, "CDLL") as library:
+            cases["invalid-layout"] = state._linux_repository_birth_time_ns(path)
+            assert not library.called
+        with patch.object(sys, "platform", "linux"), patch.object(os, "name", "posix"), \
+             patch.object(state, "_linux_repository_birth_time_ns", return_value=42_000_000_123), \
+             patch.object(state.subprocess, "run") as command:
+            native = state._repository_birth_time_ns(path, SimpleNamespace(st_ctime_ns=41))
+            assert not command.called
+        with patch.object(sys, "platform", "linux"), patch.object(os, "name", "posix"), \
+             patch.object(state, "_linux_repository_birth_time_ns", return_value=None), \
+             patch.object(state.subprocess, "run", return_value=SimpleNamespace(
+                 stdout="42.000000123\n", returncode=0
+             )) as command:
+            fallback = state._repository_birth_time_ns(path, SimpleNamespace(st_ctime_ns=41))
+            assert command.call_args.args[0] == ["stat", "--format=%.9W", "--", path]
+            assert command.call_args.kwargs["env"]["LC_ALL"] == "C"
+        print(json.dumps({
+            "cases": cases, "native": native, "fallback": fallback,
+            "layout": [real_sizeof(state._LinuxStatxTimestamp),
+                       state._LinuxStatx.birth_time.offset, real_sizeof(state._LinuxStatx)],
+        }))
+    elif scenario == "cache":
         for name, stored, live in [
             ("requested", "repository-current", None),
             ("persisted", "repository-current", None),
@@ -365,8 +457,9 @@ with ExitStack() as stack:
         ]:
             add_target(name, stored, live)
             add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
-        add_target("fresh", "repository-current")
-        connection.execute("DELETE FROM security_targets WHERE id = 'fresh'")
+        for name, identity in [("fresh", "repository-current"), ("empty", "repository-empty")]:
+            add_target(name, identity)
+            connection.execute("DELETE FROM security_targets WHERE id = ?", (name,))
         metadata[paths["reused"]].st_ino += 1000
         add_finding("requested-scan", "current-finding")
         add_finding("reused-scan", "historical-finding", closed=True)
@@ -379,14 +472,17 @@ with ExitStack() as stack:
         feedback = get_scan_feedback(
             connection, connection.execute("SELECT * FROM scans WHERE id = 'requested-scan'").fetchone()
         )
-        def requested_findings(name):
+        def findings_page(name=None, target_id=None):
             return indexes.list_global_findings(
                 connection,
-                argparse.Namespace(repository=paths[name], target_id=None, limit=50, offset=0,
+                argparse.Namespace(repository=paths[name] if name else None,
+                                   target_id=target_id, limit=50, offset=0,
                                    query=None, severity=None, status=None),
-            )["findings"]
+            )
         target_count = connection.execute("SELECT COUNT(*) FROM security_targets").fetchone()[0]
-        fresh_findings = requested_findings("fresh")
+        fresh_findings = findings_page("fresh")
+        empty_findings = findings_page("empty")
+        replacement_findings = findings_page("reused")
         with patch.object(sys, "argv", [
             "workbench", "list-global-findings", "--repository", paths["fresh"],
             "--target-id", "reused",
@@ -402,8 +498,16 @@ with ExitStack() as stack:
             "replacementRequest": listed("reused"),
             "aliases": sorted(indexes.repository_target_ids(connection, "requested")),
             "findings": sorted(row["findingId"] for row in findings("requested")),
-            "freshFindings": sorted(row["findingId"] for row in fresh_findings),
-            "replacementFindings": requested_findings("reused"),
+            "freshFindings": sorted(row["findingId"] for row in fresh_findings["findings"]),
+            "emptyFindings": empty_findings["findings"],
+            "replacementFindings": replacement_findings["findings"],
+            "projectionAvailable": {
+                "fresh": fresh_findings["projectionAvailable"],
+                "empty": empty_findings["projectionAvailable"],
+                "replacementPath": replacement_findings["projectionAvailable"],
+                "replacementId": findings_page(target_id="reused")["projectionAvailable"],
+                "unknownId": findings_page(target_id="not-registered")["projectionAvailable"],
+            },
             "rejectsBothSelectors": rejects_both_selectors,
             "readOnly": target_count == connection.execute("SELECT COUNT(*) FROM security_targets").fetchone()[0]
                 and connection.execute("SELECT 1 FROM security_targets WHERE id = 'fresh'").fetchone() is None,
@@ -647,6 +751,45 @@ function run(scenario: string): Record<string, unknown> {
   return JSON.parse(execution.stdout) as Record<string, unknown>;
 }
 
+test("reads precise Linux birth time through supported native interfaces", () => {
+  const result = run("birth-time");
+  const cases = result["cases"] as Record<string, unknown>;
+
+  expect(result["layout"]).toEqual([16, 80, 256]);
+  expect(result["native"]).toBe(42_000_000_123);
+  expect(result["fallback"]).toBe(result["native"]);
+  expect(cases["wrapper"]).toEqual({
+    value: 42_000_000_123,
+    calls: [null],
+    typed: true,
+  });
+  for (const [architecture, number] of [
+    ["x86_64", 332],
+    ["aarch64", 291],
+  ] as const) {
+    expect(cases[architecture]).toEqual({
+      value: 42_000_000_123,
+      calls: [number],
+      typed: true,
+    });
+  }
+  for (const name of ["unknown-abi", "pointer32", "long32"]) {
+    expect(cases[name]).toEqual({ value: null, calls: [], typed: true });
+  }
+  for (const name of [
+    "missing-mask",
+    "invalid-nanoseconds",
+    "zero",
+    "negative",
+    "failed",
+  ]) {
+    expect(cases[name]).toEqual({ value: null, calls: [null], typed: true });
+  }
+  for (const name of ["missing-symbols", "missing-libc", "invalid-layout"]) {
+    expect(cases[name]).toBeNull();
+  }
+});
+
 test("reuses verified legacy aliases and probes each saved target once per request", () => {
   const result = run("cache");
 
@@ -737,6 +880,14 @@ test("keeps authenticated historical aliases visible without trusting a replacem
     "historical-finding",
   ]);
   expect(result["replacementFindings"]).toEqual([]);
+  expect(result["emptyFindings"]).toEqual([]);
+  expect(result["projectionAvailable"]).toEqual({
+    fresh: true,
+    empty: true,
+    replacementPath: false,
+    replacementId: false,
+    unknownId: true,
+  });
   expect(result["rejectsBothSelectors"]).toBe(true);
   expect(result["readOnly"]).toBe(true);
   expect(result["feedback"]).toEqual(["historical-finding"]);

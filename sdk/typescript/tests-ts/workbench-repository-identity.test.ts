@@ -250,7 +250,8 @@ if scenario == "identity":
         windows_legacy_birth_time = _repository_birth_time_ns(common, legacy_metadata)
         windows_modern_birth_time = _repository_birth_time_ns(common, modern_metadata)
     linux_birth_times = {}
-    with patch.object(sys, "platform", "linux"), patch.object(os, "name", "posix"):
+    with patch.object(sys, "platform", "linux"), patch.object(os, "name", "posix"), \
+         patch("workbench_target_state._linux_repository_birth_time_ns", return_value=None):
         for label, output, status in (
             ("valid", "42.000000123\n", 0),
             ("unavailable", "0.000000000\n", 0),

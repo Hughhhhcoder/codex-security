@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import os
+import platform
 import sqlite3
 import stat
 import subprocess
@@ -46,6 +48,67 @@ def _repository_worktree(target: Path) -> tuple[Path, str] | None:
     return canonical_root, relative.as_posix()
 
 
+class _LinuxStatxTimestamp(ctypes.Structure):
+    _fields_ = (
+        ("seconds", ctypes.c_int64),
+        ("nanoseconds", ctypes.c_uint32),
+        ("_reserved", ctypes.c_int32),
+    )
+
+
+class _LinuxStatx(ctypes.Structure):
+    # Linux's statx UAPI keeps birth time at offset 0x50 in a 0x100-byte buffer.
+    _fields_ = (
+        ("mask", ctypes.c_uint32),
+        ("_before_birth_time", ctypes.c_ubyte * 76),
+        ("birth_time", _LinuxStatxTimestamp),
+        ("_after_birth_time", ctypes.c_ubyte * 160),
+    )
+
+
+def _linux_repository_birth_time_ns(path: str) -> int | None:
+    if ctypes.sizeof(_LinuxStatx) != 256 or _LinuxStatx.birth_time.offset != 80:
+        return None
+    metadata = _LinuxStatx()
+    birth_time_mask = 0x800
+    arguments = (-100, os.fsencode(path), 0, birth_time_mask, ctypes.byref(metadata))
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            statx = libc.statx
+        except AttributeError:
+            # Older musl has the syscall but no statx wrapper. Only use known LP64 ABIs.
+            if ctypes.sizeof(ctypes.c_void_p) != 8 or ctypes.sizeof(ctypes.c_long) != 8:
+                return None
+            number = {"x86_64": 332, "aarch64": 291}.get(platform.machine())
+            if number is None:
+                return None
+            statx = libc.syscall
+            statx.argtypes = (
+                ctypes.c_long, ctypes.c_long, ctypes.c_char_p, ctypes.c_long,
+                ctypes.c_ulong, ctypes.POINTER(_LinuxStatx),
+            )
+            statx.restype = ctypes.c_long
+            status = statx(number, *arguments)
+        else:
+            statx.argtypes = (
+                ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint,
+                ctypes.POINTER(_LinuxStatx),
+            )
+            statx.restype = ctypes.c_int
+            status = statx(*arguments)
+    except (AttributeError, OSError):
+        return None
+    birth_time = metadata.birth_time
+    if (
+        status != 0 or not metadata.mask & birth_time_mask
+        or not 0 <= birth_time.nanoseconds < 1_000_000_000
+    ):
+        return None
+    birth_time_ns = birth_time.seconds * 1_000_000_000 + birth_time.nanoseconds
+    return birth_time_ns if birth_time_ns > 0 else None
+
+
 def _repository_birth_time_ns(path: str, metadata: os.stat_result) -> int | None:
     birth_time_ns = getattr(metadata, "st_birthtime_ns", None)
     if birth_time_ns is not None:
@@ -57,6 +120,9 @@ def _repository_birth_time_ns(path: str, metadata: os.stat_result) -> int | None
         return int(birth_time * 1_000_000_000) if birth_time > 0 else None
     if not sys.platform.startswith("linux"):
         return None
+    birth_time_ns = _linux_repository_birth_time_ns(path)
+    if birth_time_ns is not None:
+        return birth_time_ns
     try:
         result = subprocess.run(
             ["stat", "--format=%.9W", "--", path],

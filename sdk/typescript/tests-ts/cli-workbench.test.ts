@@ -76,6 +76,20 @@ describe("CLI workbench", () => {
     }
   });
 
+  test("uses sealed scan findings when the repository projection is unavailable", async () => {
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan"],
+        capture().stream,
+        stderr.stream,
+        dependencies({ result: fakeResult(["high"]) }),
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toMatch(/FINDINGS\s+1\b/u);
+    expect(stderr.text()).toContain("1 high");
+  });
+
   test("preserves the original findings requester instead of selecting a historical alias", async () => {
     const repository = resolve("/current/repository");
     const findings: JsonObject[] = [

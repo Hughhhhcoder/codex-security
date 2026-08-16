@@ -38,6 +38,7 @@ import {
 import {
   classifyConnectionFailure,
   initialCredentialsAvailable,
+  listRepositoryFindings,
 } from "../src/api.js";
 import {
   FIREWORKS_CODEX_PROVIDER,
@@ -2903,9 +2904,38 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test("discards partial findings when a repository projection becomes unavailable", async () => {
+    const pages: JsonObject[] = [
+      { findings: [{ findingId: "first-page" }], nextOffset: 1 },
+      { findings: [], projectionAvailable: false, nextOffset: null },
+    ];
+    const commands: Array<readonly string[]> = [];
+    expect(
+      await listRepositoryFindings(async (args) => {
+        commands.push(args);
+        return pages[commands.length - 1]!;
+      }, "target_sha256_example"),
+    ).toBeUndefined();
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toEqual([...commands[0]!, "--offset", "1"]);
+    expect(
+      await listRepositoryFindings(
+        async () => ({ findings: [], projectionAvailable: true }),
+        "target_sha256_example",
+      ),
+    ).toEqual([]);
+    expect(
+      await listRepositoryFindings(
+        async () => ({ findings: [] }),
+        "target_sha256_example",
+      ),
+    ).toEqual([]);
+  });
+
   test.each([
     ["semantic matching fails", "matcher", "matcher unavailable"],
     ["the repository index fails", "index", "index unavailable"],
+    ["the repository projection is unavailable", "projection", undefined],
     ["a cost limit still allows false-positive matching", "budget", undefined],
     [
       "dismissed history survives missing reviewer feedback",
@@ -2971,6 +3001,9 @@ describe("CodexSecurity orchestration", () => {
             }
             if (args[0] === "list-global-findings") {
               if (failure === "index") throw new Error("index unavailable");
+              if (failure === "projection") {
+                return { findings: [], projectionAvailable: false };
+              }
               if (failure === "dismissed") {
                 return {
                   findings: args.includes("--status")
@@ -3036,7 +3069,12 @@ describe("CodexSecurity orchestration", () => {
           ? []
           : [`Could not update repository findings: ${warning}`],
       );
-      expect(modelCalled).toBe(failure !== "index");
+      expect(modelCalled).toBe(failure !== "index" && failure !== "projection");
+      if (failure === "projection") {
+        expect(
+          result.findings.findings.map(({ findingId }) => findingId),
+        ).toContain(current.findingId);
+      }
       expect(commands.some(([command]) => command === "complete-scan")).toBe(
         true,
       );
