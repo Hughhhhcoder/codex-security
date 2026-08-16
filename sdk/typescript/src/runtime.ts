@@ -12,6 +12,7 @@ import {
   open,
   opendir,
   readFile,
+  readlink,
   readdir,
   realpath,
   rename,
@@ -22,7 +23,16 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -116,6 +126,105 @@ export function codexSecurityStateDirectory(
   const codexHome =
     environmentValue(environment, "CODEX_HOME") ?? join(homedir(), ".codex");
   return resolve(expandHome(codexHome), "state", "plugins", "codex-security");
+}
+
+export async function validateCodexSecurityStateDirectory(
+  path: string,
+  validateLocation?: (canonical: string) => void,
+): Promise<string> {
+  const requested = resolve(expandHome(path));
+  try {
+    let canonical = requested;
+    while (true) {
+      try {
+        canonical = join(
+          await realpath(canonical),
+          relative(canonical, requested),
+        );
+        break;
+      } catch (error) {
+        if (nodeErrorCode(error) !== "ENOENT") throw error;
+        const parent = dirname(canonical);
+        if (parent === canonical) throw error;
+        canonical = parent;
+      }
+    }
+    validateLocation?.(canonical);
+    requireModelSafeOutputDir(requested);
+    requireModelSafeOutputDir(canonical);
+    const metadata = await lstat(canonical).catch((error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (metadata !== null) {
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new OutputDirectoryError(
+          `Configured Codex Security state path must be a directory: ${canonical}`,
+        );
+      }
+      try {
+        requirePrivateOutputDirectory(metadata, canonical);
+      } catch (error) {
+        if (!(error instanceof OutputDirectoryError)) throw error;
+        const mode = (metadata.mode & 0o7777).toString(8).padStart(4, "0");
+        throw new OutputDirectoryError(
+          `Configured Codex Security state directory must be private to the current user: ${canonical} (mode ${mode}). Set CODEX_SECURITY_STATE_DIR to a private directory, or set this directory's permissions to 0700 only if you own it and can safely change it.`,
+          { cause: error },
+        );
+      }
+    }
+    await requireSecureStateAncestry(requested);
+    return canonical;
+  } catch (error) {
+    if (error instanceof OutputDirectoryError) throw error;
+    throw new OutputDirectoryError(
+      `Unable to inspect configured Codex Security state directory: ${requested}`,
+      { cause: error },
+    );
+  }
+}
+
+async function requireSecureStateAncestry(
+  path: string,
+  effectiveUid = process.geteuid?.(),
+): Promise<void> {
+  if (process.platform === "win32") return;
+  const pending = [path];
+  const checked = new Set<string>();
+  while (pending.length > 0) {
+    let current = pending.pop()!;
+    while (true) {
+      while (current.length > 1 && current.endsWith(sep)) {
+        current = current.slice(0, -1);
+      }
+      if (checked.has(current)) break;
+      checked.add(current);
+      const parent = dirname(current);
+      const metadata = await lstat(current).catch((error: unknown) => {
+        if (nodeErrorCode(error) === "ENOENT") return null;
+        throw error;
+      });
+      if (metadata?.isSymbolicLink()) {
+        requireTrustedOutputOwner(metadata, current, effectiveUid);
+        const canonical = await realpath(current);
+        const target = await readlink(current);
+        // Preserve dot segments until the filesystem resolves the link target.
+        const lexicalTarget = isAbsolute(target)
+          ? target
+          : `${parent}${parent.endsWith(sep) ? "" : sep}${target}`;
+        pending.push(canonical, lexicalTarget);
+      } else if (metadata !== null) {
+        if (!metadata.isDirectory()) {
+          throw new OutputDirectoryError(
+            `Codex Security state path must use directories: ${current}`,
+          );
+        }
+        requireTrustedOutputAncestor(metadata, current, effectiveUid);
+      }
+      if (parent === current) break;
+      current = parent;
+    }
+  }
 }
 
 export function codexSecurityCredentialHome(
@@ -1619,6 +1728,21 @@ export function requireTrustedOutputAncestor(
   path: string,
   effectiveUid = process.geteuid?.(),
 ): void {
+  requireTrustedOutputOwner(metadata, path, effectiveUid);
+  if ((metadata.mode & 0o022) === 0) return;
+  if ((metadata.mode & 0o1000) === 0) {
+    const mode = (metadata.mode & 0o7777).toString(8).padStart(4, "0");
+    throw new OutputDirectoryError(
+      `Scan output parent must not be group- or world-writable without the sticky bit: ${path} (mode ${mode}). A private child directory does not make an unsafe ancestor safe. Choose a location with secure parent directories, or remove group- and world-write permissions from this ancestor only if you own it and can safely change it.`,
+    );
+  }
+}
+
+function requireTrustedOutputOwner(
+  metadata: Pick<Stats, "uid">,
+  path: string,
+  effectiveUid: number | undefined,
+): void {
   if (
     effectiveUid !== undefined &&
     metadata.uid !== 0 &&
@@ -1626,13 +1750,6 @@ export function requireTrustedOutputAncestor(
   ) {
     throw new OutputDirectoryError(
       `Scan output parent must have a trusted owner: ${path}`,
-    );
-  }
-  if ((metadata.mode & 0o022) === 0) return;
-  if ((metadata.mode & 0o1000) === 0) {
-    const mode = (metadata.mode & 0o7777).toString(8).padStart(4, "0");
-    throw new OutputDirectoryError(
-      `Scan output parent must not be group- or world-writable without the sticky bit: ${path} (mode ${mode}). A private child directory does not make an unsafe ancestor safe. Choose a location with secure parent directories, or remove group- and world-write permissions from this ancestor only if you own it and can safely change it.`,
     );
   }
 }

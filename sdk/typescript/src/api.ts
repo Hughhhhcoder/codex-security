@@ -95,7 +95,6 @@ import {
   prepareOutputDir,
   preparePersistentScanRoot,
   requireModelSafeOutputDir,
-  requireSecureOutputAncestry,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
@@ -105,6 +104,7 @@ import {
   type PluginInstall,
   type ProcessEnvironment,
   type WorkbenchCommandOptions,
+  validateCodexSecurityStateDirectory,
   validateOutputDir,
 } from "./runtime.js";
 import {
@@ -1788,24 +1788,8 @@ export class CodexSecurity {
     const stateDirectory = codexSecurityStateDirectory(
       this.#dependencies.environment,
     );
-    let canonicalStateDirectory = stateDirectory;
-    while (true) {
-      try {
-        canonicalStateDirectory = join(
-          await realpath(canonicalStateDirectory),
-          relative(canonicalStateDirectory, stateDirectory),
-        );
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        const parent = dirname(canonicalStateDirectory);
-        if (parent === canonicalStateDirectory) throw error;
-        canonicalStateDirectory = parent;
-      }
-    }
-    requireOutputOutsideRepository(protectedRoot, canonicalStateDirectory);
-    await requireSecureOutputAncestry(
-      join(canonicalStateDirectory, "codex-home"),
+    await validateCodexSecurityStateDirectory(stateDirectory, (canonical) =>
+      requireOutputOutsideRepository(protectedRoot, canonical),
     );
     return {
       repository: repo,

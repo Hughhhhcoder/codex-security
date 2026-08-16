@@ -35,7 +35,6 @@ import {
 } from "../src/index.js";
 import { main, parseCodexOverrides, Progress } from "../src/cli.js";
 import { scanPreflightCodexConfig } from "../src/api.js";
-import { requireTrustedOutputAncestor } from "../src/runtime.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
   DEFAULT_CODEX_CONFIG,
@@ -3965,19 +3964,9 @@ describe("CLI", () => {
   });
 
   test("keeps unsafe ancestry errors local and off JSON stdout", async () => {
-    const failure = (() => {
-      try {
-        requireTrustedOutputAncestor(
-          { mode: 0o40775, uid: 1000 },
-          join("fixture", "shared"),
-          1000,
-        );
-      } catch (error) {
-        if (error instanceof OutputDirectoryError) return error;
-        throw error;
-      }
-      throw new Error("unsafe ancestor must be rejected");
-    })();
+    const failure = new OutputDirectoryError(
+      "Scan output parent has unsafe permissions (mode 0775).",
+    );
 
     for (const extraArgs of [[], ["--dry-run"]]) {
       const stdout = capture();

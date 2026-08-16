@@ -4017,6 +4017,7 @@ describe("CodexSecurity orchestration", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
     for (const stateDirectory of [
+      repository,
       join(repository, "state"),
       root,
       linkedState,
@@ -4041,7 +4042,11 @@ describe("CodexSecurity orchestration", () => {
           client[operation](repository, { outputDir: join(root, "output") }),
         ).rejects.toBeInstanceOf(OutputInsideProtectedRootError);
       }
-      if (stateDirectory !== root && stateDirectory !== linkedState)
+      if (
+        stateDirectory !== repository &&
+        stateDirectory !== root &&
+        stateDirectory !== linkedState
+      )
         expect(existsSync(stateDirectory)).toBe(false);
       await client.close();
     }
@@ -4056,14 +4061,20 @@ describe("CodexSecurity orchestration", () => {
       const privateChild = join(shared, "private");
       const linkedParent = join(root, "linked-parent");
       const safeState = join(root, "state");
+      const privateState = join(root, "private-state");
+      const stateLink = join(shared, "state-link");
+      const indirectState = join(root, "indirect-state");
       const missingState = join(privateChild, "state");
       const linkedState = join(linkedParent, "private", "missing", "state");
       const safeOutput = join(root, "output");
       const unsafeOutput = join(privateChild, "output");
       await mkdir(repository);
       await mkdir(privateChild, { recursive: true, mode: 0o700 });
+      await mkdir(privateState, { mode: 0o700 });
       await chmod(shared, 0o775);
       await symlink(shared, linkedParent, "dir");
+      await symlink(privateState, stateLink, "dir");
+      await symlink(stateLink, indirectState, "dir");
 
       for (const [stateDirectory, outputDir] of [
         [safeState, unsafeOutput],
@@ -4072,6 +4083,9 @@ describe("CodexSecurity orchestration", () => {
         [missingState, undefined],
         [missingState, safeOutput],
         [linkedState, safeOutput],
+        [stateLink, safeOutput],
+        [indirectState, safeOutput],
+        [join(indirectState, "missing", "state"), safeOutput],
       ] as const) {
         const initialize = mock(() => {
           throw new Error("runtime must not initialize");
@@ -4103,8 +4117,9 @@ describe("CodexSecurity orchestration", () => {
 
       expect((await stat(shared)).mode & 0o7777).toBe(0o775);
       expect((await stat(privateChild)).mode & 0o7777).toBe(0o700);
-      expect(await readdir(shared)).toEqual(["private"]);
+      expect((await readdir(shared)).sort()).toEqual(["private", "state-link"]);
       expect(await readdir(privateChild)).toEqual([]);
+      expect(await readdir(privateState)).toEqual([]);
       for (const path of [
         safeState,
         missingState,
@@ -4113,6 +4128,50 @@ describe("CodexSecurity orchestration", () => {
         unsafeOutput,
       ]) {
         expect(existsSync(path)).toBe(false);
+      }
+    },
+  );
+
+  testPosix(
+    "rejects non-private existing state before runtime initialization",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const stateDirectory = join(root, "state");
+      const outputDir = join(root, "output");
+      await mkdir(repository);
+      await mkdir(stateDirectory, { mode: 0o700 });
+      const initialize = mock(() => {
+        throw new Error("runtime must not initialize");
+      });
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_SECURITY_STATE_DIR: stateDirectory },
+          prepareRuntime: initialize,
+          resolvePluginPython: initialize,
+          createCodex: initialize,
+        },
+      );
+
+      try {
+        for (const requestedMode of [0o755, 0o1777]) {
+          await chmod(stateDirectory, requestedMode);
+          const mode = (await stat(stateDirectory)).mode & 0o7777;
+          for (const operation of ["preflight", "run"] as const) {
+            await expect(
+              client[operation](repository, { outputDir }),
+            ).rejects.toThrow(
+              "Configured Codex Security state directory must be private",
+            );
+          }
+          expect((await stat(stateDirectory)).mode & 0o7777).toBe(mode);
+        }
+        expect(initialize).not.toHaveBeenCalled();
+        expect(await readdir(stateDirectory)).toEqual([]);
+        expect(existsSync(outputDir)).toBe(false);
+      } finally {
+        await client.close();
       }
     },
   );

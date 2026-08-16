@@ -71,6 +71,7 @@ import {
   runWorkbench,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
+  validateCodexSecurityStateDirectory,
   verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
@@ -3580,6 +3581,101 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(
       await preparePersistentScanRoot(linkedState, "linked repository"),
     ).toBe(join(root, "state", "scans", "linked-repository"));
+  });
+
+  test("validates private state aliases and missing paths without creating them", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "state");
+    const alias = join(root, "state-alias");
+    const missing = join(alias, "missing", "state");
+    await mkdir(state, { mode: 0o700 });
+    await writeFile(join(state, "preserved.txt"), "preserved\n");
+    await symlink(
+      state,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    let location: string | undefined;
+
+    expect(
+      await validateCodexSecurityStateDirectory(alias, (canonical) => {
+        location = canonical;
+      }),
+    ).toBe(state);
+    expect(location).toBe(state);
+    expect(await validateCodexSecurityStateDirectory(missing)).toBe(
+      join(state, "missing", "state"),
+    );
+    expect(existsSync(missing)).toBe(false);
+    expect(await readdir(state)).toEqual(["preserved.txt"]);
+    expect(await readFile(join(state, "preserved.txt"), "utf8")).toBe(
+      "preserved\n",
+    );
+    if (process.platform !== "win32") {
+      expect((await stat(state)).mode & 0o7777).toBe(0o700);
+    }
+  });
+
+  testPosix(
+    "requires existing configured state roots to be private",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      await mkdir(state, { mode: 0o700 });
+      await writeFile(join(state, "preserved.txt"), "preserved\n");
+
+      for (const requestedMode of [0o755, 0o775, 0o1777]) {
+        await chmod(state, requestedMode);
+        const mode = (await stat(state)).mode & 0o7777;
+        await expect(
+          validateCodexSecurityStateDirectory(state),
+        ).rejects.toThrow(
+          `${state} (mode ${mode.toString(8).padStart(4, "0")})`,
+        );
+        await expect(
+          validateCodexSecurityStateDirectory(state),
+        ).rejects.toThrow("only if you own it and can safely change it");
+        expect((await stat(state)).mode & 0o7777).toBe(mode);
+      }
+      expect(() =>
+        requirePrivateOutputDirectory(
+          { mode: 0o41777, uid: 1000 },
+          "state",
+          1000,
+        ),
+      ).toThrow("must not be accessible to other users");
+      expect(await readdir(state)).toEqual(["preserved.txt"]);
+    },
+  );
+
+  testPosix("rejects unsafe lexical and chained state aliases", async () => {
+    const root = await temporaryDirectory();
+    const state = join(root, "state");
+    const shared = join(root, "shared");
+    const trusted = join(root, "trusted");
+    const unsafeLink = join(shared, "state-link");
+    const nextLink = join(trusted, "next-link");
+    const alias = join(root, "state-alias");
+    const missing = join(alias, "missing", "state");
+    await mkdir(state, { mode: 0o700 });
+    await mkdir(shared, { mode: 0o700 });
+    await mkdir(trusted, { mode: 0o700 });
+    await chmod(shared, 0o775);
+    await symlink(state, unsafeLink, "dir");
+    await symlink(unsafeLink, nextLink, "dir");
+    await symlink(`${nextLink}${sep}`, alias, "dir");
+
+    for (const path of [unsafeLink, nextLink, alias, missing]) {
+      await expect(validateCodexSecurityStateDirectory(path)).rejects.toThrow(
+        `${shared} (mode 0775)`,
+      );
+    }
+    expect((await stat(shared)).mode & 0o7777).toBe(0o775);
+    expect((await stat(state)).mode & 0o7777).toBe(0o700);
+    expect(await readdir(state)).toEqual([]);
+    expect(await readdir(shared)).toEqual(["state-link"]);
+    expect(await readdir(trusted)).toEqual(["next-link"]);
+    expect(existsSync(missing)).toBe(false);
   });
 
   test("rejects symbolic children beneath persistent scan state", async () => {

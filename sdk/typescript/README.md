@@ -669,8 +669,9 @@ const directPublication = await publishScan("/path/to/completed-scan", {
 
 On macOS and Linux, scan output must be private to the current user. Every
 parent directory must be owned by the current user or root. A group- or
-world-writable parent is accepted only when it has the sticky bit. These checks
-also protect persistent state and stored sign-in credentials.
+world-writable parent is accepted only when it has the sticky bit. The state
+directory itself must be private; the sticky-bit exception applies only to its
+parents. These checks also protect stored sign-in credentials.
 
 An error that names a parent with mode `0775` refers to that parent, not just
 the final output directory. Creating a `0700` child beneath it does not stop
@@ -684,8 +685,11 @@ Use the setting for the location that failed:
 - For explicitly selected scan results, choose another `--output-dir` (SDK
   `outputDir`) outside the scanned repository.
 - For persistent history, default artifacts, and stored sign-in, choose a
-  private `CODEX_SECURITY_STATE_DIR` outside the repository. Selecting a new
-  state directory does not move existing history, results, or credentials.
+  private `CODEX_SECURITY_STATE_DIR` outside the repository. On macOS and Linux,
+  an existing state directory must be owned by you and private (`0700`). Change
+  its permissions only if it is your dedicated state directory and is safe to
+  change. Selecting a new directory does not move existing
+  history, results, or credentials.
 - For temporary runtime files, choose a suitable `TMPDIR` (`TEMP` on Windows).
   A fresh private child under a trusted, sticky system temporary directory is
   suitable for temporary work; it is not a replacement for persistent history.
