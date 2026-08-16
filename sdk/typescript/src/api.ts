@@ -40,6 +40,7 @@ import {
 import { estimateScanCost, ScanCostTracker, type ScanCost } from "./cost.js";
 import {
   loadContract,
+  requireScanArtifactPath,
   requireScanFile,
   type ScanExpectation,
 } from "./contract.js";
@@ -1240,16 +1241,19 @@ export class CodexSecurity {
         } catch (error) {
           if (signal.aborted || this.#closed) throw error;
           for (const artifact of completedArtifacts) {
-            const path = join(scanDir, artifact.name);
-            const parent = await realpath(dirname(path));
-            const relativeParent = relative(scanDir, parent);
-            if (
-              relativeParent === ".." ||
-              relativeParent.startsWith(`..${sep}`) ||
-              isAbsolute(relativeParent)
-            ) {
+            let path: string;
+            try {
+              path = await requireScanArtifactPath(
+                scanDir,
+                artifact.name,
+                artifact.name,
+                signal,
+              );
+            } catch (cause) {
+              if (signal.aborted || this.#closed) throw cause;
               throw new OutputDirectoryError(
                 "Cannot restore an artifact outside the scan directory.",
+                { cause },
               );
             }
             const current = await readFile(path, { signal }).catch(

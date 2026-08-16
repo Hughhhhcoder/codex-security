@@ -38,10 +38,13 @@ const SAFE_SCHEMA_ERROR_PROPERTIES = new Set([
   "coverage",
   "scope",
 ]);
-interface CheckedScanFile {
+interface CheckedScanPath {
   path: string;
-  metadata: Stats;
   parents: Array<{ path: string; metadata: Stats }>;
+}
+
+interface CheckedScanFile extends CheckedScanPath {
+  metadata: Stats;
 }
 
 interface ScanRoot {
@@ -291,14 +294,31 @@ export async function requireScanFile(
   ).path;
 }
 
-async function requireCheckedScanFile(
+/** Check parents under a canonical scan root; the artifact may be missing. */
+export async function requireScanArtifactPath(
   scanDirectory: string,
   relativePath: string,
   context: string,
   signal?: AbortSignal,
-  expectedRoot?: ScanRoot,
-): Promise<CheckedScanFile> {
+): Promise<string> {
   const checkedRoot = await requireScanRoot(scanDirectory, signal);
+  if (checkedRoot.path !== scanDirectory) {
+    throw new ContractValidationError(
+      "Scan directory changed before artifact restoration.",
+    );
+  }
+  return (
+    await requireCheckedScanPath(checkedRoot, relativePath, context, signal)
+  ).path;
+}
+
+async function requireCheckedScanPath(
+  checkedRoot: ScanRoot,
+  relativePath: string,
+  context: string,
+  signal?: AbortSignal,
+  expectedRoot?: ScanRoot,
+): Promise<CheckedScanPath> {
   const scanDir = checkedRoot.path;
   throwIfAborted(signal);
   const safePath = safeRelativePath(relativePath, context);
@@ -331,20 +351,49 @@ async function requireCheckedScanFile(
       }
       parents.push({ path: current, metadata });
     }
-    const path = join(scanDir, ...parts);
-    const metadata = await lstat(path);
+    return { path: join(scanDir, ...parts), parents };
+  } catch (error) {
+    throwIfAborted(signal);
+    if (error instanceof ContractValidationError) {
+      throw error;
+    }
+    throw new ContractValidationError(
+      `${context}: expected a file inside the scan directory.`,
+      {
+        cause: error,
+      },
+    );
+  }
+}
+
+async function requireCheckedScanFile(
+  scanDirectory: string,
+  relativePath: string,
+  context: string,
+  signal?: AbortSignal,
+  expectedRoot?: ScanRoot,
+): Promise<CheckedScanFile> {
+  const checked = await requireCheckedScanPath(
+    await requireScanRoot(scanDirectory, signal),
+    relativePath,
+    context,
+    signal,
+    expectedRoot,
+  );
+  try {
+    const metadata = await lstat(checked.path);
     throwIfAborted(signal);
     if (metadata.isSymbolicLink() || !metadata.isFile()) {
       throw new ContractValidationError(
         `${context}: expected a regular non-symlink file.`,
       );
     }
-    const canonical = await realpath(path);
+    const canonical = await realpath(checked.path);
     throwIfAborted(signal);
-    if (!isContained(scanDir, canonical)) {
+    if (!isContained(checked.parents[0]!.path, canonical)) {
       throw new Error("outside scan directory");
     }
-    return { path, metadata, parents };
+    return { ...checked, metadata };
   } catch (error) {
     throwIfAborted(signal);
     if (error instanceof ContractValidationError) {
