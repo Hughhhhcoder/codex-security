@@ -2055,9 +2055,11 @@ describe("multiscan", () => {
 
   test.each([
     ["scoped", "src", "standard"],
+    ["trailing-scope", "src/", "standard"],
+    ["root-scope", "./", "standard"],
     ["deep", "", "deep"],
   ] as const)(
-    "resumes a sealed %s scan matching the requested mode and scope",
+    "resumes current and legacy sealed %s scans matching the requested mode and scope",
     async (id, scope, mode) => {
       const paths = await fixture();
       const source = await repository(paths.root, id);
@@ -2071,12 +2073,24 @@ describe("multiscan", () => {
         return await completedScan(scanOptions.outputDir!);
       });
 
-      await runMultiscan(options(paths, security));
+      const first = await runMultiscan(options(paths, security));
       expect(await runMultiscan(options(paths, security))).toMatchObject({
         completed: 1,
         warned: 0,
         skipped: 1,
       });
+
+      const [legacy] = await results(first.resultsPath);
+      delete legacy!["targetId"];
+      delete legacy!["resolvedScope"];
+      const ledger = `${JSON.stringify(legacy)}\n`;
+      await writeFile(first.resultsPath, ledger);
+      expect(await runMultiscan(options(paths, security))).toMatchObject({
+        completed: 1,
+        warned: 0,
+        skipped: 1,
+      });
+      expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
       expect(attempts).toBe(1);
     },
   );

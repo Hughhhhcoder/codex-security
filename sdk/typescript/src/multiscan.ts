@@ -770,7 +770,8 @@ async function loadResumableCoverage(
     const expectedScope =
       receipt.scope === undefined
         ? "."
-        : receipt.resolvedScope ?? posix.normalize(receipt.scope);
+        : receipt.resolvedScope ??
+          posix.normalize(receipt.scope).replace(/\/+$/, "");
     const expectedMode =
       receipt.scope !== undefined
         ? "scoped_path"
