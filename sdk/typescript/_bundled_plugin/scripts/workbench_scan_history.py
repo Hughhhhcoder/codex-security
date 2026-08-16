@@ -17,6 +17,7 @@ from workbench_constants import FINDINGS_PAGE_MAX
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target_state import (
     RepositoryIdentityCache,
+    _timestamp_ns,
     supports_repository_identity,
 )
 
@@ -89,22 +90,13 @@ def list_scans(
         ] if identity_matches else ["0"]
         requested_identity = requested.verified_identity
         if requested_identity is not None:
-            for target_id, target in identities.targets.items():
+            for target_id in identities.targets:
                 if target_id == requested.target_id or identities.group(target_id) != (
                     "repository", requested_identity
                 ):
                     continue
-                candidate = identities.for_row(target)
-                if candidate.resolved_path is None:
-                    continue
-                repository_clauses.append(
-                    _owned_scan_clause(
-                        Path(candidate.target_path),
-                        check_ownership and not candidate.relaxed_directory_ownership,
-                        values,
-                        target_id=target_id,
-                    )
-                )
+                repository_clauses.append("scans.target_id = ?")
+                values.append(target_id)
         clauses.append(f"({' OR '.join(repository_clauses)})")
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
@@ -222,15 +214,9 @@ def _owned_scan_clause(
     target: Path,
     check_ownership: bool,
     values: list[Any],
-    *,
-    target_id: str | None = None,
 ) -> str:
-    if target_id is None:
-        values.append(str(target))
-        target_clause = "scans.target_path = ?"
-    else:
-        values.append(target_id)
-        target_clause = "scans.target_id = ?"
+    values.append(str(target))
+    target_clause = "scans.target_path = ?"
     if not check_ownership:
         return target_clause
     try:
@@ -251,6 +237,12 @@ def _owned_scan_clause(
     )
 
 
+def _scan_completion_order(scan: sqlite3.Row) -> tuple[int, str]:
+    completed_at = scan["completed_at"] if "completed_at" in scan.keys() else None
+    timestamp = _timestamp_ns(completed_at)
+    if timestamp is None:
+        timestamp = _timestamp_ns(scan["started_at"])
+    return (timestamp if timestamp is not None else 0, scan["id"])
 
 
 def list_unmatched_scan_pairs(
@@ -298,16 +290,15 @@ def list_unmatched_scan_pairs(
     focus_scan_id = getattr(args, "after_scan_id", None)
     if focus_scan_id is not None and not any(scan["id"] == focus_scan_id for scan in selected):
         raise SystemExit("The scan to match is not a completed scan in this repository.")
+    if focus_scan_id is not None:
+        available.sort(key=_scan_completion_order)
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     for index, after in enumerate(available):
         if focus_scan_id is not None and after["id"] != focus_scan_id:
             continue
-        candidates = (
-            available[:index] if focus_scan_id is None
-            else [before for before in available if before["id"] != focus_scan_id]
-        )
+        candidates = available[:index]
         previous = [
             before
             for before in candidates

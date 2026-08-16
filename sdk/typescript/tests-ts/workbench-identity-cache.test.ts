@@ -286,6 +286,40 @@ with ExitStack() as stack:
                 "SELECT repository_identity FROM security_targets WHERE id = 'changed'"
             ).fetchone()[0],
         }))
+    elif scenario == "persisted-alias":
+        for name, stored, live in [
+            ("requested", "repository-current", None),
+            ("reused", "repository-current", "repository-other"),
+            ("legacy", None, "repository-current"),
+            ("unverified", None, "repository-current"),
+            ("unrelated", "repository-other", None),
+        ]:
+            add_target(name, stored, live)
+            add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
+        metadata[paths["reused"]].st_ino += 1000
+        add_finding("requested-scan", "current-finding")
+        add_finding("reused-scan", "historical-finding", closed=True)
+        scans = listed("requested")
+        reused_listing_probes = probes[paths["reused"]]
+        matching = history.list_unmatched_scan_pairs(
+            connection, argparse.Namespace(repository=paths["requested"], force=False),
+            backfill_finding_details=lambda *_: None, read_coverage=lambda _: {},
+        )
+        feedback = get_scan_feedback(
+            connection, connection.execute("SELECT * FROM scans WHERE id = 'requested-scan'").fetchone()
+        )
+        print(json.dumps({
+            "scans": scans,
+            "replacementRequest": listed("reused"),
+            "aliases": sorted(indexes.repository_target_ids(connection, "requested")),
+            "findings": sorted(row["findingId"] for row in findings("requested")),
+            "feedback": [row["findingId"] for row in feedback["falsePositives"]],
+            "matchingCount": matching["scanCount"],
+            "reusedListingProbes": reused_listing_probes,
+            "stored": connection.execute(
+                "SELECT repository_identity FROM security_targets WHERE id = 'reused'"
+            ).fetchone()[0],
+        }))
     elif scenario == "v30-current":
         generation_birth = state._timestamp_ns("2026-08-02T00:00:00Z")
         later = "2026-08-03T00:00:00Z"
@@ -496,6 +530,23 @@ test("reuses verified legacy aliases and probes each saved target once per reque
   expect(result["feedbackMaxProbes"]).toBe(1);
   expect(result["legacyStored"]).toBeNull();
   expect(result["changedStored"]).toBe("repository-previous");
+});
+
+test("keeps authenticated historical aliases visible without trusting a replacement checkout", () => {
+  const result = run("persisted-alias");
+
+  expect(result["scans"]).toEqual([
+    "legacy-scan",
+    "requested-scan",
+    "reused-scan",
+  ]);
+  expect(result["replacementRequest"]).toEqual([]);
+  expect(result["aliases"]).toEqual(["legacy", "requested", "reused"]);
+  expect(result["findings"]).toEqual(["current-finding", "historical-finding"]);
+  expect(result["feedback"]).toEqual(["historical-finding"]);
+  expect(result["matchingCount"]).toBe(3);
+  expect(result["reusedListingProbes"]).toBe(0);
+  expect(result["stored"]).toBe("repository-current");
 });
 
 test("upgrades only independently verified pre-release repository hashes", () => {
