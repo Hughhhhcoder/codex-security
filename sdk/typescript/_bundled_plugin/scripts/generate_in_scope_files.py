@@ -154,7 +154,7 @@ def generate_diff_in_scope_files(
         is_binary_sample,
         preview_for,
     )
-    from workbench_target import _snapshot_directory_is_within_target, git_blob_bytes
+    from workbench_target import directory_is_within_target, git_blob_bytes
 
     rows: list[bytes] = []
     try:
@@ -198,7 +198,7 @@ def generate_diff_in_scope_files(
                 else:
                     try:
                         parent = path.parent.resolve(strict=True)
-                        if not _snapshot_directory_is_within_target(parent, repository):
+                        if not directory_is_within_target(parent, repository):
                             path.lstat()
                             raise InventoryError(
                                 "changed Git working-tree paths must stay inside the selected target"

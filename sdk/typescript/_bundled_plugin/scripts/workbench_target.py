@@ -379,23 +379,16 @@ def git_directory_snapshot_paths(
             if parent not in resolved_parents:
                 resolved_parents[parent] = parent.resolve()
             directory = path.resolve() if stat.S_ISDIR(metadata.st_mode) else None
-        except (OSError, RuntimeError):
-            if skip_unsafe_paths:
-                continue
-            raise SystemExit("Git working-tree paths must stay inside the selected target.")
-        try:
-            target_entry = directory is not None and directory.samefile(canonical_target)
-        except OSError:
-            target_entry = False
-        if (
-            not target_entry
-            and not _snapshot_directory_is_within_target(
+            within_target = directory_is_within_target(
                 resolved_parents[parent], canonical_target
             )
-        ) or (
-            directory is not None
-            and not _snapshot_directory_is_within_target(directory, canonical_target)
-        ):
+            if directory is not None:
+                within_target = (
+                    within_target or directory.samefile(canonical_target)
+                ) and directory_is_within_target(directory, canonical_target)
+        except (OSError, RuntimeError):
+            within_target = False
+        if not within_target:
             if skip_unsafe_paths:
                 continue
             raise SystemExit("Git working-tree paths must stay inside the selected target.")
@@ -421,7 +414,8 @@ def git_directory_snapshot_paths(
     return sorted(set(paths))
 
 
-def _snapshot_directory_is_within_target(directory: Path, target: Path) -> bool:
+def directory_is_within_target(directory: Path, target: Path) -> bool:
+    """Compare resolved directories, including equivalent filesystem spellings."""
     if directory.is_relative_to(target):
         return True
     try:

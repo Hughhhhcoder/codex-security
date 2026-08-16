@@ -44,7 +44,7 @@ from rank_preview import (
     preview_for_bytes,
 )
 from workbench_target import (
-    _snapshot_directory_is_within_target,
+    directory_is_within_target,
     git_blob_bytes,
     git_directory_snapshot_paths,
 )
@@ -700,7 +700,7 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         unsafe_parent = False
         if status != "D" and args.mode != "revisions":
             try:
-                unsafe_parent = not _snapshot_directory_is_within_target(
+                unsafe_parent = not directory_is_within_target(
                     path.parent.resolve(strict=True), repo
                 )
             except (OSError, RuntimeError):
@@ -720,14 +720,9 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         elif path.is_symlink():
             preview = ""
         elif path.is_file():
-            try:
-                path.resolve(strict=True).relative_to(repo)
-            except (OSError, ValueError):
-                preview = ""
-            else:
-                preview, is_binary = preview_for(path, args.preview_bytes)
-                if is_binary:
-                    continue
+            preview, is_binary = preview_for(path, args.preview_bytes)
+            if is_binary:
+                continue
         else:
             preview = ""
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
