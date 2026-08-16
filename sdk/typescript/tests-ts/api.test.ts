@@ -3615,7 +3615,7 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("fails a budgeted scan when token usage cannot be verified", async () => {
+  test("fails a budgeted scan when only unfinished root usage is available", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3658,6 +3658,10 @@ describe("CodexSecurity orchestration", () => {
             };
             executable._exec.run = async function* () {
               await copyCompletedScan(root);
+              await writeUsageSession(codexHome, "scan-thread", {
+                input_tokens: 100,
+                output_tokens: 10,
+              });
               yield JSON.stringify({
                 type: "thread.started",
                 thread_id: "scan-thread",

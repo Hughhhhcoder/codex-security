@@ -101,7 +101,7 @@ function taskEvent(
     type: "event_msg",
     payload: {
       type,
-      turn_id: "fixture-worker-turn",
+      turn_id: "fixture-turn",
       started_at: 1_785_067_320,
       ...(type === "task_started" ? {} : { completed_at: 1_785_067_321 }),
       ...(type === "turn_aborted" ? { reason: "interrupted" } : {}),
@@ -1786,10 +1786,11 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  testPosix(
-    "rejects budget fallback when a worker first appears during a failed refresh",
-    async () => {
+  testPosix.each(["parented", "independent"] as const)(
+    "rejects budget fallback for a newly discovered %s worker during a failed refresh",
+    async (workerKind) => {
       const home = await codexHome();
+      const scanDirectory = join(home, "scan");
       const active = await writeSession(home, "scan-thread", {
         input_tokens: 100,
         output_tokens: 10,
@@ -1797,6 +1798,7 @@ describe("live scan cost tracking", () => {
       const tracker = new ScanCostTracker({
         codexHome: home,
         model: "gpt-5.6-terra",
+        scanDirectory,
         maxCostUsd: 0.001,
       });
       tracker.start("scan-thread");
@@ -1805,7 +1807,11 @@ describe("live scan cost tracking", () => {
         home,
         "worker-thread",
         { input_tokens: 10_000, output_tokens: 1_000 },
-        "scan-thread",
+        workerKind === "parented" ? "scan-thread" : undefined,
+        workerKind === "independent"
+          ? join(scanDirectory, "artifacts")
+          : undefined,
+        "2026-07-26T12:01:00Z",
       );
       await chmod(active, 0o000);
 
@@ -1954,6 +1960,37 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([
+    ["missing", undefined],
+    ["null", null],
+    ["malformed", {}],
+  ] as const)(
+    "requires completed root-session evidence when final usage is %s",
+    async (_description, usage) => {
+      const home = await codexHome();
+      const root = await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        output_tokens: 10,
+      });
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-terra",
+        maxCostUsd: 1,
+      });
+      tracker.start("scan-thread");
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+
+      await expect(tracker.stop(usage)).rejects.toThrow(
+        "The scan cost limit could not be verified",
+      );
+      await appendFile(root, `${taskEvent("task_complete")}\n`);
+      expect((await tracker.stop(usage)).cost).toMatchObject({
+        inputTokens: 100,
+        outputTokens: 10,
+      });
+    },
+  );
+
   test("rejects a budgeted scan when the completed model cannot be priced", async () => {
     const tracker = new ScanCostTracker({
       codexHome: await codexHome(),
@@ -1979,6 +2016,24 @@ describe("live scan cost tracking", () => {
     await expect(tracker.stop(null)).resolves.toEqual({
       usage: null,
       cost: null,
+    });
+  });
+
+  test("preserves unfinished root usage when tracking is optional", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-terra",
+    });
+    tracker.start("scan-thread");
+
+    expect((await tracker.stop(undefined)).cost).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 10,
     });
   });
 

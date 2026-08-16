@@ -45,8 +45,7 @@ interface SessionUsage {
   offset: number;
   pendingLine: Buffer[];
   pendingLineBytes: number;
-  unreadable: boolean;
-  unreadableError: unknown;
+  unreadable: { error: unknown } | null;
   threadId: string | null;
   parentThreadId: string | null;
   workingDirectory: string | null;
@@ -83,6 +82,14 @@ interface ScanCostSnapshot {
   cost: ScanCost | null;
 }
 
+interface ObservedSessionUsage {
+  root: ScanTokenUsage | null;
+  workers: ScanTokenUsage | null;
+  rootCompleted: boolean;
+  unverified: boolean;
+  unfinishedWorkers: boolean;
+}
+
 const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
   "gpt-5.6": [5_000, 500, 6_250, 30_000],
   "gpt-5.6-sol": [5_000, 500, 6_250, 30_000],
@@ -104,12 +111,9 @@ export class ScanCostTracker {
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #finalSnapshot: ScanCostSnapshot | null = null;
-  #snapshotThreadUsage: ScanTokenUsage | null = null;
+  #observedUsage: ObservedSessionUsage | null = null;
   #lastCost: number | null = null;
-  #failedSession: SessionUsage | null = null;
-  #hasDelegatedWorkers = false;
-  #hasUnverifiedSessionUsage = false;
-  #hasUnfinishedWorkers = false;
+  #rootOnlyReadError = false;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -174,6 +178,7 @@ export class ScanCostTracker {
       clearInterval(this.#timer);
       this.#timer = null;
     }
+    const completedRoot = tokenUsage(fallbackUsage);
     let refreshError: unknown;
     try {
       await this.refresh();
@@ -181,15 +186,14 @@ export class ScanCostTracker {
       if (
         fallbackUsage === undefined ||
         (this.#options.maxCostUsd !== undefined &&
-          (this.#failedSession?.threadId !== this.#threadId ||
-            this.#hasDelegatedWorkers))
+          (completedRoot === null || !this.#rootOnlyReadError))
       ) {
         throw error;
       }
       refreshError = error;
     }
-    const completedRoot = tokenUsage(fallbackUsage);
-    const observedRoot = this.#snapshotThreadUsage;
+    const observed = this.#observedUsage;
+    const observedRoot = observed?.root ?? null;
     const completedRootCost = estimateScanCost(
       this.#options.model,
       completedRoot,
@@ -207,27 +211,22 @@ export class ScanCostTracker {
         : completedRoot;
     let completedUsage: unknown =
       rootUsage === completedRoot ? fallbackUsage : rootUsage;
-    let workerUsage: ScanTokenUsage | null = null;
-    if (this.#hasDelegatedWorkers && this.#snapshot.usage !== null) {
-      const previousUsage = tokenUsage(this.#snapshot.usage);
-      workerUsage =
-        previousUsage === null
-          ? null
-          : observedRoot === null
-            ? previousUsage
-            : subtractTokenUsage(previousUsage, observedRoot);
-      if (rootUsage !== null && workerUsage !== null) {
-        completedUsage = addTokenUsage(workerUsage, rootUsage);
-      }
+    const workerUsage = observed?.workers ?? null;
+    if (workerUsage !== null) {
+      completedUsage =
+        rootUsage === null
+          ? workerUsage
+          : addTokenUsage(workerUsage, rootUsage);
     }
     const cost = estimateScanCost(this.#options.model, completedUsage);
     if (
       this.#options.maxCostUsd !== undefined &&
       (rootUsage === null ||
         cost === null ||
-        this.#hasUnverifiedSessionUsage ||
-        (finalizing && this.#hasUnfinishedWorkers) ||
-        (this.#hasDelegatedWorkers && workerUsage === null))
+        observed?.unverified ||
+        (finalizing &&
+          ((completedRoot === null && !observed?.rootCompleted) ||
+            observed?.unfinishedWorkers)))
     ) {
       throw (
         refreshError ??
@@ -253,7 +252,7 @@ export class ScanCostTracker {
 
   async #readSessions(): Promise<void> {
     if (this.#threadId === null) return;
-    this.#failedSession = null;
+    this.#rootOnlyReadError = false;
     const presentSessions = new Set<string>();
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for await (const path of sessionFiles(
@@ -265,8 +264,7 @@ export class ScanCostTracker {
           offset: 0,
           pendingLine: [],
           pendingLineBytes: 0,
-          unreadable: false,
-          unreadableError: null,
+          unreadable: null,
           threadId: null,
           parentThreadId: null,
           workingDirectory: null,
@@ -299,10 +297,7 @@ export class ScanCostTracker {
           presentSessions.delete(path);
         }
       } catch (error) {
-        if (session.threadId === null) {
-          this.#failedSession = session;
-          throw error;
-        }
+        if (session.threadId === null) throw error;
         unreadable.push({ session, error });
       }
     }
@@ -356,7 +351,6 @@ export class ScanCostTracker {
     const hasUnverifiedWorkerAttribution = [...ambiguousWorkers].some(
       (threadId) => !included.has(threadId),
     );
-    if (included.size > 1) this.#hasDelegatedWorkers = true;
     if (this.#options.maxCostUsd !== undefined) {
       for (const [path, session] of this.#sessions) {
         if (
@@ -372,37 +366,52 @@ export class ScanCostTracker {
     }
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) {
-        this.#failedSession = session;
+        this.#rootOnlyReadError =
+          session.threadId === this.#threadId &&
+          included.size === 1 &&
+          !hasUnverifiedWorkerAttribution;
         throw error;
       }
       if (isSessionAccessDenied(error)) quarantineSession(session, error);
     }
 
-    let usage: ScanTokenUsage | null = null;
-    let threadUsage: ScanTokenUsage | null = null;
-    let hasUnverifiedSessionUsage = hasUnverifiedWorkerAttribution;
-    let hasUnfinishedWorkers = false;
+    const observed: ObservedSessionUsage = {
+      root: null,
+      workers: null,
+      rootCompleted: false,
+      unverified: hasUnverifiedWorkerAttribution,
+      unfinishedWorkers: false,
+    };
     for (const session of this.#sessions.values()) {
       if (session.threadId !== null && included.has(session.threadId)) {
-        if (session.pendingLineBytes > 0) hasUnverifiedSessionUsage = true;
-        if (session.threadId !== this.#threadId) {
-          if (session.usage === null) hasUnverifiedSessionUsage = true;
-          if (!session.taskCompleted) hasUnfinishedWorkers = true;
+        if (session.pendingLineBytes > 0) observed.unverified = true;
+        if (session.threadId === this.#threadId) {
+          observed.rootCompleted = session.taskCompleted;
+          if (session.usage !== null) {
+            observed.root = addTokenUsage(observed.root, session.usage);
+          }
+        } else {
+          if (session.usage === null) {
+            observed.unverified = true;
+          } else {
+            observed.workers = addTokenUsage(observed.workers, session.usage);
+          }
+          if (!session.taskCompleted) observed.unfinishedWorkers = true;
           this.#reportWorkerActivities(session);
           this.#reportWorkerProgress(session);
         }
-        if (session.usage !== null) {
-          if (session.threadId === this.#threadId) threadUsage = session.usage;
-          usage = addTokenUsage(usage, session.usage);
-        }
       }
     }
-    this.#hasUnverifiedSessionUsage = hasUnverifiedSessionUsage;
-    this.#hasUnfinishedWorkers = hasUnfinishedWorkers;
+    this.#observedUsage = observed;
+    const usage =
+      observed.root === null
+        ? observed.workers
+        : observed.workers === null
+          ? observed.root
+          : addTokenUsage(observed.root, observed.workers);
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
     this.#snapshot = { usage, cost };
-    this.#snapshotThreadUsage = threadUsage;
     this.#reportCost(cost);
   }
 
@@ -495,8 +504,8 @@ async function readSessionUsage(
   repository?: string,
   requireReadableSessions = false,
 ): Promise<boolean> {
-  if (session.unreadable) {
-    if (requireReadableSessions) throw session.unreadableError;
+  if (session.unreadable !== null) {
+    if (requireReadableSessions) throw session.unreadable.error;
     return true;
   }
   let file;
@@ -533,8 +542,7 @@ async function readSessionUsage(
 }
 
 function quarantineSession(session: SessionUsage, error: unknown): void {
-  session.unreadable = true;
-  session.unreadableError = error;
+  session.unreadable = { error };
   session.pendingLine = [];
   session.pendingLineBytes = 0;
 }
