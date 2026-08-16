@@ -33,12 +33,16 @@ import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import {
   bundledPluginRoot,
+  pluginHelperEnvironment,
   requireSecureOutputAncestry,
   resolvePluginPath,
-  resolvePluginPython,
+  resolvePluginPythonCommand,
 } from "./runtime.js";
-import type { ScanMode } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { outermostGitMarkerRoot, type ScanMode } from "./targets.js";
+import {
+  resolveTrustedExecutable,
+  type TrustedExecutable,
+} from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = [
@@ -177,23 +181,41 @@ async function runCampaign(
   await ensureManifest(join(output, "manifest.json"), tasks, options);
   const { receipts, warnedIds } = await readReceipts(ledger, tasks);
   const pending: MultiscanTask[] = [];
-  let reportRuntime: Promise<[string, string]> | undefined;
+  let reportRuntime: Promise<[TrustedExecutable, string]> | undefined;
   const restoreReport = async (
     scanDir: string,
     schemaPluginRoot: string,
   ): Promise<void> => {
     try {
       // Configured historical archives may contain schemas without helper scripts.
-      const [python, helperRoot] = await (reportRuntime ??= Promise.all([
-        resolvePluginPython({
-          configuredPath: options.config.pythonPath,
-          protectedRoot: output,
-          signal: options.signal,
-        }),
-        bundledPluginRoot(),
-      ]));
+      const [python, helperRoot] = await (reportRuntime ??= (async () => {
+        const repositories = [
+          process.cwd(),
+          ...tasks.map((task) => task.repository).filter(isAbsolute),
+        ];
+        const repositoryRoots = await Promise.all(
+          [...new Set(repositories)].map(async (repository) => {
+            const canonical = await realpath(repository).catch(() =>
+              resolve(repository),
+            );
+            const metadata = await lstat(canonical).catch(() => undefined);
+            return metadata?.isDirectory()
+              ? await outermostGitMarkerRoot(canonical, options.signal)
+              : canonical;
+          }),
+        );
+        return await Promise.all([
+          resolvePluginPythonCommand({
+            configuredPath: options.config.pythonPath,
+            environment: pluginHelperEnvironment(process.env),
+            additionalProtectedRoots: [output, ...repositoryRoots],
+            signal: options.signal,
+          }),
+          bundledPluginRoot(),
+        ]);
+      })());
       await execFile(
-        python,
+        python.executable,
         [
           "-I",
           "-B",
@@ -205,6 +227,7 @@ async function runCampaign(
           "--report-only",
         ],
         {
+          env: python.environment,
           maxBuffer: Infinity,
           windowsHide: true,
           signal: options.signal,
@@ -229,17 +252,40 @@ async function runCampaign(
     const artifactRoot = await ensureOutputDirectory(
       join(output, "artifacts", task.id),
     );
-    const artifactOutput = join(artifactRoot, `attempt-${receipt.attempt}`);
+    const attemptName = `attempt-${receipt.attempt}`;
+    const artifactOutput = join(artifactRoot, attemptName);
     const selectedArtifactOutput = join(
       resolve(options.outputDir),
       "artifacts",
       task.id,
-      `attempt-${receipt.attempt}`,
+      attemptName,
     );
     if (
       receipt.outputDir === artifactOutput ||
       receipt.outputDir === selectedArtifactOutput
     ) {
+      const canonicalArtifactOutput = await realpath(artifactOutput).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+            return undefined;
+          }
+          throw error;
+        },
+      );
+      if (canonicalArtifactOutput === undefined) {
+        pending.push(task);
+        continue;
+      }
+      if (
+        relative(
+          join(output, "artifacts", task.id, attemptName),
+          canonicalArtifactOutput,
+        ) !== ""
+      ) {
+        throw new Error(
+          "Multiscan recovery is required: saved artifacts are outside their expected campaign directory.",
+        );
+      }
       const checkout = join(output, "checkouts", task.id);
       const schemaPluginRoot = await resolveResumePluginRoot();
       const coverage = await loadResumableCoverage(
@@ -250,7 +296,7 @@ async function runCampaign(
         options.signal,
       );
       if (coverage !== undefined) {
-        await restoreReport(artifactOutput, schemaPluginRoot);
+        await restoreReport(canonicalArtifactOutput, schemaPluginRoot);
         await rm(checkout, {
           recursive: true,
           force: true,
@@ -299,6 +345,11 @@ async function runCampaign(
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
         attempt += 1;
+        if (!Number.isSafeInteger(attempt)) {
+          throw new Error(
+            "Multiscan recovery is required: the next attempt is not a safe integer.",
+          );
+        }
         const checkout = join(output, "checkouts", task.id);
         const scanDir = join(
           output,
@@ -750,6 +801,69 @@ function matchesTask(receipt: MultiscanReceipt, task: MultiscanTask): boolean {
   );
 }
 
+function isReceiptRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseReceipt(line: string, lineNumber: number): MultiscanReceipt {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    value = undefined;
+  }
+  const cost = isReceiptRecord(value) ? value["cost"] : undefined;
+  if (
+    !isReceiptRecord(value) ||
+    !["id", "repository", "revision", "outputDir"].every(
+      (field) => typeof value[field] === "string",
+    ) ||
+    (value["mode"] !== "standard" && value["mode"] !== "deep") ||
+    !["completed", "completed_with_incomplete_coverage", "failed"].includes(
+      value["status"] as string,
+    ) ||
+    typeof value["attempt"] !== "number" ||
+    !Number.isSafeInteger(value["attempt"]) ||
+    value["attempt"] < 1 ||
+    ![
+      "scope",
+      "prompt",
+      "targetId",
+      "resolvedScope",
+      "snapshotDigest",
+      "error",
+      "warning",
+    ].every(
+      (field) => value[field] === undefined || typeof value[field] === "string",
+    ) ||
+    (value["coverage"] !== undefined &&
+      !["complete", "partial", "unknown"].includes(
+        value["coverage"] as string,
+      )) ||
+    (value["warnings"] !== undefined &&
+      (!Array.isArray(value["warnings"]) ||
+        !value["warnings"].every((warning) => typeof warning === "string"))) ||
+    (cost !== undefined &&
+      (!isReceiptRecord(cost) ||
+        typeof cost["model"] !== "string" ||
+        ![
+          "inputTokens",
+          "cachedInputTokens",
+          "cacheWriteInputTokens",
+          "outputTokens",
+          "estimatedUsd",
+        ].every(
+          (field) =>
+            typeof cost[field] === "number" && Number.isFinite(cost[field]),
+        )))
+  ) {
+    throw new Error(
+      `Multiscan recovery is required: results line ${lineNumber} is not a valid receipt.`,
+    );
+  }
+  return value as unknown as MultiscanReceipt;
+}
+
 async function readReceipts(
   path: string,
   tasks: readonly MultiscanTask[],
@@ -779,8 +893,9 @@ async function readReceipts(
   const indexedTasks = new Map(
     tasks.map((task) => [task.id.toLowerCase(), task]),
   );
-  for (const line of lines.filter(Boolean)) {
-    const receipt = JSON.parse(line) as MultiscanReceipt;
+  for (const [index, line] of lines.entries()) {
+    if (!line) continue;
+    const receipt = parseReceipt(line, index + 1);
     const id = receipt.id.toLowerCase();
     receipts.set(id, receipt);
     const task = indexedTasks.get(id);

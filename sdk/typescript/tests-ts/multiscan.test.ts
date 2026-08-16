@@ -29,6 +29,7 @@ import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import * as runtime from "../src/runtime.js";
+import { outermostGitMarkerRoot } from "../src/targets.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -488,7 +489,9 @@ describe("multiscan", () => {
     const progress: Parameters<
       NonNullable<MultiscanOptions["onProgress"]>
     >[0][] = [];
+    let scans = 0;
     const security = client(async (checkout, scanOptions = {}) => {
+      scans += 1;
       if (basename(checkout) === "follow-up-warning") {
         scanOptions.onWarning?.("Could not run post-scan instructions.");
         scanOptions.onWarning?.(`Scan target changed after ${secret}.`);
@@ -523,11 +526,27 @@ describe("multiscan", () => {
     expect(receipts[1]).not.toHaveProperty("warnings");
     expect(await readFile(summary.resultsPath, "utf8")).not.toContain(secret);
 
+    const ledger = await readFile(summary.resultsPath, "utf8");
+    const unrelatedWarning = {
+      id: "OUTSIDE-CAMPAIGN",
+      warnings: ["Unrelated historical warning."],
+    };
+    await appendFile(
+      summary.resultsPath,
+      `${JSON.stringify(unrelatedWarning)}\n`,
+    );
+    const malformedLedger = await readFile(summary.resultsPath, "utf8");
+    await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+      "Multiscan recovery is required",
+    );
+    expect(scans).toBe(2);
+    expect(await readFile(summary.resultsPath, "utf8")).toBe(malformedLedger);
+    await writeFile(summary.resultsPath, ledger);
     await appendFile(
       summary.resultsPath,
       `${JSON.stringify({
-        id: "OUTSIDE-CAMPAIGN",
-        warnings: ["Unrelated historical warning."],
+        ...receipts[0],
+        ...unrelatedWarning,
       })}\n`,
     );
     for (const identity of [{ id: "QUIET" }, { repository: source.path }]) {
@@ -2263,13 +2282,23 @@ describe("multiscan", () => {
     const ledger = await readFile(first.resultsPath, "utf8");
     const resolvePython = spyOn(
       runtime,
-      "resolvePluginPython",
+      "resolvePluginPythonCommand",
     ).mockRejectedValue(
       new Error("Python unavailable: sk-proj-SYNTHETIC_REPORT_RECOVERY_123"),
     );
     try {
       await expect(runMultiscan(options(paths, security))).rejects.toThrow(
         "Multiscan report recovery is required: [redacted]",
+      );
+      expect(resolvePython).toHaveBeenCalledWith(
+        expect.objectContaining({
+          additionalProtectedRoots: expect.arrayContaining([
+            paths.output,
+            source.path,
+            await outermostGitMarkerRoot(await realpath(process.cwd())),
+          ]),
+          environment: runtime.pluginHelperEnvironment(process.env),
+        }),
       );
       expect(attempts).toBe(1);
       expect(await readFile(first.resultsPath, "utf8")).toBe(ledger);
@@ -2296,7 +2325,7 @@ describe("multiscan", () => {
     const reason = new Error("Report recovery cancelled.");
     const resolvePython = spyOn(
       runtime,
-      "resolvePluginPython",
+      "resolvePluginPythonCommand",
     ).mockImplementation(async () => {
       controller.abort(reason);
       throw reason;

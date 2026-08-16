@@ -1011,7 +1011,8 @@ def _validate_derived_finding_identities(
             raise ContractError(f"{context}.findingId: does not match derived fingerprint identity")
         if finding.get("occurrenceId") != occurrence_id:
             raise ContractError(f"{context}.occurrenceId: does not match scan occurrence identity")
-        if finding.get("fingerprints") != fingerprints:
+        actual_fingerprints = _require_dict(finding, "fingerprints", context)
+        if any(actual_fingerprints.get(key) != value for key, value in fingerprints.items()):
             raise ContractError(f"{context}.fingerprints: does not match derived fingerprint")
 
 

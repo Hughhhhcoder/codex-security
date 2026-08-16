@@ -37,7 +37,12 @@ describe("bundled scan report and source limits", () => {
       "    assert finalizer.main() == 0",
       "    report_only.assert_called_once_with(scan_dir, schema_dir)",
       "    full_finalizer.assert_not_called(); export.assert_not_called(); sarif.assert_not_called()",
-      "print(json.dumps({'reportOnly': True, 'sealedReportPreserved': True, 'sealedAliasPreserved': True}))",
+      "fingerprints = {'algorithm': finalizer.FINGERPRINT_ALGORITHM, 'primary': 'derived'}",
+      "finding = {'findingId': 'finding', 'occurrenceId': 'occurrence', 'fingerprints': {**fingerprints, 'future': 'preserved'}}",
+      "with patch.object(finalizer, '_derived_finding_identity_rows', return_value=[('finding', finding, 'finding', 'occurrence', fingerprints)]):",
+      "    finalizer._validate_derived_finding_identities({}, {})",
+      "    assert finding['fingerprints']['future'] == 'preserved'",
+      "print(json.dumps({'reportOnly': True, 'sealedReportPreserved': True, 'sealedAliasPreserved': True, 'knownFingerprintsOnly': True}))",
     ].join("\n");
     const result = Bun.spawnSync(
       [python!, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
@@ -49,6 +54,7 @@ describe("bundled scan report and source limits", () => {
       reportOnly: true,
       sealedReportPreserved: true,
       sealedAliasPreserved: true,
+      knownFingerprintsOnly: true,
     });
   });
 
