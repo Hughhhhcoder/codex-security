@@ -30,6 +30,7 @@ import {
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergedCodexConfig,
+  scanApprovalPolicy,
   scanModelConfiguration,
   scanModelProvider,
   type CodexSecurityConfig,
@@ -141,7 +142,7 @@ interface CodexClientLike {
   startThread(options: {
     workingDirectory: string;
     skipGitRepoCheck: boolean;
-    approvalPolicy: "never";
+    approvalPolicy: "never" | "on-request";
   }): CodexThreadLike;
 }
 
@@ -540,6 +541,7 @@ export class CodexSecurity {
         );
       }
       const effectiveConfig = runtime.effectiveConfig ?? requestedConfig;
+      const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       if (runtime.configPath !== undefined) {
         await writeCodexConfig(runtime.configPath, preflightConfig);
@@ -831,7 +833,7 @@ export class CodexSecurity {
         mode,
         expectation.repositoryRevision,
         runtime.plugin.version,
-        preflightConfig,
+        { ...preflightConfig, approval_policy: approvalPolicy },
         options.failureSeverity,
         knowledgeBase?.sources,
         options.maxCostUsd,
@@ -1066,6 +1068,7 @@ export class CodexSecurity {
         ),
         config: {
           ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
+          approvals_reviewer: "auto_review",
           default_permissions: SCAN_PERMISSION_PROFILE,
           allow_login_shell: false,
           responses_api_metadata: {
@@ -1077,7 +1080,7 @@ export class CodexSecurity {
       const thread = codex.startThread({
         workingDirectory: scanDir,
         skipGitRepoCheck: true,
-        approvalPolicy: "never",
+        approvalPolicy,
       });
       const serializedPaths =
         normalized.kind === "paths"
@@ -2864,6 +2867,7 @@ export function scanRuntimeCodexConfig(
   stateDirectory: string,
   protectedCredentialHome?: string,
 ): JsonObject {
+  const approvalPolicy = scanApprovalPolicy(config);
   const hardened = structuredClone(config);
   delete hardened["sandbox_mode"];
   delete hardened["approvals_reviewer"];
@@ -2883,7 +2887,8 @@ export function scanRuntimeCodexConfig(
     : {};
   return {
     ...hardened,
-    approval_policy: "never",
+    approval_policy: approvalPolicy,
+    approvals_reviewer: "auto_review",
     allow_login_shell: false,
     default_permissions: SCAN_PERMISSION_PROFILE,
     permissions: {
@@ -2908,6 +2913,7 @@ function sharedCredentialCodexConfig(
   credentialHome: string,
 ): JsonObject {
   const shared: JsonObject = {
+    approval_policy: scanApprovalPolicy(config),
     features: { plugins: true },
   };
   for (const key of [
