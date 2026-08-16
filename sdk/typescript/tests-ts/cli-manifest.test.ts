@@ -4,6 +4,7 @@ import { Cli, Schema, z } from "incur";
 import { main } from "../src/cli.js";
 import {
   fullMarkdownManifestArguments,
+  INCUR_VALUE_OPTIONS,
   renderFullMarkdownManifest,
 } from "../src/cli-manifest.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
@@ -311,6 +312,37 @@ describe("full CLI manifest", () => {
         ]),
       ),
     ).toEqual(schema);
+  });
+
+  test("rejects missing global values before discovery can dispatch a command", async () => {
+    const rejectsMissingValue = async (
+      args: readonly string[],
+      option: string,
+    ) => {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          args,
+          stdout.stream,
+          stderr.stream,
+          documentationDependencies(),
+        ),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(`Missing value for flag: ${option}`);
+    };
+    for (const option of INCUR_VALUE_OPTIONS) {
+      await rejectsMissingValue([option], option);
+    }
+    for (const command of ["scan", "logout"]) {
+      for (const discovery of ["--llms", "--llms-full", "--schema"]) {
+        await rejectsMissingValue(
+          [command, "--filter-output", discovery],
+          "--filter-output",
+        );
+      }
+    }
   });
 
   test("honors explicit output formats without rewriting structured manifests", async () => {

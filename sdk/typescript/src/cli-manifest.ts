@@ -23,7 +23,8 @@ const MANIFEST_FLAGS = new Set([
   "--schema",
   "--token-count",
 ]);
-const MANIFEST_VALUE_FLAGS = new Set([
+export const INCUR_VALUE_OPTIONS = new Set([
+  "--format",
   "--filter-output",
   "--token-limit",
   "--token-offset",
@@ -43,7 +44,7 @@ export function fullMarkdownManifestArguments(
       format = argument.slice("--format=".length);
     } else if (MANIFEST_FLAGS.has(argument)) continue;
     else if (
-      MANIFEST_VALUE_FLAGS.has(argument) &&
+      INCUR_VALUE_OPTIONS.has(argument) &&
       argv[index + 1] !== undefined
     ) {
       index += 1;

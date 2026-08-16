@@ -52,6 +52,7 @@ import {
 import { accountStatus } from "./auth.js";
 import {
   fullMarkdownManifestArguments,
+  INCUR_VALUE_OPTIONS,
   renderFullMarkdownManifest,
 } from "./cli-manifest.js";
 import {
@@ -220,10 +221,7 @@ const VALUE_OPTIONS = new Set([
   "--export-format",
   "--output",
   "--source-root",
-  "--format",
-  "--filter-output",
-  "--token-limit",
-  "--token-offset",
+  ...INCUR_VALUE_OPTIONS,
   "--scan-root",
   "--reason",
   "--to",
@@ -2890,10 +2888,23 @@ function scanArgumentsFromRecipe(
   };
 }
 
+function hasFlagValue(argv: readonly string[], index: number): boolean {
+  const next = argv[index + 1];
+  return next !== undefined && !next.startsWith("--") && next !== "-h";
+}
+
 function validateCliArguments(
   argv: readonly string[],
   positionals: string[],
 ): string | undefined {
+  for (let index = 0; index < argv.length; index += 1) {
+    const option = argv[index]!;
+    if (!INCUR_VALUE_OPTIONS.has(option)) continue;
+    if (!hasFlagValue(argv, index)) {
+      return `Missing value for flag: ${option}`;
+    }
+    index += 1;
+  }
   if (
     argv.includes("--schema") ||
     argv.some((argument) => DOCUMENTATION_FLAGS.has(argument))
@@ -3018,8 +3029,7 @@ function validateCliArguments(
     const equals = value.indexOf("=");
     const option = equals < 0 ? value : value.slice(0, equals);
     if (equals >= 0 || !VALUE_OPTIONS.has(option)) continue;
-    const next = argv[index + 1];
-    if (next === undefined || next.startsWith("--") || next === "-h") {
+    if (!hasFlagValue(argv, index)) {
       return `Missing value for flag: ${option}`;
     }
     index += 1;
