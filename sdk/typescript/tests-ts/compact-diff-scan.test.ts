@@ -417,7 +417,7 @@ describe("compact diff scan", () => {
     expect(escaped.stderr).toContain("in-scope file row 1");
   });
 
-  test("runs the compact MCP diff lifecycle through a completed scan", async () => {
+  test.each(["object", "Markdown"])("MCP diff retains %s", async (format) => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/guard.py", "allowed = True\n");
     writeSource(repository, "src/handler.py", "value = 1\n");
@@ -522,7 +522,7 @@ describe("compact diff scan", () => {
         ],
       });
       await call("record_candidate_attack_paths", { scanId, attackPaths: [] });
-      const threatModel = {
+      const canonicalModel = {
         summary: "A local handler processes selected input (src/handler.py:1).",
         assets: ["Integrity of the selected result."],
         trustBoundaries: [
@@ -534,6 +534,22 @@ describe("compact diff scan", () => {
         securityObjectives: ["Keep each result bound to its selected input."],
         assumptions: ["A shared-service deployment has not been established."],
       };
+      const savedModelPath = join(
+        scanDir,
+        "artifacts",
+        "01_context",
+        "threat_model.md",
+      );
+      mkdirSync(dirname(savedModelPath), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        savedModelPath,
+        "# Saved threat model\n\n" +
+          "Selected input stays separate from private state (src/handler.py:1).\n",
+      );
+      const threatModel =
+        format === "Markdown"
+          ? { summary: readFileSync(savedModelPath, "utf8") }
+          : canonicalModel;
       const openQuestions = [
         {
           question:
@@ -602,7 +618,10 @@ describe("compact diff scan", () => {
       expect(contract.coverage.openQuestions).toEqual(openQuestions);
       expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
       const report = readFileSync(join(scanDir, "report.md"), "utf8");
-      for (const fact of Object.values(threatModel).flat()) {
+      for (const fact of Object.values(threatModel)
+        .flat()
+        .flatMap((value) => value.split("\n"))
+        .filter(Boolean)) {
         expect(report).toContain(fact);
       }
       expect(report).toContain(openQuestions[0]!.question);
@@ -613,6 +632,7 @@ describe("compact diff scan", () => {
       mkdirSync(terminalDir, { mode: 0o700 });
       const markdownModel =
         "# Existing threat model\n\n" +
+        "## Assumptions\n\n" +
         "Selected input stays separate from private state (src/handler.py:1).\n";
       const terminalManifest = structuredClone(
         completed["manifest"],
@@ -656,6 +676,9 @@ describe("compact diff scan", () => {
       for (const line of markdownModel.split("\n").filter(Boolean)) {
         expect(terminalReport).toContain(line);
       }
+      expect(terminalReport.match(/^#{1,2} .+$/gm)).toEqual(
+        report.match(/^#{1,2} .+$/gm),
+      );
     } finally {
       await client.close();
     }
