@@ -1062,21 +1062,27 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
-  argv = defaultListCommand(
-    argv.flatMap((argument) =>
-      argument.startsWith("--format=")
-        ? ["--format", argument.slice("--format=".length)]
-        : [argument],
-    ),
-  );
+  const completing = Boolean(process.env["COMPLETE"]);
+  if (!completing) {
+    argv = defaultListCommand(
+      argv.flatMap((argument) =>
+        argument.startsWith("--format=")
+          ? ["--format", argument.slice("--format=".length)]
+          : [argument],
+      ),
+    );
+  }
   const positionals: string[] = [];
-  const argumentError = validateCliArguments(argv, positionals);
+  const argumentError = completing
+    ? undefined
+    : validateCliArguments(argv, positionals);
   if (argumentError !== undefined) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
   }
   const updateController = new AbortController();
   const pendingUpdate =
+    !completing &&
     errorOutput.isTTY === true &&
     argv.length > 0 &&
     argv[0] !== "completions" &&
@@ -2674,7 +2680,7 @@ export async function main(
     });
 
   let notice: UpdateNotice | undefined;
-  const manifestArguments = process.env["COMPLETE"]
+  const manifestArguments = completing
     ? undefined
     : fullMarkdownManifestArguments(argv);
   const markdownManifest = manifestArguments !== undefined;

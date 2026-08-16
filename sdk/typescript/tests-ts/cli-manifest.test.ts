@@ -352,6 +352,38 @@ describe("full CLI manifest", () => {
     }
   });
 
+  test("delegates partial shell-completion words without command validation", async () => {
+    const original = {
+      COMPLETE: process.env["COMPLETE"],
+      _COMPLETE_INDEX: process.env["_COMPLETE_INDEX"],
+    };
+    try {
+      process.env["COMPLETE"] = "bash";
+      for (const option of INCUR_VALUE_OPTIONS) {
+        for (const suffix of [[option], [option, ""]]) {
+          const words = ["codex-security", ...suffix];
+          process.env["_COMPLETE_INDEX"] = String(words.length - 1);
+          await invoke(["--", ...words]);
+        }
+      }
+      process.env["_COMPLETE_INDEX"] = "3";
+      const completions = await invoke([
+        "--",
+        "codex-security",
+        "--format=json",
+        "scan",
+        "--mo",
+      ]);
+      expect(completions).toContain("--model");
+      expect(completions).toContain("--mode");
+    } finally {
+      for (const [name, value] of Object.entries(original)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   test("honors explicit output formats without rewriting structured manifests", async () => {
     const markdown = await invoke(["scan", "--llms-full"]);
     for (const format of [
