@@ -47,3 +47,35 @@ Maintainers update package dependencies and the committed lockfile in the
 canonical repository. The public release workflow installs that locked graph,
 tests the package, and publishes a verified artifact with npm provenance.
 GitHub Actions dependencies are maintained separately in this repository.
+
+The `node-release-pr` workflow proposes the next patch version when the current
+`main` commit has passed `node-ci` and the packaged files have changed since the
+current release. It waits for that version's npm publication, `npm-vX.Y.Z` tag,
+and GitHub Release to finish. A successful `node-github-release` run retries the
+check if publication was still pending. The PR changes only the version in
+`sdk/typescript/package.json`. The bot preserves existing release PRs, including
+manual minor or major releases, and does not reopen or recreate a closed bot PR
+for the same version. It never merges, tags, publishes, or dispatches a release
+workflow.
+
+Generated PR descriptions use the full, static pull request template without
+copying source history. A maintainer must review the complete public PR, finish
+the disclosure checklist, and satisfy the usual review and CI requirements
+before merging. The existing protected release process still controls
+publication.
+
+To enable the bot, allow GitHub Actions to create pull requests in the
+repository's Actions settings. By default it uses `GITHUB_TOKEN`; a maintainer
+must select **Approve workflows to run** on each generated PR before its CI can
+start. For unattended CI, install a GitHub App on this repository with Actions
+read, Contents write, and Pull requests write permissions. Set the repository
+variable `RELEASE_APP_CLIENT_ID` to the App's client ID and the repository secret
+`RELEASE_APP_PRIVATE_KEY` to its private key. A configured client ID without a
+working private key fails the workflow instead of falling back to
+`GITHUB_TOKEN`. The bot does not need npm credentials or OIDC permissions.
+
+To preview the decision without creating a branch or PR, manually run
+`node-release-pr` from `main` with `dry_run` enabled. For a local preview, check
+out `main`, set `GITHUB_REPOSITORY` and `GH_TOKEN`, and run
+`node sdk/typescript/scripts/patch-release-pr.mjs --dry-run` from the repository
+root with Node.js 24.15.0.
