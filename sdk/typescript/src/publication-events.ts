@@ -13,7 +13,8 @@ export interface CollectedPublicationEvents {
   }>;
   failed: Array<{ findingId: string; error: string }>;
   indeterminate?: boolean;
-  unverifiedEvents?: string[];
+  completedEvents?: string[];
+  unresolvedCompletions?: string[];
 }
 
 export function collectPublicationEvents(
@@ -32,6 +33,7 @@ export function collectPublicationEvents(
     line: string;
   }> = [];
   const indeterminateFindings = new Set<string>();
+  const unresolvedCompletions = new Set<string>();
 
   for (const line of output.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
@@ -93,6 +95,7 @@ export function collectPublicationEvents(
 
     const saved = savedIssue(item["result"]);
     if (saved === undefined) {
+      unresolvedCompletions.add(issue.findingId);
       failed.set(
         issue.findingId,
         "The connected Linear app did not return a created issue identifier.",
@@ -114,16 +117,18 @@ export function collectPublicationEvents(
     if (target !== undefined)
       failed.set(target.findingId, unexpected.join(" "));
   }
-  const unverifiedEvents = completedEvents
-    .filter(
-      ({ findingId }) =>
-        findingId === undefined || indeterminateFindings.has(findingId),
-    )
-    .map(({ line }) => line);
+  const indeterminate = completedEvents.some(
+    ({ findingId }) =>
+      findingId === undefined || indeterminateFindings.has(findingId),
+  );
 
   return {
-    ...(unverifiedEvents.length > 0
-      ? { indeterminate: true, unverifiedEvents }
+    ...(indeterminate ? { indeterminate: true } : {}),
+    ...(completedEvents.length > 0
+      ? { completedEvents: completedEvents.map(({ line }) => line) }
+      : {}),
+    ...(unresolvedCompletions.size > 0
+      ? { unresolvedCompletions: [...unresolvedCompletions] }
       : {}),
     created: publication.issues.flatMap((issue) => {
       if (failed.has(issue.findingId)) return [];

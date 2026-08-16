@@ -84,6 +84,10 @@ describe("Codex Linear publication events", () => {
     ].join("\n");
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      completedEvents: [
+        event(prepared, 0),
+        event(prepared, 1, { tool: "linear_save_issue" }),
+      ],
       created: [
         {
           findingId: "finding_0",
@@ -132,6 +136,7 @@ describe("Codex Linear publication events", () => {
     ].join("\n");
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      completedEvents: output.split("\n"),
       created: [
         {
           findingId: "finding_0",
@@ -183,7 +188,7 @@ describe("Codex Linear publication events", () => {
       "finding_7",
     ]);
     expect(result.indeterminate).toBe(true);
-    expect(result.unverifiedEvents).toHaveLength(2);
+    expect(result.completedEvents).toEqual(output.split("\n"));
   });
 
   test("retains every completed mutation for an indeterminate finding", () => {
@@ -201,7 +206,7 @@ describe("Codex Linear publication events", () => {
     );
     expect(result.created).toEqual([]);
     expect(result.failed).toHaveLength(1);
-    expect(result.unverifiedEvents).toEqual([first, changed]);
+    expect(result.completedEvents).toEqual([first, changed]);
   });
 
   test("keeps verified findings when an additional completed mutation is unknown", () => {
@@ -219,7 +224,7 @@ describe("Codex Linear publication events", () => {
     );
     expect(result.created[0]?.issueIdentifier).toBe("SEC-1");
     expect(result.failed).toEqual([]);
-    expect(result.unverifiedEvents).toEqual([unknown]);
+    expect(result.completedEvents).toEqual([first, unknown]);
   });
 
   test("rejects missing, mismatched, or ambiguous finding occurrence IDs", () => {
@@ -274,6 +279,7 @@ describe("Codex Linear publication events", () => {
     ].join("\n");
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      completedEvents: output.split("\n"),
       created: [
         {
           findingId: "finding_0",
@@ -346,6 +352,7 @@ describe("Codex Linear publication events", () => {
     ].join("\n");
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
+      completedEvents: output.split("\n").slice(1),
       created: [
         {
           findingId: "finding_0",
@@ -535,7 +542,7 @@ describe("Codex Linear publication events", () => {
 
     expect(collectPublicationEvents(output, prepared, "missing")).toEqual({
       indeterminate: true,
-      unverifiedEvents: [output],
+      completedEvents: [output],
       created: [],
       failed: [
         {
@@ -589,6 +596,8 @@ describe("Codex Linear publication events", () => {
     expect(
       collectPublicationEvents(output, prepared, "Missing tool call."),
     ).toEqual({
+      completedEvents: [output.split("\n")[1]!],
+      unresolvedCompletions: ["finding_0"],
       created: [],
       failed: [
         {

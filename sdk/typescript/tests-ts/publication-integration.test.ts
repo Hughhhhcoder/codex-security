@@ -794,9 +794,7 @@ describe("database-backed Linear publication integration", () => {
       expect(receipt.created[0]?.issueIdentifier).toBe("SEC-901");
       expect(
         await readFile(join(dirname(handoffFile), "events.jsonl"), "utf8"),
-      ).toBe(
-        eventLogExists ? "Existing event log\n" : `${events.split("\n")[1]}\n`,
-      );
+      ).toBe(eventLogExists ? "Existing event log\n" : `${events}\n`);
       if (eventLogExists) {
         expect(receipt.warnings).toEqual([
           expect.stringContaining(

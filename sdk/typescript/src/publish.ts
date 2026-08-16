@@ -296,11 +296,11 @@ export async function publishScanInternal(
     failureMessage,
   );
   let eventLogWarning: string | undefined;
-  if (events.unverifiedEvents !== undefined) {
+  if (events.completedEvents !== undefined) {
     try {
       await writeFile(
         join(handoff.directory, "events.jsonl"),
-        `${events.unverifiedEvents.join("\n")}\n`,
+        `${events.completedEvents.join("\n")}\n`,
         {
           encoding: "utf8",
           flag: "wx",
@@ -309,17 +309,19 @@ export async function publishScanInternal(
       );
     } catch (error) {
       eventLogWarning = `Could not preserve unverified Linear publication events: ${safeErrorMessage(error)}.`;
-      result.warnings = [eventLogWarning];
     }
   }
-  const recoveryWarning =
-    eventLogWarning === undefined ? "" : ` ${eventLogWarning}`;
   const handoffResults = await collectPublicationHandoff(
     handoff.file,
     prepared,
     events,
     failureMessage,
   );
+  if (handoffResults.indeterminate && eventLogWarning !== undefined) {
+    result.warnings = [eventLogWarning];
+  }
+  const recoveryWarning =
+    result.warnings?.[0] === undefined ? "" : ` ${result.warnings[0]}`;
   if (handoffResults.created.length > 0) {
     await preserveVerifiedHandoff(
       handoff.file,
@@ -654,9 +656,8 @@ async function collectPublicationHandoff(
   try {
     content = await readFile(file, "utf8");
   } catch {
-    return events;
+    content = "";
   }
-  if (content.trim().length === 0) return events;
 
   const created = new Map<string, PublishedScanIssue>();
   const failed = new Map<string, string>();
@@ -669,7 +670,8 @@ async function collectPublicationHandoff(
   const eventCreated = new Map(
     events.created.map((issue) => [issue.findingId, issue]),
   );
-  let indeterminate = events.indeterminate ?? false;
+  const claimedIssues: Array<{ findingId: unknown; issueIdentifier: string }> =
+    [];
 
   for (const line of content.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
@@ -679,6 +681,17 @@ async function collectPublicationHandoff(
     } catch {
       unexpected.push("Codex wrote an invalid Linear publication handoff.");
       continue;
+    }
+    if (isRecord(record)) {
+      for (const key of ["issueIdentifier", "identifier", "id"]) {
+        const identifier = record[key];
+        if (typeof identifier === "string" && identifier.trim().length > 0) {
+          claimedIssues.push({
+            findingId: record["findingId"],
+            issueIdentifier: identifier,
+          });
+        }
+      }
     }
     if (!isRecord(record) || typeof record["findingId"] !== "string") {
       unexpected.push("Codex wrote an unexpected Linear publication handoff.");
@@ -692,28 +705,6 @@ async function collectPublicationHandoff(
       continue;
     }
     if (observed.has(issue.findingId)) {
-      const saved = created.get(issue.findingId);
-      const identifiers = ["issueIdentifier", "identifier", "id"].filter(
-        (name) => Object.hasOwn(record, name),
-      );
-      const identifier =
-        identifiers.length === 1 ? record[identifiers[0]!] : undefined;
-      const url = record["url"];
-      if (
-        saved !== undefined &&
-        record["scanId"] === publication.scanId &&
-        record["occurrenceId"] === issue.occurrenceId &&
-        !Object.hasOwn(record, "error") &&
-        typeof identifier === "string" &&
-        identifier.trim().length > 0 &&
-        identifier !== saved.issueIdentifier &&
-        (url === undefined ||
-          (typeof url === "string" && url.trim().length > 0))
-      ) {
-        throw new CodexSecurityError(
-          `More than one Linear issue was created for finding ${issue.findingId}: ${saved.issueIdentifier} and ${identifier}. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover both issues before retrying to avoid creating duplicate issues.`,
-        );
-      }
       explicitFailures.delete(issue.findingId);
       created.delete(issue.findingId);
       failed.set(
@@ -782,7 +773,6 @@ async function collectPublicationHandoff(
       ) {
         created.set(issue.findingId, verified);
       } else {
-        indeterminate = true;
         failed.set(
           issue.findingId,
           "Codex wrote a Linear publication with unexpected arguments or destination.",
@@ -848,6 +838,17 @@ async function collectPublicationHandoff(
       failed.set(issue.findingId, eventFailure ?? failureMessage);
     }
   }
+
+  const indeterminate =
+    events.indeterminate === true ||
+    events.unresolvedCompletions?.some(
+      (findingId) => !created.has(findingId),
+    ) === true ||
+    claimedIssues.some(
+      ({ findingId, issueIdentifier }) =>
+        typeof findingId !== "string" ||
+        created.get(findingId)?.issueIdentifier !== issueIdentifier,
+    );
 
   return {
     ...(indeterminate ? { indeterminate: true } : {}),
