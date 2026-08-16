@@ -49,7 +49,10 @@ import {
   resolveCodexCommand,
   runWorkbench,
   setCodexSecurityCredentialLogout,
+  type WorkbenchCommandOptions,
 } from "../src/runtime.js";
+import * as runtimeModule from "../src/runtime.js";
+import * as trustedExecutable from "../src/trusted-executable.js";
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
@@ -5453,6 +5456,235 @@ describe("CodexSecurity orchestration", () => {
       selectedExecutable,
     );
     await client.close();
+  });
+
+  test("binds staged bundled ripgrep only when a trusted host tool is unavailable", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "binds staged bundled ripgrep only when a trusted host tool is unavailable",
+      )
+    ) {
+      return;
+    }
+    const originalTrusted = { ...trustedExecutable };
+    const originalRuntime = { ...runtimeModule };
+    const originalPlatform = Object.getOwnPropertyDescriptor(
+      process,
+      "platform",
+    )!;
+    const inspected: [string, string][] = [];
+    let host: string | null = null;
+    let rejected: string | null = null;
+    mock.module("../src/trusted-executable.js", () => ({
+      ...originalTrusted,
+      resolveTrustedExecutable: async () => null,
+      inspectTrustedExecutable: async (
+        candidate: string,
+        environment: Record<string, string | undefined>,
+        protectedRoot: string,
+      ) => {
+        inspected.push([candidate, protectedRoot]);
+        return {
+          executable:
+            candidate === "git" || candidate === rejected
+              ? null
+              : candidate === "rg"
+                ? host
+                : candidate,
+          environment: { ...environment, PATH: "" },
+        };
+      },
+    }));
+    mock.module("../src/runtime.js", () => ({
+      ...originalRuntime,
+      pluginExecutionEnvironment: (
+        python: string,
+        environment: Record<string, string | undefined>,
+      ) => ({
+        ...environment,
+        PYTHON: python,
+        CODEX_CLI_PATH: process.execPath,
+      }),
+    }));
+    const cases: {
+      scenario: string;
+      platform?: NodeJS.Platform;
+      host: boolean;
+      bindings?: Record<string, string>;
+      expected: "host" | "staged" | "disabled" | "missing";
+    }[] = [
+      { scenario: "host", host: true, expected: "host" },
+      { scenario: "bundled", host: false, expected: "staged" },
+      { scenario: "missing", host: false, expected: "missing" },
+      {
+        scenario: "disabled",
+        host: true,
+        bindings: { CODEX_SECURITY_RG: "" },
+        expected: "disabled",
+      },
+      { scenario: "rejected-copy", host: false, expected: "missing" },
+      { scenario: "overlapping-workspace", host: false, expected: "missing" },
+      {
+        scenario: "case-distinct POSIX binding",
+        platform: "linux",
+        host: true,
+        bindings: { Codex_Security_Rg: "" },
+        expected: "host",
+      },
+      {
+        scenario: "Windows alias disable",
+        platform: "win32",
+        host: true,
+        bindings: { Codex_Security_Rg: "" },
+        expected: "disabled",
+      },
+      {
+        scenario: "Windows effective binding",
+        platform: "win32",
+        host: true,
+        bindings: { CODEX_SECURITY_RG: "previous", Codex_Security_Rg: "" },
+        expected: "host",
+      },
+    ];
+
+    try {
+      for (const entry of cases) {
+        const { scenario } = entry;
+        Object.defineProperty(process, "platform", {
+          value: entry.platform ?? originalPlatform.value,
+        });
+        const root = await temporaryDirectory();
+        const repository = join(root, "repository");
+        const nextRepository = join(root, "next-repository");
+        const codexHome = join(root, "codex-home");
+        const scanDir = join(root, "scan");
+        const workspace =
+          scenario === "overlapping-workspace"
+            ? repository
+            : join(root, "bootstrap-workspace");
+        for (const path of new Set([
+          repository,
+          nextRepository,
+          codexHome,
+          scanDir,
+          workspace,
+        ])) {
+          await mkdir(path, { mode: 0o700 });
+        }
+        const filename = process.platform === "win32" ? "rg.exe" : "rg";
+        const staged =
+          scenario === "rejected-copy"
+            ? join(repository, filename)
+            : join(workspace, filename);
+        host = entry.host ? join(root, "host-tools", filename) : null;
+        rejected = scenario === "rejected-copy" ? staged : null;
+        inspected.length = 0;
+        const stageCalls: string[] = [];
+        const workbenchEnvironments: WorkbenchCommandOptions["environment"][] =
+          [];
+        const codexEnvironments: CodexOptions["env"][] = [];
+        const environment = {
+          PATH: "",
+          CODEX_CLI_PATH: process.execPath,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-key",
+          ...entry.bindings,
+        };
+        const runtime = {
+          ...preparedRuntime(codexHome),
+          bootstrapWorkspace: workspace,
+          environment,
+        };
+        const client = new TestClient(
+          {},
+          {
+            environment,
+            prepareRuntime: async () => runtime,
+            resolvePluginPython: async () => "/managed/python",
+            prepareOutputDir: async () => scanDir,
+            repositoryRevision: async () => null,
+            resolveCodexCommand: () => ({ command: process.execPath }),
+            stageBundledRipgrep: async (path: string) => {
+              stageCalls.push(path);
+              return scenario === "missing" ? null : staged;
+            },
+            runWorkbench: async (
+              options: WorkbenchCommandOptions,
+              args: readonly string[],
+            ) => {
+              if (args[0] === "register-cli-scan") {
+                workbenchEnvironments.push(options.environment);
+              }
+              return mockWorkbench(args);
+            },
+            createCodex: (options: CodexOptions) => {
+              codexEnvironments.push(options.env);
+              throw new Error("captured tool environment");
+            },
+          },
+        );
+        try {
+          if (scenario === "overlapping-workspace") {
+            await expect(client.run(repository)).rejects.toBeInstanceOf(
+              OutputInsideProtectedRootError,
+            );
+            expect(stageCalls).toEqual([]);
+            expect(codexEnvironments).toEqual([]);
+            continue;
+          }
+          await expect(client.run(repository)).rejects.toThrow(
+            "captured tool environment",
+          );
+          if (scenario === "bundled") {
+            await expect(client.run(nextRepository)).rejects.toThrow(
+              "captured tool environment",
+            );
+            expect(
+              inspected.filter(([candidate]) => candidate === staged),
+            ).toEqual([
+              [staged, repository],
+              [staged, nextRepository],
+            ]);
+          }
+          const expected =
+            entry.expected === "disabled"
+              ? ""
+              : entry.expected === "host"
+                ? host ?? undefined
+                : entry.expected === "staged"
+                  ? staged
+                  : undefined;
+          for (const selected of [
+            ...workbenchEnvironments,
+            ...codexEnvironments,
+          ]) {
+            expect(selected?.["CODEX_SECURITY_RG"]).toBe(expected);
+            expect(selected?.["PATH"]).toBe("");
+            expect(selected?.["Codex_Security_Rg"]).toBe(
+              process.platform === "win32"
+                ? undefined
+                : entry.bindings?.["Codex_Security_Rg"],
+            );
+          }
+          expect(workbenchEnvironments).toHaveLength(
+            scenario === "bundled" ? 2 : 1,
+          );
+          expect(codexEnvironments).toHaveLength(
+            scenario === "bundled" ? 2 : 1,
+          );
+          expect(stageCalls).toEqual(
+            entry.host || entry.expected === "disabled" ? [] : [workspace],
+          );
+        } finally {
+          await client.close();
+        }
+      }
+    } finally {
+      Object.defineProperty(process, "platform", originalPlatform);
+      mock.module("../src/trusted-executable.js", () => originalTrusted);
+      mock.module("../src/runtime.js", () => originalRuntime);
+    }
   });
 
   test("authenticates without initializing the plugin runtime", async () => {

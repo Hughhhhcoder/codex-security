@@ -1,5 +1,6 @@
 import { execFile, spawnSync } from "node:child_process";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
+import * as fsSync from "node:fs";
 import {
   chmod,
   copyFile,
@@ -17,6 +18,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
+import * as nodeModule from "node:module";
 import { tmpdir } from "node:os";
 import {
   delimiter,
@@ -70,6 +72,7 @@ import {
   requireTrustedOutputAncestor,
   runWorkbench,
   setCodexSecurityCredentialLogout,
+  stageBundledRipgrep,
   streamWindowsCredentialAclDescriptors,
   verifyStableWindowsCredentialDescendants,
 } from "../src/runtime.js";
@@ -1792,6 +1795,185 @@ describe("plugin runtime preparation", () => {
     expect(command.command).toEndWith(
       join("bin", process.platform === "win32" ? "codex.exe" : "codex"),
     );
+  });
+
+  test("stages only package-owned native ripgrep and cleans failed copies", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "stages only package-owned native ripgrep and cleans failed copies",
+      )
+    ) {
+      return;
+    }
+    const originalFs = { ...fsSync };
+    const originalPromises = { ...fsPromises };
+    const originalModule = { ...nodeModule };
+    const originalPlatform = Object.getOwnPropertyDescriptor(
+      process,
+      "platform",
+    )!;
+    const root = join(tmpdir(), "codex-security-package-mock");
+    const codexPackageJson = join(root, "codex", "package.json");
+    const packageRoot = join(root, "native-package");
+    const nativePackageJson = join(packageRoot, "package.json");
+    const vendor = join(packageRoot, "vendor");
+    const bundle = join(vendor, "native-target");
+    const workspace = join(root, "private-workspace");
+    const marker = join(bundle, "codex-package.json");
+    const filename = () => (process.platform === "win32" ? "rg.exe" : "rg");
+    const source = () => join(bundle, "codex-path", filename());
+    const destination = () => join(workspace, filename());
+    const failure = (code: string) => Object.assign(new Error(code), { code });
+    let scenario = "available";
+    let cancelCopy: AbortController | undefined;
+    const resolutions: [string, string][] = [];
+    const copies: unknown[][] = [];
+    const modes: unknown[][] = [];
+    const removed: string[] = [];
+    const reset = (next: string) => {
+      scenario = next;
+      cancelCopy = undefined;
+      resolutions.length = 0;
+      copies.length = 0;
+      modes.length = 0;
+      removed.length = 0;
+    };
+    mock.module("node:module", () => ({
+      ...originalModule,
+      createRequire: (from: string | URL) => ({
+        resolve: (specifier: string) => {
+          resolutions.push([String(from), specifier]);
+          if (scenario === "missing-package") throw failure("MODULE_NOT_FOUND");
+          if (specifier === "@openai/codex/package.json") {
+            return codexPackageJson;
+          }
+          expect(String(from)).toBe(codexPackageJson);
+          expect(specifier).toBe(
+            `@openai/codex-${process.platform}-${process.arch}/package.json`,
+          );
+          return nativePackageJson;
+        },
+      }),
+    }));
+    mock.module("node:fs", () => ({
+      ...originalFs,
+      readdirSync: (path: string) => {
+        expect(path).toBe(vendor);
+        return [{ name: "native-target", isDirectory: () => true }];
+      },
+      existsSync: () => scenario !== "missing-codex",
+    }));
+    mock.module("node:fs/promises", () => ({
+      ...originalPromises,
+      realpath: async (path: string) =>
+        scenario === "outside-package" && path === source()
+          ? join(root, "other", filename())
+          : path,
+      lstat: async (path: string) => {
+        if (
+          (scenario === "missing-rg" && path === source()) ||
+          (scenario === "missing-marker" && path === marker)
+        ) {
+          throw failure("ENOENT");
+        }
+        expect([source(), marker]).toContain(path);
+        return {
+          isFile: () => scenario !== "not-file" || path !== source(),
+          isSymbolicLink: () => scenario === "symlink" && path === source(),
+        };
+      },
+      access: async (path: string, mode: number) => {
+        expect(path).toBe(source());
+        expect(mode).toBe(
+          process.platform === "win32"
+            ? originalFs.constants.F_OK
+            : originalFs.constants.X_OK,
+        );
+        if (scenario === "not-executable") throw failure("EACCES");
+        if (scenario === "io-error") throw failure("EIO");
+      },
+      copyFile: async (...args: unknown[]) => {
+        copies.push(args);
+        if (scenario === "existing-destination") throw failure("EEXIST");
+        cancelCopy?.abort(new DOMException("canceled", "AbortError"));
+      },
+      chmod: async (...args: unknown[]) => {
+        modes.push(args);
+        if (scenario === "chmod-error") throw failure("EACCES");
+      },
+      rm: async (path: string) => {
+        removed.push(path);
+      },
+    }));
+
+    try {
+      for (const platform of ["linux", "win32"] as const) {
+        Object.defineProperty(process, "platform", { value: platform });
+        reset("available");
+        expect(await stageBundledRipgrep(workspace)).toBe(destination());
+        expect(resolutions).toEqual([
+          [
+            new URL("../src/runtime.ts", import.meta.url).href,
+            "@openai/codex/package.json",
+          ],
+          [
+            codexPackageJson,
+            `@openai/codex-${platform}-${process.arch}/package.json`,
+          ],
+        ]);
+        expect(copies).toEqual([
+          [source(), destination(), originalFs.constants.COPYFILE_EXCL],
+        ]);
+        expect(modes).toEqual(
+          platform === "win32" ? [] : [[destination(), 0o700]],
+        );
+        expect(removed).toEqual([]);
+      }
+
+      Object.defineProperty(process, "platform", { value: "linux" });
+      for (const unavailable of [
+        "missing-package",
+        "missing-codex",
+        "missing-marker",
+        "missing-rg",
+        "not-file",
+        "symlink",
+        "outside-package",
+        "not-executable",
+      ]) {
+        reset(unavailable);
+        expect(await stageBundledRipgrep(workspace)).toBeNull();
+        expect(copies).toEqual([]);
+      }
+      reset("io-error");
+      await expect(stageBundledRipgrep(workspace)).rejects.toMatchObject({
+        code: "EIO",
+      });
+      expect(copies).toEqual([]);
+
+      reset("existing-destination");
+      await expect(stageBundledRipgrep(workspace)).rejects.toMatchObject({
+        code: "EEXIST",
+      });
+      expect(removed).toEqual([]);
+      reset("chmod-error");
+      await expect(stageBundledRipgrep(workspace)).rejects.toMatchObject({
+        code: "EACCES",
+      });
+      expect(removed).toEqual([destination()]);
+      reset("available");
+      cancelCopy = new AbortController();
+      await expect(
+        stageBundledRipgrep(workspace, cancelCopy.signal),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      expect(removed).toEqual([destination()]);
+    } finally {
+      Object.defineProperty(process, "platform", originalPlatform);
+      mock.module("node:module", () => originalModule);
+      mock.module("node:fs", () => originalFs);
+      mock.module("node:fs/promises", () => originalPromises);
+    }
   });
 
   test("uses an explicit Codex executable override", () => {

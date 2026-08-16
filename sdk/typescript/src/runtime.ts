@@ -2,6 +2,7 @@ import { execFile as execFileCallback, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants, existsSync, readdirSync, type Stats } from "node:fs";
 import {
+  access,
   chmod,
   cp,
   copyFile,
@@ -22,7 +23,16 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -1984,7 +1994,14 @@ export function resolveCodexCommand(
   ) {
     return { command: resolve(configured) };
   }
+  return { command: resolveBundledCodexPackage().command };
+}
 
+function resolveBundledCodexPackage(): {
+  packageRoot: string;
+  root: string;
+  command: string;
+} {
   const platform = process.platform === "android" ? "linux" : process.platform;
   const packageName = `@openai/codex-${platform}-${process.arch}`;
   let packageJson: string;
@@ -2000,13 +2017,14 @@ export function resolveCodexCommand(
       { cause: error },
     );
   }
-  const vendor = join(dirname(packageJson), "vendor");
+  const packageRoot = dirname(packageJson);
+  const vendor = join(packageRoot, "vendor");
   const target = readdirSync(vendor, { withFileTypes: true }).find((entry) =>
     entry.isDirectory(),
   );
+  const root = join(vendor, target?.name ?? "");
   const command = join(
-    vendor,
-    target?.name ?? "",
+    root,
     "bin",
     process.platform === "win32" ? "codex.exe" : "codex",
   );
@@ -2015,7 +2033,68 @@ export function resolveCodexCommand(
       `The ${packageName} package does not contain the Codex executable. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
     );
   }
-  return { command };
+  return { packageRoot, root, command };
+}
+
+export async function stageBundledRipgrep(
+  workspace: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  throwIfSignalAborted(signal);
+  const name = process.platform === "win32" ? "rg.exe" : "rg";
+  let source: string;
+  try {
+    // This is the running SDK's own dependency, not a tool found in the scan.
+    const bundled = resolveBundledCodexPackage();
+    const packageRoot = await realpath(bundled.packageRoot);
+    const candidate = join(bundled.root, "codex-path", name);
+    const marker = await lstat(join(bundled.root, "codex-package.json"));
+    const metadata = await lstat(candidate);
+    source = await realpath(candidate);
+    const inside = relative(packageRoot, source);
+    if (
+      !marker.isFile() ||
+      marker.isSymbolicLink() ||
+      !metadata.isFile() ||
+      metadata.isSymbolicLink() ||
+      inside === "" ||
+      inside === ".." ||
+      inside.startsWith(`..${sep}`) ||
+      isAbsolute(inside)
+    ) {
+      return null;
+    }
+    await access(
+      source,
+      process.platform === "win32" ? constants.F_OK : constants.X_OK,
+    );
+  } catch (error) {
+    const cause = error instanceof PluginBootstrapError ? error.cause : error;
+    if (
+      (error instanceof PluginBootstrapError && cause === undefined) ||
+      ["MODULE_NOT_FOUND", "ENOENT", "ENOTDIR", "EACCES"].includes(
+        nodeErrorCode(cause) ?? "",
+      )
+    ) {
+      return null;
+    }
+    throw error;
+  }
+
+  const destination = join(workspace, name);
+  let copied = false;
+  try {
+    throwIfSignalAborted(signal);
+    await copyFile(source, destination, constants.COPYFILE_EXCL);
+    copied = true;
+    if (process.platform !== "win32") await chmod(destination, 0o700);
+    const canonical = await realpath(destination);
+    throwIfSignalAborted(signal);
+    return canonical;
+  } catch (error) {
+    if (copied) await rm(destination, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function bootstrapPlugin(

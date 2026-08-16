@@ -100,6 +100,7 @@ import {
   resolvePluginPython,
   runWorkbench,
   setCodexSecurityCredentialLogout,
+  stageBundledRipgrep,
   type CodexCommand,
   type PluginInstall,
   type ProcessEnvironment,
@@ -147,6 +148,7 @@ interface PreparedRuntime {
   codexHome: string;
   persistentCredentialHome?: boolean;
   bootstrapWorkspace?: string;
+  bundledRipgrep?: string;
   configPath?: string;
   deepScanConfigPath?: string;
   plugin: PluginInstall;
@@ -296,6 +298,7 @@ interface ClientDependencies {
   prepareOutputDir?: typeof prepareOutputDir;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
+  stageBundledRipgrep?: typeof stageBundledRipgrep;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindings;
 }
@@ -650,17 +653,49 @@ export class CodexSecurity {
         pluginEnvironment,
         protectedGitRoot,
       );
-      const ripgrep = await inspectTrustedExecutable(
+      let ripgrep = await inspectTrustedExecutable(
         "rg",
         git.environment,
         protectedGitRoot,
       );
-      const trustedPluginEnvironment = {
+      const ripgrepKeys =
+        process.platform === "win32"
+          ? Object.keys(pluginEnvironment)
+              .filter((name) => name.toUpperCase() === "CODEX_SECURITY_RG")
+              .sort()
+          : ["CODEX_SECURITY_RG"];
+      const ripgrepDisabled =
+        pluginEnvironment[ripgrepKeys[0] ?? "CODEX_SECURITY_RG"] === "";
+      if (
+        !ripgrepDisabled &&
+        ripgrep.executable === null &&
+        runtime.bootstrapWorkspace !== undefined
+      ) {
+        const workspace = await realpath(runtime.bootstrapWorkspace);
+        requireOutputOutsideRepository(protectedGitRoot, workspace, "runtime");
+        if (runtime.bundledRipgrep === undefined) {
+          const bundled = await (
+            this.#dependencies.stageBundledRipgrep ?? stageBundledRipgrep
+          )(workspace, signal);
+          if (bundled !== null) runtime.bundledRipgrep = bundled;
+        }
+        if (runtime.bundledRipgrep !== undefined) {
+          ripgrep = await inspectTrustedExecutable(
+            runtime.bundledRipgrep,
+            ripgrep.environment,
+            protectedGitRoot,
+          );
+        }
+      }
+      const trustedPluginEnvironment: ProcessEnvironment = {
         ...ripgrep.environment,
-        CODEX_SECURITY_GIT: git.executable ?? "",
-        // The Codex runtime can add its bundled tools to PATH after this point.
-        CODEX_SECURITY_RG: ripgrep.executable ?? undefined,
       };
+      for (const name of ripgrepKeys) delete trustedPluginEnvironment[name];
+      trustedPluginEnvironment["CODEX_SECURITY_GIT"] = git.executable ?? "";
+      // The Codex runtime can add its bundled tools to PATH after this point.
+      trustedPluginEnvironment["CODEX_SECURITY_RG"] = ripgrepDisabled
+        ? ""
+        : ripgrep.executable ?? undefined;
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
