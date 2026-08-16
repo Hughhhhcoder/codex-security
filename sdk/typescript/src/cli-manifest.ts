@@ -12,11 +12,11 @@ interface Manifest {
   commands: { name: string }[];
 }
 
-// Incur 0.4.13 omits the requested path from its structured manifest.
-const MANIFEST_FLAGS = new Set([
+const INCUR_FLAGS = new Set([
   "--full-output",
   "--llms",
   "--llms-full",
+  "--mcp",
   "--help",
   "-h",
   "--version",
@@ -30,26 +30,39 @@ export const INCUR_VALUE_OPTIONS = new Set([
   "--token-offset",
 ]);
 
-export function fullMarkdownManifestArguments(
-  argv: readonly string[],
-): string[] | undefined {
-  if (!argv.includes("--llms-full") || argv.includes("--mcp")) return undefined;
+/** Keep command lookup aligned with Incur's built-in option consumption. */
+export function parseIncurArguments(argv: readonly string[]): {
+  commandArguments: string[];
+  commandIndex: number;
+  format: string | undefined;
+} {
   let format: string | undefined;
+  let commandIndex = -1;
   const commandArguments: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (argument === "--json") format = "json";
     else if (argument === "--format") format = argv[++index];
-    else if (MANIFEST_FLAGS.has(argument)) continue;
+    else if (INCUR_FLAGS.has(argument)) continue;
     else if (
       INCUR_VALUE_OPTIONS.has(argument) &&
       argv[index + 1] !== undefined
     ) {
       index += 1;
     } else {
+      if (commandIndex < 0) commandIndex = index;
       commandArguments.push(argument);
     }
   }
+  return { commandArguments, commandIndex, format };
+}
+
+export function fullMarkdownManifestArguments(
+  argv: readonly string[],
+): string[] | undefined {
+  if (!argv.includes("--llms-full") || argv.includes("--mcp")) return undefined;
+  // Incur 0.4.13 omits the requested path from its structured manifest.
+  const { commandArguments, format } = parseIncurArguments(argv);
   return format === undefined || format === "md" ? commandArguments : undefined;
 }
 

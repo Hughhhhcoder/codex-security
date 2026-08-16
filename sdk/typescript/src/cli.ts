@@ -53,6 +53,7 @@ import { accountStatus } from "./auth.js";
 import {
   fullMarkdownManifestArguments,
   INCUR_VALUE_OPTIONS,
+  parseIncurArguments,
   renderFullMarkdownManifest,
 } from "./cli-manifest.js";
 import {
@@ -193,7 +194,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
   json: "findings.json",
   sarif: "results.sarif",
 } as const;
-const VALUE_OPTIONS = new Set([
+const COMMAND_VALUE_OPTIONS = new Set([
   "--auth",
   "--path",
   "--knowledge-base",
@@ -221,7 +222,6 @@ const VALUE_OPTIONS = new Set([
   "--export-format",
   "--output",
   "--source-root",
-  ...INCUR_VALUE_OPTIONS,
   "--scan-root",
   "--reason",
   "--to",
@@ -2733,18 +2733,15 @@ export async function main(
 }
 
 function defaultListCommand(argv: readonly string[]): readonly string[] {
-  const commandIndex = argv.findIndex((value, index) => {
-    if (value.startsWith("-")) return false;
-    return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
-  });
+  const { commandArguments, commandIndex } = parseIncurArguments(argv);
   if (
     commandIndex < 0 ||
-    !["scans", "findings"].includes(argv[commandIndex]!) ||
+    !["scans", "findings"].includes(commandArguments[0]!) ||
     argv.some((argument) => DOCUMENTATION_FLAGS.has(argument))
   ) {
     return argv;
   }
-  const following = argv[commandIndex + 1];
+  const following = commandArguments[1];
   if (following !== undefined && !following.startsWith("-")) return argv;
   return [
     ...argv.slice(0, commandIndex + 1),
@@ -2920,8 +2917,11 @@ function validateCliArguments(
   ) {
     return undefined;
   }
-  const commandIndex = argv.findIndex((value) =>
-    [
+  const commandArguments = parseIncurArguments(argv).commandArguments;
+  const command = commandArguments[0];
+  if (
+    command === undefined ||
+    ![
       "scan",
       "install-hook",
       "bulk-scan",
@@ -2934,10 +2934,10 @@ function validateCliArguments(
       "login",
       "logout",
       "info",
-    ].includes(value),
-  );
-  if (commandIndex < 0) return undefined;
-  const command = argv[commandIndex]!;
+    ].includes(command)
+  ) {
+    return undefined;
+  }
   const structuredOutput = argv.some(
     (value, index) =>
       value === "--json" ||
@@ -2985,7 +2985,7 @@ function validateCliArguments(
   }
   const nestedCommand =
     command === "scans" || command === "findings" || command === "publish";
-  const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
+  const subcommand = nestedCommand ? commandArguments[1] : undefined;
   if (command === "info") {
     const metadataFields = new Set([
       "sdkVersion",
@@ -3019,19 +3019,19 @@ function validateCliArguments(
     }
   }
   for (
-    let index = commandIndex + (nestedCommand ? 2 : 1);
-    index < argv.length;
+    let index = nestedCommand ? 2 : 1;
+    index < commandArguments.length;
     index += 1
   ) {
-    const value = argv[index]!;
+    const value = commandArguments[index]!;
     if (!value.startsWith("-")) {
       positionals.push(value);
       continue;
     }
     const equals = value.indexOf("=");
     const option = equals < 0 ? value : value.slice(0, equals);
-    if (equals >= 0 || !VALUE_OPTIONS.has(option)) continue;
-    if (!hasFlagValue(argv, index)) {
+    if (equals >= 0 || !COMMAND_VALUE_OPTIONS.has(option)) continue;
+    if (!hasFlagValue(commandArguments, index)) {
       return `Missing value for flag: ${option}`;
     }
     index += 1;
