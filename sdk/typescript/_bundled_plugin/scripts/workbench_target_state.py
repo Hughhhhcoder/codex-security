@@ -116,7 +116,7 @@ def repository_identity(target: Path | str) -> str | None:
     return f"repository_sha256_{hashlib.sha256(material.encode()).hexdigest()}"
 
 
-def _supports_repository_identity(connection: sqlite3.Connection) -> bool:
+def supports_repository_identity(connection: sqlite3.Connection) -> bool:
     return any(
         row["name"] == "repository_identity"
         for row in connection.execute("PRAGMA table_info(security_targets)")
@@ -224,7 +224,7 @@ def _require_current_target_owner(
 
 
 def backfill_repository_identities(connection: sqlite3.Connection) -> None:
-    if not _supports_repository_identity(connection):
+    if not supports_repository_identity(connection):
         return
     targets = connection.execute(
         """
@@ -273,7 +273,7 @@ def backfill_security_targets(connection: sqlite3.Connection) -> None:
 def ensure_security_target(
     connection: sqlite3.Connection, target_path: str, *, verify_ownership: bool = True
 ) -> str:
-    supports_identity = _supports_repository_identity(connection)
+    supports_identity = supports_repository_identity(connection)
     existing = connection.execute(
         "SELECT id, repository_identity FROM security_targets WHERE current_path = ?"
         if supports_identity

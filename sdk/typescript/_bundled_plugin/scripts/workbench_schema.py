@@ -644,7 +644,47 @@ MIGRATIONS = (
         """,
     ),
     (
+        29,
+        "persist finding publication associations",
+        """
+        CREATE TABLE finding_publications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+            finding_id TEXT NOT NULL REFERENCES findings(id),
+            occurrence_id TEXT NOT NULL
+                REFERENCES finding_occurrences(id) ON DELETE CASCADE,
+            destination_type TEXT NOT NULL,
+            team_id TEXT,
+            project_id TEXT,
+            external_id TEXT NOT NULL,
+            external_url TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (occurrence_id, destination_type, team_id, project_id, external_id),
+            UNIQUE (destination_type, team_id, project_id, external_id)
+        );
+
+        CREATE INDEX finding_publications_by_scan
+        ON finding_publications(scan_id, occurrence_id, id);
+
+        CREATE INDEX finding_publications_by_finding
+        ON finding_publications(finding_id, id);
+        """,
+    ),
+    (
         30,
+        "preserve team-only finding publication associations",
+        """
+        CREATE UNIQUE INDEX finding_publications_team_only_occurrence
+        ON finding_publications(occurrence_id, destination_type, team_id, external_id)
+        WHERE project_id IS NULL;
+
+        CREATE UNIQUE INDEX finding_publications_team_only_external_issue
+        ON finding_publications(destination_type, team_id, external_id)
+        WHERE project_id IS NULL;
+        """,
+    ),
+    (
+        31,
         "persist repository identities",
         """
         ALTER TABLE security_targets
@@ -715,7 +755,7 @@ def apply_migrations(
                         "max_time_hours",
                         "REAL NOT NULL DEFAULT 96",
                     )
-                elif version == 30:
+                elif version == 31:
                     should_backfill_targets = (
                         repair_repository_identity_migration(connection)
                         or should_backfill_targets
@@ -725,7 +765,7 @@ def apply_migrations(
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
-            elif version == 30:
+            elif version == 31:
                 repair_repository_identity_migration(connection)
                 should_backfill_targets = True
             else:
@@ -862,6 +902,18 @@ def normalize_pre_release_execution_profile_migrations(
 
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
+    repository_identity_migration = connection.execute(
+        "SELECT name FROM schema_migrations WHERE version = 30"
+    ).fetchone()
+    if (
+        repository_identity_migration is not None
+        and repository_identity_migration["name"] == "persist repository identities"
+    ):
+        connection.execute(
+            "UPDATE schema_migrations SET version = 31 WHERE version = 30 AND name = ?",
+            ("persist repository identities",),
+        )
+
     completion_warning_migration = connection.execute(
         "SELECT name FROM schema_migrations WHERE version = 25"
     ).fetchone()

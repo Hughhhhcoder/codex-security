@@ -13,12 +13,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
 from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
-from workbench_target_state import _require_current_target_owner
+from workbench_target_state import _require_current_target_owner, supports_repository_identity
 from workbench_validation import bounded_output_text
 
 
 def repository_target_ids(connection: sqlite3.Connection, target_id: str) -> set[str]:
-    if not _has_repository_identities(connection):
+    if not supports_repository_identity(connection):
         return {target_id}
 
     requested_target = connection.execute(
@@ -50,13 +50,6 @@ def repository_target_ids(connection: sqlite3.Connection, target_id: str) -> set
         (target_id, requested_target["repository_identity"]),
     )
     return {row["id"] for row in rows} or {target_id}
-
-
-def _has_repository_identities(connection: sqlite3.Connection) -> bool:
-    return any(
-        column["name"] == "repository_identity"
-        for column in connection.execute("PRAGMA table_info(security_targets)")
-    )
 
 
 def list_global_findings(
@@ -124,7 +117,7 @@ def _indexed_findings(connection: sqlite3.Connection) -> Iterator[dict[str, Any]
     parents: dict[
         tuple[tuple[str, str], str], tuple[tuple[str, str], str]
     ] = {}
-    has_repository_identities = _has_repository_identities(connection)
+    has_repository_identities = supports_repository_identity(connection)
     identity_column = "targets.repository_identity" if has_repository_identities else "NULL"
     before_identity_column = (
         "before_targets.repository_identity" if has_repository_identities else "NULL"

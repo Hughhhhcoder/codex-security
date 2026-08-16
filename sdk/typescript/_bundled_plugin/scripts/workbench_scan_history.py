@@ -21,6 +21,7 @@ from workbench_target_state import (
     _require_current_target_owner,
     repository_identity,
     repository_relative_path,
+    supports_repository_identity,
 )
 
 
@@ -108,10 +109,7 @@ def list_scans(
     values: list[Any] = []
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
-        target_columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(security_targets)")
-        }
-        identity_column = "repository_identity" in target_columns
+        identity_column = supports_repository_identity(connection)
         requested_identity_column = (
             ", (SELECT repository_identity FROM security_targets "
             "WHERE current_path = ?) AS repository_identity"
@@ -384,10 +382,7 @@ def list_unmatched_scan_pairs(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
     repository = Path(args.repository).expanduser().resolve()
-    identity_column = any(
-        row["name"] == "repository_identity"
-        for row in connection.execute("PRAGMA table_info(security_targets)")
-    )
+    identity_column = supports_repository_identity(connection)
     requested_identity_column = (
         ", (SELECT repository_identity FROM security_targets "
         "WHERE current_path = ?) AS repository_identity"
@@ -742,10 +737,7 @@ def _scan_with_repository_identity(
 ) -> sqlite3.Row:
     if "repository_identity" in scan.keys():
         return scan
-    if not any(
-        row["name"] == "repository_identity"
-        for row in connection.execute("PRAGMA table_info(security_targets)")
-    ):
+    if not supports_repository_identity(connection):
         return scan
     enriched = connection.execute(
         """

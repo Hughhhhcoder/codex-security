@@ -151,13 +151,20 @@ def backfill(connection):
 
 connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
-historical_migration = next(
-    (migration for migration in MIGRATIONS if migration[0] == 29), None
+identity_migration = next(
+    migration for migration in MIGRATIONS if migration[1] == "persist repository identities"
 )
-historical = tuple(
-    migration for migration in MIGRATIONS if migration[0] < 30 and migration[0] != 29
+identity_version = identity_migration[0]
+historical = tuple(migration for migration in MIGRATIONS if migration[0] <= 28)
+published = tuple(migration for migration in MIGRATIONS if migration[0] < identity_version)
+apply_migrations(
+    connection,
+    historical if scenario in (
+        "out-of-order-publication-migrations", "pre-release-identity-version"
+    ) else published,
+    lambda: timestamp,
+    backfill,
 )
-apply_migrations(connection, historical, lambda: timestamp, backfill)
 backfill_calls.clear()
 connection.execute(
     "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -167,7 +174,7 @@ connection.execute(
 if scenario == "recorded-without-column":
     connection.execute(
         "INSERT INTO schema_migrations VALUES (?, ?, ?)",
-        (30, "persist repository identities", timestamp),
+        (identity_version, "persist repository identities", timestamp),
     )
 elif scenario == "recorded-without-index":
     connection.execute(
@@ -175,37 +182,26 @@ elif scenario == "recorded-without-index":
     )
     connection.execute(
         "INSERT INTO schema_migrations VALUES (?, ?, ?)",
-        (30, "persist repository identities", timestamp),
+        (identity_version, "persist repository identities", timestamp),
     )
 
 connection.commit()
-migrations = MIGRATIONS
-if scenario == "out-of-order-historical-migration":
-    without_historical = tuple(
-        migration for migration in MIGRATIONS if migration[0] != 29
+if scenario == "out-of-order-publication-migrations":
+    apply_migrations(
+        connection, (*historical, identity_migration), lambda: timestamp, backfill
     )
-    apply_migrations(connection, without_historical, lambda: timestamp, backfill)
-    migrations = tuple(sorted(
-        (
-            *without_historical,
-            historical_migration or (
-                29,
-                "synthetic historical migration",
-                """
-                CREATE TABLE historical_migration_fixture (
-                    id INTEGER PRIMARY KEY,
-                    value TEXT
-                );
-
-                CREATE INDEX historical_migration_fixture_by_value
-                ON historical_migration_fixture(value);
-                """,
-            ),
-        ),
-        key=lambda migration: migration[0],
-    ))
-apply_migrations(connection, migrations, lambda: timestamp, backfill)
-apply_migrations(connection, migrations, lambda: timestamp, backfill)
+elif scenario == "pre-release-identity-version":
+    apply_migrations(
+        connection,
+        (*historical, (30, *identity_migration[1:])),
+        lambda: timestamp,
+        backfill,
+    )
+    connection.execute(
+        "UPDATE security_targets SET repository_identity = 'synthetic-identity'"
+    )
+apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
+apply_migrations(connection, MIGRATIONS, lambda: timestamp, backfill)
 
 columns = {
     row["name"]: row
@@ -219,10 +215,18 @@ print(json.dumps({
     "backfillCalls": len(backfill_calls),
     "hasRepositoryIdentityColumn": "repository_identity" in columns,
     "hasRepositoryIdentityIndex": "security_targets_by_repository_identity" in indexes,
-    "historicalMigrationApplied": connection.execute(
-        "SELECT 1 FROM schema_migrations WHERE version = 29"
-    ).fetchone() is not None,
-    "historicalMigrationInSource": historical_migration is not None,
+    "identityVersion": identity_version,
+    "publicationMigrations": {
+        str(row["version"]): row["name"]
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version IN (29, 30)"
+        )
+    },
+    "teamOnlyPublicationIndexes": sorted(
+        row["name"]
+        for row in connection.execute("PRAGMA index_list(finding_publications)")
+        if row["name"].startswith("finding_publications_team_only_") and row["unique"]
+    ),
     "repositoryIdentityColumnIsNullable": not bool(
         columns["repository_identity"]["notnull"]
     ),
@@ -230,7 +234,10 @@ print(json.dumps({
         indexes["security_targets_by_repository_identity"]["unique"]
     ),
     "migrationName": connection.execute(
-        "SELECT name FROM schema_migrations WHERE version = 30"
+        "SELECT name FROM schema_migrations WHERE version = ?", (identity_version,)
+    ).fetchone()[0],
+    "targetIdentity": connection.execute(
+        "SELECT repository_identity FROM security_targets"
     ).fetchone()[0],
     "targetId": connection.execute(
         "SELECT id FROM security_targets"
@@ -337,8 +344,12 @@ describe("stable workbench target migration", () => {
       "repairs a recorded migration missing only its index",
     ],
     [
-      "out-of-order-historical-migration",
-      "applies an unavailable migration after a newer migration is recorded",
+      "out-of-order-publication-migrations",
+      "applies published migrations after repository identity was recorded",
+    ],
+    [
+      "pre-release-identity-version",
+      "preserves an identity recorded under the pre-release migration number",
     ],
   ] as const)("%s: %s", (scenario) => {
     const python =
@@ -365,25 +376,36 @@ describe("stable workbench target migration", () => {
       backfillCalls: number;
       hasRepositoryIdentityColumn: boolean;
       hasRepositoryIdentityIndex: boolean;
-      historicalMigrationApplied: boolean;
-      historicalMigrationInSource: boolean;
+      identityVersion: number;
       migrationName: string;
+      publicationMigrations: Record<string, string>;
       repositoryIdentityColumnIsNullable: boolean;
       repositoryIdentityIndexIsUnique: boolean;
+      targetIdentity: string | null;
       targetId: string;
+      teamOnlyPublicationIndexes: string[];
     };
     expect(result).toEqual({
-      backfillCalls: 1,
+      backfillCalls: scenario === "pre-release-identity-version" ? 0 : 1,
       hasRepositoryIdentityColumn: true,
       hasRepositoryIdentityIndex: true,
-      historicalMigrationApplied:
-        scenario === "out-of-order-historical-migration" ||
-        result.historicalMigrationInSource,
-      historicalMigrationInSource: result.historicalMigrationInSource,
+      identityVersion: 31,
       migrationName: "persist repository identities",
+      publicationMigrations: {
+        "29": "persist finding publication associations",
+        "30": "preserve team-only finding publication associations",
+      },
       repositoryIdentityColumnIsNullable: true,
       repositoryIdentityIndexIsUnique: false,
+      targetIdentity:
+        scenario === "pre-release-identity-version"
+          ? "synthetic-identity"
+          : null,
       targetId: "target-existing",
+      teamOnlyPublicationIndexes: [
+        "finding_publications_team_only_external_issue",
+        "finding_publications_team_only_occurrence",
+      ],
     });
   });
 });
