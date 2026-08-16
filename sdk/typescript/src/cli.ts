@@ -2708,7 +2708,7 @@ export async function main(
   if (frameworkExit !== undefined) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
-      `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      `codex-security: ${safeErrorMessage(incurErrorMessage(frameworkOutput))}\n`,
     );
     return 2;
   }
@@ -2906,8 +2906,16 @@ function validateCliArguments(
   for (let index = 0; index < argv.length; index += 1) {
     const option = argv[index]!;
     if (!INCUR_VALUE_OPTIONS.has(option)) continue;
-    if (!hasFlagValue(argv, index) || argv[index + 1] === "") {
+    const value = argv[index + 1];
+    if (value === undefined || value === "" || !hasFlagValue(argv, index)) {
       return `Missing value for flag: ${option}`;
+    }
+    // Keep Incur's accepted numeric values without echoing rejected operands.
+    if (
+      (option === "--token-limit" || option === "--token-offset") &&
+      (!Number.isFinite(Number(value)) || value.trim() === "")
+    ) {
+      return `Invalid value for ${option}: expected a finite number.`;
     }
     index += 1;
   }
