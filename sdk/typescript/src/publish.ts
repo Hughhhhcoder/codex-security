@@ -88,7 +88,6 @@ export interface PublishScanResult {
   issues?: PreparedPublicationIssue[];
   warnings?: string[];
   payloadDigest?: string;
-  requestedAssignee?: string;
 }
 
 export interface PublicationCodexResult {
@@ -178,9 +177,6 @@ export async function publishScanInternal(
     uploadId: prepared.scanId,
     destination: prepared.destination,
     payloadDigest,
-    ...(options.assigneeId === undefined
-      ? {}
-      : { requestedAssignee: options.assigneeId }),
     created: [],
     failed: [],
     counts: {

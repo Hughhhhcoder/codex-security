@@ -614,7 +614,7 @@ describe("connected Linear publication", () => {
     expect(started).toBe(false);
   });
 
-  test("identifies the requested assignee without including credentials in the preview", async () => {
+  test("binds the requested assignee without exposing it or credentials in the preview", async () => {
     const publication = preparedPublication();
     const preview = (linearApiKey: string) =>
       publishScanInternal(
@@ -629,9 +629,9 @@ describe("connected Linear publication", () => {
       );
     const first = await preview("synthetic-first-key");
     const rotated = await preview("synthetic-rotated-key");
-    expect(first.requestedAssignee).toBe("reviewer@example.test");
     expect(rotated.payloadDigest).toBe(first.payloadDigest);
     expect(JSON.stringify(first)).not.toContain("synthetic-first-key");
+    expect(JSON.stringify(first)).not.toContain("reviewer@example.test");
   });
 
   test("rejects pre-aborted publication before preparing scans or touching local state", async () => {

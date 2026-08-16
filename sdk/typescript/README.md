@@ -577,7 +577,7 @@ npx @openai/codex-security publish scan \
 
 Destination flags take precedence over `CODEX_SECURITY_LINEAR_TEAM` and the
 optional `CODEX_SECURITY_LINEAR_PROJECT`. Use `--dry-run --json` to preview the
-complete issue payload without creating issues, or `--json` to return
+issue content and destination without creating issues, or `--json` to return
 structured publication results.
 Interactive publication shows a full-screen activity view with live Codex
 output and issue-creation progress. Other terminals receive plain progress on
@@ -600,8 +600,9 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
 
 The digest covers the selected issue content, destination, scan identity, and
 requested assignee. A mismatch stops publication before any local publication
-state or Linear issues are created. The preview reports `requestedAssignee`
-when one was supplied. It is not a permissions check or a remote readback.
+state or Linear issues are created. Keep the same assignee option when
+publishing; previews do not echo assignee identities or credentials. The digest
+is not a permissions check or a remote readback.
 Keep saved previews private: they contain the full finding descriptions and
 source snippets. Descriptions omit a wall-clock upload timestamp so an unchanged
 scan and selection produce the same preview; Linear records issue creation time.

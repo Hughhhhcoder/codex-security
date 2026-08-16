@@ -445,11 +445,58 @@ try {
   assert.equal(publication.counts.findings, 1);
   assert.equal(publication.counts.created, 0);
   assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
+  assert.match(publication.payloadDigest, /^[a-f0-9]{64}$/u);
+  assert.doesNotMatch(publication.issues[0].description, /\*\*Uploaded:\*\*/u);
 
   const networkGuard = join(consumer, "reject-publication-network.cjs");
   await writeFile(
     networkGuard,
     'globalThis.fetch = async () => { throw new Error("Publication dry runs must not make network requests."); };\n',
+  );
+  const selectedPublicationArgs = [
+    "--require",
+    networkGuard,
+    launcher,
+    "publish",
+    "scan",
+    publicationScan,
+    "--to",
+    "linear",
+    "--linear-team",
+    "team-example",
+    "--finding",
+    publication.issues[0].findingId,
+    "--expect-digest",
+    publication.payloadDigest,
+  ];
+  const selectedPublicationOptions = {
+    cwd: consumer,
+    capture: true,
+    env: {
+      ...process.env,
+      CODEX_SECURITY_LINEAR_PROJECT: "",
+      CODEX_SECURITY_LINEAR_API_KEY: "",
+      CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
+    },
+  };
+  assert.deepEqual(
+    JSON.parse(
+      run(
+        process.execPath,
+        [...selectedPublicationArgs, "--dry-run", "--json"],
+        selectedPublicationOptions,
+      ),
+    ),
+    publication,
+  );
+  assert.throws(
+    () =>
+      run(
+        process.execPath,
+        [...selectedPublicationArgs.slice(0, -1), "0".repeat(64), "--json"],
+        selectedPublicationOptions,
+      ),
+    /does not match the expected digest/u,
   );
   const directPublicationText = run(
     process.execPath,
