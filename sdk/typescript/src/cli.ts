@@ -226,6 +226,8 @@ const VALUE_OPTIONS = new Set([
   "--linear-api-key",
   "--project",
   "--linear-assignee",
+  "--finding",
+  "--expect-digest",
 ]);
 const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
@@ -1526,7 +1528,8 @@ export async function main(
   const publication = Cli.create("publish", {
     description: "Publish completed Codex Security scan findings.",
   }).command("scan", {
-    description: "Publish every finding from a completed scan to Linear.",
+    description:
+      "Publish selected or all findings from a completed scan to Linear.",
     destructive: true,
     mcp: false,
     args: z.object({
@@ -1555,6 +1558,15 @@ export async function main(
         .describe(
           "Linear assignee email or user ID; omit to leave issues unassigned.",
         ),
+      finding: z
+        .array(optionValue("--finding"))
+        .optional()
+        .describe(
+          "Finding ID to publish; repeat to select several. Defaults to all findings.",
+        ),
+      expectDigest: optionValue("--expect-digest")
+        .optional()
+        .describe("Require the payload digest from a reviewed dry run."),
       dryRun: z
         .boolean()
         .default(false)
@@ -1788,6 +1800,12 @@ export async function main(
               dryRun: options.dryRun,
               ...(linearApiKey === undefined ? {} : { linearApiKey }),
               ...(assigneeId === undefined ? {} : { assigneeId }),
+              ...(options.finding === undefined
+                ? {}
+                : { findingIds: options.finding }),
+              ...(options.expectDigest === undefined
+                ? {}
+                : { expectedDigest: options.expectDigest }),
               ...(options.dryRun
                 ? {}
                 : {

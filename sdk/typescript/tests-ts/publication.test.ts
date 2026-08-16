@@ -58,6 +58,17 @@ async function reseal(scanDirectory: string): Promise<void> {
 }
 
 describe("scan publication preparation", () => {
+  test("prepares stable descriptions without a wall-clock upload timestamp", async () => {
+    const scanDirectory = await copyExample();
+    const options = { destination: "linear", teamId: "team_example" } as const;
+    const first = await prepareScanPublication(scanDirectory, options);
+    const second = await prepareScanPublication(scanDirectory, options);
+
+    expect(second).toEqual(first);
+    expect(first.issues[0]!.description).toContain("**Completed:**");
+    expect(first.issues[0]!.description).not.toContain("**Uploaded:**");
+  });
+
   test("prepares sealed findings with scan-based upload IDs and full traceability", async () => {
     const scanDirectory = await copyExample();
     const publication = await prepareScanPublication(
