@@ -52,10 +52,11 @@ export function renderFullMarkdownManifest(
   manifest: Manifest,
 ): string {
   const selected = new Set(manifest.commands.map(({ name }) => name));
+  const groups = new Map<string, string>();
   const commands = Cli.collectSkillCommands(
     Cli.toCommands.get(cli)!,
     [],
-    new Map(),
+    groups,
   )
     .filter((command) => selected.has(command.name!))
     .map((command) => ({
@@ -63,6 +64,13 @@ export function renderFullMarkdownManifest(
       args: documentInputs(command.args, false),
       options: documentInputs(command.options, true),
     }));
+  const groupRows = [...groups]
+    .filter(([name]) =>
+      commands.some((command) => command.name?.startsWith(`${name} `)),
+    )
+    .map(
+      ([name, description]) => `| \`${cli.name} ${name}\` | ${description} |`,
+    );
   const defaults = scanModelConfiguration(DEFAULT_CODEX_CONFIG);
   const features = DEFAULT_CODEX_CONFIG["features"] as JsonObject;
   const multiAgent = features["multi_agent_v2"] as JsonObject;
@@ -146,6 +154,16 @@ export function renderFullMarkdownManifest(
       "Issue descriptions contain source code and vulnerability details, so select a destination authorized to receive them.",
     "## Global options and integrations",
     "```text\n" + Help.formatRoot(cli.name, { root: true }) + "\n```",
+    ...(groupRows.length === 0
+      ? []
+      : [
+          "## Command groups",
+          [
+            "| Group | Description |",
+            "|-------|-------------|",
+            ...groupRows,
+          ].join("\n"),
+        ]),
     "## Command reference",
     ...commands.map((command) =>
       Skill.generate(cli.name, [command]).replace(/^#/gmu, "###"),

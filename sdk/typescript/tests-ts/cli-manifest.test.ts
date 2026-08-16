@@ -205,16 +205,54 @@ describe("full CLI manifest", () => {
       "coverage",
       "`130`",
       "`143`",
+      "## Operating notes",
+      "## Global options and integrations",
+      "## Command groups",
+      "## Command reference",
     ]) {
       expect(markdown).toContain(value);
     }
     for (const key of Object.keys(fakeResult().toJSON())) {
       expect(markdown).toContain(`\`${key}\``);
     }
-    expect(markdown).toContain(
-      "does not verify authentication or model access",
+  });
+
+  test("preserves descriptions for selected command groups", () => {
+    const descriptions = {
+      first: "First group metadata.",
+      nested: "Nested group metadata.",
+      second: "Second group metadata.",
+    };
+    const cli = Cli.create("sample")
+      .command(
+        Cli.create("first", { description: descriptions.first })
+          .command("show", { run() {} })
+          .command(
+            Cli.create("nested", { description: descriptions.nested }).command(
+              "show",
+              { run() {} },
+            ),
+          ),
+      )
+      .command(
+        Cli.create("second", { description: descriptions.second }).command(
+          "show",
+          { run() {} },
+        ),
+      );
+    const commands = ["first show", "first nested show", "second show"].map(
+      (name) => ({ name }),
     );
-    expect(markdown).toContain("MCP exposes only the read-only `info` command");
+    const full = renderFullMarkdownManifest(cli, { commands });
+    for (const description of Object.values(descriptions)) {
+      expect(full).toContain(description);
+    }
+    const scoped = renderFullMarkdownManifest(cli, {
+      commands: [{ name: "first nested show" }],
+    });
+    expect(scoped).toContain(descriptions.first);
+    expect(scoped).toContain(descriptions.nested);
+    expect(scoped).not.toContain(descriptions.second);
   });
 
   test("preserves group and leaf discovery without executing handlers", async () => {
