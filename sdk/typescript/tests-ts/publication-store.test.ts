@@ -1,11 +1,20 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  inspectPublicationStore,
   preparePublicationStore,
   recordPublishedIssues,
 } from "../src/publication-store.js";
@@ -163,6 +172,152 @@ function publishedIssue(
     url: `https://linear.app/example/issue/${identifier}`,
   };
 }
+
+describe("read-only publication history", () => {
+  test("does not create a missing database or migrate old history", async () => {
+    const missing = await publicationFixture({ createDatabase: false });
+    await expect(
+      inspectPublicationStore(missing.publication, missing.environment),
+    ).rejects.toThrow(/scan-history database does not exist/u);
+    expect(existsSync(missing.stateDirectory)).toBe(false);
+
+    const fixture = await publicationFixture();
+    databaseRows(fixture, "DROP TABLE finding_publications");
+    databaseRows(fixture, "DELETE FROM schema_migrations WHERE version >= ?", [
+      29,
+    ]);
+    const database = join(fixture.stateDirectory, "workbench.sqlite3");
+    const before = await readFile(database);
+    const mode = (await stat(database)).mode;
+    await expect(
+      inspectPublicationStore(fixture.publication, fixture.environment),
+    ).resolves.toEqual([]);
+    expect(await readFile(database)).toEqual(before);
+    expect((await stat(database)).mode).toBe(mode);
+    expect(
+      (await readdir(fixture.stateDirectory)).some((name) =>
+        name.startsWith("publication-"),
+      ),
+    ).toBe(false);
+    expect(
+      databaseRows(
+        fixture,
+        "SELECT version FROM schema_migrations WHERE version >= ?",
+        [29],
+      ),
+    ).toEqual([]);
+    expect(
+      databaseRows(
+        fixture,
+        "SELECT name FROM sqlite_master WHERE name = 'finding_publications'",
+      ),
+    ).toEqual([]);
+  });
+
+  test("returns one recorded issue per exact scan occurrence and destination", async () => {
+    const fixture = await publicationFixture();
+    const first = publishedIssue(fixture.publication, 0, "EXAMPLE-101");
+    const second = publishedIssue(fixture.publication, 1, "EXAMPLE-102");
+    await recordPublishedIssues(
+      fixture.publication,
+      [second, first],
+      fixture.environment,
+    );
+    await recordPublishedIssues(
+      fixture.publication,
+      [publishedIssue(fixture.publication, 0, "EXAMPLE-201")],
+      fixture.environment,
+    );
+    const teamOnly: PreparedScanPublication = {
+      ...fixture.publication,
+      destination: { type: "linear", teamId: "team-example" },
+    };
+    const withoutProject = publishedIssue(teamOnly, 1, "EXAMPLE-301");
+    await recordPublishedIssues(
+      teamOnly,
+      [withoutProject],
+      fixture.environment,
+    );
+
+    await expect(
+      inspectPublicationStore(fixture.publication, fixture.environment),
+    ).resolves.toEqual([first, second]);
+    await expect(
+      inspectPublicationStore(teamOnly, fixture.environment),
+    ).resolves.toEqual([withoutProject]);
+    for (const destination of [
+      { ...fixture.publication.destination, teamId: "another-team" },
+      { ...fixture.publication.destination, projectId: "another-project" },
+    ]) {
+      await expect(
+        inspectPublicationStore(
+          { ...fixture.publication, destination },
+          fixture.environment,
+        ),
+      ).resolves.toEqual([]);
+    }
+
+    const scanDirectory = join(fixture.stateDirectory, "another-scan");
+    await mkdir(scanDirectory, { mode: 0o700 });
+    const otherScan: PreparedScanPublication = {
+      ...fixture.publication,
+      scanId: OTHER_SCAN_ID,
+      uploadId: OTHER_SCAN_ID,
+      scanDirectory,
+      issues: fixture.publication.issues.map((issue) => ({
+        ...issue,
+        occurrenceId: `other-${issue.occurrenceId}`,
+      })),
+    };
+    seedPublicationScan(fixture, otherScan);
+    await expect(
+      inspectPublicationStore(otherScan, fixture.environment),
+    ).resolves.toEqual([]);
+    await expect(
+      inspectPublicationStore(
+        { ...fixture.publication, issues: [fixture.publication.issues[0]!] },
+        fixture.environment,
+      ),
+    ).rejects.toThrow(/exactly match/u);
+  });
+
+  test("includes committed associations that are still in the WAL", async () => {
+    const fixture = await publicationFixture({ count: 1 });
+    const original = publishedIssue(fixture.publication, 0, "EXAMPLE-401");
+    const changed = publishedIssue(fixture.publication, 0, "EXAMPLE-402");
+    await recordPublishedIssues(
+      fixture.publication,
+      [original],
+      fixture.environment,
+    );
+    const database = join(fixture.stateDirectory, "workbench.sqlite3");
+    const update = spawnSync(
+      fixture.python,
+      [
+        "-I",
+        "-B",
+        "-c",
+        [
+          "import os, sqlite3, sys",
+          "connection = sqlite3.connect(sys.argv[1])",
+          "connection.execute('PRAGMA wal_autocheckpoint = 0')",
+          "connection.execute('UPDATE finding_publications SET external_id = ?, external_url = ?', (sys.argv[2], sys.argv[3]))",
+          "connection.commit()",
+          "os._exit(0)",
+        ].join("\n"),
+        database,
+        changed.issueIdentifier,
+        changed.url!,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(update.status, update.stderr).toBe(0);
+    expect(existsSync(`${database}-wal`)).toBe(true);
+    await expect(
+      inspectPublicationStore(fixture.publication, fixture.environment),
+    ).resolves.toEqual([changed]);
+  });
+});
 
 describe("persisted finding publication associations", () => {
   test("upgrades existing scan history and verifies every completed finding before publication", async () => {
