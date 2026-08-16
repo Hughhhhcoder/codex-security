@@ -2889,12 +2889,7 @@ function scanArgumentsFromRecipe(
 
 function hasFlagValue(argv: readonly string[], index: number): boolean {
   const next = argv[index + 1];
-  return (
-    next !== undefined &&
-    next.length > 0 &&
-    !next.startsWith("--") &&
-    next !== "-h"
-  );
+  return next !== undefined && !next.startsWith("--") && next !== "-h";
 }
 
 function validateCliArguments(
@@ -2904,7 +2899,7 @@ function validateCliArguments(
   for (let index = 0; index < argv.length; index += 1) {
     const option = argv[index]!;
     if (!INCUR_VALUE_OPTIONS.has(option)) continue;
-    if (!hasFlagValue(argv, index)) {
+    if (!hasFlagValue(argv, index) || argv[index + 1] === "") {
       return `Missing value for flag: ${option}`;
     }
     index += 1;
