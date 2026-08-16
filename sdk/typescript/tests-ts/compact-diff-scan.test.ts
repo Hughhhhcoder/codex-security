@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { afterEach, describe, expect, test } from "bun:test";
+import { loadContract } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 type JsonObject = Record<string, unknown>;
@@ -475,10 +476,11 @@ describe("compact diff scan", () => {
         claimToken: handoffClaimToken,
         threadId: owner,
       });
-      await call("get_codex_security_scan_context", {
+      const context = await call("get_codex_security_scan_context", {
         scanId,
         handoffClaimToken,
       });
+      const scanDir = (context["scan"] as JsonObject)["scanDir"] as string;
 
       const inventory = await call("prepare_codex_security_review_items", {
         scanId,
@@ -520,15 +522,45 @@ describe("compact diff scan", () => {
         ],
       });
       await call("record_candidate_attack_paths", { scanId, attackPaths: [] });
+      const threatModel = {
+        summary: "A local handler processes selected input (src/handler.py:1).",
+        assets: ["Integrity of the selected result."],
+        trustBoundaries: [
+          "Caller input reaches the handler without authority over private state (src/handler.py:1).",
+        ],
+        attackerCapabilities: [
+          "A caller can choose input but cannot choose another user's state.",
+        ],
+        securityObjectives: ["Keep each result bound to its selected input."],
+        assumptions: ["A shared-service deployment has not been established."],
+      };
+      const openQuestions = [
+        {
+          question:
+            "Does a supported embedding share this worker across callers?",
+          followUpPrompt:
+            "Confirm the deployment's ownership and isolation controls.",
+        },
+      ];
+      const coverageNote =
+        "The handler does not grant access to another caller's state (src/handler.py:1).";
       await call("record_codex_security_scan_draft", {
         scanId,
         handoffClaimToken,
+        threatModel,
         findings: [],
         coverage: {
           completeness: "complete",
-          surfaces: [{ label: "Changed files", disposition: "rejected" }],
+          surfaces: [
+            {
+              label: "Changed files",
+              disposition: "rejected",
+              notes: coverageNote,
+            },
+          ],
           explicitExclusions: [],
           deferred: [],
+          openQuestions,
         },
       });
       await call("complete_codex_security_scan", {
@@ -556,6 +588,74 @@ describe("compact diff scan", () => {
       expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
         "diff",
       );
+      expect(
+        ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[
+          "threatModel"
+        ],
+      ).toEqual(threatModel);
+      expect((completed["coverage"] as JsonObject)["openQuestions"]).toEqual(
+        openQuestions,
+      );
+      expect((completed["findings"] as JsonObject)["findings"]).toEqual([]);
+      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(contract.manifest.scan.threatModel).toEqual(threatModel);
+      expect(contract.coverage.openQuestions).toEqual(openQuestions);
+      expect(contract.coverage.surfaces[0]?.notes).toBe(coverageNote);
+      const report = readFileSync(join(scanDir, "report.md"), "utf8");
+      for (const fact of Object.values(threatModel).flat()) {
+        expect(report).toContain(fact);
+      }
+      expect(report).toContain(openQuestions[0]!.question);
+      expect(report).toContain(openQuestions[0]!.followUpPrompt);
+      expect(report).toContain(coverageNote);
+
+      const terminalDir = join(root, "terminal-scan");
+      mkdirSync(terminalDir, { mode: 0o700 });
+      const markdownModel =
+        "# Existing threat model\n\n" +
+        "Selected input stays separate from private state (src/handler.py:1).\n";
+      const terminalManifest = structuredClone(
+        completed["manifest"],
+      ) as JsonObject;
+      const terminalScan = terminalManifest["scan"] as JsonObject;
+      terminalScan["threatModel"] = { summary: markdownModel };
+      delete terminalScan["sealedAt"];
+      delete terminalScan["artifacts"];
+      for (const [name, document] of [
+        ["scan-manifest.json", terminalManifest],
+        ["findings.json", completed["findings"]],
+        ["coverage.json", completed["coverage"]],
+      ] as const) {
+        writeFileSync(join(terminalDir, name), JSON.stringify(document));
+      }
+      const finalized = python(
+        "finalize_scan_contract.py",
+        "--scan-dir",
+        terminalDir,
+        "--source-root",
+        repository,
+      );
+      expect(finalized.status, finalized.stderr).toBe(0);
+      const validated = python(
+        "validate_scan_contract.py",
+        "--scan-dir",
+        terminalDir,
+      );
+      expect(validated.status, validated.stderr).toBe(0);
+      const terminalResult = JSON.parse(
+        readFileSync(join(terminalDir, "scan-manifest.json"), "utf8"),
+      ) as { scan: { threatModel: unknown; sealedAt: string } };
+      expect(terminalResult.scan.threatModel).toEqual({
+        summary: markdownModel,
+      });
+      expect(terminalResult.scan.sealedAt).toBeDefined();
+      const terminalReport = readFileSync(
+        join(terminalDir, "report.md"),
+        "utf8",
+      );
+      for (const line of markdownModel.split("\n").filter(Boolean)) {
+        expect(terminalReport).toContain(line);
+      }
     } finally {
       await client.close();
     }
