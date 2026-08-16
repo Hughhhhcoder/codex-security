@@ -51,7 +51,7 @@ import {
 } from "./api.js";
 import { accountStatus } from "./auth.js";
 import {
-  isFullMarkdownManifest,
+  fullMarkdownManifestArguments,
   renderFullMarkdownManifest,
 } from "./cli-manifest.js";
 import {
@@ -2675,8 +2675,10 @@ export async function main(
       ? ["--format", argument.slice("--format=".length)]
       : [argument],
   );
-  const markdownManifest =
-    !process.env["COMPLETE"] && isFullMarkdownManifest(frameworkArguments);
+  const manifestArguments = process.env["COMPLETE"]
+    ? undefined
+    : fullMarkdownManifestArguments(frameworkArguments);
+  const markdownManifest = manifestArguments !== undefined;
   try {
     await cli.serve(
       markdownManifest
@@ -2711,6 +2713,7 @@ export async function main(
       frameworkOutput = renderFullMarkdownManifest(
         cli,
         JSON.parse(frameworkOutput),
+        manifestArguments,
       );
     }
     await writeCliOutput(
@@ -2891,7 +2894,10 @@ function validateCliArguments(
   argv: readonly string[],
   positionals: string[],
 ): string | undefined {
-  if (argv.some((argument) => DOCUMENTATION_FLAGS.has(argument))) {
+  if (
+    argv.includes("--schema") ||
+    argv.some((argument) => DOCUMENTATION_FLAGS.has(argument))
+  ) {
     return undefined;
   }
   const commandIndex = argv.findIndex((value) =>
@@ -2925,8 +2931,7 @@ function validateCliArguments(
   );
   if (
     structuredOutput &&
-    ["validate", "patch", "login", "logout"].includes(command) &&
-    !argv.includes("--schema")
+    ["validate", "patch", "login", "logout"].includes(command)
   ) {
     return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
   }
@@ -2946,7 +2951,7 @@ function validateCliArguments(
   ) {
     return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
   }
-  if (command === "scan" && !argv.includes("--schema")) {
+  if (command === "scan") {
     if (
       argv.some(
         (value) =>
@@ -3019,10 +3024,7 @@ function validateCliArguments(
     }
     index += 1;
   }
-  if (
-    subcommand === "match" &&
-    !argv.some((value) => ["--schema", "--llms", "--llms-full"].includes(value))
-  ) {
+  if (subcommand === "match") {
     if (argv.includes("--all") && positionals.length > 0) {
       return "scans match --all does not accept scan identifiers.";
     }

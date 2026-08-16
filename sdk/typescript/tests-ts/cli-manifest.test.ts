@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { Cli, Schema, z } from "incur";
 import { main } from "../src/cli.js";
 import {
-  isFullMarkdownManifest,
+  fullMarkdownManifestArguments,
   renderFullMarkdownManifest,
 } from "../src/cli-manifest.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
@@ -230,9 +230,13 @@ describe("full CLI manifest", () => {
     for (const description of Object.values(descriptions)) {
       expect(full).toContain(description);
     }
-    const scoped = renderFullMarkdownManifest(cli, {
-      commands: [{ name: "first nested show" }],
-    });
+    const scoped = renderFullMarkdownManifest(
+      cli,
+      {
+        commands: [{ name: "first nested show" }],
+      },
+      ["first", "nested"],
+    );
     expect(scoped).toContain(descriptions.first);
     expect(scoped).toContain(descriptions.nested);
     expect(scoped).not.toContain(descriptions.second);
@@ -256,19 +260,57 @@ describe("full CLI manifest", () => {
       expect(short.commands.map(({ name }) => name)).toEqual(
         expected.map(({ name }) => name),
       );
-      expect([
-        ...commandSections(await invoke([group, "--llms-full"])).keys(),
-      ]).toEqual(expected.map(({ name }) => name));
+      const markdown = await invoke([group, "--llms-full"]);
+      expect(markdown).toStartWith(`# codex-security ${group}\n`);
+      expect(markdown).not.toContain("\n## Authentication\n");
+      expect([...commandSections(markdown).keys()]).toEqual(
+        expected.map(({ name }) => name),
+      );
     }
     for (const command of root.commands) {
       const args = command.name.split(" ");
       expect((await readManifest(args)).commands).toEqual([command]);
-      expect([
-        ...commandSections(
-          await invoke([...args, "--llms-full", "--format=md"]),
-        ).keys(),
-      ]).toEqual([command.name]);
+      const markdown = await invoke([...args, "--llms-full", "--format=md"]);
+      expect(markdown).toStartWith(`# codex-security ${command.name}\n`);
+      expect(markdown).not.toContain("\n## Authentication\n");
+      expect([...commandSections(markdown).keys()]).toEqual([command.name]);
     }
+  });
+
+  test("preserves scoped paths when global discovery flags come first or between commands", async () => {
+    for (const args of [
+      ["--llms-full", "--format", "md", "scans", "show"],
+      ["scans", "--llms-full", "--token-count", "show"],
+      ["--filter-output", "scan", "scans", "show", "--llms-full"],
+    ]) {
+      const markdown = await invoke(args);
+      expect(markdown).toStartWith("# codex-security scans show\n");
+      expect([...commandSections(markdown).keys()]).toEqual(["scans show"]);
+      expect(markdown).not.toContain("\n## Authentication\n");
+    }
+    expect(
+      await invoke(["--filter-output", "scan", "--llms-full"]),
+    ).toStartWith("# codex-security\n");
+  });
+
+  test("keeps schema discovery separate from execution-only format checks", async () => {
+    const schema = JSON.parse(
+      await invoke(["export", "--schema", "--format", "json"]),
+    );
+    expect(
+      JSON.parse(
+        await invoke([
+          "export",
+          "--schema",
+          "--format",
+          "json",
+          "--output",
+          "-",
+          "--export-format",
+          "csv",
+        ]),
+      ),
+    ).toEqual(schema);
   });
 
   test("honors explicit output formats without rewriting structured manifests", async () => {
@@ -292,7 +334,9 @@ describe("full CLI manifest", () => {
     expect(
       manifest.commands[0]?.schema?.options?.properties,
     ).not.toHaveProperty("output-dir");
-    expect(isFullMarkdownManifest(["--llms-full", "--mcp"])).toBe(false);
+    expect(
+      fullMarkdownManifestArguments(["--llms-full", "--mcp"]),
+    ).toBeUndefined();
   });
 
   test("does not mutate the schemas used by the command parser", () => {

@@ -717,7 +717,8 @@ and structured output. Use `--llms` for a command index or `--llms-full` for
 the full Markdown reference, including accepted flags, values, and the operating
 guide from this README. Add `--format json` to read the original structured
 manifest, or scope either manifest to a command or group, such as
-`scans --llms-full`. Inspect a
+`scans --llms-full`. The full operating guide appears only in the root
+manifest. Inspect a
 command schema with `scan --schema --format json`, register the CLI as an MCP
 server with `mcp add`, sync agent skills with `skills add`, or generate shell
 completions with `completions bash|zsh|fish`. Scan results support

@@ -12,31 +12,75 @@ interface Manifest {
   commands: { name: string }[];
 }
 
-export function isFullMarkdownManifest(argv: readonly string[]): boolean {
-  if (!argv.includes("--llms-full") || argv.includes("--mcp")) return false;
+// Incur 0.4.13 omits the requested path from its structured manifest.
+const MANIFEST_FLAGS = new Set([
+  "--full-output",
+  "--llms",
+  "--llms-full",
+  "--help",
+  "-h",
+  "--version",
+  "--schema",
+  "--token-count",
+]);
+const MANIFEST_VALUE_FLAGS = new Set([
+  "--filter-output",
+  "--token-limit",
+  "--token-offset",
+]);
+
+export function fullMarkdownManifestArguments(
+  argv: readonly string[],
+): string[] | undefined {
+  if (!argv.includes("--llms-full") || argv.includes("--mcp")) return undefined;
   let format: string | undefined;
+  const commandArguments: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
-    if (argv[index] === "--json") format = "json";
-    else if (argv[index] === "--format") format = argv[++index];
-    else if (argv[index]?.startsWith("--format=")) {
-      format = argv[index]!.slice("--format=".length);
+    const argument = argv[index]!;
+    if (argument === "--json") format = "json";
+    else if (argument === "--format") format = argv[++index];
+    else if (argument.startsWith("--format=")) {
+      format = argument.slice("--format=".length);
+    } else if (MANIFEST_FLAGS.has(argument)) continue;
+    else if (
+      MANIFEST_VALUE_FLAGS.has(argument) &&
+      argv[index + 1] !== undefined
+    ) {
+      index += 1;
+    } else {
+      commandArguments.push(argument);
     }
   }
-  return format === undefined || format === "md";
+  return format === undefined || format === "md" ? commandArguments : undefined;
 }
 
 /** Render a documentation-only view; keep Incur's parsed schemas unchanged. */
 export function renderFullMarkdownManifest(
   cli: Cli.Cli,
   manifest: Manifest,
+  commandArguments: readonly string[] = [],
 ): string {
   const selected = new Set(manifest.commands.map(({ name }) => name));
   const groups = new Map<string, string>();
-  const commands = Cli.collectSkillCommands(
+  const allCommands = Cli.collectSkillCommands(
     Cli.toCommands.get(cli)!,
     [],
     groups,
-  )
+  );
+  let scope = "";
+  for (const argument of commandArguments) {
+    const next = scope ? `${scope} ${argument}` : argument;
+    if (
+      !allCommands.some(
+        ({ name }) => name === next || name?.startsWith(`${next} `),
+      )
+    ) {
+      break;
+    }
+    scope = next;
+    if (allCommands.some(({ name }) => name === scope)) break;
+  }
+  const commands = allCommands
     .filter((command) => selected.has(command.name!))
     .map((command) => ({
       ...command,
@@ -51,13 +95,23 @@ export function renderFullMarkdownManifest(
       ([name, description]) => `| \`${cli.name} ${name}\` | ${description} |`,
     );
   const defaults = scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+  const scopedName = scope ? `${cli.name} ${scope}` : cli.name;
+  const description = scope
+    ? groups.get(scope) ??
+      allCommands.find(({ name }) => name === scope)?.description
+    : cli.description;
 
   return [
-    Skill.index(cli.name, commands, cli.description),
+    Skill.index(cli.name, commands, description).replace(
+      /^# [^\n]+/u,
+      `# ${scopedName}`,
+    ),
     `CLI/SDK version: ${VERSION}. Bundled plugin: ${BUNDLED_PLUGIN_VERSION}. ` +
       `Codex runtime: ${CODEX_EXECUTABLE_VERSION}. Codex SDK: ${CODEX_SDK_VERSION}. ` +
       `Default model: ${defaults.model}; reasoning effort: ${defaults.reasoningEffort}.`,
-    readOperatingGuide(),
+    scope
+      ? `Run \`${cli.name} --llms-full\` for the operating guide.`
+      : readOperatingGuide(),
     "## Global options and integrations",
     "```text\n" + Help.formatRoot(cli.name, { root: true }) + "\n```",
     ...(groupRows.length === 0
