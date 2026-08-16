@@ -720,9 +720,18 @@ def make_diff_rank_input(args: argparse.Namespace) -> None:
         elif path.is_symlink():
             preview = ""
         elif path.is_file():
-            preview, is_binary = preview_for(path, args.preview_bytes)
-            if is_binary:
-                continue
+            try:
+                safe_leaf = directory_is_within_target(
+                    path.resolve(strict=True).parent, repo
+                )
+            except (OSError, RuntimeError):
+                safe_leaf = False
+            if safe_leaf:
+                preview, is_binary = preview_for(path, args.preview_bytes)
+                if is_binary:
+                    continue
+            else:
+                preview = ""
         else:
             preview = ""
         rows.append({"path": rel.as_posix(), "area": args.area, "preview": preview})
