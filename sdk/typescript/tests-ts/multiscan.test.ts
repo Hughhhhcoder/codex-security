@@ -1712,9 +1712,16 @@ describe("multiscan", () => {
     expect(ledger).not.toContain("SYNTHETIC");
   });
 
-  test.each([false, true])(
-    "preserves the scan outcome when checkout cleanup fails (failed: %s)",
-    async (failed) => {
+  test.each(["complete", "partial", "failed"] as const)(
+    "preserves the %s scan outcome when checkout cleanup fails",
+    async (outcome) => {
+      const failed = outcome === "failed";
+      const expected = {
+        completed: outcome === "complete" ? 1 : 0,
+        incomplete: outcome === "partial" ? 1 : 0,
+        failed: failed ? 1 : 0,
+        warned: 1,
+      };
       const paths = await fixture();
       const source = await repository(paths.root, "cleanup-failure");
       await writeFile(
@@ -1741,21 +1748,23 @@ describe("multiscan", () => {
             paths,
             client(async (_repository, scanOptions = {}) => {
               scanned = true;
-              if (failed) throw new Error("Original scan failure.");
-              return await completedScan(scanOptions.outputDir!);
+              if (outcome === "failed") {
+                throw new Error("Original scan failure.");
+              }
+              return await completedScan(scanOptions.outputDir!, outcome);
             }),
             { maxAttempts: 1 },
           ),
         );
 
-        expect(summary).toMatchObject({
-          completed: failed ? 0 : 1,
-          failed: failed ? 1 : 0,
-          warned: 1,
-        });
+        expect(summary).toMatchObject(expected);
         expect(await results(summary.resultsPath)).toMatchObject([
           {
-            status: failed ? "failed" : "completed",
+            status: failed
+              ? "failed"
+              : outcome === "complete"
+                ? "completed"
+                : "completed_with_incomplete_coverage",
             attempt: 1,
             ...(failed ? { error: "Original scan failure." } : {}),
             warnings: [
@@ -1768,6 +1777,8 @@ describe("multiscan", () => {
       }
 
       if (!failed) {
+        const ledgerPath = join(paths.output, "results.jsonl");
+        const ledger = await readFile(ledgerPath, "utf8");
         const resumed = await runMultiscan(
           options(
             paths,
@@ -1777,11 +1788,11 @@ describe("multiscan", () => {
           ),
         );
         expect(resumed).toMatchObject({
-          completed: 1,
-          warned: 1,
+          ...expected,
           skipped: 1,
         });
         expect(await readdir(join(paths.output, "checkouts"))).toEqual([]);
+        expect(await readFile(ledgerPath, "utf8")).toBe(ledger);
       }
     },
   );

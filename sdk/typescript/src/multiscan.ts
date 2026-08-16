@@ -27,7 +27,7 @@ import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
-import { loadContract, type LoadedContract } from "./contract.js";
+import { loadContract } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
@@ -195,54 +195,31 @@ async function runCampaign(
         receipt.outputDir === selectedArtifactOutput) &&
       (await hasArtifacts(artifactOutput))
     ) {
-      const contract = await loadResumableContract(
+      const checkout = join(output, "checkouts", task.id);
+      const coverage = await loadResumableCoverage(
         artifactOutput,
         await resolveResumePluginRoot(),
-        task,
-        receipt.targetId ??
-          `target_sha256_${createHash("sha256")
-            .update(`local-workspace\0${join(output, "checkouts", task.id)}`)
-            .digest("hex")}`,
-        receipt.resolvedScope,
-        receipt.snapshotDigest,
+        receipt,
+        checkout,
         options.signal,
       );
-      if (
-        receipt.status === "completed" &&
-        contract?.coverage.completeness === "complete"
-      ) {
-        await rm(join(output, "checkouts", task.id), {
+      if (coverage !== undefined) {
+        await rm(checkout, {
           recursive: true,
           force: true,
         }).catch(() => undefined);
-        completed += 1;
-        continue;
-      }
-      const coverage =
-        receipt.status === "completed_with_incomplete_coverage"
-          ? receipt.coverage ?? contract?.coverage.completeness
-          : receipt.status === "failed" &&
-              receipt.error === "Multiscan repository coverage is incomplete."
-            ? contract?.coverage.completeness
-            : undefined;
-      if (
-        coverage !== undefined &&
-        coverage !== "complete" &&
-        coverage === contract?.coverage.completeness
-      ) {
-        await rm(join(output, "checkouts", task.id), {
-          recursive: true,
-          force: true,
-        }).catch(() => undefined);
-        incomplete += 1;
-        notifyProgress(options, {
-          repository: task.id,
-          status: "completed_with_incomplete_coverage",
-          attempt: receipt.attempt,
-          warning:
-            receipt.warning ??
-            `Scan coverage is ${coverage}; results may be incomplete.`,
-        });
+        if (coverage === "complete") completed += 1;
+        else {
+          incomplete += 1;
+          notifyProgress(options, {
+            repository: task.id,
+            status: "completed_with_incomplete_coverage",
+            attempt: receipt.attempt,
+            warning:
+              receipt.warning ??
+              `Scan coverage is ${coverage}; results may be incomplete.`,
+          });
+        }
         continue;
       }
     }
@@ -772,49 +749,59 @@ async function readReceipts(
   return { receipts, warnedIds };
 }
 
-async function loadResumableContract(
+async function loadResumableCoverage(
   path: string,
   pluginRoot: string,
-  task: MultiscanTask,
-  targetId: string,
-  resolvedScope: string | undefined,
-  snapshotDigest: string | undefined,
+  receipt: MultiscanReceipt,
+  checkout: string,
   signal?: AbortSignal,
-): Promise<LoadedContract | undefined> {
+): Promise<CoverageDocument["completeness"] | undefined> {
   try {
-    const contract = await loadContract(path, { pluginRoot, signal });
-    const target = contract.manifest.scan.target;
+    const { manifest, coverage } = await loadContract(path, {
+      pluginRoot,
+      signal,
+    });
+    const { target, scope, producer } = manifest.scan;
+    const targetId =
+      receipt.targetId ??
+      `target_sha256_${createHash("sha256")
+        .update(`local-workspace\0${checkout}`)
+        .digest("hex")}`;
     const expectedScope =
-      task.scope === undefined
+      receipt.scope === undefined
         ? "."
-        : resolvedScope ?? posix.normalize(task.scope);
+        : receipt.resolvedScope ?? posix.normalize(receipt.scope);
     const expectedMode =
-      task.scope !== undefined
+      receipt.scope !== undefined
         ? "scoped_path"
-        : task.mode === "deep"
+        : receipt.mode === "deep"
           ? "deep_repository"
           : "repository";
+    const expectedKind =
+      receipt.snapshotDigest === undefined ? "git_revision" : "git_worktree";
     if (
-      contract.manifest.scan.producer.name !== "codex-security-plugin" ||
+      producer.name !== "codex-security-plugin" ||
       target.targetId !== targetId ||
-      (target.kind !== "git_revision" && target.kind !== "git_worktree") ||
-      (target.kind === "git_worktree" &&
-        (snapshotDigest === undefined ||
-          target.snapshotDigest !== snapshotDigest)) ||
-      (target.kind === "git_revision" &&
-        (target.snapshotDigest !== undefined ||
-          snapshotDigest !== undefined)) ||
-      target.displayName !== task.id ||
-      target.revision !== task.revision ||
-      contract.coverage.mode !== expectedMode ||
-      contract.coverage.excludePaths.length !== 0 ||
-      contract.manifest.scan.scope.includePaths.length !== 1 ||
-      contract.manifest.scan.scope.includePaths[0] !== expectedScope ||
-      contract.manifest.scan.scope.excludePaths.length !== 0
+      target.kind !== expectedKind ||
+      target.snapshotDigest !== receipt.snapshotDigest ||
+      target.displayName !== receipt.id ||
+      target.revision !== receipt.revision ||
+      coverage.mode !== expectedMode ||
+      scope.includePaths.length !== 1 ||
+      scope.includePaths[0] !== expectedScope ||
+      scope.excludePaths.length !== 0
     ) {
       return undefined;
     }
-    return contract;
+    const completeness = coverage.completeness;
+    const matchesOutcome =
+      completeness === "complete"
+        ? receipt.status === "completed"
+        : (receipt.status === "completed_with_incomplete_coverage" &&
+            (receipt.coverage ?? completeness) === completeness) ||
+          (receipt.status === "failed" &&
+            receipt.error === "Multiscan repository coverage is incomplete.");
+    return matchesOutcome ? completeness : undefined;
   } catch {
     if (signal?.aborted === true) signal.throwIfAborted();
     return undefined;
