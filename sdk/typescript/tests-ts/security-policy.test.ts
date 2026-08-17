@@ -1134,6 +1134,31 @@ describe("security policy review and application", () => {
     expect(await readdir(outside.outputDir)).toEqual([]);
   });
 
+  test("applies policies referenced by an inherited symlink", async () => {
+    for (const existing of [false, true]) {
+      const f = await fixture();
+      const component = join(f.repository, "component");
+      const target = join(component, "SECURITY.md");
+      const inherited = join(f.repository, "SECURITY.md");
+      await mkdir(component);
+      if (existing) await writeFile(target, "# Original policy\n");
+      await symlink(target, inherited, "file");
+      await f.generate({ path: "component" });
+      const draft = await loadSecurityPolicyDraft(f.repository, f.outputDir, {
+        path: "component",
+      });
+      expect(await securityPolicyDiff(draft, PYTHON)).toContain(
+        "b/component/SECURITY.md",
+      );
+      const applied = await applySecurityPolicy(draft);
+      expect(applied.targetPath).toBe(target);
+      expect(applied.recoveryPath === null).toBe(!existing);
+      expect((await lstat(inherited)).isSymbolicLink()).toBe(true);
+      expect(await readFile(inherited, "utf8")).toBe(POLICY);
+      expect(await readFile(target, "utf8")).toBe(POLICY);
+    }
+  });
+
   test("checks inherited policies around application and verification", async () => {
     for (const timing of ["before", "after"] as const) {
       const f = await fixture();

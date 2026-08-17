@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type {
   CodexOptions,
@@ -156,6 +156,52 @@ describe("CodexSecurity policy API", () => {
     expect(prepared).toBe(false);
     expect(await readdir(f.outputDir)).toEqual([]);
     await f.security.close();
+  });
+
+  test("validates inherited policies before preflight or runtime setup", async () => {
+    for (const invalid of ["utf8", "size", "outside"] as const) {
+      let prepared = false;
+      const f = await setup({
+        onPrepare: () => {
+          prepared = true;
+        },
+      });
+      await mkdir(join(f.repository, "component"));
+      const policy = join(f.repository, "SECURITY.md");
+      let message: string;
+      if (invalid === "utf8") {
+        await writeFile(policy, Buffer.from([0xff]));
+        message = "valid UTF-8";
+      } else if (invalid === "size") {
+        await writeFile(policy, Buffer.alloc(1024 * 1024 + 1, "x"));
+        message = "1 MiB";
+      } else {
+        const outside = join(f.root, "outside-policy.md");
+        await writeFile(outside, "# Outside policy\n");
+        await symlink(outside, policy, "file");
+        message = "outside the repository";
+      }
+      const options = { path: "component", outputDir: f.outputDir };
+      await expect(
+        f.security.preflightPolicy(f.repository, options),
+      ).rejects.toThrow(message);
+      await expect(
+        f.security.generatePolicy(f.repository, options),
+      ).rejects.toThrow(message);
+      expect(prepared).toBe(false);
+      expect(f.threads).toHaveLength(0);
+      expect(await readdir(f.outputDir)).toEqual([]);
+      await f.security.close();
+    }
+  });
+
+  test("rejects a closed policy client before resolving its target", async () => {
+    const f = await setup();
+    await f.security.close();
+    await expect(
+      f.security.preflightPolicy(join(f.root, "missing-repository")),
+    ).rejects.toThrow("CodexSecurity is closed");
+    expect(f.threads).toHaveLength(0);
   });
 
   test("uses the shared runtime for three fresh, scoped, structured turns", async () => {

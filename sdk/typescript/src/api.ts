@@ -461,11 +461,13 @@ export class CodexSecurity {
     repository: string,
     options: SecurityPolicyOptions = {},
   ): Promise<SecurityPolicyPreflight> {
+    this.#requireOpen();
     const target = await resolveSecurityPolicyTarget(
       repository,
       options.path,
       options.signal,
     );
+    await readSecurityPolicySnapshot(target, options.signal);
     const preflight = await this.preflight(target.repository, {
       auth: options.auth,
       target: target.scope === "." ? "repository" : [target.scope],
@@ -522,6 +524,7 @@ export class CodexSecurity {
         options.path,
         signal,
       );
+      const snapshot = await readSecurityPolicySnapshot(target, signal);
       const inputs = await this.#validateLocalInputs(
         target.repository,
         {
@@ -596,7 +599,6 @@ export class CodexSecurity {
         options.onObserverError,
         outputDir,
       );
-      const snapshot = await readSecurityPolicySnapshot(target, signal);
       const guidance = await resolveSecurityPolicyGuidance(
         target,
         python,

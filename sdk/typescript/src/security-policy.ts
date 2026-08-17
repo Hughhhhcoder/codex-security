@@ -221,6 +221,11 @@ export async function readSecurityPolicySnapshot(
   signal?: AbortSignal,
 ): Promise<SecurityPolicySnapshot> {
   // Previewing a saved draft does not need to start the policy resolver.
+  const previousContent = await readSecurityPolicy(target.targetPath);
+  const canonicalTarget =
+    previousContent === null
+      ? target.targetPath
+      : await realpath(target.targetPath);
   const inherited: [string, string][] = [];
   let directory = target.repository;
   for (const part of target.scope === "." ? [] : target.scope.split("/")) {
@@ -237,19 +242,21 @@ export async function readSecurityPolicySnapshot(
         [path],
         signal,
       );
-      const content = await readPolicyFile(
-        join(target.repository, normalized.paths[0]!),
-      );
-      inherited.push([
-        relative(target.repository, path).split(sep).join("/"),
-        digest(content),
-      ]);
+      const canonical = join(target.repository, normalized.paths[0]!);
+      // A link to the selected file is covered by its own checkpoint.
+      if (canonical !== canonicalTarget) {
+        const content = await readPolicyFile(canonical);
+        inherited.push([
+          relative(target.repository, path).split(sep).join("/"),
+          digest(content),
+        ]);
+      }
     }
     directory = join(directory, part);
   }
   signal?.throwIfAborted();
   return {
-    previousContent: await readSecurityPolicy(target.targetPath),
+    previousContent,
     inheritedPolicySha256: digest(JSON.stringify(inherited)),
   };
 }
