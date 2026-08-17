@@ -1645,29 +1645,34 @@ describe("CodexSecurity orchestration", () => {
       const repository = join(worktree, "packages", "service");
       const output = join(worktree, "scan");
       await mkdir(repository, { recursive: true });
-      let runtimeStarted = false;
-      const client = new TestClient(
-        {},
-        {
-          environment: {},
-          prepareRuntime: async () => {
-            runtimeStarted = true;
-            throw new Error("runtime should not initialize");
+      for (const environment of [{}, { CODEX_SECURITY_GIT: "" }]) {
+        let runtimeStarted = false;
+        const client = new TestClient(
+          {},
+          {
+            environment,
+            prepareRuntime: async () => {
+              runtimeStarted = true;
+              throw new Error("runtime should not initialize");
+            },
           },
-        },
-      );
+        );
 
-      await expect(
-        client.run(repository, { outputDir: output }),
-      ).rejects.toMatchObject({
-        name: OutputInsideProtectedRootError.name,
-        outputDirectory: output,
-        protectedRoot: worktree,
-        pathKind: "output",
-      });
-      expect(runtimeStarted).toBe(false);
-      await expect(stat(output)).rejects.toThrow();
-      await client.close();
+        try {
+          await expect(
+            client.run(repository, { outputDir: output }),
+          ).rejects.toMatchObject({
+            name: OutputInsideProtectedRootError.name,
+            outputDirectory: output,
+            protectedRoot: worktree,
+            pathKind: "output",
+          });
+          expect(runtimeStarted).toBe(false);
+          await expect(stat(output)).rejects.toThrow();
+        } finally {
+          await client.close();
+        }
+      }
     }
   });
 
