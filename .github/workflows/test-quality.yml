@@ -114,12 +114,14 @@ jobs:
       - name: Compare inventories and outcomes
         shell: bash
         run: |
+          comparison_status=0
           for os in ubuntu-latest windows-latest; do
             for mode in isolated parallel randomized; do
-              python3 sdk/typescript/scripts/compare-test-reports.py "reports/runner-$os-baseline.xml" "reports/runner-$os-$mode.xml" >> "$GITHUB_STEP_SUMMARY"
+              python3 sdk/typescript/scripts/compare-test-reports.py "reports/runner-$os-baseline.xml" "reports/runner-$os-$mode.xml" >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
             done
           done
-          python3 sdk/typescript/scripts/compare-test-reports.py reports/runner-windows-latest-baseline.xml 'reports/runner-windows-latest-shard-*.xml' >> "$GITHUB_STEP_SUMMARY"
+          python3 sdk/typescript/scripts/compare-test-reports.py reports/runner-windows-latest-baseline.xml 'reports/runner-windows-latest-shard-*.xml' >> "$GITHUB_STEP_SUMMARY" || comparison_status=1
+          exit "$comparison_status"
 
   mutation:
     name: Pure-module mutation trial

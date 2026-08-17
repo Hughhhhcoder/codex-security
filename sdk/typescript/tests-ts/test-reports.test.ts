@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +58,55 @@ function compare(baseline: string, ...candidates: string[]) {
 }
 
 describe("JUnit inventory comparison", () => {
+  test("runs every workflow comparison before reporting a mismatch", async () => {
+    const fixture = await fixtures();
+    const workflow = Bun.YAML.parse(
+      await readFile(
+        new URL("../../../.github/workflows/test-quality.yml", import.meta.url),
+        "utf8",
+      ),
+    ) as {
+      jobs: { compare: { steps: Array<{ name?: string; run?: string }> } };
+    };
+    const script = workflow.jobs.compare.steps.find(
+      (step) => step.name === "Compare inventories and outcomes",
+    )!.run!;
+    const expected = [
+      ...["ubuntu-latest", "windows-latest"].flatMap((os) =>
+        ["isolated", "parallel", "randomized"].map(
+          (mode) => `reports/runner-${os}-${mode}.xml`,
+        ),
+      ),
+      "reports/runner-windows-latest-shard-*.xml",
+    ];
+    const mock = `python3() {
+  printf '%s\\n' "$3"
+  [[ "$3" != "$CODEX_SECURITY_TEST_FAIL_REPORT" ]]
+}`;
+    const summary = join(fixture.root, "summary.md");
+    for (const failedReport of ["", expected[0]!]) {
+      await writeFile(summary, "");
+      const result = spawnSync(
+        "bash",
+        ["-e", "-o", "pipefail", "-c", `${mock}\n${script}`],
+        {
+          cwd: fixture.root,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GITHUB_STEP_SUMMARY: "summary.md",
+            CODEX_SECURITY_TEST_FAIL_REPORT: failedReport,
+          },
+          timeout: 10_000,
+        },
+      );
+      expect(result.status, result.stderr).toBe(failedReport === "" ? 0 : 1);
+      expect((await readFile(summary, "utf8")).trim().split(/\r?\n/u)).toEqual(
+        expected,
+      );
+    }
+  });
+
   test("merges native shards without depending on test order", async () => {
     const fixture = await fixtures();
     const passed = testcase("accepts &amp; preserves");
