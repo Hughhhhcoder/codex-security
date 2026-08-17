@@ -3129,8 +3129,11 @@ function validateCliArguments(
   positionals: string[],
 ): string | undefined {
   if (argv.includes("--help") || argv.includes("-h")) return undefined;
-  const commandIndex = argv.findIndex((value) =>
-    [
+  const commandIndex = cliCommandIndex(argv);
+  const command = argv[commandIndex];
+  if (
+    command === undefined ||
+    ![
       "scan",
       "policy",
       "install-hook",
@@ -3144,10 +3147,10 @@ function validateCliArguments(
       "login",
       "logout",
       "info",
-    ].includes(value),
-  );
-  if (commandIndex < 0) return undefined;
-  const command = argv[commandIndex]!;
+    ].includes(command)
+  ) {
+    return undefined;
+  }
   const structuredOutput = argv.some(
     (value, index) =>
       value === "--json" ||
