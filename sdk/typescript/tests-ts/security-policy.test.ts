@@ -878,12 +878,14 @@ describe("security policy review and application", () => {
     }
   });
 
-  test("creates policies without hard-link support and never clobbers a racing file", async () => {
+  test("handles unavailable hard links without clobbering policy files", async () => {
     const name =
-      "creates policies without hard-link support and never clobbers a racing file";
+      "handles unavailable hard links without clobbering policy files";
     if (runMockInSubprocess(import.meta.path, name)) return;
     const originalLink = fsPromises.link;
+    const originalCopyFile = fsPromises.copyFile;
     let collision = false;
+    let copyFailure = false;
     mock.module("node:fs/promises", () => ({
       ...fsPromises,
       link: async (_source: string, destination: string) => {
@@ -891,6 +893,15 @@ describe("security policy review and application", () => {
         throw Object.assign(new Error("hard links are unsupported"), {
           code: "ENOTSUP",
         });
+      },
+      copyFile: async (source: string, destination: string, mode?: number) => {
+        if (copyFailure) {
+          await writeFile(destination, "# Partial policy\n", { flag: "wx" });
+          throw Object.assign(new Error("synthetic copy failure"), {
+            code: "EIO",
+          });
+        }
+        await originalCopyFile(source, destination, mode);
       },
     }));
     try {
@@ -916,10 +927,27 @@ describe("security policy review and application", () => {
       expect(await readFile(racing.targetPath, "utf8")).toBe(
         "# Concurrent policy\n",
       );
+      collision = false;
+      copyFailure = true;
+      const failed = await fixture();
+      const partial = await failed.generate();
+      const error = await applySecurityPolicy(partial).catch(
+        (value: unknown) => value,
+      );
+      expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
+      expect(error).toMatchObject({
+        targetPath: partial.targetPath,
+        cause: { code: "EIO" },
+      });
+      expect(await readFile(partial.targetPath, "utf8")).toBe(
+        "# Partial policy\n",
+      );
+      expect(await readdir(failed.repository)).toEqual(["SECURITY.md"]);
     } finally {
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
         link: originalLink,
+        copyFile: originalCopyFile,
       }));
     }
   });
@@ -1925,19 +1953,21 @@ describe("security policy review and application", () => {
   });
 
   test("rejects case aliases to a missing component policy on every platform", async () => {
-    const f = await fixture();
-    await mkdir(join(f.repository, "component"));
-    await mkdir(join(f.repository, "sibling"));
-    await symlink(
-      join(f.repository, "component", "security.md"),
-      join(f.repository, "sibling", "SECURITY.md"),
-      "file",
-    );
-    const draft = await f.generate({ path: "component" });
-    await expect(applySecurityPolicy(draft)).rejects.toThrow(
-      "outside the selected component",
-    );
-    expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
+    for (const name of ["security.md", "\u017fECURITY.md"]) {
+      const f = await fixture();
+      await mkdir(join(f.repository, "component"));
+      await mkdir(join(f.repository, "sibling"));
+      await symlink(
+        join(f.repository, "component", name),
+        join(f.repository, "sibling", "SECURITY.md"),
+        "file",
+      );
+      const draft = await f.generate({ path: "component" });
+      await expect(
+        applySecurityPolicy(draft, { pythonPath: "missing-python" }),
+      ).rejects.toThrow("outside the selected component");
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
+    }
   });
 
   test("treats inherited links through regular files as absent", async () => {

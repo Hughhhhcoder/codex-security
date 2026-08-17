@@ -805,7 +805,7 @@ async function validatePolicyLinks(
         (canonicalTarget === null &&
           alias.status === "missing" &&
           relative(component, dirname(destination)) === "" &&
-          basename(destination).toLowerCase() === "security.md"))
+          basename(destination).toUpperCase() === "SECURITY.MD"))
     ) {
       const policyPath = relative(protectedRoot, path).split(sep).join("/");
       throw new CodexSecurityError(
@@ -970,9 +970,27 @@ export async function applySecurityPolicy(
           await validatePolicyLinks(target, options.signal);
           await requireUnchangedSecurityPolicy(target, draft, options.signal);
           options.signal?.throwIfAborted();
-          if (draft.previousContent === null)
-            await installFileNoClobber(temporary, target.targetPath);
-          else
+          if (draft.previousContent === null) {
+            try {
+              await installFileNoClobber(temporary, target.targetPath);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+                // A failed copy fallback can leave a partial destination.
+                written =
+                  (await lstat(target.targetPath).catch(
+                    (inspectError: NodeJS.ErrnoException) => {
+                      if (
+                        inspectError.code === "ENOENT" ||
+                        inspectError.code === "ENOTDIR"
+                      )
+                        return null;
+                      throw inspectError;
+                    },
+                  )) !== null;
+              }
+              throw error;
+            }
+          } else
             recoveryPath = await replaceExistingPolicy(
               temporary,
               target.targetPath,
