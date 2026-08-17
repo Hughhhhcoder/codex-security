@@ -214,6 +214,17 @@ describe("TypeScript package skeleton", () => {
     for (const upload of uploads) {
       expect(upload.with?.["overwrite"]).toBe(true);
     }
+    expect(
+      uploads.find((step) => step.name === "Upload mutation report"),
+    ).toMatchObject({ "continue-on-error": true });
+    expect(
+      uploads.find((step) => step.name === "Upload runner report"),
+    ).not.toHaveProperty("continue-on-error");
+    expect(
+      quality.jobs["mutation"]?.steps.find(
+        (step) => step.name === "Run mutation trial",
+      ),
+    ).not.toHaveProperty("continue-on-error");
   });
 
   test("builds packages without a preinstalled package manager and provides a production audit", async () => {
