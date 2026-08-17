@@ -92,9 +92,11 @@ Pass scan configuration to `security.run(repository, options)` or
 
 Progress and lifecycle callbacks are `onAuthentication`, `onCost`,
 `onOutputArchived`, `onOutputDirReady`, `onScanStarted`,
-`onTrustedAccessStatus`, `onReconnect`, `onWorkerStatus`, `onWarning`, and
-`onObserverError`. Preflight does not start the runtime, authenticate, resolve
-Python, inspect the plugin, or run those scan-lifecycle callbacks.
+`onTrustedAccessStatus`, `onReconnect`, `onSessionEvent`, `onWorkerStatus`,
+`onWarning`, and `onObserverError`. `onSessionEvent` receives saved scan and
+worker events with their thread IDs and worker numbers. Preflight does not start
+the runtime, authenticate, resolve Python, inspect the plugin, or run those
+scan-lifecycle callbacks.
 
 ## Authentication
 
@@ -248,6 +250,8 @@ npx @openai/codex-security validate /path/outside/repository/findings.json "Poss
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch /path/outside/repository/findings.json "Missing authorization check in src/routes.ts:18"
 npx @openai/codex-security patch "Missing authorization check" --effort high
+npx @openai/codex-security patch --linear-issue SEC-123 --linear-issue SEC-124
+npx @openai/codex-security patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'
 ```
 
 Run `npx @openai/codex-security --version` for the installed CLI version or
@@ -438,7 +442,7 @@ The CLI and SDK recognize the following user-configurable environment:
 | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `OPENAI_API_KEY`, `CODEX_API_KEY`                                           | Scan authentication; `OPENAI_API_KEY` wins when both are present.                             |
 | `CODEX_SECURITY_LINEAR_TEAM`, `CODEX_SECURITY_LINEAR_PROJECT`               | Default Linear team and project for completed-scan publication.                               |
-| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Publish directly to Linear with a personal API key; safer than a command-line key.            |
+| `CODEX_SECURITY_LINEAR_API_KEY`                                             | Patch Linear issues or publish directly with a personal API key.                              |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI-only; set to `debug` for verbose diagnostics.                                             |
 | `LOG_LEVEL`                                                                 | CLI-only fallback when `CODEX_SECURITY_LOG_LEVEL` is unset.                                   |
 | `CODEX_SECURITY_STATE_DIR`                                                  | Select the history database, artifact directory, and dedicated Codex credential home.         |
@@ -498,9 +502,8 @@ Progress and summaries use stderr; structured scan results remain on stdout.
 Add `--verbose` or set `CODEX_SECURITY_LOG_LEVEL=debug` to print
 lifecycle, authentication, progress, and cost diagnostics to stderr.
 `LOG_LEVEL=debug` is used only when `CODEX_SECURITY_LOG_LEVEL` is unset.
-Structured JSON results remain on stdout. Verbose diagnostics may contain
-sensitive data; review local logs before sharing them. The interactive
-dashboard omits activity containing recognizable credentials.
+Structured JSON results remain on stdout. Review sensitive verbose logs before
+sharing them. The normal activity feed hides credentials.
 
 Each scan records its model, tokens, and estimated cost in its JSON result,
 scan history, and bulk-scan receipt. Estimates use
@@ -562,8 +565,9 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
   --linear-team TEAM_ID
 ```
 
-Add `--project PROJECT_ID` to place the issues in a Linear project. Without a
-project, issues are created directly in the selected team.
+Add `--linear-project PROJECT_ID` to place the issues in a Linear project.
+The existing `--project` flag remains an alias. Without a project, issues are
+created directly in the selected team.
 
 To choose from all completed scans saved in your local scan history, omit the
 scan directory. The selector highlights each repository and shows its finding
@@ -689,7 +693,9 @@ the configuration, results, coverage, and artifact locations. Add
 `--show-linked-findings` to include finding links from previous scans.
 
 `scans logs` shows session events from the latest scan, including an active scan.
-Pass `SCAN_ID` to select another scan. Logs can contain source code and credentials.
+Pass `SCAN_ID` to select another scan. During a scan, press `d` for live details.
+Filter with `a` for all sources, `m` for the main scan, or `1`–`9` for a worker.
+Logs and live details can contain source code and credentials.
 
 Every scan history command accepts a full scan ID or a unique prefix of at
 least eight characters.
@@ -792,10 +798,24 @@ Use `validate` to run the bundled validation skill on candidate findings and
 `patch` to run the bundled fix-finding skill on security issues. Each positional
 input can be either a file, whose contents are read into the request, or literal
 text. Both commands operate on the current directory, use the scan model
-and reasoning defaults, ignore unrelated user configuration and plugins, and
-print the final response without the underlying Codex event stream. Override
-the model with `--codex 'model="gpt-5.6-sol"'` and the reasoning effort with
-`--effort high` or `--codex 'model_reasoning_effort="high"'`.
+and reasoning defaults, disable plugins, and print the final response without
+the underlying Codex event stream. Patching starts a saved task in the Codex
+desktop app. Override the model with `--codex 'model="gpt-5.6-sol"'` and the
+reasoning effort with `--effort high` or
+`--codex 'model_reasoning_effort="high"'`.
+
+Use `patch --linear-issue ISSUE` to import a Linear issue by identifier or URL.
+Repeat `--linear-issue` to include more issues. Use
+`patch --linear-project "PROJECT"` to patch every open issue in a project. Add
+`--linear-filter '{"labels":{"name":{"eq":"security"}}}'` to apply a native
+Linear issue filter on the server. Completed and canceled issues are excluded
+unless the filter explicitly sets `state`. Set `CODEX_SECURITY_LINEAR_API_KEY`
+for a personal API key, or `LINEAR_ACCESS_TOKEN` for an OAuth access token.
+`LINEAR_API_KEY` is also accepted. `--linear-api-key KEY` overrides these
+environment settings; prefer the environment variable to keep keys out of shell
+history. Imported content is always literal, and issue URLs must match the
+selected workspace. Linear access is read-only, and its credentials are not
+passed to the patch subprocess.
 
 Exit codes are `0` for a completed report-only scan or a passing policy, `1`
 for a completed policy violation, `2` for invalid input, incomplete coverage, or
