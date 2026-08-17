@@ -1707,7 +1707,7 @@ describe("security policy review and application", () => {
       ).toBe("# Reporting a vulnerability\n");
   });
 
-  test("treats non-directory reporting and inherited policy paths as absent", async () => {
+  test("treats non-directory reporting-policy paths as absent", async () => {
     for (const entry of [".github", "docs"]) {
       const f = await fixture();
       const path = join(f.repository, entry);
@@ -1719,17 +1719,6 @@ describe("security policy review and application", () => {
       await applySecurityPolicy(draft);
       expect(await readFile(path, "utf8")).toBe("A regular source file.\n");
     }
-    const f = await fixture();
-    await mkdir(join(f.repository, "component"));
-    await writeFile(join(f.repository, "not-a-directory"), "source\n");
-    await symlink(
-      join(f.repository, "not-a-directory", "policy.md"),
-      join(f.repository, "SECURITY.md"),
-      "file",
-    );
-    const draft = await f.generate({ path: "component" });
-    await applySecurityPolicy(draft);
-    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
   });
 
   test("validates descendant policy links before applying a draft", async () => {
@@ -1949,6 +1938,23 @@ describe("security policy review and application", () => {
       "outside the selected component",
     );
     expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
+  });
+
+  test("treats inherited links through regular files as absent", async () => {
+    const f = await fixture();
+    await mkdir(join(f.repository, "component"));
+    await writeFile(join(f.repository, "not-a-directory"), "source\n");
+    await symlink(
+      join(f.repository, "not-a-directory", "policy.md"),
+      join(f.repository, "SECURITY.md"),
+      "file",
+    );
+    const draft = await f.generate({ path: "component" });
+    expect(await securityPolicyDiff(draft, PYTHON)).toContain(
+      "b/component/SECURITY.md",
+    );
+    await applySecurityPolicy(draft);
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
   });
 
   test("invalidates component drafts when inherited links change", async () => {
