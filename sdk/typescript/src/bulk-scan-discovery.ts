@@ -68,6 +68,7 @@ export interface BulkScanPrompt {
     question: string,
     options: readonly { label: string; value: Value; short?: string }[],
     presentation?: { header?: string },
+    signal?: AbortSignal,
   ): Promise<Value>;
 }
 
@@ -357,7 +358,7 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
       confirm({ message, default: defaultValue }, context(signal)),
     input: (message, defaultValue, signal) =>
       input({ message, default: defaultValue }, context(signal)),
-    select: (message, options, presentation) =>
+    select: (message, options, presentation, signal) =>
       search(
         {
           message,
@@ -382,7 +383,7 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
                 ...(short === undefined ? {} : { short }),
               })),
         },
-        context(),
+        context(signal),
       ),
   };
 }

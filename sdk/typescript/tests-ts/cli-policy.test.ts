@@ -185,6 +185,154 @@ describe("policy CLI", () => {
     expect(closed).toBe(true);
   });
 
+  test("offers the scan credential chooser before interactive policy generation", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    for (const [source, selection] of [
+      ["OPENAI_API_KEY", "chatgpt"],
+      ["CODEX_API_KEY", "api-key"],
+    ] as const) {
+      let selected: SecurityPolicyOptions["auth"];
+      let question = "";
+      let choices: readonly { label: string; value: string }[] = [];
+      const stderr = capture(true);
+      const deps = policyDependencies(f, {
+        draft,
+        prompt: prompt({
+          isInteractive: () => true,
+          confirm: async () => false,
+        }),
+        onGenerate: (_repository, options) => {
+          selected = options.auth;
+        },
+      });
+      deps.environment = { [source]: "synthetic-private-key" };
+      deps.hasStoredChatGPTSignIn = async () => true;
+      deps.scanAuthenticationPrompt = {
+        isInteractive: () => true,
+        select: async <Value extends string>(
+          message: string,
+          options: readonly { label: string; value: Value }[],
+        ): Promise<Value> => {
+          question = message;
+          choices = options;
+          return options.find((option) => option.value === selection)!.value;
+        },
+      };
+      expect(
+        await main(["policy"], capture(true).stream, stderr.stream, deps),
+      ).toBe(0);
+      expect(selected).toBe(selection);
+      expect(question).toContain("policy generation");
+      expect(choices.map((choice) => choice.value)).toEqual([
+        "chatgpt",
+        "api-key",
+      ]);
+      expect(stderr.text()).toContain(source);
+      expect(stderr.text()).not.toContain("synthetic-private-key");
+    }
+    expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("does not choose credentials for automated, explicit, or saved policy requests", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    for (const scenario of [
+      { args: ["--headless"] },
+      { args: ["--json"] },
+      { args: ["--format", "toon"] },
+      { args: ["--dry-run"] },
+      { args: ["--auth", "chatgpt"] },
+      { args: ["--auth", "api-key"] },
+      { args: ["--provider", "openrouter", "--model", "vendor/model"] },
+      { args: ["--apply", f.outputDir] },
+      { args: [], ci: true },
+      { args: [], stored: false },
+      { args: [], key: false },
+      { args: [], terminal: false },
+      { args: [], inputInteractive: false },
+    ]) {
+      let choices = 0;
+      const deps = policyDependencies(f, {
+        draft,
+        prompt: prompt({
+          isInteractive: () => scenario.inputInteractive !== false,
+          confirm: async () => false,
+        }),
+      });
+      deps.environment = {
+        ...(scenario.key === false
+          ? {}
+          : { OPENAI_API_KEY: "synthetic-private-key" }),
+        ...(scenario.ci ? { CI: "1" } : {}),
+      };
+      deps.hasStoredChatGPTSignIn = async () => scenario.stored !== false;
+      deps.scanAuthenticationPrompt = {
+        isInteractive: () => true,
+        select: async <Value extends string>(
+          _message: string,
+          options: readonly { label: string; value: Value }[],
+        ): Promise<Value> => {
+          choices++;
+          return options[0]!.value;
+        },
+      };
+      expect(
+        await main(
+          ["policy", ...scenario.args],
+          capture().stream,
+          capture(scenario.terminal !== false).stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(choices).toBe(0);
+    }
+    expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("cancels credential selection before starting the policy runtime", async () => {
+    for (const phase of ["status", "prompt"] as const) {
+      const f = await fixture();
+      const signals = new FakeSignals();
+      let initialized = false;
+      const deps = policyDependencies(f, {
+        signals,
+        prompt: prompt({ isInteractive: () => true }),
+        onConfig: () => {
+          initialized = true;
+        },
+      });
+      deps.environment = { OPENAI_API_KEY: "synthetic-private-key" };
+      deps.hasStoredChatGPTSignIn = async (signal) => {
+        expect(signal).toBeDefined();
+        if (phase === "status") {
+          queueMicrotask(() => signals.emit("SIGTERM"));
+          return await new Promise<boolean>(() => {});
+        }
+        return true;
+      };
+      deps.scanAuthenticationPrompt = {
+        isInteractive: () => true,
+        select: async <Value extends string>(
+          _message: string,
+          _options: readonly { label: string; value: Value }[],
+          _presentation?: { header?: string },
+          signal?: AbortSignal,
+        ): Promise<Value> => {
+          expect(signal).toBeDefined();
+          queueMicrotask(() => signals.emit("SIGTERM"));
+          return await new Promise<Value>(() => {});
+        },
+      };
+      expect(
+        await main(["policy"], capture().stream, capture(true).stream, deps),
+      ).toBe(143);
+      expect(initialized).toBe(false);
+      expect(await readdir(f.outputDir)).toEqual([]);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    }
+  });
+
   test("does not present a partial cost as the final estimate", async () => {
     const f = await fixture();
     const draft = await f.generate();
@@ -794,6 +942,48 @@ describe("policy CLI", () => {
       expect(result).not.toHaveProperty("data");
       expect(stderr.text()).toContain(result.error.message);
     }
+    expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("keeps policy argument and schema errors in full-output stdout", async () => {
+    const f = await fixture();
+    let initialized = false;
+    const deps = policyDependencies(f);
+    deps.createPolicySecurity = () => {
+      initialized = true;
+      throw new Error("Validation must finish before initializing Codex");
+    };
+    for (const [args, message] of [
+      [["policy", "--write"], "--write requires --apply"],
+      [
+        ["policy", "--apply", f.outputDir, "--model", "synthetic-model"],
+        "--apply cannot be combined",
+      ],
+      [["policy", "--path"], "Missing value"],
+      [["policy", "--path", "--write"], "Missing value"],
+      [["policy", ".", "extra"], "Unexpected positional argument"],
+      [["policy", "--unknown-policy-option"], "Unknown flag"],
+      [["policy", "--max-cost", "0"], "Too small"],
+    ] as const) {
+      for (const leadingOutputFlags of [false, true]) {
+        const flags = ["--json", "--full-output"];
+        const stdout = capture();
+        const stderr = capture();
+        expect(
+          await main(
+            leadingOutputFlags ? [...flags, ...args] : [...args, ...flags],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        const result = JSON.parse(stdout.text());
+        expect(result.ok).toBe(false);
+        expect(result.error.message).toContain(message);
+        expect(stderr.text()).not.toContain('"ok": false');
+      }
+    }
+    expect(initialized).toBe(false);
     expect(await readdir(f.repository)).toEqual([]);
   });
 

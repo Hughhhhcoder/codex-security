@@ -1135,14 +1135,23 @@ describe("security policy review and application", () => {
   });
 
   test("applies policies referenced by an inherited symlink", async () => {
-    for (const existing of [false, true]) {
+    for (const [existing, chained] of [
+      [false, false],
+      [true, false],
+      [false, true],
+      [true, true],
+    ]) {
       const f = await fixture();
       const component = join(f.repository, "component");
       const target = join(component, "SECURITY.md");
       const inherited = join(f.repository, "SECURITY.md");
       await mkdir(component);
       if (existing) await writeFile(target, "# Original policy\n");
-      await symlink(target, inherited, "file");
+      const destination = chained
+        ? join(f.repository, "policy-link.md")
+        : target;
+      if (chained) await symlink(target, destination, "file");
+      await symlink(destination, inherited, "file");
       await f.generate({ path: "component" });
       const draft = await loadSecurityPolicyDraft(f.repository, f.outputDir, {
         path: "component",
@@ -1156,6 +1165,84 @@ describe("security policy review and application", () => {
       expect((await lstat(inherited)).isSymbolicLink()).toBe(true);
       expect(await readFile(inherited, "utf8")).toBe(POLICY);
       expect(await readFile(target, "utf8")).toBe(POLICY);
+    }
+  });
+
+  test("invalidates component drafts when inherited alias links change", async () => {
+    for (const change of ["add", "remove", "retarget", "activate"] as const) {
+      const f = await fixture();
+      const component = join(f.repository, "component");
+      const target = join(component, "SECURITY.md");
+      const inherited = join(f.repository, "SECURITY.md");
+      const intermediate = join(f.repository, "policy-link.md");
+      await mkdir(component);
+      await writeFile(target, "# Original policy\n");
+      if (change === "remove" || change === "retarget")
+        await symlink(target, inherited, "file");
+      if (change === "activate") await symlink(intermediate, inherited, "file");
+      const draft = await f.generate({ path: "component" });
+      if (change === "add") await symlink(target, inherited, "file");
+      if (change === "remove") await rm(inherited);
+      if (change === "retarget") {
+        await symlink(target, intermediate, "file");
+        await rm(inherited);
+        await symlink(intermediate, inherited, "file");
+      }
+      if (change === "activate") await symlink(target, intermediate, "file");
+      await expect(securityPolicyDiff(draft, "missing-python")).rejects.toThrow(
+        "inherited SECURITY.md changed",
+      );
+      await expect(
+        applySecurityPolicy(draft, { pythonPath: "missing-python" }),
+      ).rejects.toThrow("inherited SECURITY.md changed");
+      expect(await readFile(target, "utf8")).toBe("# Original policy\n");
+    }
+  });
+
+  test("rejects a newly added dangling alias before creating the target", async () => {
+    const f = await fixture();
+    await mkdir(join(f.repository, "component"));
+    const draft = await f.generate({ path: "component" });
+    await symlink(draft.targetPath, join(f.repository, "SECURITY.md"), "file");
+    await expect(applySecurityPolicy(draft)).rejects.toThrow(
+      "inherited SECURITY.md changed",
+    );
+    expect(await readSecurityPolicy(draft.targetPath)).toBeNull();
+  });
+
+  test("rejects cycles in inherited policy links", async () => {
+    const f = await fixture();
+    await mkdir(join(f.repository, "component"));
+    const inherited = join(f.repository, "SECURITY.md");
+    const intermediate = join(f.repository, "policy-link.md");
+    await symlink(intermediate, inherited, "file");
+    await symlink(inherited, intermediate, "file");
+    await expect(f.generate({ path: "component" })).rejects.toThrow("cycle");
+    expect(await readdir(f.outputDir)).toEqual([]);
+  });
+
+  test("checks inherited alias links before and after a policy write", async () => {
+    for (const timing of ["before", "after"] as const) {
+      const f = await fixture();
+      await mkdir(join(f.repository, "component"));
+      const pluginPath = await policyPlugin(
+        f.root,
+        [
+          "import pathlib, sys",
+          "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+          "target = root / 'component' / 'SECURITY.md'",
+          `if ${timing === "before" ? "not " : ""}target.exists():`,
+          "    (root / 'SECURITY.md').symlink_to(target)",
+          "print('resolver accepted the current policy chain')",
+        ].join("\n"),
+      );
+      const draft = await f.generate({ path: "component", pluginPath });
+      await expect(applySecurityPolicy(draft)).rejects.toThrow(
+        timing === "before" ? "inherited SECURITY.md changed" : "was written",
+      );
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(
+        timing === "before" ? null : POLICY,
+      );
     }
   });
 

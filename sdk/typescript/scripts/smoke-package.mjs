@@ -532,6 +532,20 @@ try {
   );
   assert.equal(failedPolicy.ok, false);
   assert.equal(failedPolicy.error.code, "POLICY_FAILED");
+  const invalidPolicy = JSON.parse(
+    run(
+      process.execPath,
+      [launcher, "policy", policyTarget, "--write", "--json", "--full-output"],
+      {
+        cwd: consumer,
+        capture: true,
+        env: savedPolicyEnvironment,
+        expectedStatus: 2,
+      },
+    ),
+  );
+  assert.equal(invalidPolicy.ok, false);
+  assert.match(invalidPolicy.error.message, /--write requires --apply/u);
   assert.deepEqual(await readdir(policyTarget), []);
   // Node rejects Python's flags before reading stdin. Report that failure
   // without an uncaught stream error in the installed Node.js entrypoint.

@@ -224,6 +224,9 @@ threat model, and a concise policy draft. In an interactive terminal, the comman
 asks about facts that materially affect the policy, in groups of at most three
 questions. It then shows the exact proposed diff and any decisions that need
 owner review. Nothing is written into the repository without confirmation.
+If both a ChatGPT sign-in and an API key are available, interactive generation
+asks which one to use. Set `--auth chatgpt` or `--auth api-key` to choose
+explicitly.
 
 ### Review and apply a saved draft
 
@@ -245,10 +248,10 @@ npx @openai/codex-security policy . --path services/api \
 `--apply` loads the saved draft without starting Codex. Omit `--write` to review
 and confirm interactively. `--write` is available only with `--apply`, so a
 noninteractive write always selects an existing draft. The repository and
-component must match the draft. The original `SECURITY.md` and any separate
-inherited policies must be unchanged. The command writes the reviewed bytes and
-verifies that the policy resolver can read them. It does not stage, commit, or
-publish anything.
+component must match the draft. The original `SECURITY.md`, inherited policies,
+and inherited policy links must be unchanged. The command writes the reviewed
+bytes and verifies that the policy resolver can read them. It does not stage,
+commit, or publish anything.
 
 An update keeps the previous file so an editor with an old file handle cannot
 lose a late save. The command tries to move it into the private artifact
@@ -293,9 +296,9 @@ does not validate threat scenarios as vulnerabilities.
 paths, review notes, status, and estimated cost. Explicit output options disable
 interactive questions and write prompts. Global filters select fields from the
 result; token options apply to the selected format, including Markdown. Progress
-goes to stderr. With `--full-output`, a failed operation returns `ok: false` and
-an error message. Plain `--json` retains the recovery status and paths described
-above when a write needs attention.
+goes to stderr. With `--full-output`, policy and validation failures return
+`ok: false` and an error message. Plain `--json` retains the recovery status and
+paths described above when a write needs attention.
 `--max-cost` applies to the entire generation, not separately to each stage.
 If a stage cannot inspect its required source evidence, generation stops instead
 of substituting a generic policy. Failures and cancellation preserve intermediate

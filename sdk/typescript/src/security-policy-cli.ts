@@ -1,4 +1,4 @@
-import type { CodexSecurity } from "./api.js";
+import type { CodexSecurity, ScanAuthMode } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
 import { formatUsd } from "./cost.js";
@@ -41,6 +41,11 @@ export interface PolicyCommandOptions {
 
 export interface PolicyCommandDependencies {
   createSecurity(config: CodexSecurityConfig): PolicySecurity;
+  chooseAuthentication(
+    config: CodexSecurityConfig,
+    auth: ScanAuthMode | undefined,
+    signal: AbortSignal,
+  ): Promise<ScanAuthMode | undefined>;
   prompt: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
   errorOutput: Output;
@@ -120,6 +125,15 @@ export async function runPolicyCommand(
       });
       outputDir = draft.outputDir;
     } else {
+      const auth =
+        interactive && !options.dryRun
+          ? await dependencies.chooseAuthentication(
+              options.config,
+              options.generation.auth,
+              controller.signal,
+            )
+          : options.generation.auth;
+      controller.signal.throwIfAborted();
       security = dependencies.createSecurity(options.config);
       if (options.dryRun) {
         const preflight = await security.preflightPolicy(options.repository, {
@@ -137,6 +151,7 @@ export async function runPolicyCommand(
       }
       draft = await security.generatePolicy(options.repository, {
         ...options.generation,
+        auth,
         signal: controller.signal,
         onOutputDirReady: (directory) => {
           outputDir = directory;

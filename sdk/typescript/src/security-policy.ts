@@ -6,6 +6,7 @@ import {
   lstat,
   open,
   readFile,
+  readlink,
   realpath,
   rename,
   rm,
@@ -13,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
@@ -231,10 +232,21 @@ export async function readSecurityPolicySnapshot(
   for (const part of target.scope === "." ? [] : target.scope.split("/")) {
     signal?.throwIfAborted();
     const path = join(directory, "SECURITY.md");
-    const metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
+    const policyPath = relative(target.repository, path).split(sep).join("/");
+    let metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
+    if (metadata?.isSymbolicLink()) {
+      inherited.push([
+        policyPath,
+        `link:${digest(JSON.stringify(await policyLinkSnapshot(path, target.repository, signal)))}`,
+      ]);
+      metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+    }
     if (metadata?.isFile()) {
       // Inherited policies may link to another file inside the repository.
       const normalized = await normalizeTarget(
@@ -243,13 +255,10 @@ export async function readSecurityPolicySnapshot(
         signal,
       );
       const canonical = join(target.repository, normalized.paths[0]!);
-      // A link to the selected file is covered by its own checkpoint.
+      // The target checkpoint covers its contents; the link stays in the hash.
       if (canonical !== canonicalTarget) {
         const content = await readPolicyFile(canonical);
-        inherited.push([
-          relative(target.repository, path).split(sep).join("/"),
-          digest(content),
-        ]);
+        inherited.push([policyPath, digest(content)]);
       }
     }
     directory = join(directory, part);
@@ -259,6 +268,47 @@ export async function readSecurityPolicySnapshot(
     previousContent,
     inheritedPolicySha256: digest(JSON.stringify(inherited)),
   };
+}
+
+async function policyLinkSnapshot(
+  path: string,
+  repository: string,
+  signal?: AbortSignal,
+): Promise<{ links: [string, string][]; destination: string | null }> {
+  const links: [string, string][] = [];
+  const seen = new Set<string>();
+  let current = path;
+  for (;;) {
+    signal?.throwIfAborted();
+    const parent = await realpath(dirname(current)).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      },
+    );
+    if (parent === null) return { links, destination: null };
+    const canonical = join(parent, basename(current));
+    const metadata = await lstat(canonical).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      },
+    );
+    const relativePath = relative(repository, canonical).split(sep).join("/");
+    if (!metadata?.isSymbolicLink())
+      return { links, destination: relativePath };
+    if (seen.has(canonical)) {
+      throw new CodexSecurityError(
+        `Inherited security-policy link contains a cycle: ${path}`,
+      );
+    }
+    seen.add(canonical);
+    const destination = await readlink(canonical);
+    links.push([relativePath, destination]);
+    current = isAbsolute(destination)
+      ? destination
+      : `${parent}${sep}${destination}`;
+  }
 }
 
 export async function requireUnchangedSecurityPolicy(

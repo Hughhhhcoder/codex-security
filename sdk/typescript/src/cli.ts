@@ -124,7 +124,12 @@ import type {
   ScanWorkerPhase,
   ScanWorkerStatus,
 } from "./worker-progress.js";
-import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
+import {
+  abortable,
+  DiffTarget,
+  type ScanMode,
+  type ScanTarget,
+} from "./targets.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   checkForUpdate,
@@ -702,7 +707,7 @@ interface CliDependencies {
   prepareAuthenticationHome?: (
     environment: NodeJS.ProcessEnv,
   ) => Promise<string>;
-  hasStoredChatGPTSignIn?: () => Promise<boolean>;
+  hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   publishScan?: typeof publishScan;
@@ -738,7 +743,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
-  hasStoredChatGPTSignIn: async () => {
+  hasStoredChatGPTSignIn: async (signal) => {
+    signal?.throwIfAborted();
     const environment = Object.fromEntries(
       Object.entries(process.env).filter(
         ([name]) =>
@@ -748,10 +754,14 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     );
     const command = resolveCodexCommand(environment);
     if (existsSync(codexSecurityCredentialHome(process.env))) {
-      const dedicatedStatus = await accountStatus(command, {
-        ...environment,
-        CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
-      });
+      const dedicatedStatus = await accountStatus(
+        command,
+        {
+          ...environment,
+          CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
+        },
+        signal,
+      );
       if (
         dedicatedStatus.authenticated &&
         /\bchatgpt\b/iu.test(dedicatedStatus.details)
@@ -759,7 +769,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         return true;
       }
     }
-    const ambientStatus = await accountStatus(command, environment);
+    const ambientStatus = await accountStatus(command, environment, signal);
     return (
       ambientStatus.authenticated && /\bchatgpt\b/iu.test(ambientStatus.details)
     );
@@ -1061,9 +1071,11 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
   argv = defaultListCommand(argv);
+  const policyFullOutput =
+    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const positionals: string[] = [];
   const argumentError = validateCliArguments(argv, positionals);
-  if (argumentError !== undefined) {
+  if (argumentError !== undefined && !policyFullOutput) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
   }
@@ -1094,7 +1106,6 @@ export async function main(
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
   let renderedPolicy: string | undefined;
-  let renderPolicyError = false;
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1998,12 +2009,8 @@ export async function main(
         const filterOutput = outputOptions.some((argument) =>
           argument.startsWith("--filter-output"),
         );
-        const fullOutput = outputOptions.some((argument) =>
-          argument.startsWith("--full-output"),
-        );
         const fail = (message: string, failureExitCode: number) => {
           exitCode = failureExitCode;
-          renderPolicyError = fullOutput;
           return incurError({
             code: "POLICY_FAILED",
             message,
@@ -2011,6 +2018,7 @@ export async function main(
           });
         };
         try {
+          if (argumentError !== undefined) return fail(argumentError, 2);
           const directory = dependencies.currentDirectory();
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
@@ -2055,6 +2063,20 @@ export async function main(
                   dependencies.createPolicySecurity ??
                   ((config) =>
                     createSecurityInternal(config, { surface: "cli" })),
+                chooseAuthentication: (config, auth, signal) =>
+                  chooseInteractiveAuthentication(
+                    {
+                      auth,
+                      provider: scanModelProvider({
+                        ...DEFAULT_CODEX_CONFIG,
+                        ...config.codexOverrides,
+                      }),
+                      command: "policy",
+                      signal,
+                    },
+                    errorOutput,
+                    dependencies,
+                  ),
                 prompt:
                   dependencies.policyPrompt ??
                   createBulkScanDiscoveryDependencies({
@@ -2074,7 +2096,10 @@ export async function main(
             ),
           );
           exitCode = outcome.exitCode;
-          if (exitCode !== 0 && (fullOutput || outcome.data === undefined)) {
+          if (
+            exitCode !== 0 &&
+            (policyFullOutput || outcome.data === undefined)
+          ) {
             return fail(outcome.error ?? "Policy command failed.", exitCode);
           }
           if (
@@ -2902,12 +2927,16 @@ export async function main(
     updateController.abort();
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
-  if (frameworkExit !== undefined && !renderPolicyError) {
-    if (exitCode !== 0) return exitCode;
-    errorOutput.write(
-      `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
-    );
-    return 2;
+  if (frameworkExit !== undefined) {
+    if (policyFullOutput) {
+      if (exitCode === 0) exitCode = 2;
+    } else {
+      if (exitCode !== 0) return exitCode;
+      errorOutput.write(
+        `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      );
+      return 2;
+    }
   }
   if (frameworkOutput.length === 0) return exitCode;
   try {
@@ -2925,11 +2954,15 @@ export async function main(
   }
 }
 
-function defaultListCommand(argv: readonly string[]): readonly string[] {
-  const commandIndex = argv.findIndex((value, index) => {
+function cliCommandIndex(argv: readonly string[]): number {
+  return argv.findIndex((value, index) => {
     if (value.startsWith("-")) return false;
     return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
   });
+}
+
+function defaultListCommand(argv: readonly string[]): readonly string[] {
+  const commandIndex = cliCommandIndex(argv);
   if (
     commandIndex < 0 ||
     !["scans", "findings"].includes(argv[commandIndex]!) ||
@@ -3666,6 +3699,66 @@ function diagnosticValue(value: unknown): string {
   );
 }
 
+async function chooseInteractiveAuthentication(
+  options: {
+    auth: ScanAuthMode | undefined;
+    provider: unknown;
+    command: "scan" | "policy";
+    signal: AbortSignal;
+  },
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+): Promise<ScanAuthMode | undefined> {
+  const { auth, provider, signal } = options;
+  if (
+    errorOutput.isTTY !== true ||
+    isExternalModelProvider(provider) ||
+    (auth !== undefined && auth !== "auto")
+  )
+    return auth;
+  const authentication = scanAuthentication(
+    dependencies.environment,
+    auth,
+    provider,
+  );
+  if (authentication.method !== "api_key") return auth;
+  const prompt =
+    dependencies.scanAuthenticationPrompt ??
+    createBulkScanDiscoveryDependencies({
+      output: errorOutput,
+      now: dependencies.now,
+      currentDirectory: dependencies.currentDirectory,
+    }).prompt;
+  const hasStoredSignIn = dependencies.hasStoredChatGPTSignIn;
+  if (
+    !prompt.isInteractive() ||
+    hasStoredSignIn === undefined ||
+    !(await abortable(() => hasStoredSignIn(signal), signal))
+  )
+    return auth;
+  const source = authentication.source;
+  try {
+    errorOutput.write(
+      `Both a ChatGPT sign-in and an API key from ${source} are available.\n`,
+    );
+  } catch {}
+  return await abortable(
+    () =>
+      prompt.select<ScanAuthMode>(
+        options.command === "scan"
+          ? "How would you like to authenticate this scan?"
+          : "How would you like to authenticate policy generation?",
+        [
+          { label: "ChatGPT subscription", value: "chatgpt" },
+          { label: `API key from ${source}`, value: "api-key" },
+        ],
+        undefined,
+        signal,
+      ),
+    signal,
+  );
+}
+
 async function runScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
@@ -3836,50 +3929,25 @@ async function executeScan(
     };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
-    let auth = arguments_.auth;
     const provider = scanModelProvider(effectiveConfiguration);
+    const auth =
+      !arguments_.dryRun && interactive
+        ? await chooseInteractiveAuthentication(
+            {
+              auth: arguments_.auth,
+              provider,
+              command: "scan",
+              signal: preparationAbortController.signal,
+            },
+            errorOutput,
+            dependencies,
+          )
+        : arguments_.auth;
     selectedAuthentication = scanAuthentication(
       dependencies.environment,
       auth,
       provider,
     );
-    if (
-      !isExternalModelProvider(provider) &&
-      (auth === undefined || auth === "auto") &&
-      !arguments_.dryRun &&
-      interactive &&
-      errorOutput.isTTY === true &&
-      selectedAuthentication.method === "api_key"
-    ) {
-      const prompt =
-        dependencies.scanAuthenticationPrompt ??
-        createBulkScanDiscoveryDependencies({
-          output: errorOutput,
-          now: dependencies.now,
-          currentDirectory: dependencies.currentDirectory,
-        }).prompt;
-      if (
-        prompt.isInteractive() &&
-        (await dependencies.hasStoredChatGPTSignIn?.()) === true
-      ) {
-        const source = selectedAuthentication.source;
-        errorOutput.write(
-          `Both a ChatGPT sign-in and an API key from ${source} are available.\n`,
-        );
-        auth = await prompt.select<ScanAuthMode>(
-          "How would you like to authenticate this scan?",
-          [
-            { label: "ChatGPT subscription", value: "chatgpt" },
-            { label: `API key from ${source}`, value: "api-key" },
-          ],
-        );
-        selectedAuthentication = scanAuthentication(
-          dependencies.environment,
-          auth,
-          provider,
-        );
-      }
-    }
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
