@@ -54,6 +54,7 @@ import {
 } from "../src/runtime.js";
 import * as runtimeModule from "../src/runtime.js";
 import * as trustedExecutable from "../src/trusted-executable.js";
+import * as targetsModule from "../src/targets.js";
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
@@ -5475,11 +5476,13 @@ describe("CodexSecurity orchestration", () => {
     }
     const originalTrusted = { ...trustedExecutable };
     const originalRuntime = { ...runtimeModule };
+    const originalTargets = { ...targetsModule };
     const originalPlatform = Object.getOwnPropertyDescriptor(
       process,
       "platform",
     )!;
     const inspected: [string, string][] = [];
+    const gitSelections: (string | null | undefined)[] = [];
     let gitHost: string | null = null;
     let host: string | null = null;
     let rejected: string | null = null;
@@ -5522,6 +5525,17 @@ describe("CodexSecurity orchestration", () => {
         PYTHON: python,
         CODEX_CLI_PATH: process.execPath,
       }),
+    }));
+    mock.module("../src/targets.js", () => ({
+      ...originalTargets,
+      enclosingGitWorktreeRoot: async (
+        _repository: string,
+        _signal?: AbortSignal,
+        command?: trustedExecutable.InspectedExecutable,
+      ) => {
+        gitSelections.push(command?.executable);
+        return null;
+      },
     }));
     const cases: {
       scenario: string;
@@ -5668,6 +5682,7 @@ describe("CodexSecurity orchestration", () => {
         host = entry.host ? join(root, "host-tools", filename) : null;
         rejected = scenario === "rejected-copy" ? staged : null;
         inspected.length = 0;
+        gitSelections.length = 0;
         sanitizedGitEnvironment = undefined;
         const stageCalls: string[] = [];
         const workbenchEnvironments: WorkbenchCommandOptions["environment"][] =
@@ -5720,6 +5735,10 @@ describe("CodexSecurity orchestration", () => {
           },
         );
         try {
+          await client.preflight(repository);
+          expect(gitSelections).toEqual([
+            entry.expectedGit === "host" ? gitHost : null,
+          ]);
           if (scenario === "overlapping-workspace") {
             await expect(client.run(repository)).rejects.toBeInstanceOf(
               OutputInsideProtectedRootError,
@@ -5787,6 +5806,7 @@ describe("CodexSecurity orchestration", () => {
       Object.defineProperty(process, "platform", originalPlatform);
       mock.module("../src/trusted-executable.js", () => originalTrusted);
       mock.module("../src/runtime.js", () => originalRuntime);
+      mock.module("../src/targets.js", () => originalTargets);
     }
   });
 

@@ -7,6 +7,24 @@ export interface TrustedExecutable {
   environment: Record<string, string | undefined>;
 }
 
+export interface InspectedExecutable {
+  executable: string | null;
+  environment: Record<string, string | undefined>;
+}
+
+export function executableBinding(
+  environment: Readonly<Record<string, string | undefined>>,
+  setting: "CODEX_SECURITY_GIT" | "CODEX_SECURITY_RG",
+): { keys: string[]; value: string | undefined } {
+  const keys =
+    process.platform === "win32"
+      ? Object.keys(environment)
+          .filter((name) => name.toUpperCase() === setting)
+          .sort()
+      : [setting];
+  return { keys, value: environment[keys[0] ?? setting] };
+}
+
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
@@ -26,10 +44,7 @@ export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string,
-): Promise<{
-  executable: string | null;
-  environment: Record<string, string | undefined>;
-}> {
+): Promise<InspectedExecutable> {
   const root = await realpath(protectedRoot).catch(() =>
     resolve(protectedRoot),
   );

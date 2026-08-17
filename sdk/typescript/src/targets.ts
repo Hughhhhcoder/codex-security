@@ -4,8 +4,12 @@ import { lstat, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { InvalidTargetError } from "./errors.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { ConfigurationError, InvalidTargetError } from "./errors.js";
+import {
+  executableBinding,
+  inspectTrustedExecutable,
+  type InspectedExecutable,
+} from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
@@ -136,16 +140,25 @@ export function resolveRepositoryPath(repository: string): string {
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
+  gitCommand?: InspectedExecutable,
 ): Promise<string | null> {
   try {
+    const command =
+      gitCommand ??
+      (await resolveGitCommand(
+        process.env,
+        await outermostGitMarkerRoot(repository, signal),
+      ));
     const root = await gitOutput(
       repository,
       ["rev-parse", "--show-toplevel"],
+      command,
       signal,
     );
     return await abortable(() => realpath(root), signal);
-  } catch {
+  } catch (error) {
     throwIfAborted(signal);
+    if (error instanceof ConfigurationError) throw error;
     return null;
   }
 }
@@ -170,6 +183,7 @@ export async function normalizeTarget(
   repository: string,
   target: ScanTarget,
   signal?: AbortSignal,
+  gitCommand?: InspectedExecutable,
 ): Promise<NormalizedTarget> {
   const root = await normalizeRepository(repository, signal);
   throwIfAborted(signal);
@@ -199,8 +213,14 @@ export async function normalizeTarget(
         "Working-tree targets cannot specify a head ref.",
       );
     }
-    await requireGitRepository(root, signal);
-    const base = await resolveGitRef(root, target.base, signal);
+    const command =
+      gitCommand ??
+      (await resolveGitCommand(
+        process.env,
+        await outermostGitMarkerRoot(root, signal),
+      ));
+    await requireGitRepository(root, command, signal);
+    const base = await resolveGitRef(root, target.base, command, signal);
     if (target.kind === "refs") {
       const head = target.head;
       if (typeof head !== "string" || head.length === 0) {
@@ -212,7 +232,7 @@ export async function normalizeTarget(
         kind: "refs",
         paths: [],
         base,
-        head: await resolveGitRef(root, head, signal),
+        head: await resolveGitRef(root, head, command, signal),
         baseRef: target.base,
         headRef: head,
       };
@@ -221,7 +241,7 @@ export async function normalizeTarget(
       kind: "working_tree",
       paths: [],
       base,
-      head: await resolveGitRef(root, "HEAD", signal),
+      head: await resolveGitRef(root, "HEAD", command, signal),
       baseRef: target.base,
       headRef: "HEAD",
     };
@@ -288,10 +308,17 @@ export async function validateCommittedDiffCheckout(
   repository: string,
   target: NormalizedTarget,
   signal?: AbortSignal,
+  gitCommand?: InspectedExecutable,
 ): Promise<void> {
   if (target.kind !== "refs") return;
 
-  const checkoutHead = await resolveGitRef(repository, "HEAD", signal);
+  const command =
+    gitCommand ??
+    (await resolveGitCommand(
+      process.env,
+      await outermostGitMarkerRoot(repository, signal),
+    ));
+  const checkoutHead = await resolveGitRef(repository, "HEAD", command, signal);
   if (checkoutHead !== target.head) {
     throw new InvalidTargetError(
       `Committed-diff scans require the repository checkout to match the requested head revision. Checkout HEAD is ${checkoutHead}; requested head is ${target.head}. Check out the requested head and retry.`,
@@ -301,6 +328,7 @@ export async function validateCommittedDiffCheckout(
   const status = await gitOutput(
     repository,
     ["status", "--porcelain=v1", "--untracked-files=all"],
+    command,
     signal,
   );
   if (status.length !== 0) {
@@ -309,7 +337,12 @@ export async function validateCommittedDiffCheckout(
     );
   }
 
-  const tracked = await gitOutput(repository, ["ls-files", "-t", "-z"], signal);
+  const tracked = await gitOutput(
+    repository,
+    ["ls-files", "-t", "-z"],
+    command,
+    signal,
+  );
   if (tracked.split("\0").some((entry) => entry.startsWith("S "))) {
     throw new InvalidTargetError(
       "Committed-diff scans require a full repository checkout. Sparse checkouts are not supported; materialize skipped tracked files and retry.",
@@ -334,21 +367,31 @@ export function validateMode(target: NormalizedTarget, mode: ScanMode): void {
 export async function repositoryRevision(
   repository: string,
   signal?: AbortSignal,
+  gitCommand?: InspectedExecutable,
 ): Promise<string | null> {
   try {
+    const command =
+      gitCommand ??
+      (await resolveGitCommand(
+        process.env,
+        await outermostGitMarkerRoot(repository, signal),
+      ));
     return await gitOutput(
       repository,
       ["rev-parse", "--verify", "HEAD^{commit}"],
+      command,
       signal,
     );
-  } catch {
+  } catch (error) {
     throwIfAborted(signal);
+    if (error instanceof ConfigurationError) throw error;
     return null;
   }
 }
 
 async function requireGitRepository(
   repository: string,
+  command: InspectedExecutable,
   signal?: AbortSignal,
 ): Promise<void> {
   let root: string;
@@ -356,6 +399,7 @@ async function requireGitRepository(
     root = await gitOutput(
       repository,
       ["rev-parse", "--show-toplevel"],
+      command,
       signal,
     );
   } catch (error) {
@@ -378,12 +422,14 @@ async function requireGitRepository(
 async function resolveGitRef(
   repository: string,
   ref: string,
+  command: InspectedExecutable,
   signal?: AbortSignal,
 ): Promise<string> {
   try {
     return await gitOutput(
       repository,
       ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`],
+      command,
       signal,
     );
   } catch (error) {
@@ -395,27 +441,58 @@ async function resolveGitRef(
 async function gitOutput(
   repository: string,
   args: readonly string[],
+  command: InspectedExecutable,
   signal?: AbortSignal,
 ): Promise<string> {
   throwIfAborted(signal);
-  const command = await resolveTrustedExecutable(
-    "git",
-    isolatedGitEnvironment(args[0] === "rev-parse"),
-    await outermostGitMarkerRoot(repository, signal),
-  );
-  if (command === null)
+  if (command.executable === null)
     throw new Error("Git is not available on a trusted PATH.");
-  throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
     ["-c", "core.fsmonitor=false", "-C", repository, ...args],
     {
       encoding: "utf8",
       signal,
-      env: command.environment,
+      env: isolatedGitEnvironment(command.environment, args[0] === "rev-parse"),
     },
   );
   return stdout.trim();
+}
+
+export async function resolveGitCommand(
+  environment: Readonly<Record<string, string | undefined>>,
+  protectedRoot: string,
+): Promise<InspectedExecutable> {
+  const binding = executableBinding(environment, "CODEX_SECURITY_GIT");
+  let inspected = await inspectTrustedExecutable(
+    "git",
+    environment,
+    protectedRoot,
+  );
+  let executable = inspected.executable;
+  if (binding.value === "") {
+    executable = null;
+  } else if (binding.value !== undefined) {
+    if (!isAbsolute(binding.value)) {
+      throw new ConfigurationError(
+        "CODEX_SECURITY_GIT must name an absolute trusted executable.",
+      );
+    }
+    inspected = await inspectTrustedExecutable(
+      binding.value,
+      inspected.environment,
+      protectedRoot,
+    );
+    if (inspected.executable === null) {
+      throw new ConfigurationError(
+        "CODEX_SECURITY_GIT does not name an available executable.",
+      );
+    }
+    executable = binding.value;
+  }
+  for (const key of binding.keys) delete inspected.environment[key];
+  inspected.environment["CODEX_SECURITY_GIT"] = executable ?? "";
+  return { executable, environment: inspected.environment };
 }
 
 export async function outermostGitMarkerRoot(
@@ -439,9 +516,10 @@ export async function outermostGitMarkerRoot(
 }
 
 function isolatedGitEnvironment(
+  source: Readonly<Record<string, string | undefined>>,
   preserveGitConfiguration: boolean,
 ): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
+  const environment = { ...source };
   for (const name of Object.keys(environment)) {
     const normalized = name.toUpperCase();
     if (

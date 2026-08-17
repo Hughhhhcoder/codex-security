@@ -40,6 +40,7 @@ describe("CLI", () => {
         Path: "C:\\Python;C:\\Windows\\System32",
         PYTHON: "/managed/python",
         TMPDIR: "/tmp",
+        CODEX_SECURITY_GIT: "",
         OPENAI_API_KEY: "openai-secret",
         CODEX_API_KEY: "codex-secret",
         GITHUB_TOKEN: "github-secret",
@@ -49,7 +50,11 @@ describe("CLI", () => {
       Path: "C:\\Python;C:\\Windows\\System32",
       PYTHON: "/managed/python",
       TMPDIR: "/tmp",
+      CODEX_SECURITY_GIT: "",
     });
+    expect(exportEnvironment({ CODEX_SECURITY_GIT: "/synthetic/git" })).toEqual(
+      { CODEX_SECURITY_GIT: "/synthetic/git" },
+    );
   });
 
   test("exports findings to stdout without initializing Codex", async () => {

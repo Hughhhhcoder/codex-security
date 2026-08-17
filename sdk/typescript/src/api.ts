@@ -124,6 +124,7 @@ import {
   normalizeTarget,
   outermostGitMarkerRoot,
   repositoryRevision,
+  resolveGitCommand,
   resolveRepositoryPath,
   type NormalizedTarget,
   type ScanMode,
@@ -132,7 +133,11 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
-import { inspectTrustedExecutable } from "./trusted-executable.js";
+import {
+  executableBinding,
+  inspectTrustedExecutable,
+  type InspectedExecutable,
+} from "./trusted-executable.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -298,6 +303,8 @@ export interface ScanPreflight extends DeepScanOptions {
 interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
+  protectedGitRoot: string;
+  gitCommand: InspectedExecutable;
   stateDirectory: string;
 }
 
@@ -495,6 +502,8 @@ export class CodexSecurity {
         mode,
         outputDir: requestedOutput,
         protectedRoot,
+        protectedGitRoot,
+        gitCommand,
         stateDirectory,
       } = await this.#validateLocalInputs(repository, options, signal);
       checkOpen();
@@ -555,21 +564,15 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
-      const toolBindingKeys = (
-        setting: "CODEX_SECURITY_GIT" | "CODEX_SECURITY_RG",
-      ): string[] =>
-        process.platform === "win32"
-          ? Object.keys(pluginEnvironment)
-              .filter((name) => name.toUpperCase() === setting)
-              .sort()
-          : [setting];
-      const gitKeys = toolBindingKeys("CODEX_SECURITY_GIT");
-      const ripgrepKeys = toolBindingKeys("CODEX_SECURITY_RG");
-      const configuredGit =
-        pluginEnvironment[gitKeys[0] ?? "CODEX_SECURITY_GIT"];
-      const configuredRipgrep =
-        pluginEnvironment[ripgrepKeys[0] ?? "CODEX_SECURITY_RG"];
-      const protectedGitRoot = await outermostGitMarkerRoot(repo, signal);
+      const { keys: gitKeys } = executableBinding(
+        pluginEnvironment,
+        "CODEX_SECURITY_GIT",
+      );
+      const { keys: ripgrepKeys, value: configuredRipgrep } = executableBinding(
+        pluginEnvironment,
+        "CODEX_SECURITY_RG",
+      );
+      // Sanitize the runtime PATH without changing the Git selected at preflight.
       const git = await inspectTrustedExecutable(
         "git",
         pluginEnvironment,
@@ -580,24 +583,20 @@ export class CodexSecurity {
         git.environment,
         protectedGitRoot,
       );
-      for (const [setting, configured] of [
-        ["CODEX_SECURITY_GIT", configuredGit],
-        ["CODEX_SECURITY_RG", configuredRipgrep],
-      ] as const) {
-        if (configured === undefined || configured === "") continue;
-        if (!isAbsolute(configured)) {
+      if (configuredRipgrep !== undefined && configuredRipgrep !== "") {
+        if (!isAbsolute(configuredRipgrep)) {
           throw new ConfigurationError(
-            `${setting} must name an absolute trusted executable.`,
+            "CODEX_SECURITY_RG must name an absolute trusted executable.",
           );
         }
         const inspected = await inspectTrustedExecutable(
-          configured,
+          configuredRipgrep,
           ripgrep.environment,
           protectedGitRoot,
         );
         if (inspected.executable === null) {
           throw new ConfigurationError(
-            `${setting} does not name an available executable.`,
+            "CODEX_SECURITY_RG does not name an available executable.",
           );
         }
         ripgrep.environment = inspected.environment;
@@ -630,7 +629,7 @@ export class CodexSecurity {
         delete trustedPluginEnvironment[name];
       }
       trustedPluginEnvironment["CODEX_SECURITY_GIT"] =
-        configuredGit ?? git.executable ?? "";
+        gitCommand.executable ?? "";
       // The Codex runtime can add its bundled tools to PATH after this point.
       trustedPluginEnvironment["CODEX_SECURITY_RG"] =
         configuredRipgrep ?? ripgrep.executable ?? undefined;
@@ -706,7 +705,7 @@ export class CodexSecurity {
         repository: repo,
         repositoryRevision: await (
           this.#dependencies.repositoryRevision ?? repositoryRevision
-        )(repo, signal),
+        )(repo, signal, gitCommand),
         target: normalized,
         mode,
         pluginVersion: runtime.plugin.version,
@@ -1980,18 +1979,27 @@ export class CodexSecurity {
     throwIfAborted(signal);
     const requestedTarget = options.target ?? "repository";
     validatedGitEnvironment(this.#dependencies.environment);
-    const normalized = await normalizeTarget(repo, requestedTarget, signal);
+    const protectedGitRoot = await outermostGitMarkerRoot(repo, signal);
+    const gitCommand = await resolveGitCommand(
+      this.#dependencies.environment,
+      protectedGitRoot,
+    );
+    const normalized = await normalizeTarget(
+      repo,
+      requestedTarget,
+      signal,
+      gitCommand,
+    );
     throwIfAborted(signal);
     const mode = options.mode ?? "standard";
     validateMode(normalized, mode);
-    await validateCommittedDiffCheckout(repo, normalized, signal);
+    await validateCommittedDiffCheckout(repo, normalized, signal, gitCommand);
     throwIfAborted(signal);
-    const enclosingRoot = await enclosingGitWorktreeRoot(repo, signal);
-    const repositoryRelative =
-      enclosingRoot === null ? null : relative(enclosingRoot, repo);
+    const enclosingRoot =
+      (await enclosingGitWorktreeRoot(repo, signal, gitCommand)) ??
+      protectedGitRoot;
+    const repositoryRelative = relative(enclosingRoot, repo);
     const protectedRoot =
-      enclosingRoot !== null &&
-      repositoryRelative !== null &&
       repositoryRelative !== ".." &&
       !repositoryRelative.startsWith(`..${sep}`) &&
       !isAbsolute(repositoryRelative)
@@ -2029,6 +2037,8 @@ export class CodexSecurity {
       mode,
       outputDir: requestedOutput,
       protectedRoot,
+      protectedGitRoot,
+      gitCommand,
       stateDirectory,
     };
   }

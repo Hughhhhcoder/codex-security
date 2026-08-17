@@ -126,6 +126,7 @@ import type {
   ScanWorkerStatus,
 } from "./worker-progress.js";
 import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
+import { executableBinding } from "./trusted-executable.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   checkForUpdate,
@@ -1062,7 +1063,7 @@ async function writeCliOutput(
 export function exportEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  return Object.fromEntries(
+  const result = Object.fromEntries(
     [
       "PATH",
       "Path",
@@ -1081,6 +1082,9 @@ export function exportEnvironment(
       .filter((key) => environment[key] !== undefined)
       .map((key) => [key, environment[key]]),
   );
+  const git = executableBinding(environment, "CODEX_SECURITY_GIT").value;
+  if (git !== undefined) result["CODEX_SECURITY_GIT"] = git;
+  return result;
 }
 
 export async function main(
