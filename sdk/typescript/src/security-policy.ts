@@ -1009,13 +1009,8 @@ function validatePolicyContent(content: string): void {
       "The security policy must contain valid Unicode text.",
     );
   }
-  if (
-    !/^#\s+\S/mu.test(content.replace(/^\uFEFF/u, "")) ||
-    content.trim().length === 0
-  ) {
-    throw new CodexSecurityError(
-      "The generated security policy must be a nonempty Markdown document.",
-    );
+  if (content.trim().length === 0) {
+    throw new CodexSecurityError("The security policy must not be empty.");
   }
   validatePolicySize(Buffer.byteLength(content, "utf8"));
 }

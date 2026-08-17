@@ -1280,28 +1280,6 @@ export async function preserveCodexSecurityPluginRegistration(
   };
 }
 
-export async function preparePersistentScanRoot(
-  stateDirectory: string,
-  repositoryName: string,
-): Promise<string> {
-  return await preparePersistentOutputRoot(
-    stateDirectory,
-    "scans",
-    repositoryName,
-  );
-}
-
-export async function preparePersistentPolicyRoot(
-  stateDirectory: string,
-  repositoryName: string,
-): Promise<string> {
-  return await preparePersistentOutputRoot(
-    stateDirectory,
-    "policies",
-    repositoryName,
-  );
-}
-
 export function requireOutputOutsideRepository(
   repository: string,
   outputDirectory: string,
@@ -1327,7 +1305,7 @@ export function requireOutputOutsideRepository(
   }
 }
 
-async function preparePersistentOutputRoot(
+export async function preparePersistentOutputRoot(
   stateDirectory: string,
   category: "scans" | "policies",
   repositoryName: string,

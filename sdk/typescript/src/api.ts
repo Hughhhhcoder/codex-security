@@ -121,8 +121,7 @@ import {
   pluginExecutionEnvironment,
   planOutputArchive,
   prepareOutputDir,
-  preparePersistentScanRoot,
-  preparePersistentPolicyRoot,
+  preparePersistentOutputRoot,
   requireModelSafeOutputDir,
   requireOutputOutsideRepository,
   resolveCodexCommand,
@@ -577,8 +576,9 @@ export class CodexSecurity {
       const root =
         inputs.outputDir === null &&
         this.#dependencies.prepareOutputDir === undefined
-          ? await preparePersistentPolicyRoot(
+          ? await preparePersistentOutputRoot(
               inputs.stateDirectory,
+              "policies",
               basename(target.repository),
             )
           : temporaryRoot;
@@ -885,7 +885,11 @@ export class CodexSecurity {
       const scanOutputRoot =
         requestedOutput === null &&
         this.#dependencies.prepareOutputDir === undefined
-          ? await preparePersistentScanRoot(stateDirectory, basename(repo))
+          ? await preparePersistentOutputRoot(
+              stateDirectory,
+              "scans",
+              basename(repo),
+            )
           : temporaryRoot;
       if (scanOutputRoot !== undefined) {
         requireOutputOutsideRepository(
@@ -1916,12 +1920,6 @@ export class CodexSecurity {
       env: definedEnvironment(selectedScanEnvironment(environment, "chatgpt")),
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
-        approvals_reviewer: "auto_review",
-        default_permissions:
-          overrides["default_permissions"] === POLICY_PERMISSION_PROFILE
-            ? POLICY_PERMISSION_PROFILE
-            : SCAN_PERMISSION_PROFILE,
-        allow_login_shell: false,
         responses_api_metadata: {
           ...configuredResponsesMetadata,
           codex_security_surface: this.#surface,

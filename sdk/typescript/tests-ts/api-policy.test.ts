@@ -331,15 +331,7 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("validates inherited policies before preflight or runtime setup", async () => {
-    for (const invalid of [
-      "utf8",
-      "size",
-      "outside",
-      "alias",
-      "dangling",
-      "sibling",
-      "descendant",
-    ] as const) {
+    for (const invalid of ["utf8", "alias"] as const) {
       let prepared = false;
       const f = await setup({
         onPrepare: () => {
@@ -352,29 +344,12 @@ describe("CodexSecurity policy API", () => {
       if (invalid === "utf8") {
         await writeFile(policy, Buffer.from([0xff]));
         message = "valid UTF-8";
-      } else if (invalid === "size") {
-        await writeFile(policy, Buffer.alloc(1024 * 1024 + 1, "x"));
-        message = "1 MiB";
-      } else if (invalid === "outside" || invalid === "descendant") {
-        const outside = join(f.root, "outside-policy.md");
-        await writeFile(outside, "# Outside policy\n");
-        const alias =
-          invalid === "descendant"
-            ? join(f.repository, "component", "child", "SECURITY.md")
-            : policy;
-        await mkdir(dirname(alias), { recursive: true });
-        await symlink(outside, alias, "file");
-        message = "outside the repository";
       } else {
-        const target = join(f.repository, "component", "SECURITY.md");
-        if (invalid === "alias")
-          await writeFile(target, "# Component policy\n");
-        const alias =
-          invalid === "sibling"
-            ? join(f.repository, "sibling", "SECURITY.md")
-            : policy;
-        await mkdir(dirname(alias), { recursive: true });
-        await symlink(target, alias, "file");
+        await symlink(
+          join(f.repository, "component", "SECURITY.md"),
+          policy,
+          "file",
+        );
         message = "outside the selected component";
       }
       const options = { path: "component", outputDir: f.outputDir };

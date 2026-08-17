@@ -32,7 +32,7 @@ import {
   type SecurityPolicyStage,
 } from "../src/security-policy.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { preparePersistentPolicyRoot } from "../src/runtime.js";
+import { preparePersistentOutputRoot } from "../src/runtime.js";
 import { runMockInSubprocess } from "./support/isolated-mock.js";
 import {
   POLICY,
@@ -58,8 +58,9 @@ describe("security policy generation", () => {
   test("stores policy drafts separately from scans and rejects linked state children", async () => {
     const f = await fixture();
     const state = join(f.root, "state");
-    const directory = await preparePersistentPolicyRoot(
+    const directory = await preparePersistentOutputRoot(
       state,
+      "policies",
       "sample project",
     );
     expect(directory).toBe(join(state, "policies", "sample-project"));
@@ -70,9 +71,9 @@ describe("security policy generation", () => {
       join(state, "policies", "linked"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    await expect(preparePersistentPolicyRoot(state, "linked")).rejects.toThrow(
-      "Persistent policy output must use real directories",
-    );
+    await expect(
+      preparePersistentOutputRoot(state, "policies", "linked"),
+    ).rejects.toThrow("Persistent policy output must use real directories");
     expect(await readdir(f.repository)).toEqual([]);
   });
 
@@ -527,7 +528,8 @@ describe("security policy generation", () => {
 
   test("rejects empty or oversized policy documents", async () => {
     for (const markdown of [
-      "not a Markdown policy",
+      "",
+      " \n\t",
       "# Policy\n\ud800",
       `# Policy\n${"x".repeat(1024 * 1024)}`,
     ]) {
@@ -574,6 +576,28 @@ describe("security policy generation", () => {
 });
 
 describe("security policy review and application", () => {
+  test("accepts policy Markdown without a hash-style heading", async () => {
+    for (const content of [
+      "Security policy\n===============\n\nReport vulnerabilities privately.\n",
+      "Report vulnerabilities privately.\n",
+    ]) {
+      const f = await fixture();
+      await f.generate({
+        run: async (stage) => ({
+          ...stageResult(stage),
+          ...(stage === "policy" ? { markdown: content } : {}),
+        }),
+      });
+      const draft = await loadSecurityPolicyDraft(f.repository, f.outputDir);
+      expect(draft.content).toBe(content);
+      await applySecurityPolicy(draft, { pythonPath: PYTHON });
+      expect(await readFile(draft.targetPath, "utf8")).toBe(content);
+      expect(
+        await resolveSecurityPolicyGuidance(draft, PYTHON, PLUGIN_ROOT),
+      ).toContain(content);
+    }
+  });
+
   test("previews a real diff and applies a new policy accepted by the resolver", async () => {
     const f = await fixture();
     const draft = await f.generate();
@@ -1048,48 +1072,33 @@ describe("security policy review and application", () => {
     }
   });
 
-  test("validates the recovery directory before replacing an existing policy", async () => {
-    const f = await fixture();
-    const original = "# Original policy\n";
-    await writeFile(join(f.repository, "SECURITY.md"), original);
-    const draft = await f.generate();
-    const inside = join(f.repository, "artifacts");
-    await mkdir(inside, { mode: 0o700 });
-    await writeFile(
-      join(inside, "policy-draft.json"),
-      await readFile(join(f.outputDir, "policy-draft.json")),
-    );
-    await expect(
-      applySecurityPolicy({ ...draft, outputDir: inside }),
-    ).rejects.toThrow("outside the protected scan root");
-    expect(await readFile(draft.targetPath, "utf8")).toBe(original);
-    expect((await readdir(f.repository)).sort()).toEqual([
-      "SECURITY.md",
-      "artifacts",
-    ]);
-  });
-
-  test("keeps recovery files outside an enclosing checkout", async () => {
-    const f = await fixture();
-    policyGit(f.repository, "init", "--quiet");
-    const nested = await addPolicySubmodule(
-      f.repository,
-      join(f.root, "submodule-source"),
-    );
-    const original = "# Original nested policy\n";
-    await writeFile(join(nested, "SECURITY.md"), original);
-    const draft = await f.generate({ path: "services/api" });
-    const inside = join(f.repository, "artifacts");
-    await mkdir(inside, { mode: 0o700 });
-    await writeFile(
-      join(inside, "policy-draft.json"),
-      await readFile(join(f.outputDir, "policy-draft.json")),
-    );
-    await expect(
-      applySecurityPolicy({ ...draft, outputDir: inside }),
-    ).rejects.toThrow("outside the protected scan root");
-    expect(await readFile(draft.targetPath, "utf8")).toBe(original);
-    expect(await readdir(inside)).toEqual(["policy-draft.json"]);
+  test("keeps recovery files outside the target and enclosing checkouts", async () => {
+    for (const path of [".", "services/api"]) {
+      const f = await fixture();
+      if (path !== ".") {
+        policyGit(f.repository, "init", "--quiet");
+        await addPolicySubmodule(
+          f.repository,
+          join(f.root, "submodule-source"),
+        );
+      }
+      const original = "# Original policy\n";
+      await writeFile(join(f.repository, path, "SECURITY.md"), original);
+      const draft = await f.generate({ path });
+      const inside = join(f.repository, "artifacts");
+      await mkdir(inside, { mode: 0o700 });
+      await writeFile(
+        join(inside, "policy-draft.json"),
+        await readFile(join(f.outputDir, "policy-draft.json")),
+      );
+      const before = (await readdir(f.repository)).sort();
+      await expect(
+        applySecurityPolicy({ ...draft, outputDir: inside }),
+      ).rejects.toThrow("outside the protected scan root");
+      expect(await readFile(draft.targetPath, "utf8")).toBe(original);
+      expect((await readdir(f.repository)).sort()).toEqual(before);
+      expect(await readdir(inside)).toEqual(["policy-draft.json"]);
+    }
   });
 
   test("restores the original policy when canceled after moving it", async () => {
