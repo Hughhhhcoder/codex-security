@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
   CodexOptions,
   ThreadEvent,
@@ -43,6 +43,7 @@ async function setup(
   fixtures.push(f);
   const codexHome = join(f.root, "codex-home");
   await mkdir(codexHome);
+  const runtime = preparedRuntime(codexHome);
   let configuration: CodexOptions | undefined;
   const threads: ThreadOptions[] = [];
   const prompts: string[] = [];
@@ -58,7 +59,7 @@ async function setup(
       environment: { CODEX_SECURITY_STATE_DIR: join(f.root, "state") },
       prepareRuntime: async () => {
         options.onPrepare?.();
-        return preparedRuntime(codexHome);
+        return runtime;
       },
       resolvePluginPython: async () => PYTHON,
       repositoryRevision: async () => "synthetic-revision",
@@ -91,6 +92,7 @@ async function setup(
   return {
     ...f,
     security,
+    runtime,
     threads,
     prompts,
     turns,
@@ -203,6 +205,30 @@ describe("CodexSecurity policy API", () => {
     expect(await readFile(result.targetPath, "utf8")).toContain(
       "Keep the reporting channel.",
     );
+    await f.security.close();
+  });
+
+  test("rejects an incomplete policy plugin before starting model work", async () => {
+    const f = await setup();
+    const pluginRoot = join(f.root, "incomplete-plugin");
+    for (const path of [
+      "references/threat-model.md",
+      "skills/define-security-policy/SKILL.md",
+      "scripts/resolve_security_md.py",
+    ]) {
+      const destination = join(pluginRoot, path);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, "synthetic plugin fixture\n");
+    }
+    f.runtime["plugin"] = {
+      ...(f.runtime["plugin"] as Record<string, unknown>),
+      pluginRoot,
+    };
+    await expect(
+      f.security.generatePolicy(f.repository, { outputDir: f.outputDir }),
+    ).rejects.toThrow("references/security-guidance.md");
+    expect(f.threads).toHaveLength(0);
+    expect(await readdir(f.outputDir)).toEqual([]);
     await f.security.close();
   });
 

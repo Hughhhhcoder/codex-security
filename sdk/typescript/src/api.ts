@@ -553,6 +553,7 @@ export class CodexSecurity {
       validateScanCostLimit(options.maxCostUsd, model.model);
       for (const path of [
         "references/threat-model.md",
+        "references/security-guidance.md",
         "skills/define-security-policy/SKILL.md",
         "scripts/resolve_security_md.py",
       ]) {
@@ -3369,7 +3370,7 @@ export function scanRuntimeCodexConfig(
       [POLICY_PERMISSION_PROFILE]: {
         filesystem: {
           ":root": "read",
-          ":workspace_roots": "write",
+          ":workspace_roots": "read",
           ...(protectedCredentialHome === undefined
             ? {}
             : { [protectedCredentialHome]: "read" }),

@@ -19,6 +19,7 @@ import { SecurityPolicyVerificationError } from "../src/errors.js";
 import {
   applySecurityPolicy,
   loadSecurityPolicyDraft,
+  readSecurityPolicy,
   resolveSecurityPolicyGuidance,
   resolveSecurityPolicyTarget,
   securityPolicyDiff,
@@ -129,6 +130,67 @@ describe("security policy generation", () => {
     ).toEqual(target);
   });
 
+  test("does not silently drop inherited policies when Git is unavailable", async () => {
+    const name =
+      "does not silently drop inherited policies when Git is unavailable";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const checkout = await fixture();
+    const standalone = await fixture();
+    execFileSync("git", ["init", "--quiet", checkout.repository]);
+    const component = join(checkout.repository, "component");
+    await mkdir(component);
+    await writeFile(join(checkout.repository, "SECURITY.md"), POLICY);
+    const pathEntries = Object.entries(process.env).filter(
+      ([key]) => key.toUpperCase() === "PATH",
+    );
+    try {
+      for (const [key] of pathEntries) delete process.env[key];
+      process.env["PATH"] = "";
+      await expect(resolveSecurityPolicyTarget(component)).rejects.toThrow(
+        "Could not determine the Git worktree root",
+      );
+      expect(
+        (await resolveSecurityPolicyTarget(standalone.repository)).repository,
+      ).toBe(standalone.repository);
+    } finally {
+      delete process.env["PATH"];
+      for (const [key, value] of pathEntries) process.env[key] = value;
+    }
+  });
+
+  test("asks every material owner question in groups of at most three", async () => {
+    const f = await fixture();
+    const questions = [
+      "Which endpoints are public?",
+      "Who can deploy the service?",
+      "Who can read backups?",
+      "Which operators are trusted?",
+      "Are tenants isolated?",
+      "Who controls the identity provider?",
+      "Which data needs retention limits?",
+    ];
+    const batches: string[][] = [];
+    await f.generate({
+      answerQuestions: async (batch) => {
+        batches.push([...batch]);
+        return `Owner answer ${batches.length}`;
+      },
+      run: async (stage, prompt) => {
+        if (stage === "architecture")
+          return { ...stageResult(stage), questions };
+        for (const question of questions) expect(prompt).toContain(question);
+        for (let index = 1; index <= 3; index++)
+          expect(prompt).toContain(`Owner answer ${index}`);
+        return stageResult(stage);
+      },
+    });
+    expect(batches).toEqual([
+      questions.slice(0, 3),
+      questions.slice(3, 6),
+      questions.slice(6),
+    ]);
+  });
+
   test("carries unanswered questions and review decisions into the final policy", async () => {
     const f = await fixture();
     const draft = await f.generate({
@@ -227,6 +289,34 @@ describe("security policy generation", () => {
       ).rejects.toThrow();
       expect(await readdir(f.repository)).toEqual([]);
     }
+  });
+
+  test("enforces the resolver byte limit on existing policies and saved files", async () => {
+    const header = "# Policy\n";
+    const maximum =
+      header + "x".repeat(1024 * 1024 - Buffer.byteLength(header));
+    const existing = await fixture();
+    const target = join(existing.repository, "SECURITY.md");
+    await writeFile(target, maximum);
+    expect(await readSecurityPolicy(target)).toBe(maximum);
+    await writeFile(target, `${maximum}x`);
+    await expect(existing.generate()).rejects.toThrow("1 MiB limit");
+    expect(await readdir(existing.outputDir)).toEqual([]);
+
+    const saved = await fixture();
+    const draft = await saved.generate();
+    await writeFile(draft.draftPath, `${maximum}x`);
+    await expect(
+      loadSecurityPolicyDraft(saved.repository, saved.outputDir),
+    ).rejects.toThrow("1 MiB limit");
+    await writeFile(draft.draftPath, POLICY);
+    await writeFile(
+      join(saved.outputDir, "previous-SECURITY.md"),
+      `${maximum}x`,
+    );
+    await expect(
+      loadSecurityPolicyDraft(saved.repository, saved.outputDir),
+    ).rejects.toThrow("1 MiB limit");
   });
 });
 
@@ -516,6 +606,24 @@ describe("security policy review and application", () => {
     const diff = await securityPolicyDiff(draft, PYTHON);
     expect(diff).toContain("-# Old policy\n\\ No newline at end of file\n");
     expect(diff).toContain("+# New policy\n\\ No newline at end of file\n");
+  });
+
+  test("reports an early diff subprocess exit without an unhandled stdin error", async () => {
+    const name =
+      "reports an early diff subprocess exit without an unhandled stdin error";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const draft = await f.generate();
+    const node = execFileSync("node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim();
+    await expect(
+      securityPolicyDiff(
+        { ...draft, content: `# Policy\n${"x".repeat(900_000)}` },
+        node,
+      ),
+    ).rejects.toThrow();
+    expect(await readdir(f.repository)).toEqual([]);
   });
 
   test("preserves UTF-8 text and CRLF content independently of Python's locale", async () => {

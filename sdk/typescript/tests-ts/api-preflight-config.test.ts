@@ -342,7 +342,7 @@ describe("CodexSecurity preflight configuration", () => {
         codex_security_policy: {
           filesystem: {
             ":root": "read",
-            ":workspace_roots": "write",
+            ":workspace_roots": "read",
           },
           network: { enabled: false },
         },
@@ -375,7 +375,7 @@ describe("CodexSecurity preflight configuration", () => {
         codex_security_policy: {
           filesystem: {
             ":root": "read",
-            ":workspace_roots": "write",
+            ":workspace_roots": "read",
             [credentialHome]: "read",
           },
           network: { enabled: false },

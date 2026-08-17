@@ -464,6 +464,25 @@ try {
   })) {
     await writeFile(join(policyArtifacts, name), contents, { mode: 0o600 });
   }
+  // Node rejects Python's flags before reading stdin. Report that failure
+  // without an uncaught stream error in the installed Node.js entrypoint.
+  run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      [
+        'import assert from "node:assert/strict";',
+        `const { loadSecurityPolicyDraft, securityPolicyDiff } = await import(${JSON.stringify(packageManifest.name)});`,
+        "const draft = await loadSecurityPolicyDraft(process.argv[1], process.argv[2]);",
+        'draft.content = "# Policy\\n" + "x".repeat(900_000);',
+        "await assert.rejects(securityPolicyDiff(draft, process.execPath));",
+      ].join("\n"),
+      policyTarget,
+      policyArtifacts,
+    ],
+    { cwd: consumer },
+  );
   const appliedPolicy = JSON.parse(
     run(
       process.execPath,

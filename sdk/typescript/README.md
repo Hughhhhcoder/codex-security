@@ -202,8 +202,9 @@ Trusted Access for Cyber. To apply or check your access, visit
 `policy` generates or updates the `SECURITY.md` that future scans read. It uses
 the same Codex runtime, authentication, model settings, and bundled security
 guidance as scans, but does not run vulnerability discovery or create a scan
-record. Generation can read the source, but can write only in its private
-artifact workspace. Network access, web search, apps, and MCP tools are disabled.
+record. Model turns are read-only; the SDK saves their responses in the private
+artifact directory. Network access and web search are disabled. The command does
+not enable apps or MCP servers.
 
 ```bash
 npx @openai/codex-security policy .
@@ -220,9 +221,9 @@ closest policy takes precedence when guidance conflicts.
 
 Generation has three stages: a code-backed architecture specification, a detailed
 threat model, and a concise policy draft. In an interactive terminal, the command
-can ask up to three questions about facts that materially affect the policy. It
-then shows the exact proposed diff and any decisions that need owner review.
-Nothing is written into the repository without confirmation.
+asks about facts that materially affect the policy, in groups of at most three
+questions. It then shows the exact proposed diff and any decisions that need
+owner review. Nothing is written into the repository without confirmation.
 
 ### Review and apply a saved draft
 
@@ -307,8 +308,8 @@ Use `security.preflightPolicy()` to validate local inputs without starting Codex
 `generatePolicy()` never edits the repository. It accepts `auth`, `path`,
 `knowledgeBasePaths`, `outputDir`, `maxCostUsd`, and `signal`, plus progress and
 cost callbacks. An optional `answerQuestions` callback supplies owner context;
-it receives the questions and a cancellation signal. Without one, questions
-remain unresolved. Use
+it receives each group of up to three questions and a cancellation signal.
+Without one, questions remain unresolved. Use
 `loadSecurityPolicyDraft(repository, artifactDirectory, { path })` to load an
 edited saved draft before reviewing and applying it. For a saved custom-plugin
 draft, pass `{ pluginPath }` to `applySecurityPolicy()`. A

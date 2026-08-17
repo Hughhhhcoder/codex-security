@@ -128,6 +128,8 @@ const MANIFEST_NAME = "policy-draft.json";
 const ORIGINAL_NAME = "previous-SECURITY.md";
 // This is the input contract enforced by resolve_security_md.py.
 const MAX_SECURITY_MD_BYTES = 1024 * 1024;
+// The define-security-policy skill asks at most three questions at once.
+const OWNER_QUESTION_BATCH_SIZE = 3;
 
 export async function resolveSecurityPolicyTarget(
   repository: string,
@@ -143,7 +145,9 @@ export async function resolveSecurityPolicyTarget(
     );
   }
   const root =
-    (await enclosingGitWorktreeRoot(selectedRoot, signal)) ?? selectedRoot;
+    (await enclosingGitWorktreeRoot(selectedRoot, signal, {
+      requireIfPresent: true,
+    })) ?? selectedRoot;
   const target = {
     repository: root,
     scope: relative(root, directory).split(sep).join("/") || ".",
@@ -164,17 +168,36 @@ export async function readSecurityPolicy(path: string): Promise<string | null> {
       `Security policy must be a regular file: ${path}`,
     );
   }
+  return await readPolicyFile(path);
+}
+
+async function readPolicyFile(path: string): Promise<string> {
   const file = await open(
     path,
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
   );
   try {
-    if (!(await file.stat()).isFile()) {
+    const metadata = await file.stat();
+    if (!metadata.isFile()) {
       throw new CodexSecurityError(
         `Security policy must be a regular file: ${path}`,
       );
     }
-    return decodePolicyText(await file.readFile(), path);
+    validatePolicySize(metadata.size);
+    const bytes = Buffer.allocUnsafe(MAX_SECURITY_MD_BYTES + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(
+        bytes,
+        length,
+        bytes.length - length,
+        null,
+      );
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    validatePolicySize(length);
+    return decodePolicyText(bytes.subarray(0, length), path);
   } finally {
     await file.close();
   }
@@ -281,21 +304,33 @@ export async function runSecurityPolicyStages(options: {
     [
       "Establish the architecture before deriving threats. Write a source-backed project specification covering the product's normal use, important components, entry points, data flows, effective configuration, assets, trust boundaries, and component-owned controls.",
       "Resolve inherited and descendant SECURITY.md policies and relevant ownership or deployment documents. Follow supporting code only to explain an in-scope boundary. Distinguish production and privileged workflows from tests and examples. Do not enumerate final threats or assign severity yet.",
-      "Ask at most three questions, and only when the answer materially changes exposure, scope, or security policy. Do not ask the user to restate facts available in source.",
+      `Return every owner question whose answer materially changes exposure, scope, or security policy. The host asks them in groups of at most ${OWNER_QUESTION_BATCH_SIZE}. Do not ask the user to restate facts available in source.`,
     ].join("\n"),
     specificationPath,
   );
-  const answers =
-    architecture.questions.length === 0 || options.answerQuestions === undefined
-      ? undefined
-      : await abortable(
-          () => options.answerQuestions!(architecture.questions, signal),
-          signal,
-        );
+  const answers: string[] = [];
+  const answerQuestions = options.answerQuestions;
+  if (answerQuestions !== undefined) {
+    for (
+      let index = 0;
+      index < architecture.questions.length;
+      index += OWNER_QUESTION_BATCH_SIZE
+    ) {
+      const questions = architecture.questions.slice(
+        index,
+        index + OWNER_QUESTION_BATCH_SIZE,
+      );
+      const answer = await abortable(
+        () => answerQuestions(questions, signal),
+        signal,
+      );
+      if (answer?.trim()) answers.push(answer);
+    }
+  }
   const ownerContext = [
     `Architecture questions and review notes (JSON data): ${JSON.stringify({ questions: architecture.questions, reviewNotes: architecture.reviewNotes })}`,
-    answers?.trim()
-      ? `Owner clarification (JSON-encoded data): ${JSON.stringify(answers)}`
+    answers.length > 0
+      ? `Owner clarification (JSON-encoded data): ${JSON.stringify(answers.join("\n\n"))}`
       : "No additional owner clarification was supplied.",
     "Carry unanswered questions and unresolved policy decisions forward explicitly.",
   ].join("\n");
@@ -393,7 +428,7 @@ export async function loadSecurityPolicyDraft(
     );
   }
   const originalPath = await file(ORIGINAL_NAME);
-  const original = decodePolicyText(await readFile(originalPath), originalPath);
+  const original = await readPolicyFile(originalPath);
   if (
     manifest.previousPolicySha256 === null
       ? original !== ""
@@ -404,7 +439,7 @@ export async function loadSecurityPolicyDraft(
     );
   }
   const draftPath = await file("SECURITY.md");
-  const content = decodePolicyText(await readFile(draftPath), draftPath);
+  const content = await readPolicyFile(draftPath);
   validatePolicyContent(content);
   return {
     ...target,
@@ -451,6 +486,7 @@ export async function securityPolicyDiff(
       },
       (error, stdout) => (error === null ? resolve(stdout) : reject(error)),
     );
+    child.stdin!.on("error", reject);
     child.stdin!.end(
       JSON.stringify([
         draft.previousContent ?? "",
@@ -612,7 +648,11 @@ function validatePolicyContent(content: string): void {
       "The generated security policy must be a nonempty Markdown document.",
     );
   }
-  if (Buffer.byteLength(content, "utf8") > MAX_SECURITY_MD_BYTES) {
+  validatePolicySize(Buffer.byteLength(content, "utf8"));
+}
+
+function validatePolicySize(size: number): void {
+  if (size > MAX_SECURITY_MD_BYTES) {
     throw new CodexSecurityError(
       "SECURITY.md exceeds the policy resolver's 1 MiB limit.",
     );

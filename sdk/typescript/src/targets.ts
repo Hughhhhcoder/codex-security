@@ -136,6 +136,7 @@ export function resolveRepositoryPath(repository: string): string {
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
+  options: { requireIfPresent?: boolean } = {},
 ): Promise<string | null> {
   try {
     const root = await gitOutput(
@@ -144,8 +145,17 @@ export async function enclosingGitWorktreeRoot(
       signal,
     );
     return await abortable(() => realpath(root), signal);
-  } catch {
+  } catch (error) {
     throwIfAborted(signal);
+    if (
+      options.requireIfPresent === true &&
+      (await outermostGitMarkerRoot(repository, signal)) !== null
+    ) {
+      throw new InvalidTargetError(
+        "Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible.",
+        { cause: error },
+      );
+    }
     return null;
   }
 }
@@ -401,7 +411,7 @@ async function gitOutput(
   const command = await resolveTrustedExecutable(
     "git",
     isolatedGitEnvironment(args[0] === "rev-parse"),
-    await outermostGitMarkerRoot(repository, signal),
+    (await outermostGitMarkerRoot(repository, signal)) ?? repository,
   );
   if (command === null)
     throw new Error("Git is not available on a trusted PATH.");
@@ -421,9 +431,9 @@ async function gitOutput(
 async function outermostGitMarkerRoot(
   repository: string,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<string | null> {
   let current = repository;
-  let root = repository;
+  let root: string | null = null;
   while (true) {
     throwIfAborted(signal);
     try {
