@@ -98,6 +98,7 @@ from workbench_schema import (
     sql_statements as sql_statements,
 )
 from workbench_source_excerpt import finding_source_excerpt, safe_source_path
+from workbench_source_scopes import capture_source_scopes
 from workbench_target import (
     clean_worktree_content_digest,
     copy_directory_excluding,
@@ -851,6 +852,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             diff_target,
             metadata=target_metadata,
         )
+        source_scopes = capture_source_scopes(target, target_identity, [scope])
         target_root = scan_target_root(args.scan_root, target)
         target_root.mkdir(parents=True, exist_ok=True)
         if manages_transaction:
@@ -899,6 +901,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            source_scopes=source_scopes,
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
@@ -955,6 +958,7 @@ def _start_prompt_driven_scan(
     )
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
+    source_scopes = capture_source_scopes(target, target_identity, [scope])
     target_root = scan_target_root(args.scan_root, target)
 
     connection.execute("BEGIN IMMEDIATE")
@@ -1054,6 +1058,7 @@ def _start_prompt_driven_scan(
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            source_scopes=source_scopes,
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
@@ -1615,12 +1620,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     recipe = parse_scan_recipe(args.recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
-    stored_recipe = {
-        **recipe,
-        "_codexSecurityFileScopes": [
-            path for path in paths if (repository / path).is_file()
-        ],
-    }
+    recipe.pop("_codexSecurityFileScopes", None)
     scope = paths[0] if len(paths) == 1 else "."
     diff_target = None
     if requested_target["kind"] in {"refs", "working_tree"}:
@@ -1638,6 +1638,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
+    source_scopes = capture_source_scopes(repository, target_identity, paths or ["."])
     scope_file_count = (
         directory_snapshot_regular_file_count(repository)
         if not paths
@@ -1695,6 +1696,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            source_scopes=source_scopes,
             target_root=scan_dir.parent,
             target_summary=None,
             scope_file_count=scope_file_count,
@@ -1706,7 +1708,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             "UPDATE scans SET recipe_json = ?, parent_scan_id = ? WHERE id = ?",
             (
                 json.dumps(
-                    stored_recipe, allow_nan=False, separators=(",", ":"), sort_keys=True
+                    recipe, allow_nan=False, separators=(",", ":"), sort_keys=True
                 ),
                 parent_scan_id,
                 scan_id,

@@ -62,6 +62,11 @@ Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
 limit access to authorized reviewers.
 
+Saved-history source excerpts use the Git objects selected when the scan began.
+They do not fetch missing objects. An excerpt can be omitted when the original
+source is unavailable or an older scoped scan did not record enough information
+to establish its scope; the finding itself remains available.
+
 ### SDK configuration and scan options
 
 Pass runtime configuration to the `CodexSecurity` constructor:

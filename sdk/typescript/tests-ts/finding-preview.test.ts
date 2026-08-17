@@ -1,374 +1,96 @@
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-describe("bundled finding previews", () => {
-  test("only reads source excerpts within explicitly requested scan paths", () => {
-    const python =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(python).not.toBeNull();
-    const program = [
-      "import json, os, sys, tempfile, unicodedata",
-      "from pathlib import Path",
-      "sys.path.insert(0, sys.argv[1])",
-      "import workbench_source_excerpt as excerpts",
-      "committed = {'src', 'src/nested', 'allowed/public.py'}",
-      "git_calls = []",
-      "def git_bytes(_, *args):",
-      "    git_calls.append((args, os.environ.get('GIT_NO_LAZY_FETCH'), os.environ.get('GIT_ALLOW_PROTOCOL')))",
-      "    if args[0] == 'config': return b'true\\n'",
-      "    if args[0] == 'ls-tree':",
-      "        parent = args[-1].partition(':')[2]",
-      "        prefix = tuple(Path(parent).parts) if parent else ()",
-      "        names = {Path(value).parts[len(prefix)] for value in committed if Path(value).parts[:len(prefix)] == prefix and len(Path(value).parts) > len(prefix)}",
-      "        return b''.join(b'040000 tree fake\\t' + name.encode() + b'\\0' for name in sorted(names))",
-      "    return f'{args[-1]}\\n'.encode()",
-      "excerpts.git_bytes = git_bytes",
-      "excerpts.git_worktree_context = lambda target: (target, '.')",
-      "scan = {'target_revision': 'deadbeef', 'target_snapshot_digest': None}",
-      "with tempfile.TemporaryDirectory() as directory:",
-      "    target = Path(directory).resolve()",
-      "    (target / 'src' / 'nested').mkdir(parents=True)",
-      "    (target / 'allowed').mkdir()",
-      "    (target / 'private').mkdir()",
-      "    (target / 'allowed' / 'public.py').write_text('public\\n')",
-      "    composed = unicodedata.normalize('NFC', 'café')",
-      "    decomposed = unicodedata.normalize('NFD', composed)",
-      "    (target / composed).mkdir()",
-      "    committed.add(composed)",
-      "    complex_unicode, complex_alias = '\\u1fb7\\u0342', '\\u1fb6\\u0342\\u03b9'",
-      "    (target / complex_unicode).mkdir()",
-      "    committed.add(complex_unicode)",
-      "    (target / 'selected').write_text('selected file\\n')",
-      "    os.link(target / 'allowed' / 'public.py', target / 'private' / 'secret.py')",
-      "    if sys.platform != 'win32':",
-      "        (target / 'redirected').symlink_to(target, target_is_directory=True)",
-      "        (target / 'src' / 'redirected').symlink_to(target / 'private', target_is_directory=True)",
-      "        (target / 'src' / 'escaped').symlink_to(target.parent, target_is_directory=True)",
-      "        (target / 'loop').symlink_to(target / 'loop', target_is_directory=True)",
-      "    def excerpt(path, scope):",
-      "        return excerpts.finding_source_excerpt(scan, target, [{'path': path, 'startLine': 1}], scope)",
-      "    def case_collision(scope='SRC'):",
-      "        if not (target / 'SRC').is_dir(): return None",
-      "        committed.add('SRC')",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        result = excerpt('src/public.py', [scope])",
-      "        committed.remove('SRC')",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        return result",
-      "    def historical_alias():",
-      "        if not (target / 'SRC').is_dir(): return None",
-      "        os.rename(target / 'src', target / 'moved')",
-      "        result = excerpt('src/public.py', ['SRC'])",
-      "        os.rename(target / 'moved', target / 'src')",
-      "        return result",
-      "    def historical_normalization_alias():",
-      "        if not (target / decomposed).is_dir(): return None",
-      "        os.rename(target / composed, target / 'moved-unicode')",
-      "        result = excerpt(f'{composed}/public.py', [decomposed])",
-      "        os.rename(target / 'moved-unicode', target / composed)",
-      "        return result",
-      "    def nested_target():",
-      "        excerpts.git_worktree_context = lambda selected: (selected.parent, 'ScopedTarget') if selected == target else (selected, '.')",
-      "        excerpts.committed_worktree_context.cache_clear()",
-      "        result = excerpt('private.py', ['.'])",
-      "        excerpts.git_worktree_context = lambda selected: (selected, '.')",
-      "        excerpts.committed_worktree_context.cache_clear()",
-      "        return result",
-      "    def missing_git():",
-      "        def unavailable(_): raise SystemExit('missing Git metadata')",
-      "        excerpts.git_worktree_context = unavailable",
-      "        excerpts.committed_worktree_context.cache_clear()",
-      "        result = excerpt('private.py', ['.'])",
-      "        excerpts.git_worktree_context = lambda selected: (selected, '.')",
-      "        excerpts.committed_worktree_context.cache_clear()",
-      "        return result",
-      "    def case_sensitive_collision():",
-      "        upper, lower = target / 'SECRET.py', target / 'secret.py'",
-      "        upper.write_text('selected\\n')",
-      "        lower.write_text('private\\n')",
-      "        if upper.samefile(lower): return None",
-      "        committed.add('secret.py')",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        return excerpt('secret.py', ['SECRET.py'])",
-      "    def missing_case_sibling():",
-      "        committed.add('SRC')",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        original = Path.samefile",
-      "        def missing(self, other):",
-      "            if Path(other) == target / 'SRC': raise FileNotFoundError",
-      "            return original(self, other)",
-      "        Path.samefile = missing",
-      "        try: return excerpt('src/public.py', ['src'])",
-      "        finally:",
-      "            Path.samefile = original",
-      "            committed.remove('SRC')",
-      "            excerpts.committed_tree_entries.cache_clear()",
-      "    def missing_unicode_alias():",
-      "        requested, actual = 'ß.py', 'ss.py'",
-      "        committed.add(actual)",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        original = Path.samefile",
-      "        def missing(self, other):",
-      "            if {self.name, Path(other).name} == {requested, actual}: raise FileNotFoundError",
-      "            return original(self, other)",
-      "        Path.samefile = missing",
-      "        try: return excerpt(actual, [requested])",
-      "        finally:",
-      "            Path.samefile = original",
-      "            committed.remove(actual)",
-      "            excerpts.committed_tree_entries.cache_clear()",
-      "    def mixed_case_filesystem():",
-      "        requested, actual = 'MIXED-SELECTED.py', 'mixed-selected.py'",
-      "        committed.add(actual)",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        original = Path.samefile",
-      "        def separate(self, other):",
-      "            if self.parent == target and self.name != Path(other).name: raise FileNotFoundError",
-      "            return original(self, other)",
-      "        Path.samefile = separate",
-      "        try: return excerpt(actual, [requested])",
-      "        finally:",
-      "            Path.samefile = original",
-      "            committed.remove(actual)",
-      "            excerpts.committed_tree_entries.cache_clear()",
-      "    def unauthenticated_committed_alias():",
-      "        requested, actual = 'PRIVATE-ALIAS.py', 'private-alias.py'",
-      "        (target / requested).write_text('selected\\n')",
-      "        committed.add(actual)",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        original = excerpts.filesystem_case_alias",
-      "        excerpts.filesystem_case_alias = lambda *_: False",
-      "        try: return excerpt(requested, [requested])",
-      "        finally:",
-      "            excerpts.filesystem_case_alias = original",
-      "            committed.remove(actual)",
-      "            excerpts.committed_tree_entries.cache_clear()",
-      "    def replaced_directory():",
-      "        os.rename(target / 'src', target / 'saved-src')",
-      "        (target / 'src').write_text('replacement\\n')",
-      "        result = excerpt('src/public.py', ['src'])",
-      "        (target / 'src').unlink()",
-      "        os.rename(target / 'saved-src', target / 'src')",
-      "        return result",
-      "    def replaced_scope_ancestor():",
-      "        parent = target / 'historical-parent'",
-      "        parent.write_text('replacement\\n')",
-      "        try: return excerpt('historical-parent/selected/finding.py', ['historical-parent/selected'])",
-      "        finally: parent.unlink()",
-      "    def inaccessible_scope():",
-      "        if sys.platform == 'win32' or hasattr(os, 'geteuid') and os.geteuid() == 0: return None",
-      "        parent = target / 'inaccessible'",
-      "        (parent / 'selected').mkdir(parents=True)",
-      "        parent.chmod(0)",
-      "        try: return excerpt('inaccessible/selected/finding.py', ['inaccessible/selected'])",
-      "        finally: parent.chmod(0o700)",
-      "    def removed_file_scope():",
-      "        selected = target / 'selected'",
-      "        selected.unlink()",
-      "        committed.add('selected/private.py')",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        recorded = {**scan, 'recipe_json': json.dumps({'_codexSecurityFileScopes': ['selected']})}",
-      "        result = excerpts.finding_source_excerpt(recorded, target, [{'path': 'selected/private.py', 'startLine': 1}], ['selected'])",
-      "        committed.remove('selected/private.py')",
-      "        selected.write_text('selected file\\n')",
-      "        return result",
-      "    def legacy_file_scope(remove=False):",
-      "        selected = target / 'selected'",
-      "        if remove: selected.unlink()",
-      "        committed.add('selected/private.py')",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        legacy = {**scan, 'recipe_json': json.dumps({'target': {'kind': 'paths', 'paths': ['selected']}})}",
-      "        result = excerpts.finding_source_excerpt(legacy, target, [{'path': 'selected/private.py', 'startLine': 1}], ['selected'])",
-      "        committed.remove('selected/private.py')",
-      "        excerpts.committed_tree_entries.cache_clear()",
-      "        if remove: selected.write_text('selected file\\n')",
-      "        return result",
-      "    def dirty_snapshot():",
-      "        def forbidden(*_): raise AssertionError('ineligible snapshot touched Git')",
-      "        original = excerpts.git_bytes",
-      "        excerpts.git_bytes = forbidden",
-      "        try: return excerpts.finding_source_excerpt({**scan, 'target_snapshot_digest': 'dirty'}, target, [{'path': 'SRC/public.py', 'startLine': 1}], ['src'])",
-      "        finally: excerpts.git_bytes = original",
-      "    def many_locations():",
-      "        original, calls = excerpts.safe_source_path, []",
-      "        def counted(*arguments):",
-      "            calls.append(arguments)",
-      "            return original(*arguments)",
-      "        excerpts.safe_source_path = counted",
-      "        try:",
-      "            locations = [{'path': 'src/public.py', 'startLine': 1, 'role': 'root_control'}] + [{'path': f'src/other-{index}.py', 'startLine': 1} for index in range(10000)]",
-      "            result = excerpts.finding_source_excerpt(scan, target, locations, ['src'])",
-      "            return {'excerpt': result, 'resolved': len(calls)}",
-      "        finally: excerpts.safe_source_path = original",
-      "    def linked_case_collision():",
-      "        if not (target / 'SRC').is_dir(): return None",
-      "        original = excerpts.os.scandir",
-      "        class Entries:",
-      "            def __enter__(self): return iter([type('Entry', (), {'name': 'src'})(), type('Entry', (), {'name': 'SRC'})()])",
-      "            def __exit__(self, *_): return False",
-      "        excerpts.os.scandir = lambda _: Entries()",
-      "        try: return excerpts.filesystem_case_alias(target, target / 'SRC', target / 'src')",
-      "        finally: excerpts.os.scandir = original",
-      "    print(json.dumps({",
-      "        'selected': excerpt('src/public.py', ['src']),",
-      "        'outside': excerpt('private.py', ['src']),",
-      "        'additional': excerpt('docs/readme.py', ['src', 'docs']),",
-      "        'repository': excerpt('private.py', ['.']),",
-      "        'redirected': excerpt('private.py', ['redirected']) if sys.platform != 'win32' else None,",
-      "        'redirectedDescendant': excerpt('src/redirected/secret.py', ['src']) if sys.platform != 'win32' else None,",
-      "        'escapedDescendant': excerpt('SRC/escaped/secret.py', ['src']) if sys.platform != 'win32' else None,",
-      "        'loop': excerpt('docs/readme.py', ['loop', 'docs']),",
-      "        'caseAlias': excerpt('src/public.py', ['SRC']) if (target / 'SRC').is_dir() else None,",
-      "        'casePathAlias': excerpt('SRC/public.py', ['src']) if (target / 'SRC').is_dir() else None,",
-      "        'nestedCaseAlias': excerpt('src/nested/public.py', ['SRC/nested']) if (target / 'SRC').is_dir() else None,",
-      "        'normalizationSupported': (target / decomposed).is_dir(),",
-      "        'normalizationAlias': excerpt(f'{composed}/public.py', [decomposed]) if (target / decomposed).is_dir() else None,",
-      "        'normalizedPathAlias': excerpt(f'{decomposed}/public.py', [composed]) if (target / decomposed).is_dir() else None,",
-      "        'complexNormalizationSupported': (target / complex_alias).is_dir(),",
-      "        'complexNormalizationAlias': excerpt(f'{complex_unicode}/public.py', [complex_alias]) if (target / complex_alias).is_dir() else None,",
-      "        'caseCollision': case_collision(),",
-      "        'exactCaseCollision': case_collision('src'),",
-      "        'historicalAlias': historical_alias(),",
-      "        'historicalNormalizationAlias': historical_normalization_alias(),",
-      "        'nestedTarget': nested_target(),",
-      "        'missingGit': missing_git(),",
-      "        'caseSensitiveCollision': case_sensitive_collision(),",
-      "        'missingCaseSibling': missing_case_sibling(),",
-      "        'missingUnicodeAlias': missing_unicode_alias(),",
-      "        'mixedCaseFilesystem': mixed_case_filesystem(),",
-      "        'unauthenticatedCommittedAlias': unauthenticated_committed_alias(),",
-      "        'replacedDirectory': replaced_directory(),",
-      "        'replacedScopeAncestor': replaced_scope_ancestor(),",
-      "        'inaccessibleScope': inaccessible_scope(),",
-      "        'manyScopes': excerpt('src/public.py', [f'outside-{index}' for index in range(1024)] + ['src']),",
-      "        'manyLocations': many_locations(),",
-      "        'linkedCaseCollision': linked_case_collision(),",
-      "        'linkedAlias': excerpts.filesystem_case_alias(target, target / 'redirected', target) if sys.platform != 'win32' else None,",
-      "        'selectedFileDescendant': excerpt('selected/private.py', ['selected']),",
-      "        'removedFileScope': removed_file_scope(),",
-      "        'legacyExistingFileScope': legacy_file_scope(),",
-      "        'legacyRemovedFileScope': legacy_file_scope(True),",
-      "        'dirtySnapshot': dirty_snapshot(),",
-      "        'hardLink': excerpt('private/secret.py', ['allowed/public.py']),",
-      "        'fallback': excerpts.finding_source_excerpt(scan, target, [{'path': 'private.py', 'startLine': 1, 'role': 'root_control'}, {'path': 'src/public.py', 'startLine': 1}], ['src']),",
-      "        'rootControl': excerpts.finding_source_excerpt(scan, target, [{'path': 'src/support.py', 'startLine': 1, 'role': 'evidence:root_control'}, {'path': 'src/public.py', 'startLine': 1, 'role': 'root_control'}], ['src']),",
-      "        'offlineGit': all(lazy == '1' and protocols == '' and args[0] != '--no-lazy-fetch' for args, lazy, protocols in git_calls),",
-      "    }))",
-    ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
-      { stdout: "pipe", stderr: "pipe" },
-    );
+function sourceScopeProbe(scenario: string): Record<string, unknown> {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  expect(python).not.toBeNull();
+  const result = Bun.spawnSync(
+    [
+      python!,
+      "-I",
+      "-B",
+      fileURLToPath(new URL("./fixtures/source_scopes.py", import.meta.url)),
+      join(PLUGIN_ROOT, "scripts"),
+      scenario,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  return JSON.parse(new TextDecoder().decode(result.stdout)) as Record<
+    string,
+    unknown
+  >;
+}
 
-    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-    const preview = JSON.parse(
-      new TextDecoder().decode(result.stdout),
-    ) as Record<string, unknown> & {
-      caseAlias: string | null;
-      normalizationSupported: boolean;
-      complexNormalizationSupported: boolean;
-    };
-    expect(preview).toEqual({
-      selected: "1  deadbeef:src/public.py",
+describe("bundled finding previews", () => {
+  test("reads only the immutable source objects selected for the scan", () => {
+    expect(sourceScopeProbe("boundaries")).toEqual({
+      selected: "1  public source",
       outside: null,
-      additional: "1  deadbeef:docs/readme.py",
-      repository: "1  deadbeef:private.py",
+      additional: "1  selected file",
+      repository: "1  private source",
+      fileDescendant: null,
+      traversal: null,
+      absolute: null,
       redirected: null,
-      redirectedDescendant: null,
-      escapedDescendant: null,
-      loop: "1  deadbeef:docs/readme.py",
-      caseAlias: preview.caseAlias,
-      casePathAlias:
-        preview.caseAlias === null ? null : "1  deadbeef:src/public.py",
-      nestedCaseAlias:
-        preview.caseAlias === null ? null : "1  deadbeef:src/nested/public.py",
-      normalizationSupported: preview.normalizationSupported,
-      normalizationAlias: preview.normalizationSupported
-        ? "1  deadbeef:café/public.py"
-        : null,
-      normalizedPathAlias: preview.normalizationSupported
-        ? "1  deadbeef:café/public.py"
-        : null,
-      complexNormalizationSupported: preview.complexNormalizationSupported,
-      complexNormalizationAlias: preview.complexNormalizationSupported
-        ? "1  deadbeef:ᾷ͂/public.py"
-        : null,
-      caseCollision: null,
-      exactCaseCollision: null,
-      historicalAlias:
-        preview.caseAlias === null ? null : "1  deadbeef:src/public.py",
-      historicalNormalizationAlias: preview.normalizationSupported
-        ? "1  deadbeef:café/public.py"
-        : null,
-      nestedTarget: "1  deadbeef:ScopedTarget/private.py",
-      missingGit: null,
-      caseSensitiveCollision: null,
-      missingCaseSibling: null,
-      missingUnicodeAlias: null,
-      mixedCaseFilesystem: null,
-      unauthenticatedCommittedAlias: null,
-      replacedDirectory: "1  deadbeef:src/public.py",
-      replacedScopeAncestor:
-        "1  deadbeef:historical-parent/selected/finding.py",
-      inaccessibleScope: null,
-      manyScopes: "1  deadbeef:src/public.py",
-      manyLocations: { excerpt: "1  deadbeef:src/public.py", resolved: 3 },
-      linkedCaseCollision: preview.caseAlias === null ? null : false,
-      linkedAlias: process.platform === "win32" ? null : false,
-      selectedFileDescendant: null,
-      removedFileScope: null,
-      legacyExistingFileScope: null,
-      legacyRemovedFileScope: null,
-      dirtySnapshot: null,
-      hardLink: null,
-      fallback: "1  deadbeef:src/public.py",
-      rootControl: "1  deadbeef:src/public.py",
-      offlineGit: true,
+      escaped: null,
+      legacyScoped: null,
+      legacyRoot: "1  private source",
+      legacyKnownDirectory: "1  public source",
+      legacyKnownFile: "1  selected file",
+      legacyFileDescendant: null,
+      emptyAuthority: null,
+      dirty: null,
+      fallback: "1  public source",
+      rootControl: "1  public source",
+      replacedFile: "1  selected file",
+      replacedFileDescendant: null,
+      removedDirectory: "1  nested source",
+      offline: "1  public source",
+      missingObject: null,
     });
-    if (preview.caseAlias !== null) {
-      expect(preview.caseAlias).toBe("1  deadbeef:src/public.py");
-    }
   });
 
-  test("does not use linked entries as evidence of case-insensitive paths", () => {
-    const python =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(python).not.toBeNull();
-    const program = [
-      "import json, stat, sys, tempfile",
-      "from contextlib import nullcontext",
-      "from pathlib import Path",
-      "from types import SimpleNamespace",
-      "from unittest.mock import patch",
-      "sys.path.insert(0, sys.argv[1])",
-      "import workbench_source_excerpt as excerpts",
-      "with tempfile.TemporaryDirectory() as directory:",
-      "    target = Path(directory).resolve()",
-      "    def probe(kind):",
-      "        names = ['Probe', 'probe'] if kind == 'distinct' else ['Probe']",
-      "        entries = [SimpleNamespace(name=name, path=str(target / name)) for name in names]",
-      "        def metadata(path, *args, **kwargs):",
-      "            mode = stat.S_IFLNK if kind == 'symlink' and path.name == 'probe' else stat.S_IFREG",
-      "            return SimpleNamespace(st_mode=mode, st_nlink=2 if kind == 'hardlink' else 1, st_file_attributes=0x400 if kind == 'reparse' and path.name == 'probe' else 0)",
-      "        def samefile(path, other):",
-      "            if path.name in {'SECRET.py', 'secret.py'}: raise FileNotFoundError",
-      "            return {path.name, Path(other).name} == {'Probe', 'probe'}",
-      "        with patch.object(Path, 'is_symlink', return_value=False), patch.object(Path, 'lstat', metadata), patch.object(Path, 'samefile', samefile), patch.object(excerpts.os, 'scandir', side_effect=lambda _: nullcontext(entries)), patch.object(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400, create=True):",
-      "            return excerpts.filesystem_case_alias(target, target / 'SECRET.py', target / 'secret.py')",
-      "    print(json.dumps({kind: probe(kind) for kind in ['regular', 'symlink', 'hardlink', 'distinct', 'reparse']}))",
-    ].join("\n");
-    const result = Bun.spawnSync(
-      [python!, "-I", "-B", "-c", program, join(PLUGIN_ROOT, "scripts")],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
-    expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
-      regular: true,
-      symlink: false,
+  test("keeps captured filesystem aliases usable after their source paths disappear", () => {
+    expect(sourceScopeProbe("aliases")).toEqual({
+      case: expect.any(Boolean),
+      unicode: expect.any(Boolean),
+      nonAscii: expect.any(Boolean),
+      collisionChecked: true,
+    });
+  });
+
+  test("does not treat links or reparse points as filesystem alias evidence", () => {
+    expect(sourceScopeProbe("alias_evidence")).toEqual({
+      ordinary: true,
       hardlink: false,
-      distinct: false,
+      symlink: false,
       reparse: false,
+    });
+  });
+
+  test("keeps subdirectory and linked-worktree targets bound to their selected tree", () => {
+    expect(sourceScopeProbe("worktrees")).toEqual({
+      subdirectoryBound: true,
+      linkedWorktreeBound: true,
+    });
+  });
+
+  test("records source authority through every scan-start path without changing launch recipes", () => {
+    expect(sourceScopeProbe("writers")).toEqual({
+      writers: 4,
+      nativeRecipesUnchanged: true,
+      cliRecipeUnchanged: true,
+    });
+  });
+
+  test("preserves legacy scans and separately owned migration history", () => {
+    expect(sourceScopeProbe("migration")).toEqual({
+      legacyAuthorityUnset: true,
+      otherMigrationsPreserved: true,
+      conflictRejected: true,
     });
   });
 

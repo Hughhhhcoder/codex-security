@@ -188,6 +188,7 @@ describe("persisted finding publication associations", () => {
         version: 30,
         name: "preserve team-only finding publication associations",
       },
+      { version: 34, name: "persist authorized source excerpt scopes" },
     ]);
     expect(
       databaseRows(
