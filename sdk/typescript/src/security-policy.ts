@@ -101,6 +101,7 @@ const manifestSchema = z.object({
   createdAt: z.string(),
   revision: z.string().nullable(),
   previousPolicySha256: z.string().nullable(),
+  inheritedPolicySha256: z.string(),
   model: z.string(),
   reasoningEffort: z.string(),
   pluginVersion: z.string(),
@@ -110,13 +111,19 @@ const manifestSchema = z.object({
 
 type PolicyManifest = z.infer<typeof manifestSchema>;
 
-export interface SecurityPolicyDraft extends SecurityPolicyTarget {
+export interface SecurityPolicySnapshot {
+  previousContent: string | null;
+  inheritedPolicySha256: string;
+}
+
+export interface SecurityPolicyDraft
+  extends SecurityPolicyTarget,
+    SecurityPolicySnapshot {
   outputDir: string;
   draftPath: string;
   specificationPath: string;
   threatModelPath: string;
   content: string;
-  previousContent: string | null;
   customPlugin: boolean;
   // Only an explicit in-memory selection can choose executable plugin code.
   pluginPath?: string;
@@ -209,6 +216,62 @@ async function readPolicyFile(path: string): Promise<string> {
   }
 }
 
+export async function readSecurityPolicySnapshot(
+  target: SecurityPolicyTarget,
+  signal?: AbortSignal,
+): Promise<SecurityPolicySnapshot> {
+  // Previewing a saved draft does not need to start the policy resolver.
+  const inherited: [string, string][] = [];
+  let directory = target.repository;
+  for (const part of target.scope === "." ? [] : target.scope.split("/")) {
+    signal?.throwIfAborted();
+    const path = join(directory, "SECURITY.md");
+    const metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (metadata?.isFile()) {
+      // Inherited policies may link to another file inside the repository.
+      const normalized = await normalizeTarget(
+        target.repository,
+        [path],
+        signal,
+      );
+      const content = await readPolicyFile(
+        join(target.repository, normalized.paths[0]!),
+      );
+      inherited.push([
+        relative(target.repository, path).split(sep).join("/"),
+        digest(content),
+      ]);
+    }
+    directory = join(directory, part);
+  }
+  signal?.throwIfAborted();
+  return {
+    previousContent: await readSecurityPolicy(target.targetPath),
+    inheritedPolicySha256: digest(JSON.stringify(inherited)),
+  };
+}
+
+export async function requireUnchangedSecurityPolicy(
+  target: SecurityPolicyTarget,
+  snapshot: SecurityPolicySnapshot,
+  signal?: AbortSignal,
+): Promise<void> {
+  const current = await readSecurityPolicySnapshot(target, signal);
+  if (current.previousContent !== snapshot.previousContent) {
+    throw new CodexSecurityError(
+      "SECURITY.md changed after its contents were read. Reconcile the changes and generate a new draft before writing.",
+    );
+  }
+  if (current.inheritedPolicySha256 !== snapshot.inheritedPolicySha256) {
+    throw new CodexSecurityError(
+      "An inherited SECURITY.md changed after the policy guidance was read. Generate a new draft before writing.",
+    );
+  }
+}
+
 export async function resolveSecurityPolicyGuidance(
   target: SecurityPolicyTarget,
   python: string,
@@ -235,6 +298,7 @@ export async function resolveSecurityPolicyGuidance(
 
 export async function runSecurityPolicyStages(options: {
   target: SecurityPolicyTarget;
+  snapshot: SecurityPolicySnapshot;
   outputDir: string;
   pluginRoot: string;
   pluginPath?: string;
@@ -254,7 +318,7 @@ export async function runSecurityPolicyStages(options: {
   cost(): Readonly<ScanCost> | null;
 }): Promise<SecurityPolicyDraft> {
   const { target, outputDir, signal } = options;
-  const previousContent = await readSecurityPolicy(target.targetPath);
+  const { previousContent, inheritedPolicySha256 } = options.snapshot;
   await writeFile(join(outputDir, ORIGINAL_NAME), previousContent ?? "", {
     flag: "wx",
     mode: 0o600,
@@ -384,6 +448,7 @@ export async function runSecurityPolicyStages(options: {
     revision: options.revision,
     previousPolicySha256:
       previousContent === null ? null : digest(previousContent),
+    inheritedPolicySha256,
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     pluginVersion: options.pluginVersion,
@@ -407,6 +472,7 @@ export async function runSecurityPolicyStages(options: {
     threatModelPath,
     content: policy.markdown,
     previousContent,
+    inheritedPolicySha256,
     customPlugin: manifest.customPlugin,
     ...(options.pluginPath === undefined
       ? {}
@@ -462,6 +528,7 @@ export async function loadSecurityPolicyDraft(
     threatModelPath: await file("THREAT_MODEL.md"),
     content,
     previousContent: manifest.previousPolicySha256 === null ? null : original,
+    inheritedPolicySha256: manifest.inheritedPolicySha256,
     customPlugin: manifest.customPlugin,
     reviewNotes: manifest.reviewNotes,
     cost: null,
@@ -593,14 +660,13 @@ export async function applySecurityPolicy(
         });
         if (
           (await realpath(dirname(target.targetPath))) !==
-            dirname(target.targetPath) ||
-          (await readSecurityPolicy(target.targetPath)) !==
-            draft.previousContent
+          dirname(target.targetPath)
         ) {
           throw new CodexSecurityError(
             "The security-policy destination changed. Review a new draft before writing.",
           );
         }
+        await requireUnchangedSecurityPolicy(target, draft, options.signal);
         options.signal?.throwIfAborted();
         if (draft.previousContent === null)
           await installFileNoClobber(temporary, target.targetPath);
@@ -642,6 +708,10 @@ export async function applySecurityPolicy(
         pluginRoot,
         options.environment,
       );
+      await requireUnchangedSecurityPolicy(target, {
+        previousContent: draft.content,
+        inheritedPolicySha256: draft.inheritedPolicySha256,
+      });
     } catch (error) {
       if (written)
         throw new SecurityPolicyVerificationError(target.targetPath, {
@@ -739,11 +809,7 @@ async function unchangedPolicyTarget(
       "The security-policy destination changed. Review a new draft before writing.",
     );
   }
-  if ((await readSecurityPolicy(target.targetPath)) !== draft.previousContent) {
-    throw new CodexSecurityError(
-      "SECURITY.md changed after this draft was generated. Reconcile the changes and generate a new draft before writing.",
-    );
-  }
+  await requireUnchangedSecurityPolicy(target, draft, signal);
   return target;
 }
 
@@ -786,10 +852,12 @@ function decodePolicyText(bytes: Uint8Array, path: string): string {
 }
 
 function diffLabel(path: string): string {
-  if (!/[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069"\\]/u.test(path))
+  if (
+    !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}"\\]/u.test(path)
+  )
     return path;
   return JSON.stringify(path).replaceAll(
-    /[\u007f-\u009f\u2028-\u202e\u2066-\u2069]/gu,
+    /[\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu,
     (character) =>
       `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );

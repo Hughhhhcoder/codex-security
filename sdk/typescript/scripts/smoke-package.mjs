@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   cp,
@@ -461,6 +462,7 @@ try {
       createdAt: "2026-01-01T00:00:00.000Z",
       revision: null,
       previousPolicySha256: null,
+      inheritedPolicySha256: createHash("sha256").update("[]").digest("hex"),
       model: "synthetic-model",
       reasoningEffort: "high",
       pluginVersion: packageManifest.version,

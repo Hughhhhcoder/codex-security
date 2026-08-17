@@ -245,9 +245,10 @@ npx @openai/codex-security policy . --path services/api \
 `--apply` loads the saved draft without starting Codex. Omit `--write` to review
 and confirm interactively. `--write` is available only with `--apply`, so a
 noninteractive write always selects an existing draft. The repository and
-component must match the draft, and the original `SECURITY.md` must be unchanged.
-The command writes the reviewed bytes and verifies that the policy resolver can
-read them. It does not stage, commit, or publish anything.
+component must match the draft. The original `SECURITY.md` and all inherited
+policies must be unchanged. The command writes the reviewed bytes and verifies
+that the policy resolver can read them. It does not stage, commit, or publish
+anything.
 
 An update keeps the previous file so an editor with an old file handle cannot
 lose a late save. The command tries to move it into the private artifact
@@ -277,7 +278,7 @@ The artifact directory contains:
 | `THREAT_MODEL.md`      | Detailed, source-backed threat model.                     |
 | `project-spec.md`      | Architecture and security-boundary evidence.              |
 | `previous-SECURITY.md` | Original policy used for review and overwrite protection. |
-| `policy-draft.json`    | Target, revision, model, and review metadata.             |
+| `policy-draft.json`    | Target, policy hashes, revision, model, and review notes. |
 
 After an update, `recovery-SECURITY-*.md` files can also contain retained previous
 policies. They are not removed automatically.

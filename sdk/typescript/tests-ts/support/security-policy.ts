@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  readSecurityPolicySnapshot,
   resolveSecurityPolicyTarget,
   runSecurityPolicyStages,
   type SecurityPolicyDraft,
@@ -62,9 +63,14 @@ export async function policyFixture(): Promise<{
     root,
     repository,
     outputDir,
-    generate: async (options = {}) =>
-      runSecurityPolicyStages({
-        target: await resolveSecurityPolicyTarget(repository, options.path),
+    generate: async (options = {}) => {
+      const target = await resolveSecurityPolicyTarget(
+        repository,
+        options.path,
+      );
+      return await runSecurityPolicyStages({
+        target,
+        snapshot: await readSecurityPolicySnapshot(target, options.signal),
         outputDir,
         pluginRoot: PLUGIN_ROOT,
         pluginPath: options.pluginPath,
@@ -77,7 +83,8 @@ export async function policyFixture(): Promise<{
         run: options.run ?? (async (stage) => stageResult(stage)),
         answerQuestions: options.answerQuestions,
         cost: () => null,
-      }),
+      });
+    },
     cleanup: async () => rm(root, { recursive: true, force: true }),
   };
 }

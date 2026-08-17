@@ -502,6 +502,37 @@ describe("security policy review and application", () => {
     expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
   });
 
+  test("rechecks the reviewed bytes after the resolver returns", async () => {
+    for (const change of ["remove", "replace"] as const) {
+      const f = await fixture();
+      const original = "# Original policy\n";
+      await writeFile(join(f.repository, "SECURITY.md"), original);
+      const pluginPath = await policyPlugin(
+        f.root,
+        [
+          "import pathlib, sys",
+          "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+          "target = root / 'SECURITY.md'",
+          `if target.read_text() == ${JSON.stringify(POLICY)}:`,
+          change === "remove"
+            ? "    target.unlink()"
+            : "    target.write_text('# Concurrent policy\\n')",
+          "print('resolver accepted the current policy chain')",
+        ].join("\n"),
+      );
+      const draft = await f.generate({ pluginPath });
+      const error = await applySecurityPolicy(draft).catch(
+        (value: unknown) => value,
+      );
+      expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
+      const recovery = error as SecurityPolicyVerificationError;
+      expect(await readFile(recovery.recoveryPath!, "utf8")).toBe(original);
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(
+        change === "remove" ? null : "# Concurrent policy\n",
+      );
+    }
+  });
+
   test("creates policies without hard-link support and never clobbers a racing file", async () => {
     const name =
       "creates policies without hard-link support and never clobbers a racing file";
@@ -1010,6 +1041,21 @@ describe("security policy review and application", () => {
     },
   );
 
+  test("escapes every Unicode direction control in diff labels", async () => {
+    const f = await fixture();
+    const controls =
+      "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
+    const scope = `component${controls}name`;
+    await mkdir(join(f.repository, scope));
+    const draft = await f.generate({ path: scope });
+    const diff = await securityPolicyDiff(draft, PYTHON);
+    expect(diff).not.toMatch(/\p{Bidi_Control}/u);
+    for (const character of controls)
+      expect(diff).toContain(
+        `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      );
+  });
+
   test("checks source freshness even for an unchanged draft", async () => {
     const f = await fixture();
     await writeFile(join(f.repository, "SECURITY.md"), POLICY);
@@ -1023,6 +1069,98 @@ describe("security policy review and application", () => {
       "changed after",
     );
     await expect(applySecurityPolicy(draft)).rejects.toThrow("changed after");
+  });
+
+  test("invalidates saved component drafts when inherited policies change", async () => {
+    for (const change of ["edit", "add", "remove"] as const) {
+      const f = await fixture();
+      const component = join(f.repository, "services", "api");
+      const rootPolicy = join(f.repository, "SECURITY.md");
+      await mkdir(component, { recursive: true });
+      await writeFile(rootPolicy, "# Root policy\n");
+      if (change === "edit")
+        await writeFile(join(component, "SECURITY.md"), POLICY);
+      const generated = await f.generate({ path: "services/api" });
+      const draft = await loadSecurityPolicyDraft(f.repository, f.outputDir, {
+        path: "services/api",
+      });
+      expect(draft.inheritedPolicySha256).toBe(generated.inheritedPolicySha256);
+      if (change === "edit") await writeFile(rootPolicy, "# New root policy\n");
+      else if (change === "add")
+        await writeFile(
+          join(f.repository, "services", "SECURITY.md"),
+          "# New intermediate policy\n",
+        );
+      else await rm(rootPolicy);
+      await expect(securityPolicyDiff(draft, "missing-python")).rejects.toThrow(
+        "inherited SECURITY.md changed",
+      );
+      await expect(
+        applySecurityPolicy(draft, { pythonPath: "missing-python" }),
+      ).rejects.toThrow("inherited SECURITY.md changed");
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(
+        draft.previousContent,
+      );
+    }
+  });
+
+  test("tracks safe inherited policy links and rejects outside links", async () => {
+    const f = await fixture();
+    const linkedPolicy = join(f.repository, "owner-policy.md");
+    await mkdir(join(f.repository, "component"));
+    await writeFile(linkedPolicy, "# Owner policy\n");
+    await symlink(linkedPolicy, join(f.repository, "SECURITY.md"), "file");
+    const draft = await f.generate({ path: "component" });
+    expect(await securityPolicyDiff(draft, PYTHON)).toContain(
+      "b/component/SECURITY.md",
+    );
+    await writeFile(linkedPolicy, "# Changed owner policy\n");
+    await expect(applySecurityPolicy(draft)).rejects.toThrow(
+      "inherited SECURITY.md changed",
+    );
+
+    const outside = await fixture();
+    await mkdir(join(outside.repository, "component"));
+    const outsidePolicy = join(outside.root, "outside-policy.md");
+    await writeFile(outsidePolicy, "# Outside policy\n");
+    await symlink(
+      outsidePolicy,
+      join(outside.repository, "SECURITY.md"),
+      "file",
+    );
+    await expect(outside.generate({ path: "component" })).rejects.toThrow(
+      "outside the repository",
+    );
+    expect(await readdir(outside.outputDir)).toEqual([]);
+  });
+
+  test("checks inherited policies around application and verification", async () => {
+    for (const timing of ["before", "after"] as const) {
+      const f = await fixture();
+      await mkdir(join(f.repository, "component"));
+      await writeFile(join(f.repository, "SECURITY.md"), "# Root policy\n");
+      const pluginPath = await policyPlugin(
+        f.root,
+        [
+          "import pathlib, sys",
+          "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+          "target = root / 'component' / 'SECURITY.md'",
+          `if ${timing === "before" ? "not " : ""}target.exists():`,
+          "    (root / 'SECURITY.md').write_text('# New root policy\\n')",
+          "print('resolver accepted the current policy chain')",
+        ].join("\n"),
+      );
+      const draft = await f.generate({ path: "component", pluginPath });
+      const error = await applySecurityPolicy(draft).catch(
+        (value: unknown) => value,
+      );
+      if (timing === "before")
+        expect(String(error)).toContain("inherited SECURITY.md changed");
+      else expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(
+        timing === "before" ? null : POLICY,
+      );
+    }
   });
 
   test("honors cancellation before applying a draft", async () => {

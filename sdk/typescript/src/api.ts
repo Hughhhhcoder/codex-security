@@ -78,6 +78,8 @@ import {
 } from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import {
+  readSecurityPolicySnapshot,
+  requireUnchangedSecurityPolicy,
   resolveSecurityPolicyGuidance,
   resolveSecurityPolicyTarget,
   runSecurityPolicyStages,
@@ -594,6 +596,7 @@ export class CodexSecurity {
         options.onObserverError,
         outputDir,
       );
+      const snapshot = await readSecurityPolicySnapshot(target, signal);
       const guidance = await resolveSecurityPolicyGuidance(
         target,
         python,
@@ -601,6 +604,7 @@ export class CodexSecurity {
         session.scanEnvironment,
         signal,
       );
+      await requireUnchangedSecurityPolicy(target, snapshot, signal);
       const { codex } = this.#createSessionCodex(
         session,
         {
@@ -734,6 +738,7 @@ export class CodexSecurity {
       };
       return await runSecurityPolicyStages({
         target,
+        snapshot,
         outputDir,
         guidance,
         pluginRoot: runtime.plugin.pluginRoot,

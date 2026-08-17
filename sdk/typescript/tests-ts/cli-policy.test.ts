@@ -717,22 +717,29 @@ describe("policy CLI", () => {
 
   test("renders terminal controls visibly without changing reviewed bytes", async () => {
     const f = await fixture();
-    const draft = await f.generate();
-    const controlled = `${POLICY}\nLiteral \u001b[2J text.\u202e\n`;
+    const controls =
+      "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069";
+    const scope = `component${controls}name`;
+    await mkdir(join(f.repository, scope));
+    const draft = await f.generate({ path: scope });
+    const controlled = `${POLICY}\nLiteral \u001b[2J text.${controls}\n`;
     await writeFile(draft.draftPath, controlled);
     const stderr = capture();
     expect(
       await main(
-        ["policy", "--apply", f.outputDir, "--write"],
+        ["policy", "--path", scope, "--apply", f.outputDir, "--write"],
         capture().stream,
         stderr.stream,
         policyDependencies(f),
       ),
     ).toBe(0);
     expect(stderr.text()).not.toContain("\u001b");
-    expect(stderr.text()).not.toContain("\u202e");
+    expect(stderr.text()).not.toMatch(/\p{Bidi_Control}/u);
     expect(stderr.text()).toContain("\\u001b[2J");
-    expect(stderr.text()).toContain("\\u202e");
+    for (const character of controls)
+      expect(stderr.text()).toContain(
+        `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      );
     expect(await readFile(draft.targetPath, "utf8")).toBe(controlled);
   });
 

@@ -8,13 +8,18 @@ import type {
 } from "@openai/codex-sdk";
 import Ajv, { type AnySchema } from "ajv";
 import { afterEach, describe, expect, test } from "bun:test";
-import { CodexSecurity, type SecurityPolicyStage } from "../src/index.js";
+import {
+  CodexSecurity,
+  securityPolicyDiff,
+  type SecurityPolicyStage,
+} from "../src/index.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
   PYTHON,
   policyFixture,
+  policyPlugin,
   stageResult,
 } from "./support/security-policy.js";
 
@@ -35,6 +40,7 @@ async function setup(
       signal: AbortSignal,
     ) => AsyncGenerator<ThreadEvent>;
     onPrepare?: () => void;
+    onRevision?: () => Promise<void>;
     surface?: "cli" | "sdk";
     config?: Record<string, unknown>;
   } = {},
@@ -62,7 +68,10 @@ async function setup(
         return runtime;
       },
       resolvePluginPython: async () => PYTHON,
-      repositoryRevision: async () => "synthetic-revision",
+      repositoryRevision: async () => {
+        await options.onRevision?.();
+        return "synthetic-revision";
+      },
       runWorkbench: async () => {
         throw new Error("Policy generation must not register a scan.");
       },
@@ -205,6 +214,74 @@ describe("CodexSecurity policy API", () => {
     expect(await readFile(result.draftPath, "utf8")).toBe(POLICY);
     expect(await readFile(result.targetPath, "utf8")).toContain(
       "Keep the reporting channel.",
+    );
+    await f.security.close();
+  });
+
+  test("rejects policy changes made while resolving generation guidance", async () => {
+    for (const scope of [".", "component"]) {
+      const f = await setup();
+      await mkdir(join(f.repository, "component"));
+      await writeFile(join(f.repository, "SECURITY.md"), "# Original policy\n");
+      const pluginRoot = await policyPlugin(
+        f.root,
+        [
+          "import pathlib, sys",
+          "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+          "policy = root / 'SECURITY.md'",
+          "previous = policy.read_text()",
+          "policy.write_text('# Concurrent policy\\n')",
+          "print(previous)",
+        ].join("\n"),
+      );
+      for (const name of [
+        "references/threat-model.md",
+        "references/security-guidance.md",
+        "skills/define-security-policy/SKILL.md",
+      ]) {
+        const path = join(pluginRoot, name);
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, "Synthetic policy guidance.\n");
+      }
+      f.runtime["plugin"] = {
+        ...(f.runtime["plugin"] as Record<string, unknown>),
+        pluginRoot,
+      };
+      await expect(
+        f.security.generatePolicy(f.repository, {
+          path: scope,
+          outputDir: f.outputDir,
+        }),
+      ).rejects.toThrow("changed after");
+      expect(f.threads).toHaveLength(0);
+      expect(await readFile(join(f.repository, "SECURITY.md"), "utf8")).toBe(
+        "# Concurrent policy\n",
+      );
+      expect(await readdir(f.outputDir)).not.toContain("policy-draft.json");
+      await f.security.close();
+    }
+  });
+
+  test("keeps the original checkpoint when a policy changes after guidance resolution", async () => {
+    let targetPath = "";
+    const f = await setup({
+      onRevision: async () => {
+        await writeFile(targetPath, "# Concurrent policy\n");
+      },
+    });
+    targetPath = join(f.repository, "SECURITY.md");
+    const original = "# Original policy\n";
+    await writeFile(targetPath, original);
+    const draft = await f.security.generatePolicy(f.repository, {
+      outputDir: f.outputDir,
+    });
+    expect(draft.previousContent).toBe(original);
+    expect(f.prompts[0]).toContain(original.trim());
+    expect(
+      await readFile(join(f.outputDir, "previous-SECURITY.md"), "utf8"),
+    ).toBe(original);
+    await expect(securityPolicyDiff(draft, PYTHON)).rejects.toThrow(
+      "changed after",
     );
     await f.security.close();
   });

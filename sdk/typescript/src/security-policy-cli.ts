@@ -302,8 +302,8 @@ export async function runPolicyCommand(
 function display(value: string, multiline = false): string {
   return value.replaceAll(
     multiline
-      ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/gu
-      : /[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/gu,
+      ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu
+      : /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu,
     (character) =>
       `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );

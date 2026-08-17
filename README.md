@@ -105,10 +105,11 @@ npx @openai/codex-security policy . --apply /path/outside/repository/policy --wr
 
 Use the same repository and `--path` when applying a component draft. Applying
 does not call the model, and it checks for changes since generation before
-writing. `--write` requires a previously generated `--apply` draft. If you
-generated with a custom `--plugin-path`, select that plugin again when applying
-a saved draft. Updates keep the previous file at the reported recovery path;
-remove it only after other writers have closed it and any edits are reconciled.
+writing, including changes to inherited policies. `--write` requires a previously
+generated `--apply` draft. If you generated with a custom `--plugin-path`, select
+that plugin again when applying a saved draft. Updates keep the previous file at
+the reported recovery path; remove it only after other writers have closed it
+and any edits are reconciled.
 
 The private artifact directory also contains `project-spec.md` and
 `THREAT_MODEL.md`. Review these detailed documents before sharing them; only the
