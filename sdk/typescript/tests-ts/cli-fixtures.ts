@@ -190,7 +190,8 @@ export function dependencies(
     onRun?: () => void;
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
-    onCodex?: (args: readonly string[]) => number;
+    onCodex?: (...args: Parameters<MainDependencies["runCodex"]>) => number;
+    linearClient?: MainDependencies["linearClient"];
     bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
@@ -253,8 +254,11 @@ export function dependencies(
       signals.remove(signal, listener),
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
-    runCodex: async (args) => options.onCodex?.(args) ?? 0,
+    runCodex: async (...args) => options.onCodex?.(...args) ?? 0,
     ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
+    ...(options.linearClient === undefined
+      ? {}
+      : { linearClient: options.linearClient }),
     runWorkbench: async (args) =>
       (await options.onWorkbench?.(args)) ?? { scans: [] },
     matchFindings: async (input) =>
