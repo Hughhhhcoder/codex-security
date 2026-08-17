@@ -233,7 +233,9 @@ use. Set `--auth chatgpt` or `--auth api-key` to choose explicitly.
 ### Review the draft
 
 The command never changes repository files. Review the saved `SECURITY.md`
-before copying it to the reported target path. Preserve existing reporting
+before copying it to the reported target path. Check whether another policy,
+such as `.github/SECURITY.md` or `docs/SECURITY.md`, links to that target; a
+manual copy can change the linked policy too. Preserve existing reporting
 instructions and obtain owner approval for exclusions, accepted risks, and
 severity decisions. Later scans read the approved policy.
 
