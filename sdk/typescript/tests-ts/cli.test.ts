@@ -194,7 +194,7 @@ describe("CLI", () => {
     expect(manifest.text()).toContain("codex-security bulk-scan [input]");
     expect(manifest.text()).toContain("codex-security export [scanDir]");
     expect(manifest.text()).toContain("codex-security validate <findings...>");
-    expect(manifest.text()).toContain("codex-security patch <issues...>");
+    expect(manifest.text()).toContain("codex-security patch [issues...]");
     expect(manifest.text()).toContain(
       "codex-security findings false-positive <occurrenceId>",
     );
@@ -1762,6 +1762,44 @@ describe("CLI", () => {
     }
   });
 
+  test.each([false, true])(
+    "subscribes to session details only with TTY stdin: %s",
+    async (stdinTTY) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        process.stdin,
+        "isTTY",
+      );
+      const stderr = capture(true);
+      let subscribed = false;
+      try {
+        Object.defineProperty(process.stdin, "isTTY", {
+          configurable: true,
+          value: stdinTTY,
+        });
+        const code = await main(
+          ["scan", "."],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            onTurn: (_repository, options) => {
+              subscribed =
+                typeof (options as ScanOptions).onSessionEvent === "function";
+            },
+          }),
+        );
+        expect(code).toBe(0);
+        expect(stderr.text()).toContain("CODEX SECURITY");
+        expect(subscribed).toBe(stdinTTY);
+      } finally {
+        if (descriptor === undefined) {
+          Reflect.deleteProperty(process.stdin, "isTTY");
+        } else {
+          Object.defineProperty(process.stdin, "isTTY", descriptor);
+        }
+      }
+    },
+  );
+
   test("uses plain scan progress in headless, CI, and noninteractive terminals", async () => {
     for (const { options, environment, isTTY } of [
       { options: ["--headless"], environment: {}, isTTY: true },
@@ -2688,7 +2726,10 @@ describe("CLI", () => {
       [["export", "scan-a", "scan-b"], "Unexpected positional"],
       [["validate"], "findings..."],
       [["validate", ""], "A finding must not be empty"],
-      [["patch"], "issues..."],
+      [
+        ["patch"],
+        "Patch requires an issue, --linear-issue, or --linear-project.",
+      ],
       [["patch", ""], "An issue must not be empty"],
       [
         ["export", "scan", "--output", "--source-root", "repo"],

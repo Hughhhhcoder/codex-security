@@ -18,6 +18,13 @@ export interface ScanCost {
   estimatedUsd: number;
 }
 
+export interface ScanSessionEvent {
+  threadId: string;
+  parentThreadId: string | null;
+  worker?: number;
+  event: Record<string, unknown>;
+}
+
 type ModelPricing = readonly [
   input: number,
   cachedInput: number,
@@ -65,6 +72,7 @@ interface SessionUsage {
   prose: Set<string>;
   reasoning: SessionReasoning | null;
   reasoningCount: number;
+  events?: Record<string, unknown>[];
 }
 
 interface ScanCostTrackerOptions {
@@ -77,6 +85,7 @@ interface ScanCostTrackerOptions {
   onCost?: (cost: Readonly<ScanCost>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
+  onSessionEvent?: (event: ScanSessionEvent) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -103,6 +112,34 @@ const MODEL_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> = {
 
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
+
+function createSessionUsage(): SessionUsage {
+  return {
+    offset: 0,
+    pendingLine: [],
+    pendingLineBytes: 0,
+    unreadable: null,
+    threadId: null,
+    parentThreadId: null,
+    workingDirectory: null,
+    startedAt: null,
+    inheritedUsage: null,
+    previousRawUsage: null,
+    accumulatedOwnUsage: null,
+    replaying: false,
+    accounting: null,
+    accountingError: null,
+    taskCompleted: false,
+    calls: new Map(),
+    activities: [],
+    progress: [],
+    filesCompleted: 0,
+    filesTotal: null,
+    prose: new Set(),
+    reasoning: null,
+    reasoningCount: 0,
+  };
+}
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
@@ -144,7 +181,8 @@ export class ScanCostTracker {
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
       this.#options.onActivity === undefined &&
-      this.#options.onProgress === undefined
+      this.#options.onProgress === undefined &&
+      this.#options.onSessionEvent === undefined
     ) {
       return;
     }
@@ -279,31 +317,7 @@ export class ScanCostTracker {
     )) {
       let session = this.#sessions.get(path);
       if (session === undefined) {
-        session = {
-          offset: 0,
-          pendingLine: [],
-          pendingLineBytes: 0,
-          unreadable: null,
-          threadId: null,
-          parentThreadId: null,
-          workingDirectory: null,
-          startedAt: null,
-          inheritedUsage: null,
-          previousRawUsage: null,
-          accumulatedOwnUsage: null,
-          replaying: false,
-          accounting: null,
-          accountingError: null,
-          taskCompleted: false,
-          calls: new Map(),
-          activities: [],
-          progress: [],
-          filesCompleted: 0,
-          filesTotal: null,
-          prose: new Set(),
-          reasoning: null,
-          reasoningCount: 0,
-        };
+        session = createSessionUsage();
         this.#sessions.set(path, session);
       }
       try {
@@ -469,8 +483,9 @@ export class ScanCostTracker {
       unverified: hasUnverifiedWorkerAttribution,
       unfinishedWorkers: false,
     };
-    for (const session of this.#sessions.values()) {
+    for (const [path, session] of this.#sessions) {
       if (session.threadId !== null && included.has(session.threadId)) {
+        await this.#reportSessionEvents(path, session);
         if (
           this.#options.maxCostUsd !== undefined &&
           session.accountingError !== null
@@ -495,8 +510,6 @@ export class ScanCostTracker {
             observed.workers = addTokenUsage(observed.workers, usage);
           }
           if (!session.taskCompleted) observed.unfinishedWorkers = true;
-          this.#reportWorkerActivities(session);
-          this.#reportWorkerProgress(session);
         }
       }
     }
@@ -527,22 +540,55 @@ export class ScanCostTracker {
     }
   }
 
-  #reportWorkerActivities(session: SessionUsage): void {
-    if (this.#options.onActivity === undefined || session.threadId === null) {
-      return;
+  async #reportSessionEvents(
+    path: string,
+    session: SessionUsage,
+  ): Promise<void> {
+    const threadId = session.threadId;
+    if (threadId === null) return;
+    if (
+      this.#options.onSessionEvent !== undefined &&
+      session.events === undefined
+    ) {
+      const replay = createSessionUsage();
+      replay.events = [];
+      try {
+        // Replay only bytes already accounted for, without replacing cost state.
+        await readSessionUsage(
+          path,
+          replay,
+          this.#options.model,
+          this.#options.repository,
+          false,
+          session.offset,
+        );
+      } catch {
+        // Detail replay is optional. The accounting reader retains its own errors.
+      }
+      session.events = replay.threadId === threadId ? replay.events : [];
     }
-    let worker = this.#workers.get(session.threadId);
-    if (worker === undefined) {
-      worker = this.#workers.size + 1;
-      this.#workers.set(session.threadId, worker);
+    let worker: number | undefined;
+    if (threadId !== this.#threadId) {
+      worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
+      this.#workers.set(threadId, worker);
     }
+    for (const event of session.events?.splice(0) ?? []) {
+      this.#options.onSessionEvent?.({
+        threadId,
+        parentThreadId: session.parentThreadId,
+        worker,
+        event,
+      });
+    }
+    if (worker === undefined) return;
     for (const activity of session.activities.splice(0)) {
-      this.#options.onActivity({
+      this.#options.onActivity?.({
         ...activity,
-        id: `${session.threadId}:${activity.id}`,
+        id: `${threadId}:${activity.id}`,
         worker,
       });
     }
+    this.#reportWorkerProgress(session);
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -616,6 +662,7 @@ async function readSessionUsage(
   model: string,
   repository?: string,
   requireReadableSessions = false,
+  endOffset?: number,
 ): Promise<boolean> {
   if (session.unreadable !== null) {
     if (requireReadableSessions) throw session.unreadable.error;
@@ -634,12 +681,12 @@ async function readSessionUsage(
   try {
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
     while (true) {
-      const { bytesRead } = await file.read(
-        buffer,
-        0,
-        buffer.length,
-        session.offset,
-      );
+      const length =
+        endOffset === undefined
+          ? buffer.length
+          : Math.min(buffer.length, endOffset - session.offset);
+      if (length <= 0) return true;
+      const { bytesRead } = await file.read(buffer, 0, length, session.offset);
       if (bytesRead === 0) return true;
       session.offset += bytesRead;
       try {
@@ -727,6 +774,7 @@ function readSessionEvent(
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
       session.taskCompleted = false;
+      if (!session.replaying) session.events?.push(event);
       return;
     }
     if (typeof payload["id"] === "string") {
@@ -748,6 +796,7 @@ function readSessionEvent(
       payload["parent_thread_id"] ??
       (isRecord(spawn) ? spawn["parent_thread_id"] : undefined);
     if (typeof parent === "string") session.parentThreadId = parent;
+    session.events?.push(event);
     return;
   }
   if (session.replaying) {
@@ -767,9 +816,11 @@ function readSessionEvent(
     ) {
       session.replaying = false;
       session.taskCompleted = false;
+      session.events?.push(event);
     }
     return;
   }
+  session.events?.push(event);
   if (event["type"] === "event_msg") {
     if (payload["type"] === "task_started") {
       session.taskCompleted = false;
