@@ -470,7 +470,8 @@ export class CodexSecurity {
     await readSecurityPolicySnapshot(target, options.signal);
     const preflight = await this.preflight(target.repository, {
       auth: options.auth,
-      target: target.scope === "." ? "repository" : [target.scope],
+      target:
+        target.scope === "." ? "repository" : [dirname(target.targetPath)],
       knowledgeBasePaths: options.knowledgeBasePaths,
       outputDir: options.outputDir,
       maxCostUsd: options.maxCostUsd,
@@ -529,7 +530,8 @@ export class CodexSecurity {
         target.repository,
         {
           auth: options.auth,
-          target: target.scope === "." ? "repository" : [target.scope],
+          target:
+            target.scope === "." ? "repository" : [dirname(target.targetPath)],
           outputDir: options.outputDir,
           maxCostUsd: options.maxCostUsd,
         },

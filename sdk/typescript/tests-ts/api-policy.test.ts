@@ -9,7 +9,9 @@ import type {
 import Ajv, { type AnySchema } from "ajv";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  applySecurityPolicy,
   CodexSecurity,
+  loadSecurityPolicyDraft,
   securityPolicyDiff,
   type SecurityPolicyStage,
 } from "../src/index.js";
@@ -158,6 +160,40 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
+  test("keeps literal component names intact through generation and apply", async () => {
+    for (const scope of ["-component", "~component", "~", "~/child"]) {
+      let prepared = false;
+      const f = await setup({
+        onPrepare: () => {
+          prepared = true;
+        },
+      });
+      const component = join(f.repository, scope);
+      await mkdir(component, { recursive: true });
+      await writeFile(
+        join(f.repository, "SECURITY.md"),
+        "# Root policy\nInherited guidance.\n",
+      );
+      const options = { path: `./${scope}`, outputDir: f.outputDir };
+      const preflight = await f.security.preflightPolicy(f.repository, options);
+      expect(preflight.scope).toBe(scope);
+      expect(preflight.targetPath).toBe(join(component, "SECURITY.md"));
+      expect(prepared).toBe(false);
+      const generated = await f.security.generatePolicy(f.repository, options);
+      expect(generated.scope).toBe(scope);
+      expect(f.prompts[0]).toContain("Inherited guidance.");
+      const saved = await loadSecurityPolicyDraft(f.repository, f.outputDir, {
+        path: options.path,
+      });
+      expect(await securityPolicyDiff(saved, PYTHON)).toContain(
+        `b/${scope}/SECURITY.md`,
+      );
+      await applySecurityPolicy(saved, { pythonPath: PYTHON });
+      expect(await readFile(saved.targetPath, "utf8")).toBe(POLICY);
+      await f.security.close();
+    }
+  });
+
   test("validates inherited policies before preflight or runtime setup", async () => {
     for (const invalid of [
       "utf8",
@@ -165,6 +201,7 @@ describe("CodexSecurity policy API", () => {
       "outside",
       "alias",
       "dangling",
+      "sibling",
     ] as const) {
       let prepared = false;
       const f = await setup({
@@ -190,11 +227,13 @@ describe("CodexSecurity policy API", () => {
         const target = join(f.repository, "component", "SECURITY.md");
         if (invalid === "alias")
           await writeFile(target, "# Component policy\n");
-        await symlink(target, policy, "file");
-        message =
-          invalid === "alias"
-            ? "outside the selected component"
-            : "dangling link";
+        const alias =
+          invalid === "sibling"
+            ? join(f.repository, "sibling", "SECURITY.md")
+            : policy;
+        await mkdir(dirname(alias), { recursive: true });
+        await symlink(target, alias, "file");
+        message = "outside the selected component";
       }
       const options = { path: "component", outputDir: f.outputDir };
       await expect(
