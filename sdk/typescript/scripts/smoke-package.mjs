@@ -351,6 +351,36 @@ try {
     { cwd: consumer },
   );
 
+  await cp(
+    join(packageRoot, "scripts", "fixtures", "package-consumer.ts"),
+    join(consumer, "consumer.ts"),
+  );
+  await writeFile(
+    join(consumer, "tsconfig.json"),
+    JSON.stringify({
+      files: ["consumer.ts"],
+      compilerOptions: {
+        target: "ES2022",
+        lib: ["ESNext"],
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        strict: true,
+        noEmit: true,
+        types: ["node"],
+        typeRoots: [join(packageRoot, "node_modules", "@types")],
+      },
+    }),
+  );
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "node_modules", "typescript", "bin", "tsc"),
+      "--project",
+      join(consumer, "tsconfig.json"),
+    ],
+    { cwd: consumer },
+  );
+
   assert.equal(
     typeof installedManifest.bin?.["codex-security"],
     "string",
@@ -496,7 +526,7 @@ try {
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   console.log(
-    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, CLI, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, and a nested worker without global codex.`,
+    `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, ${expectedPluginFiles.length} bundled plugin files, bundled Codex version, and a nested worker without global codex.`,
   );
 } finally {
   await rm(consumer, {
