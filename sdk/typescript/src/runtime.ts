@@ -2054,17 +2054,21 @@ export async function bootstrapPlugin(
     );
   }
 
-  const staged =
-    existing === null
-      ? null
-      : await pluginMetadata(join(marketplace, "plugins", PLUGIN_NAME)).catch(
-          () => null,
-        );
-  if (staged?.version !== version) {
+  // A bundled plugin can change without changing its upstream version.
+  // Finish the replacement before removing the currently staged plugin.
+  await mkdir(codexHome, { recursive: true, mode: 0o700 });
+  const stagingHome = await mkdtemp(join(codexHome, ".sdk-marketplace-"));
+  try {
+    const staged = await createMarketplace(stagingHome, root, options.signal);
+    throwIfSignalAborted(options.signal);
     if (existing !== null) {
       await rm(marketplace, { recursive: true, force: true });
     }
-    await createMarketplace(codexHome, root, options.signal);
+    await rename(staged, marketplace);
+  } finally {
+    await rm(stagingHome, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
   }
   const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(
     (error: unknown) => {

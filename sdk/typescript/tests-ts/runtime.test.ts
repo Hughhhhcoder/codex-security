@@ -1427,6 +1427,7 @@ describe("plugin runtime preparation", () => {
   test("uses the installed plugin path returned by Codex", async () => {
     const root = await temporaryDirectory();
     const selected = await plugin(root);
+    await writeFile(join(selected, "scripts", "obsolete.py"), "obsolete\n");
     const home = join(root, "home");
     await mkdir(home);
     await writeFile(join(home, "config.toml"), "[features]\nplugins = true\n");
@@ -1483,10 +1484,22 @@ describe("plugin runtime preparation", () => {
       join(selected, "scripts", "helper.py"),
       "print('updated')\n",
     );
+    await rm(join(selected, "scripts", "obsolete.py"));
     const reused = await bootstrapPlugin(home, selected, {
       codexCommand: { command: "/codex" },
       runCodex: async (_command, args) => {
         calls.push([...args]);
+        const scripts = join(
+          home,
+          "sdk-marketplace",
+          "plugins",
+          "codex-security",
+          "scripts",
+        );
+        expect(await readFile(join(scripts, "helper.py"), "utf8")).toBe(
+          "print('updated')\n",
+        );
+        expect(existsSync(join(scripts, "obsolete.py"))).toBe(false);
         return JSON.stringify({ installedPath: installed, version: "1.2.3" });
       },
     });
@@ -1647,6 +1660,78 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
+  test("keeps the existing marketplace when its replacement cannot be staged", async () => {
+    const root = await temporaryDirectory();
+    const previous = await plugin(join(root, "previous"), "1.2.3");
+    const next = await plugin(join(root, "next"), "1.2.4");
+    const outside = join(root, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "untouched"), "preserved\n");
+    await symlink(
+      outside,
+      join(next, "linked"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const home = join(root, "home");
+    const marketplace = await createMarketplace(home, previous);
+    const config = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
+    await writeFile(join(home, "config.toml"), config);
+    await writeFile(join(home, "auth.json"), '{"token":"preserved"}\n');
+    let registrationCalls = 0;
+
+    await expect(
+      bootstrapPlugin(home, next, {
+        codexCommand: { command: "/codex" },
+        runCodex: async () => {
+          registrationCalls += 1;
+          return "";
+        },
+      }),
+    ).rejects.toThrow(PluginBootstrapError);
+
+    expect(registrationCalls).toBe(0);
+    expect(
+      await readFile(
+        join(marketplace, "plugins", "codex-security", "scripts", "helper.py"),
+        "utf8",
+      ),
+    ).toBe("print('ok')\n");
+    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(config);
+    expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
+      '{"token":"preserved"}\n',
+    );
+    expect(await readFile(join(outside, "untouched"), "utf8")).toBe(
+      "preserved\n",
+    );
+    expect(
+      (await readdir(home)).filter((path) =>
+        path.startsWith(".sdk-marketplace-"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("can restage a plugin selected from its current marketplace", async () => {
+    const root = await temporaryDirectory();
+    const selected = await plugin(root);
+    const home = join(root, "home");
+    const marketplace = await createMarketplace(home, selected);
+    const staged = join(marketplace, "plugins", "codex-security");
+
+    const installed = await bootstrapPlugin(home, staged, {
+      codexCommand: { command: "/codex" },
+      runCodex: async (_command, args) => {
+        if (args[1] === "marketplace") return "";
+        expect(
+          await readFile(join(staged, "scripts", "helper.py"), "utf8"),
+        ).toBe("print('ok')\n");
+        return JSON.stringify({ installedPath: staged, version: "1.2.3" });
+      },
+    });
+
+    expect(installed.pluginRoot).toBe(staged);
+    expect(installed.installedRoot).toBe(staged);
+  });
+
   test("upgrades a cached plugin without deleting persistent credentials", async () => {
     const root = await temporaryDirectory();
     const previous = await plugin(join(root, "previous"), "1.2.3");
@@ -1741,10 +1826,11 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("upgrades a plugin with the real bundled Codex executable", async () => {
+  test("refreshes and upgrades a plugin with the real bundled Codex executable", async () => {
     const root = await temporaryDirectory();
     const previous = await plugin(join(root, "previous"), "1.2.3");
     const next = await plugin(join(root, "next"), "1.2.4");
+    await writeFile(join(previous, "scripts", "obsolete.py"), "obsolete\n");
     const home = join(root, "home");
     await mkdir(home, { mode: 0o700 });
     await writeFile(
@@ -1769,9 +1855,30 @@ describe("plugin runtime preparation", () => {
     const credentials = await readFile(join(home, "auth.json"), "utf8");
 
     const options = { codexCommand: command, environment };
-    expect((await bootstrapPlugin(home, previous, options)).version).toBe(
-      "1.2.3",
+    const first = await bootstrapPlugin(home, previous, options);
+    expect(first.version).toBe("1.2.3");
+    expect(
+      await readFile(join(first.installedRoot, "scripts", "helper.py"), "utf8"),
+    ).toBe("print('ok')\n");
+
+    await writeFile(
+      join(previous, "scripts", "helper.py"),
+      "print('updated')\n",
     );
+    await rm(join(previous, "scripts", "obsolete.py"));
+    const refreshed = await bootstrapPlugin(home, previous, options);
+    expect(refreshed.version).toBe("1.2.3");
+    expect(refreshed.installedRoot).toBe(first.installedRoot);
+    expect(
+      await readFile(
+        join(refreshed.installedRoot, "scripts", "helper.py"),
+        "utf8",
+      ),
+    ).toBe("print('updated')\n");
+    expect(
+      existsSync(join(refreshed.installedRoot, "scripts", "obsolete.py")),
+    ).toBe(false);
+
     const upgraded = await bootstrapPlugin(home, next, options);
 
     expect(upgraded.version).toBe("1.2.4");
