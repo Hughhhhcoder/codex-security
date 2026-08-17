@@ -23,9 +23,11 @@ import type {
   ScanPreflight,
 } from "../src/index.js";
 import {
+  AuthenticationRequiredError,
   BUNDLED_PLUGIN_VERSION,
   CodexSecurityError,
   ConfigurationError,
+  ContractValidationError,
   DiffTarget,
   InvalidTargetError,
   OutputDirectoryError,
@@ -4021,6 +4023,43 @@ describe("CLI", () => {
       expect(stderr.text()).not.toContain("cannot access the configured model");
       expect(stderr.text()).not.toContain("Authentication failed");
       expect(stderr.text()).not.toContain("reached its rate limit");
+    }
+  });
+
+  test("classifies constructed typed scan errors in structured output", async () => {
+    for (const [failure, message] of [
+      [
+        new ContractValidationError("Contract validation failed."),
+        "The scan could not complete because a local input or filesystem operation failed.",
+      ],
+      [
+        new AuthenticationRequiredError("Authentication is required."),
+        "Authentication failed. Check the selected credentials.",
+      ],
+    ] as const) {
+      for (const format of ["json", "jsonl"] as const) {
+        const stdout = capture();
+        const stderr = capture();
+        const deps = dependencies({
+          onRun: () => {
+            throw failure;
+          },
+        });
+
+        expect(
+          await main(
+            ["scan", ".", "--format", format],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_FAILED",
+          message,
+        });
+        expect(stderr.text()).toContain(`${failure.message}\n`);
+      }
     }
   });
 

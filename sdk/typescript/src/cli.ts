@@ -70,8 +70,10 @@ import {
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
 import {
+  AuthenticationRequiredError,
   CodexSecurityError,
   ConfigurationError,
+  ContractValidationError,
   InvalidTargetError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
@@ -4340,8 +4342,11 @@ function structuredScanFailureMessage(error: unknown): string {
   if (error instanceof ScanCostLimitExceededError) {
     return "The scan exceeded its configured cost limit.";
   }
-  if (isLocalScanFailure(error)) {
+  if (error instanceof ContractValidationError || isLocalScanFailure(error)) {
     return "The scan could not complete because a local input or filesystem operation failed.";
+  }
+  if (error instanceof AuthenticationRequiredError) {
+    return "Authentication failed. Check the selected credentials.";
   }
   if (
     /flagged for possible cybersecurity risk|trusted access for cyber|cybersecurity policy/iu.test(
