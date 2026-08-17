@@ -713,11 +713,12 @@ export async function securityPolicyDiff(
 ): Promise<string> {
   await unchangedPolicyTarget(draft, signal);
   if (draft.previousContent === draft.content) return "";
-  const roots = await enclosingGitWorktreeRoots(draft.repository, signal);
   const interpreter =
     python ??
     (await resolvePluginPython({
-      protectedRoot: roots.at(-1) ?? draft.repository,
+      protectedRoot:
+        (await enclosingGitWorktreeRoots(draft.repository, signal)).at(-1) ??
+        draft.repository,
       signal,
     }));
   const label = relative(draft.repository, draft.targetPath)

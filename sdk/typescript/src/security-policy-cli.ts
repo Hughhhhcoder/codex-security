@@ -16,6 +16,7 @@ import {
   type SecurityPolicyStage,
 } from "./security-policy.js";
 import { resolvePluginPython } from "./runtime.js";
+import { enclosingGitWorktreeRoots } from "./targets.js";
 
 type SignalName = "SIGINT" | "SIGTERM";
 type Output = { write(value: string): unknown };
@@ -192,7 +193,13 @@ export async function runPolicyCommand(
       ? await (dependencies.resolvePython ?? resolvePluginPython)({
           configuredPath: options.config.pythonPath,
           environment: dependencies.environment,
-          protectedRoot: draft.repository,
+          protectedRoot:
+            (
+              await enclosingGitWorktreeRoots(
+                draft.repository,
+                controller.signal,
+              )
+            ).at(-1) ?? draft.repository,
           signal: controller.signal,
         })
       : undefined;
