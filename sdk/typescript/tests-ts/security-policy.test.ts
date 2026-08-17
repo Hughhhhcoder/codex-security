@@ -163,6 +163,38 @@ describe("security policy generation", () => {
     }
   });
 
+  test("rejects policy targets inside Git metadata", async () => {
+    for (const kind of ["traditional", "separate", "bare"]) {
+      const f = await fixture();
+      const metadata =
+        kind === "traditional"
+          ? join(f.repository, ".git")
+          : join(f.root, "git-data");
+      execFileSync("git", [
+        "init",
+        "--quiet",
+        ...(kind === "bare"
+          ? ["--bare", metadata]
+          : [
+              ...(kind === "separate" ? ["--separate-git-dir", metadata] : []),
+              f.repository,
+            ]),
+      ]);
+      const refs = join(metadata, "refs", "heads");
+      await expect(resolveSecurityPolicyTarget(refs)).rejects.toThrow(
+        "inside Git metadata",
+      );
+      await expect(
+        resolveSecurityPolicyTarget(metadata, "refs/heads"),
+      ).rejects.toThrow("inside Git metadata");
+      if (kind === "traditional")
+        await expect(
+          resolveSecurityPolicyTarget(f.repository, ".git/refs/heads"),
+        ).rejects.toThrow("inside Git metadata");
+      expect(await readdir(refs)).toEqual([]);
+    }
+  });
+
   test("keeps linked worktrees and submodules as their own policy roots", async () => {
     const f = await fixture();
     const git = (repository: string, ...args: string[]) =>
@@ -204,10 +236,31 @@ describe("security policy generation", () => {
       "services/api",
     );
     const submodule = join(f.repository, "services", "api");
-    expect(await resolveSecurityPolicyTarget(submodule)).toEqual({
+    await writeFile(join(f.repository, "SECURITY.md"), "# Parent policy\n");
+    await writeFile(join(submodule, "SECURITY.md"), "# Submodule policy\n");
+    const direct = await resolveSecurityPolicyTarget(submodule);
+    expect(direct).toEqual({
       repository: submodule,
       scope: ".",
       targetPath: join(submodule, "SECURITY.md"),
+    });
+    expect(
+      await resolveSecurityPolicyTarget(f.repository, "services/api"),
+    ).toEqual(direct);
+    const guidance = await resolveSecurityPolicyGuidance(
+      direct,
+      PYTHON,
+      PLUGIN_ROOT,
+    );
+    expect(guidance).toContain("Submodule policy");
+    expect(guidance).not.toContain("Parent policy");
+    await mkdir(join(submodule, "component"));
+    expect(
+      await resolveSecurityPolicyTarget(f.repository, "services/api/component"),
+    ).toEqual({
+      repository: submodule,
+      scope: "component",
+      targetPath: join(submodule, "component", "SECURITY.md"),
     });
   });
 

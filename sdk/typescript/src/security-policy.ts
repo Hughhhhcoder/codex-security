@@ -160,7 +160,7 @@ export async function resolveSecurityPolicyTarget(
     );
   }
   const root =
-    (await enclosingGitWorktreeRoot(selectedRoot, signal, {
+    (await enclosingGitWorktreeRoot(directory, signal, {
       requireIfPresent: true,
     })) ?? selectedRoot;
   const target = {

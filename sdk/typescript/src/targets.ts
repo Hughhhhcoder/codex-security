@@ -138,13 +138,26 @@ export async function enclosingGitWorktreeRoot(
   signal?: AbortSignal,
   options: { requireIfPresent?: boolean } = {},
 ): Promise<string | null> {
-  const markerRoot =
-    options.requireIfPresent === true
-      ? await gitMarkerRoot(repository, signal, "nearest")
-      : null;
-  if (options.requireIfPresent === true && markerRoot === null) return null;
+  const strict = options.requireIfPresent === true;
+  const markerRoot = strict
+    ? await gitMarkerRoot(repository, signal, "nearest")
+    : null;
   let canonicalRoot: string;
   try {
+    if (strict) {
+      if (
+        (await gitOutput(
+          repository,
+          ["rev-parse", "--is-inside-git-dir"],
+          signal,
+        )) === "true"
+      ) {
+        throw new InvalidTargetError(
+          "The selected path is inside Git metadata. Select a worktree directory instead.",
+        );
+      }
+      if (markerRoot === null) return null;
+    }
     const root = await gitOutput(
       repository,
       ["rev-parse", "--show-toplevel"],
@@ -153,6 +166,7 @@ export async function enclosingGitWorktreeRoot(
     canonicalRoot = await abortable(() => realpath(root), signal);
   } catch (error) {
     throwIfAborted(signal);
+    if (strict && error instanceof InvalidTargetError) throw error;
     if (markerRoot !== null) {
       throw new InvalidTargetError(
         "Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible.",

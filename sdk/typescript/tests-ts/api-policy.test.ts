@@ -214,6 +214,29 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
+  test("rejects Git metadata targets before starting Codex", async () => {
+    let prepared = false;
+    const f = await setup({
+      onPrepare: () => {
+        prepared = true;
+      },
+    });
+    execFileSync("git", ["init", "--quiet", f.repository]);
+    const options = { path: ".git/refs/heads", outputDir: f.outputDir };
+    await expect(
+      f.security.preflightPolicy(f.repository, options),
+    ).rejects.toThrow("inside Git metadata");
+    await expect(
+      f.security.generatePolicy(f.repository, options),
+    ).rejects.toThrow("inside Git metadata");
+    expect(prepared).toBe(false);
+    expect(await readdir(f.outputDir)).toEqual([]);
+    expect(await readdir(join(f.repository, ".git", "refs", "heads"))).toEqual(
+      [],
+    );
+    await f.security.close();
+  });
+
   test("keeps literal component names intact through generation and apply", async () => {
     for (const scope of ["-component", "~component", "~", "~/child"]) {
       let prepared = false;

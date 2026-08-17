@@ -217,6 +217,8 @@ The repository defaults to the current directory. `--path` selects one
 repository-relative component directory. When invoked from a component inside a
 Git checkout, the command still resolves inherited policies from the Git root.
 It rejects Git settings that redirect that root outside the selected checkout.
+An initialized submodule uses its own checkout root, including when selected
+with `--path`. Git metadata cannot be a policy target.
 Existing root and nested `SECURITY.md` files compose from root to leaf; the
 closest policy takes precedence when guidance conflicts.
 If a `SECURITY.md` outside the selected component links to its policy, fix that
