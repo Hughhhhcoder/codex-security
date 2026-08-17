@@ -273,10 +273,12 @@ with ExitStack() as stack:
             return real_identity_details(selected_root) is not None
         def configured(value, scope=b"local"):
             return scope + b"\0" + os.fsencode(value) + b"\0"
+        # Keep directory checks inside the metadata fixture on every supported Python.
         with patch.object(state, "git_bytes", git_bytes), \
              patch.object(os.path, "realpath", side_effect=os.path.abspath), \
              patch.object(Path, "stat", lambda path, *a, **k: records[str(path)]), \
              patch.object(Path, "lstat", lambda path, *a, **k: records[str(path)]), \
+             patch.object(Path, "is_dir", lambda path, *a, **k: stat.S_ISDIR(records[str(path)].st_mode)), \
              patch.object(Path, "read_bytes", lambda path: files[str(path)]), \
              patch.object(state, "_repository_birth_time_ns", side_effect=lambda path, value: value.st_birthtime_ns):
             first = real_identity_details(main)
