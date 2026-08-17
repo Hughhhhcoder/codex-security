@@ -224,7 +224,7 @@ export async function readSecurityPolicySnapshot(
 ): Promise<SecurityPolicySnapshot> {
   // Previewing a saved draft does not need to start the policy resolver.
   const previousContent = await readSecurityPolicy(target.targetPath);
-  await rejectPolicyAliases(target, signal);
+  await validatePolicyLinks(target, signal);
   const inherited: [string, string][] = [];
   let directory = target.repository;
   for (const part of target.scope === "." ? [] : target.scope.split("/")) {
@@ -232,7 +232,7 @@ export async function readSecurityPolicySnapshot(
     const path = join(directory, "SECURITY.md");
     const policyPath = relative(target.repository, path).split(sep).join("/");
     let metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
       throw error;
     });
     if (metadata?.isSymbolicLink()) {
@@ -248,7 +248,7 @@ export async function readSecurityPolicySnapshot(
       }
       inherited.push([policyPath, `link:${digest(JSON.stringify(links))}`]);
       metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return null;
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
         throw error;
       });
     }
@@ -272,7 +272,7 @@ export async function readSecurityPolicySnapshot(
   };
 }
 
-async function rejectPolicyAliases(
+async function validatePolicyLinks(
   target: SecurityPolicyTarget,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -284,49 +284,52 @@ async function rejectPolicyAliases(
       throw error;
     },
   );
-  const directories = rootPolicy
-    ? [join(target.repository, ".github"), join(target.repository, "docs")]
-    : [target.repository];
+  const reportingPaths = rootPolicy
+    ? [".github", "docs"].map((directory) =>
+        join(target.repository, directory, "SECURITY.md"),
+      )
+    : [];
+  const check = async (path: string, reportingPolicy: boolean) => {
+    const alias = await policyLinkSnapshot(path, target.repository, signal);
+    let destination =
+      alias.destination === null
+        ? null
+        : join(target.repository, alias.destination);
+    if (destination !== null && alias.status === "resolved")
+      destination = await realpath(destination);
+    if (destination !== null)
+      policyRelativePath(target.repository, destination);
+    const outsideScope = relativePathIsOutside(
+      relative(component, dirname(path)),
+    );
+    if (
+      (outsideScope || reportingPolicy) &&
+      destination !== null &&
+      (relative(canonicalTarget ?? target.targetPath, destination) === "" ||
+        // A missing leaf can become live with different casing on macOS.
+        (canonicalTarget === null &&
+          alias.status === "missing" &&
+          process.platform === "darwin" &&
+          relative(component, dirname(destination)) === "" &&
+          basename(destination).toLowerCase() === "security.md"))
+    ) {
+      const policyPath = relative(target.repository, path).split(sep).join("/");
+      throw new CodexSecurityError(
+        `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${reportingPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before generating or applying a policy.`,
+      );
+    }
+  };
+  const directories = [target.repository];
   while (directories.length > 0) {
     signal?.throwIfAborted();
     const directory = directories.pop()!;
-    if (!rootPolicy && relative(component, directory) === "") continue;
     const path = join(directory, "SECURITY.md");
-    const metadata = rootPolicy
-      ? null
-      : await lstat(path).catch((error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        });
-    if (rootPolicy || metadata?.isSymbolicLink()) {
-      const alias = await policyLinkSnapshot(path, target.repository, signal);
-      let destination =
-        alias.destination === null
-          ? null
-          : join(target.repository, alias.destination);
-      if (destination !== null && alias.status === "resolved")
-        destination = await realpath(destination);
-      if (destination !== null)
-        policyRelativePath(target.repository, destination);
-      if (
-        destination !== null &&
-        (relative(canonicalTarget ?? target.targetPath, destination) === "" ||
-          // A missing leaf can become live with different casing on macOS.
-          (canonicalTarget === null &&
-            alias.status === "missing" &&
-            process.platform === "darwin" &&
-            relative(component, dirname(destination)) === "" &&
-            basename(destination).toLowerCase() === "security.md"))
-      ) {
-        const policyPath = relative(target.repository, path)
-          .split(sep)
-          .join("/");
-        throw new CodexSecurityError(
-          `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${rootPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before generating or applying a policy.`,
-        );
-      }
-    }
-    if (rootPolicy) continue;
+    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      throw error;
+    });
+    if (metadata?.isSymbolicLink() && !reportingPaths.includes(path))
+      await check(path, false);
     // Match the policy resolver's inventory without following directory links.
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.name !== ".git" && entry.isDirectory()) {
@@ -334,6 +337,8 @@ async function rejectPolicyAliases(
       }
     }
   }
+  // Reporting paths can also alias the root policy through a directory link.
+  for (const path of reportingPaths) await check(path, true);
 }
 
 async function policyLinkSnapshot(
@@ -366,7 +371,7 @@ async function policyLinkSnapshot(
     const relativePath = policyRelativePath(repository, canonical);
     const metadata = await lstat(canonical).catch(
       (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return null;
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
         throw error;
       },
     );
@@ -389,12 +394,16 @@ async function policyLinkSnapshot(
 
 function policyRelativePath(repository: string, path: string): string {
   const result = relative(repository, path);
-  if (result === ".." || result.startsWith(`..${sep}`) || isAbsolute(result)) {
+  if (relativePathIsOutside(result)) {
     throw new InvalidTargetError(
       `Security-policy link is outside the repository: ${path}`,
     );
   }
   return result.split(sep).join("/");
+}
+
+function relativePathIsOutside(path: string): boolean {
+  return path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path);
 }
 
 export async function requireUnchangedSecurityPolicy(

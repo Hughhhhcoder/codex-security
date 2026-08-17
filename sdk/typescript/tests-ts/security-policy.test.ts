@@ -136,6 +136,81 @@ describe("security policy generation", () => {
     ).toEqual(target);
   });
 
+  test("rejects Git configuration that redirects the selected checkout", async () => {
+    for (const indirect of [false, true]) {
+      for (const location of ["sibling", "ancestor"]) {
+        const f = await fixture();
+        const outside = join(f.root, "outside");
+        await mkdir(outside);
+        execFileSync("git", [
+          "init",
+          "--quiet",
+          ...(indirect ? ["--separate-git-dir", join(f.root, "git-data")] : []),
+          f.repository,
+        ]);
+        execFileSync("git", [
+          "-C",
+          f.repository,
+          "config",
+          "core.worktree",
+          location === "sibling" ? outside : f.root,
+        ]);
+        await expect(resolveSecurityPolicyTarget(f.repository)).rejects.toThrow(
+          "does not match the selected checkout",
+        );
+        expect(await readdir(f.outputDir)).toEqual([]);
+      }
+    }
+  });
+
+  test("keeps linked worktrees and submodules as their own policy roots", async () => {
+    const f = await fixture();
+    const git = (repository: string, ...args: string[]) =>
+      execFileSync("git", [
+        "-C",
+        repository,
+        "-c",
+        "user.name=Synthetic Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ]);
+    git(f.repository, "init", "--quiet");
+    git(f.repository, "commit", "--allow-empty", "--quiet", "-m", "initial");
+    const linked = join(f.root, "linked-worktree");
+    git(f.repository, "worktree", "add", "--quiet", "--detach", linked, "HEAD");
+    await mkdir(join(linked, "component"));
+    expect(
+      await resolveSecurityPolicyTarget(join(linked, "component")),
+    ).toEqual({
+      repository: linked,
+      scope: "component",
+      targetPath: join(linked, "component", "SECURITY.md"),
+    });
+    const source = join(f.root, "submodule-source");
+    await mkdir(source);
+    git(source, "init", "--quiet");
+    git(source, "commit", "--allow-empty", "--quiet", "-m", "initial");
+    git(
+      f.repository,
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--quiet",
+      source,
+      "services/api",
+    );
+    const submodule = join(f.repository, "services", "api");
+    expect(await resolveSecurityPolicyTarget(submodule)).toEqual({
+      repository: submodule,
+      scope: ".",
+      targetPath: join(submodule, "SECURITY.md"),
+    });
+  });
+
   test("does not silently drop inherited policies when Git is unavailable", async () => {
     const name =
       "does not silently drop inherited policies when Git is unavailable";
@@ -1227,6 +1302,56 @@ describe("security policy review and application", () => {
       expect(
         await readFile(join(f.repository, directory, "SECURITY.md"), "utf8"),
       ).toBe("# Reporting a vulnerability\n");
+  });
+
+  test("treats non-directory reporting and inherited policy paths as absent", async () => {
+    for (const entry of [".github", "docs"]) {
+      const f = await fixture();
+      const path = join(f.repository, entry);
+      await writeFile(path, "A regular source file.\n");
+      const draft = await f.generate();
+      expect(await securityPolicyDiff(draft, PYTHON)).toContain(
+        "b/SECURITY.md",
+      );
+      await applySecurityPolicy(draft);
+      expect(await readFile(path, "utf8")).toBe("A regular source file.\n");
+    }
+    const f = await fixture();
+    await mkdir(join(f.repository, "component"));
+    await writeFile(join(f.repository, "not-a-directory"), "source\n");
+    await symlink(
+      join(f.repository, "not-a-directory", "policy.md"),
+      join(f.repository, "SECURITY.md"),
+      "file",
+    );
+    const draft = await f.generate({ path: "component" });
+    await applySecurityPolicy(draft);
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+  });
+
+  test("validates descendant policy links before generation or applying a draft", async () => {
+    for (const scope of [".", "component"]) {
+      for (const existing of [false, true]) {
+        const f = await fixture();
+        const component = join(f.repository, scope);
+        const alias = join(component, "child", "SECURITY.md");
+        const outside = join(f.root, "outside-policy.md");
+        await mkdir(dirname(alias), { recursive: true });
+        const draft = await f.generate({ path: scope });
+        if (existing) await writeFile(outside, "# Outside policy\n");
+        await symlink(outside, alias, "file");
+        await expect(f.generate({ path: scope })).rejects.toThrow(
+          "outside the repository",
+        );
+        await expect(
+          securityPolicyDiff(draft, "missing-python"),
+        ).rejects.toThrow("outside the repository");
+        await expect(
+          applySecurityPolicy(draft, { pythonPath: "missing-python" }),
+        ).rejects.toThrow("outside the repository");
+        expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
+      }
+    }
   });
 
   test("rejects root drafts that would change a linked reporting policy", async () => {

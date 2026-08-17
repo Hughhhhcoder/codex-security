@@ -138,19 +138,22 @@ export async function enclosingGitWorktreeRoot(
   signal?: AbortSignal,
   options: { requireIfPresent?: boolean } = {},
 ): Promise<string | null> {
+  const markerRoot =
+    options.requireIfPresent === true
+      ? await gitMarkerRoot(repository, signal, "nearest")
+      : null;
+  if (options.requireIfPresent === true && markerRoot === null) return null;
+  let canonicalRoot: string;
   try {
     const root = await gitOutput(
       repository,
       ["rev-parse", "--show-toplevel"],
       signal,
     );
-    return await abortable(() => realpath(root), signal);
+    canonicalRoot = await abortable(() => realpath(root), signal);
   } catch (error) {
     throwIfAborted(signal);
-    if (
-      options.requireIfPresent === true &&
-      (await outermostGitMarkerRoot(repository, signal)) !== null
-    ) {
+    if (markerRoot !== null) {
       throw new InvalidTargetError(
         "Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible.",
         { cause: error },
@@ -158,6 +161,18 @@ export async function enclosingGitWorktreeRoot(
     }
     return null;
   }
+  if (
+    markerRoot !== null &&
+    relative(
+      await abortable(() => realpath(markerRoot), signal),
+      canonicalRoot,
+    ) !== ""
+  ) {
+    throw new InvalidTargetError(
+      "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
+    );
+  }
+  return canonicalRoot;
 }
 
 export function validatedGitEnvironment(
@@ -411,7 +426,7 @@ async function gitOutput(
   const command = await resolveTrustedExecutable(
     "git",
     isolatedGitEnvironment(args[0] === "rev-parse"),
-    (await outermostGitMarkerRoot(repository, signal)) ?? repository,
+    (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
   );
   if (command === null)
     throw new Error("Git is not available on a trusted PATH.");
@@ -428,9 +443,10 @@ async function gitOutput(
   return stdout.trim();
 }
 
-async function outermostGitMarkerRoot(
+async function gitMarkerRoot(
   repository: string,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  search: "nearest" | "outermost",
 ): Promise<string | null> {
   let current = repository;
   let root: string | null = null;
@@ -438,6 +454,7 @@ async function outermostGitMarkerRoot(
     throwIfAborted(signal);
     try {
       await lstat(join(current, ".git"));
+      if (search === "nearest") return current;
       root = current;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

@@ -216,6 +216,7 @@ npx @openai/codex-security policy . --dry-run --json
 The repository defaults to the current directory. `--path` selects one
 repository-relative component directory. When invoked from a component inside a
 Git checkout, the command still resolves inherited policies from the Git root.
+It rejects Git settings that redirect that root outside the selected checkout.
 Existing root and nested `SECURITY.md` files compose from root to leaf; the
 closest policy takes precedence when guidance conflicts.
 If a `SECURITY.md` outside the selected component links to its policy, fix that

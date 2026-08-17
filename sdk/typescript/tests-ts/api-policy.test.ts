@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type {
@@ -185,6 +186,34 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
+  test("rejects redirected Git roots before inspecting policy or starting Codex", async () => {
+    let prepared = false;
+    const f = await setup({
+      onPrepare: () => {
+        prepared = true;
+      },
+    });
+    execFileSync("git", ["init", "--quiet", f.repository]);
+    execFileSync("git", [
+      "-C",
+      f.repository,
+      "config",
+      "core.worktree",
+      f.root,
+    ]);
+    for (const operation of [
+      () => f.security.preflightPolicy(f.repository),
+      () => f.security.generatePolicy(f.repository),
+    ])
+      await expect(operation()).rejects.toThrow(
+        "does not match the selected checkout",
+      );
+    expect(prepared).toBe(false);
+    expect(f.threads).toHaveLength(0);
+    expect(await readdir(f.outputDir)).toEqual([]);
+    await f.security.close();
+  });
+
   test("keeps literal component names intact through generation and apply", async () => {
     for (const scope of ["-component", "~component", "~", "~/child"]) {
       let prepared = false;
@@ -227,6 +256,7 @@ describe("CodexSecurity policy API", () => {
       "alias",
       "dangling",
       "sibling",
+      "descendant",
     ] as const) {
       let prepared = false;
       const f = await setup({
@@ -243,10 +273,15 @@ describe("CodexSecurity policy API", () => {
       } else if (invalid === "size") {
         await writeFile(policy, Buffer.alloc(1024 * 1024 + 1, "x"));
         message = "1 MiB";
-      } else if (invalid === "outside") {
+      } else if (invalid === "outside" || invalid === "descendant") {
         const outside = join(f.root, "outside-policy.md");
         await writeFile(outside, "# Outside policy\n");
-        await symlink(outside, policy, "file");
+        const alias =
+          invalid === "descendant"
+            ? join(f.repository, "component", "child", "SECURITY.md")
+            : policy;
+        await mkdir(dirname(alias), { recursive: true });
+        await symlink(outside, alias, "file");
         message = "outside the repository";
       } else {
         const target = join(f.repository, "component", "SECURITY.md");
