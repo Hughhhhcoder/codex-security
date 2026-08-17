@@ -45,10 +45,11 @@ def safe_source_path(target: Path, value: str) -> Path | None:
 
 
 def offline_git_bytes(repository: Path, *arguments: str) -> bytes | None:
-    names = ("GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL")
+    names = ("GIT_NO_LAZY_FETCH", "GIT_ALLOW_PROTOCOL", "GIT_NO_REPLACE_OBJECTS")
     previous = {name: os.environ.get(name) for name in names}
     os.environ["GIT_NO_LAZY_FETCH"] = "1"
     os.environ["GIT_ALLOW_PROTOCOL"] = ""
+    os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
     try:
         return git_bytes(repository, *arguments)
     finally:

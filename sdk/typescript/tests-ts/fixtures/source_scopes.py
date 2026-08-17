@@ -81,6 +81,42 @@ def excerpt(
     )
 
 
+def replacements(repository: Path) -> dict:
+    write(repository, "selected.py", "selected source\n")
+    write(repository, "private.py", "private source\n")
+    write(repository, "selected/public.py", "selected directory\n")
+    write(repository, "private/public.py", "private directory\n")
+    revision = commit(repository)
+    file_record = scan(repository, revision, ["selected.py"])
+    directory_record = scan(repository, revision, ["selected"])
+    file_object = git(repository, "rev-parse", "HEAD:selected.py")
+    private_object = git(repository, "rev-parse", "HEAD:private.py")
+    tree_object = git(repository, "rev-parse", "HEAD:selected")
+    private_tree = git(repository, "rev-parse", "HEAD:private")
+    git(repository, "replace", file_object, private_object)
+    git(repository, "replace", tree_object, private_tree)
+    scopes.tree_entries.cache_clear()
+    assert (
+        excerpt(file_record, repository, "selected.py", ["selected.py"])
+        == "1  selected source"
+    )
+    assert (
+        excerpt(directory_record, repository, "selected/public.py", ["selected"])
+        == "1  selected directory"
+    )
+    scopes.tree_entries.cache_clear()
+    captured = scan(repository, revision, ["selected.py", "selected"])
+    assert (
+        excerpt(captured, repository, "selected.py", ["selected.py", "selected"])
+        == "1  selected source"
+    )
+    assert (
+        excerpt(captured, repository, "selected/public.py", ["selected.py", "selected"])
+        == "1  selected directory"
+    )
+    return {"savedObjectsUnchanged": True, "captureIgnoresReplacements": True}
+
+
 def boundaries(repository: Path) -> dict:
     for name, content in {
         "src/public.py": "public source\n",
@@ -202,13 +238,17 @@ def boundaries(repository: Path) -> dict:
 
     def observed(target: Path, *arguments: str):
         calls.append(
-            (os.environ.get("GIT_NO_LAZY_FETCH"), os.environ.get("GIT_ALLOW_PROTOCOL"))
+            (
+                os.environ.get("GIT_NO_LAZY_FETCH"),
+                os.environ.get("GIT_ALLOW_PROTOCOL"),
+                os.environ.get("GIT_NO_REPLACE_OBJECTS"),
+            )
         )
         return original(target, *arguments)
 
     with patch.object(scopes, "git_bytes", observed):
         result["offline"] = excerpt(selected, repository, "src/public.py", ["src"])
-    assert calls and all(call == ("1", "") for call in calls)
+    assert calls and all(call == ("1", "", "1") for call in calls)
     with patch.object(excerpts, "offline_git_bytes", return_value=None):
         result["missingObject"] = excerpt(
             selected, repository, "src/public.py", ["src"]
@@ -420,6 +460,15 @@ def writers(repository: Path) -> dict:
         "--scan-root",
         str(scan_root),
     )
+    direct_deep = command(
+        "begin-deep-scan",
+        "--thread-id",
+        "synthetic-direct-deep",
+        "--target-path",
+        str(repository),
+        "--scan-root",
+        str(scan_root),
+    )["deepScan"]["scanId"]
     cli_directory = Path(tempfile.mkdtemp(prefix="cli-scan-", dir=repository.parent))
     recipe = {
         "config": {},
@@ -442,15 +491,17 @@ def writers(repository: Path) -> dict:
     )
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            "SELECT id, recipe_json, source_scopes_json FROM scans"
-        ).fetchall()
-        assert len(rows) == 4
+        rows = connection.execute("SELECT * FROM scans").fetchall()
+        assert len(rows) == 5
         for row in rows:
             metadata = json.loads(row["source_scopes_json"])
             assert metadata["revision"] == revision
             expected = (
-                {"src", "selected.py"} if row["id"] == registered["scanId"] else {"src"}
+                {"src", "selected.py"}
+                if row["id"] == registered["scanId"]
+                else {"."}
+                if row["id"] == direct_deep
+                else {"src"}
             )
             assert {scope["path"] for scope in metadata["scopes"]} == expected
             if row["id"] != registered["scanId"]:
@@ -458,7 +509,27 @@ def writers(repository: Path) -> dict:
                 assert "does not have a saved launch recipe" in command(
                     "get-scan-recipe", "--scan-id", row["id"], succeeds=False
                 )
-    return {"writers": 4, "nativeRecipesUnchanged": True, "cliRecipeUnchanged": True}
+        deep_record = next(row for row in rows if row["id"] == direct_deep)
+        git(
+            repository,
+            "commit",
+            "--amend",
+            "--quiet",
+            "-m",
+            "Rewritten synthetic fixture",
+        )
+        git(repository, "reflog", "expire", "--expire=now", "--all")
+        git(repository, "gc", "--prune=now")
+        try:
+            git(repository, "cat-file", "-e", revision)
+        except subprocess.CalledProcessError:
+            pass
+        else:
+            raise AssertionError("Original commit was not pruned")
+        assert (
+            excerpt(deep_record, repository, "selected.py", ["."]) == "1  selected file"
+        )
+    return {"writers": 5, "nativeRecipesUnchanged": True, "cliRecipeUnchanged": True}
 
 
 def migration(_: Path) -> dict:
@@ -562,6 +633,7 @@ with tempfile.TemporaryDirectory(prefix="codex-security-source-scopes-") as temp
         json.dumps(
             {
                 "boundaries": boundaries,
+                "replacements": replacements,
                 "aliases": aliases,
                 "alias_evidence": alias_evidence,
                 "worktrees": worktrees,

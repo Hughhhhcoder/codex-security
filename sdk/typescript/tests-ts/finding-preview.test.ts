@@ -62,6 +62,13 @@ describe("bundled finding previews", () => {
     });
   });
 
+  test("ignores replacement refs during source capture and immutable reads", () => {
+    expect(sourceScopeProbe("replacements")).toEqual({
+      savedObjectsUnchanged: true,
+      captureIgnoresReplacements: true,
+    });
+  });
+
   test("does not treat links or reparse points as filesystem alias evidence", () => {
     expect(sourceScopeProbe("alias_evidence")).toEqual({
       ordinary: true,
@@ -80,7 +87,7 @@ describe("bundled finding previews", () => {
 
   test("records source authority through every scan-start path without changing launch recipes", () => {
     expect(sourceScopeProbe("writers")).toEqual({
-      writers: 4,
+      writers: 5,
       nativeRecipesUnchanged: true,
       cliRecipeUnchanged: true,
     });
