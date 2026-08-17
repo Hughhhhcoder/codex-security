@@ -223,9 +223,7 @@ export async function readSecurityPolicySnapshot(
   target: SecurityPolicyTarget,
   signal?: AbortSignal,
 ): Promise<SecurityPolicySnapshot> {
-  // Previewing a saved draft does not need to start the policy resolver.
   const previousContent = await readSecurityPolicy(target.targetPath);
-  await validatePolicyLinks(target, signal);
   const inherited: [string, string][] = [];
   let directory = target.repository;
   for (const part of target.scope === "." ? [] : target.scope.split("/")) {
@@ -335,7 +333,7 @@ async function validatePolicyLinks(
     ) {
       const policyPath = relative(protectedRoot, path).split(sep).join("/");
       throw new CodexSecurityError(
-        `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${reportingPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before generating or applying a policy.`,
+        `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${reportingPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before applying a policy.`,
       );
     }
   };
@@ -724,7 +722,8 @@ export async function securityPolicyDiff(
   python?: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  await unchangedPolicyTarget(draft, signal);
+  const target = await resolveDraftTarget(draft, signal);
+  await requireUnchangedSecurityPolicy(target, draft, signal);
   if (draft.previousContent === draft.content) return "";
   const interpreter =
     python ??
@@ -777,7 +776,10 @@ export async function applySecurityPolicy(
   } = {},
 ): Promise<SecurityPolicyApplication> {
   validatePolicyContent(draft.content);
-  const target = await unchangedPolicyTarget(draft, options.signal);
+  const target = await resolveDraftTarget(draft, options.signal);
+  if (draft.previousContent !== draft.content)
+    await validatePolicyLinks(target, options.signal);
+  await requireUnchangedSecurityPolicy(target, draft, options.signal);
   if (draft.previousContent === draft.content)
     return { targetPath: target.targetPath, recoveryPath: null };
   const roots = await enclosingGitWorktreeRoots(
@@ -856,6 +858,7 @@ export async function applySecurityPolicy(
             "The security-policy destination changed. Review a new draft before writing.",
           );
         }
+        await validatePolicyLinks(target, options.signal);
         await requireUnchangedSecurityPolicy(target, draft, options.signal);
         options.signal?.throwIfAborted();
         if (draft.previousContent === null)
@@ -898,6 +901,7 @@ export async function applySecurityPolicy(
         pluginRoot,
         options.environment,
       );
+      await validatePolicyLinks(target);
       await requireUnchangedSecurityPolicy(target, {
         previousContent: draft.content,
         inheritedPolicySha256: draft.inheritedPolicySha256,
@@ -985,7 +989,7 @@ async function retainPolicyRecovery(
   }
 }
 
-async function unchangedPolicyTarget(
+async function resolveDraftTarget(
   draft: SecurityPolicyDraft,
   signal?: AbortSignal,
 ): Promise<SecurityPolicyTarget> {
@@ -999,7 +1003,6 @@ async function unchangedPolicyTarget(
       "The security-policy destination changed. Review a new draft before writing.",
     );
   }
-  await requireUnchangedSecurityPolicy(target, draft, signal);
   return target;
 }
 

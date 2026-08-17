@@ -295,26 +295,18 @@ describe("security policy generation", () => {
         const target = join(nested, "SECURITY.md");
         const original = "# Existing nested policy\n";
         if (existing) await writeFile(target, original);
-        const draft = existing
-          ? await f.generate({ path: "services/api" })
-          : null;
         const alias = join(f.repository, "SECURITY.md");
         await symlink(target, alias, "file");
-        if (draft === null) {
-          await expect(f.generate({ path: "services/api" })).rejects.toThrow(
-            "outside the selected component",
-          );
-          expect(await readdir(f.outputDir)).toEqual([]);
-          await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
-        } else {
-          await expect(securityPolicyDiff(draft, PYTHON)).rejects.toThrow(
-            "outside the selected component",
-          );
-          await expect(applySecurityPolicy(draft)).rejects.toThrow(
-            "outside the selected component",
-          );
-          expect(await readFile(target, "utf8")).toBe(original);
-        }
+        const draft = await f.generate({ path: "services/api" });
+        expect(await securityPolicyDiff(draft, PYTHON)).toContain(
+          "b/SECURITY.md",
+        );
+        await expect(applySecurityPolicy(draft)).rejects.toThrow(
+          "outside the selected component",
+        );
+        expect(await readSecurityPolicy(target)).toBe(
+          existing ? original : null,
+        );
         expect((await lstat(alias)).isSymbolicLink()).toBe(true);
       }
     }
@@ -332,10 +324,11 @@ describe("security policy generation", () => {
       join(middle, ".github"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    await expect(f.generate({ path: "services/api" })).rejects.toThrow(
+    const draft = await f.generate({ path: "services/api" });
+    await expect(applySecurityPolicy(draft)).rejects.toThrow(
       "separate vulnerability-reporting policy",
     );
-    expect(await readdir(f.outputDir)).toEqual([]);
+    expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
   });
 
   test("allows an explicitly selected reporting policy", async () => {
@@ -372,10 +365,11 @@ describe("security policy generation", () => {
       join(f.repository, lowerCaseExists ? ".github" : "docs"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    await expect(f.generate({ path: "Docs" })).rejects.toThrow(
+    const draft = await f.generate({ path: "Docs" });
+    await expect(applySecurityPolicy(draft)).rejects.toThrow(
       "separate vulnerability-reporting policy",
     );
-    expect(await readdir(f.outputDir)).toEqual([]);
+    expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
   });
 
   test("does not silently drop inherited policies when Git is unavailable", async () => {
@@ -1458,10 +1452,10 @@ describe("security policy review and application", () => {
           : target;
         if (chained) await symlink(target, destination, "file");
         await symlink(destination, alias, "file");
-        await expect(f.generate({ path: "component" })).rejects.toThrow(
+        const draft = await f.generate({ path: "component" });
+        await expect(applySecurityPolicy(draft)).rejects.toThrow(
           "outside the selected component",
         );
-        expect(await readdir(f.outputDir)).toEqual([]);
         expect((await lstat(alias)).isSymbolicLink()).toBe(true);
         expect(await readSecurityPolicy(target)).toBe(
           existing ? "# Original policy\n" : null,
@@ -1527,7 +1521,7 @@ describe("security policy review and application", () => {
     expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
   });
 
-  test("validates descendant policy links before generation or applying a draft", async () => {
+  test("validates descendant policy links before applying a draft", async () => {
     for (const scope of [".", "component"]) {
       for (const existing of [false, true]) {
         const f = await fixture();
@@ -1535,15 +1529,12 @@ describe("security policy review and application", () => {
         const alias = join(component, "child", "SECURITY.md");
         const outside = join(f.root, "outside-policy.md");
         await mkdir(dirname(alias), { recursive: true });
-        const draft = await f.generate({ path: scope });
         if (existing) await writeFile(outside, "# Outside policy\n");
         await symlink(outside, alias, "file");
-        await expect(f.generate({ path: scope })).rejects.toThrow(
-          "outside the repository",
+        const draft = await f.generate({ path: scope });
+        expect(await securityPolicyDiff(draft, PYTHON)).toContain(
+          "SECURITY.md",
         );
-        await expect(
-          securityPolicyDiff(draft, "missing-python"),
-        ).rejects.toThrow("outside the repository");
         await expect(
           applySecurityPolicy(draft, { pythonPath: "missing-python" }),
         ).rejects.toThrow("outside the repository");
@@ -1571,12 +1562,9 @@ describe("security policy review and application", () => {
           : target;
         if (chained) await symlink(target, destination, "file");
         await symlink(destination, reporting, "file");
-        await expect(f.generate()).rejects.toThrow(
-          "separate vulnerability-reporting policy",
+        expect(await securityPolicyDiff(draft, PYTHON)).toContain(
+          "b/SECURITY.md",
         );
-        await expect(
-          securityPolicyDiff(draft, "missing-python"),
-        ).rejects.toThrow("separate vulnerability-reporting policy");
         await expect(
           applySecurityPolicy(draft, { pythonPath: "missing-python" }),
         ).rejects.toThrow("separate vulnerability-reporting policy");
@@ -1595,10 +1583,11 @@ describe("security policy review and application", () => {
         join(f.repository, directory),
         process.platform === "win32" ? "junction" : "dir",
       );
-      await expect(f.generate()).rejects.toThrow(
+      const draft = await f.generate();
+      await expect(applySecurityPolicy(draft)).rejects.toThrow(
         "separate vulnerability-reporting policy",
       );
-      expect(await readdir(f.outputDir)).toEqual([]);
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
     }
   });
 
@@ -1654,12 +1643,12 @@ describe("security policy review and application", () => {
             destination = join(directoryLink, "policy-link.md");
           }
           await symlink(destination, alias, "file");
+          const draft = await f.generate({ path: "component" });
           inspected.length = 0;
-          await expect(f.generate({ path: "component" })).rejects.toThrow(
+          await expect(applySecurityPolicy(draft)).rejects.toThrow(
             "outside the repository",
           );
           expect(inspected).toEqual([]);
-          expect(await readdir(f.outputDir)).toEqual([]);
         }
       }
     } finally {
@@ -1723,12 +1712,12 @@ describe("security policy review and application", () => {
         throw error;
       },
     );
+    const draft = await f.generate({ path: "component" });
     if (gitRecognizesDirectory) {
-      const draft = await f.generate({ path: "component" });
       await applySecurityPolicy(draft);
       expect(await readFile(target, "utf8")).toBe(POLICY);
     } else {
-      await expect(f.generate({ path: "component" })).rejects.toThrow(
+      await expect(applySecurityPolicy(draft)).rejects.toThrow(
         "outside the selected component",
       );
     }
@@ -1745,10 +1734,11 @@ describe("security policy review and application", () => {
         join(f.repository, "sibling", "SECURITY.md"),
         "file",
       );
-      await expect(f.generate({ path: "component" })).rejects.toThrow(
+      const draft = await f.generate({ path: "component" });
+      await expect(applySecurityPolicy(draft)).rejects.toThrow(
         "outside the selected component",
       );
-      expect(await readdir(f.outputDir)).toEqual([]);
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
     },
   );
 
@@ -1797,9 +1787,6 @@ describe("security policy review and application", () => {
         const draft = await loadSecurityPolicyDraft(f.repository, f.outputDir, {
           path: "component",
         });
-        await expect(
-          securityPolicyDiff(draft, "missing-python"),
-        ).rejects.toThrow("outside the selected component");
         await expect(
           applySecurityPolicy(draft, { pythonPath: "missing-python" }),
         ).rejects.toThrow("outside the selected component");

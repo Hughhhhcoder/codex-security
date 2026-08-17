@@ -331,7 +331,7 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("validates inherited policies before preflight or runtime setup", async () => {
-    for (const invalid of ["utf8", "alias"] as const) {
+    for (const invalid of ["utf8", "outside"] as const) {
       let prepared = false;
       const f = await setup({
         onPrepare: () => {
@@ -345,12 +345,10 @@ describe("CodexSecurity policy API", () => {
         await writeFile(policy, Buffer.from([0xff]));
         message = "valid UTF-8";
       } else {
-        await symlink(
-          join(f.repository, "component", "SECURITY.md"),
-          policy,
-          "file",
-        );
-        message = "outside the selected component";
+        const outside = join(f.root, "outside-policy.md");
+        await writeFile(outside, "# Outside policy\n");
+        await symlink(outside, policy, "file");
+        message = "outside the repository";
       }
       const options = { path: "component", outputDir: f.outputDir };
       await expect(
