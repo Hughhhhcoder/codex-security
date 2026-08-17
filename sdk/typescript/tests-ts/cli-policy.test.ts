@@ -694,6 +694,29 @@ describe("policy CLI", () => {
       expect(stderr.text()).toContain("was written");
       expect(stderr.text()).not.toContain("canceled by Ctrl-C");
       expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+      await writeFile(
+        join(pluginPath, "scripts", "resolve_security_md.py"),
+        "print('resolver accepted the policy')\n",
+      );
+      const retry = capture();
+      expect(
+        await main(
+          [
+            "policy",
+            "--apply",
+            f.outputDir,
+            "--plugin-path",
+            pluginPath,
+            "--write",
+            "--json",
+          ],
+          retry.stream,
+          capture().stream,
+          policyDependencies(f),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(retry.text()).status).toBe("unchanged");
+      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
     } finally {
       mock.module("node:fs/promises", () => ({
         ...fsPromises,

@@ -600,6 +600,7 @@ describe("security policy review and application", () => {
     expect(diff).toContain("--- /dev/null\n+++ b/SECURITY.md\n");
     expect(diff).toContain("+Requests must be authorized");
     expect(await applySecurityPolicy(draft)).toEqual({
+      status: "written",
       targetPath: draft.targetPath,
       recoveryPath: null,
     });
@@ -763,6 +764,50 @@ describe("security policy review and application", () => {
     expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
     expect(error).toMatchObject({ targetPath: draft.targetPath });
     expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+  });
+
+  test("retries verification without replacing an already-installed draft", async () => {
+    for (const existing of [false, true]) {
+      const f = await fixture();
+      if (existing)
+        await writeFile(
+          join(f.repository, "SECURITY.md"),
+          "# Existing policy\n",
+        );
+      const blocked = join(f.root, "block-verification");
+      await writeFile(blocked, "");
+      const pluginPath = await policyPlugin(
+        f.root,
+        [
+          "import pathlib, sys",
+          "target = pathlib.Path(sys.argv[sys.argv.index('--scope') + 1]) / 'SECURITY.md'",
+          `if target.exists() and target.read_text() == ${JSON.stringify(POLICY)} and pathlib.Path(${JSON.stringify(blocked)}).exists():`,
+          "    raise SystemExit('synthetic verification failure')",
+          "print('resolver accepted the policy')",
+        ].join("\n"),
+      );
+      const draft = await f.generate({ pluginPath });
+      await expect(applySecurityPolicy(draft)).rejects.toBeInstanceOf(
+        SecurityPolicyVerificationError,
+      );
+      const installed = await stat(draft.targetPath);
+      const artifacts = (await readdir(f.outputDir)).sort();
+      expect(await securityPolicyDiff(draft, PYTHON)).toBe("");
+      await expect(applySecurityPolicy(draft)).rejects.toBeInstanceOf(
+        SecurityPolicyVerificationError,
+      );
+      await rm(blocked);
+      const saved = await loadSecurityPolicyDraft(f.repository, f.outputDir);
+      expect(
+        await applySecurityPolicy(saved, { pythonPath: PYTHON, pluginPath }),
+      ).toEqual({
+        status: "unchanged",
+        targetPath: draft.targetPath,
+        recoveryPath: null,
+      });
+      expect((await stat(draft.targetPath)).ino).toBe(installed.ino);
+      expect((await readdir(f.outputDir)).sort()).toEqual(artifacts);
+    }
   });
 
   test("rechecks the reviewed bytes after the resolver returns", async () => {
@@ -1196,6 +1241,37 @@ describe("security policy review and application", () => {
     },
   );
 
+  test("preserves read-only mode when temporary cleanup changes permissions", async () => {
+    const name =
+      "preserves read-only mode when temporary cleanup changes permissions";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const target = join(f.repository, "SECURITY.md");
+    await writeFile(target, "# Existing policy\n");
+    await chmod(target, 0o444);
+    const draft = await f.generate();
+    const originalRm = fsPromises.rm;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      rm: async (path: string, options: Parameters<typeof originalRm>[1]) => {
+        if (path.endsWith(".tmp")) await chmod(path, 0o666);
+        return await originalRm(path, options);
+      },
+    }));
+    try {
+      await applySecurityPolicy(draft);
+      expect(await readFile(target, "utf8")).toBe(POLICY);
+      expect((await stat(target)).mode & 0o200).toBe(0);
+      expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        rm: originalRm,
+      }));
+      await chmod(target, 0o644);
+    }
+  });
+
   test("finishes verification when cancellation arrives after the write commits", async () => {
     const name =
       "finishes verification when cancellation arrives after the write commits";
@@ -1334,7 +1410,11 @@ describe("security policy review and application", () => {
     expect(await securityPolicyDiff(draft, "missing-python")).toBe("");
     expect(
       await applySecurityPolicy(draft, { pythonPath: "missing-python" }),
-    ).toEqual({ targetPath: draft.targetPath, recoveryPath: null });
+    ).toEqual({
+      status: "unchanged",
+      targetPath: draft.targetPath,
+      recoveryPath: null,
+    });
     await writeFile(draft.targetPath, "# Concurrent policy\n");
     await expect(securityPolicyDiff(draft, PYTHON)).rejects.toThrow(
       "changed after",
@@ -1478,6 +1558,57 @@ describe("security policy review and application", () => {
       expect(await readFile(descendant, "utf8")).toBe(POLICY);
       expect((await lstat(descendant)).isSymbolicLink()).toBe(true);
     }
+  });
+
+  test("keeps descendant checkout reporting policies out of scope", async () => {
+    for (const kind of ["nested", "submodule"] as const) {
+      for (const linkedDirectory of [false, true]) {
+        const f = await fixture();
+        policyGit(f.repository, "init", "--quiet");
+        let child: string;
+        if (kind === "submodule") {
+          child = await addPolicySubmodule(
+            f.repository,
+            join(f.root, "submodule-source"),
+            "child",
+          );
+        } else {
+          child = join(f.repository, "child");
+          await mkdir(child);
+          policyGit(child, "init", "--quiet");
+        }
+        const reporting = linkedDirectory
+          ? join(f.repository, "reporting")
+          : join(child, ".github");
+        await mkdir(reporting);
+        const target = join(f.repository, "SECURITY.md");
+        await symlink(target, join(reporting, "SECURITY.md"), "file");
+        if (linkedDirectory)
+          await symlink(
+            reporting,
+            join(child, ".github"),
+            process.platform === "win32" ? "junction" : "dir",
+          );
+        const draft = await f.generate();
+        await expect(applySecurityPolicy(draft)).rejects.toThrow(
+          "separate vulnerability-reporting policy",
+        );
+        expect(await readSecurityPolicy(target)).toBe(null);
+      }
+    }
+  });
+
+  test("leaves unrelated aliases in descendant checkouts alone", async () => {
+    const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
+    const child = join(f.repository, "child");
+    await mkdir(child);
+    policyGit(child, "init", "--quiet");
+    const separate = join(f.repository, "child-policy.md");
+    await writeFile(separate, "# Child policy\n");
+    await symlink(separate, join(child, "SECURITY.md"), "file");
+    await applySecurityPolicy(await f.generate());
+    expect(await readFile(separate, "utf8")).toBe("# Child policy\n");
   });
 
   test("preserves separate reporting policies when applying a root draft", async () => {
@@ -1724,24 +1855,21 @@ describe("security policy review and application", () => {
     }
   });
 
-  test.skipIf(process.platform !== "darwin" && process.platform !== "win32")(
-    "rejects case aliases to a missing component policy",
-    async () => {
-      const f = await fixture();
-      await mkdir(join(f.repository, "component"));
-      await mkdir(join(f.repository, "sibling"));
-      await symlink(
-        join(f.repository, "component", "security.md"),
-        join(f.repository, "sibling", "SECURITY.md"),
-        "file",
-      );
-      const draft = await f.generate({ path: "component" });
-      await expect(applySecurityPolicy(draft)).rejects.toThrow(
-        "outside the selected component",
-      );
-      expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
-    },
-  );
+  test("rejects case aliases to a missing component policy on every platform", async () => {
+    const f = await fixture();
+    await mkdir(join(f.repository, "component"));
+    await mkdir(join(f.repository, "sibling"));
+    await symlink(
+      join(f.repository, "component", "security.md"),
+      join(f.repository, "sibling", "SECURITY.md"),
+      "file",
+    );
+    const draft = await f.generate({ path: "component" });
+    await expect(applySecurityPolicy(draft)).rejects.toThrow(
+      "outside the selected component",
+    );
+    expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
+  });
 
   test("invalidates component drafts when inherited links change", async () => {
     for (const change of ["add", "remove", "retarget", "dangle"] as const) {
@@ -1886,6 +2014,23 @@ describe("security policy review and application", () => {
     expect(await readFile(draft.targetPath, "utf8")).toBe(
       "# Someone else's new policy\n",
     );
+  });
+
+  test("rejects application after a component changes Git roots", async () => {
+    for (const change of ["add", "remove"] as const) {
+      const f = await fixture();
+      policyGit(f.repository, "init", "--quiet");
+      const component = join(f.repository, "component");
+      await mkdir(component);
+      if (change === "remove") policyGit(component, "init", "--quiet");
+      const draft = await f.generate({ path: "component" });
+      if (change === "add") policyGit(component, "init", "--quiet");
+      else await rename(join(component, ".git"), join(f.root, "previous-git"));
+      await expect(applySecurityPolicy(draft)).rejects.toThrow(
+        "destination changed",
+      );
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
+    }
   });
 
   test("binds saved drafts to the explicitly selected repository and component", async () => {

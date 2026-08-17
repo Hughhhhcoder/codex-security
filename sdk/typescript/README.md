@@ -255,6 +255,10 @@ guidance have not changed. It also rejects links that would change another
 component's guidance or a separate reporting policy in `.github` or `docs`.
 Fix those links before applying. It writes the reviewed bytes, verifies that
 the policy resolver can read them, and does not stage, commit, or publish them.
+If a write succeeded but verification failed, fix the reported problem and
+retry the same saved draft with `--write`. An exact-content retry verifies the
+installed policy without replacing it. Keep any previously reported recovery
+file until concurrent edits have been reconciled.
 
 Updates keep the previous file so a late save through an open editor handle is
 not lost. The command moves it into the private artifact directory when possible;

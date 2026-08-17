@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   chmod,
+  copyFile,
   lstat,
   open,
   readFile,
@@ -135,6 +136,7 @@ export interface SecurityPolicyDraft
 }
 
 export interface SecurityPolicyApplication {
+  status: "written" | "unchanged";
   targetPath: string;
   recoveryPath: string | null;
 }
@@ -342,6 +344,13 @@ export async function requireUnchangedSecurityPolicy(
   signal?: AbortSignal,
 ): Promise<void> {
   const current = await readSecurityPolicySnapshot(target, signal);
+  requirePolicySnapshot(current, snapshot);
+}
+
+function requirePolicySnapshot(
+  current: SecurityPolicySnapshot,
+  snapshot: SecurityPolicySnapshot,
+): void {
   if (current.previousContent !== snapshot.previousContent) {
     throw new CodexSecurityError(
       "SECURITY.md changed after its contents were read. Reconcile the changes and generate a new draft before writing.",
@@ -352,6 +361,22 @@ export async function requireUnchangedSecurityPolicy(
       "An inherited SECURITY.md changed after the policy guidance was read. Generate a new draft before writing.",
     );
   }
+}
+
+async function readDraftContent(
+  target: SecurityPolicyTarget,
+  draft: SecurityPolicyDraft,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const current = await readSecurityPolicySnapshot(target, signal);
+  requirePolicySnapshot(current, {
+    previousContent:
+      current.previousContent === draft.content
+        ? draft.content
+        : draft.previousContent,
+    inheritedPolicySha256: draft.inheritedPolicySha256,
+  });
+  return current.previousContent;
 }
 
 export async function resolveSecurityPolicyGuidance(
@@ -623,8 +648,8 @@ export async function securityPolicyDiff(
   signal?: AbortSignal,
 ): Promise<string> {
   const target = await resolveDraftTarget(draft, signal);
-  await requireUnchangedSecurityPolicy(target, draft, signal);
-  if (draft.previousContent === draft.content) return "";
+  if ((await readDraftContent(target, draft, signal)) === draft.content)
+    return "";
   const interpreter =
     python ??
     (await resolvePluginPython({
@@ -683,8 +708,11 @@ async function validatePolicyLinks(
       throw error;
     },
   );
-  const reportingPaths: string[] = [];
-  for (const repository of repositories) {
+  const knownRoots = new Set<string>();
+  const reportingPaths = new Map<string, string>();
+  const addRoot = async (repository: string) => {
+    if (knownRoots.has(repository)) return;
+    knownRoots.add(repository);
     for (const name of [".github", "docs"]) {
       let directory = join(repository, name);
       const metadata = await lstat(directory).catch(
@@ -698,31 +726,35 @@ async function validatePolicyLinks(
         directory = await realpath(directory);
         policyRelativePath(repository, directory);
       }
-      reportingPaths.push(join(directory, "SECURITY.md"));
+      reportingPaths.set(join(directory, "SECURITY.md"), repository);
     }
-  }
-  const check = async (path: string, reportingPolicy: boolean) => {
-    const repository = repositories.find(
+  };
+  for (const repository of repositories) await addRoot(repository);
+  const check = async (
+    path: string,
+    repository: string,
+    reportingPolicy: boolean,
+  ) => {
+    const boundary = repositories.find(
       (root) => !relativePathIsOutside(relative(root, path)),
     )!;
-    const alias = await policyLinkSnapshot(path, repository, signal);
+    const alias = await policyLinkSnapshot(path, boundary, signal);
     let destination =
-      alias.destination === null ? null : join(repository, alias.destination);
+      alias.destination === null ? null : join(boundary, alias.destination);
     if (destination !== null && alias.status === "resolved")
       destination = await realpath(destination);
-    if (destination !== null) policyRelativePath(repository, destination);
+    if (destination !== null) policyRelativePath(boundary, destination);
     reportingPolicy &&= path !== target.targetPath;
-    const outsideScope = relativePathIsOutside(
-      relative(component, dirname(path)),
-    );
+    const outsideScope =
+      repository !== target.repository ||
+      relativePathIsOutside(relative(component, dirname(path)));
     if (
       (outsideScope || reportingPolicy) &&
       destination !== null &&
       (relative(canonicalTarget ?? target.targetPath, destination) === "" ||
-        // A missing leaf can become live with different casing on macOS.
+        // A missing leaf can become live on a case-insensitive volume.
         (canonicalTarget === null &&
           alias.status === "missing" &&
-          process.platform === "darwin" &&
           relative(component, dirname(destination)) === "" &&
           basename(destination).toLowerCase() === "security.md"))
     ) {
@@ -732,19 +764,38 @@ async function validatePolicyLinks(
       );
     }
   };
-  const directories = [protectedRoot];
+  const directories = [{ directory: protectedRoot, repository: protectedRoot }];
   while (directories.length > 0) {
     signal?.throwIfAborted();
-    const directory = directories.pop()!;
+    const entry = directories.pop()!;
+    const { directory } = entry;
+    let repository = knownRoots.has(directory) ? directory : entry.repository;
+    const entries = await readdir(directory, { withFileTypes: true });
+    if (
+      !knownRoots.has(directory) &&
+      entries.some((entry) => entry.name.toLowerCase() === ".git") &&
+      (await lstat(join(directory, ".git")).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        },
+      )) !== null
+    ) {
+      repository =
+        (await enclosingGitWorktreeRoot(directory, signal, {
+          requireIfPresent: true,
+        })) ?? repository;
+      await addRoot(repository);
+    }
     const path = join(directory, "SECURITY.md");
     const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
       throw error;
     });
-    if (metadata?.isSymbolicLink() && !reportingPaths.includes(path))
-      await check(path, false);
+    if (metadata?.isSymbolicLink() && !reportingPaths.has(path))
+      await check(path, repository, false);
     // Do not follow directory links or inspect Git metadata.
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
+    for (const entry of entries) {
       if (!entry.isDirectory() || entry.name === ".git") continue;
       if (entry.name.toLowerCase() === ".git") {
         const metadata = await realpath(join(directory, ".git")).catch(
@@ -759,11 +810,12 @@ async function validatePolicyLinks(
         )
           continue;
       }
-      directories.push(join(directory, entry.name));
+      directories.push({ directory: join(directory, entry.name), repository });
     }
   }
   // Reporting policies can alias the selected file through a directory link.
-  for (const path of reportingPaths) await check(path, true);
+  for (const [path, repository] of reportingPaths)
+    await check(path, repository, true);
 }
 
 export async function applySecurityPolicy(
@@ -779,16 +831,21 @@ export async function applySecurityPolicy(
   const target = await resolveDraftTarget(draft, options.signal);
   if (draft.previousContent !== draft.content)
     await validatePolicyLinks(target, options.signal);
-  await requireUnchangedSecurityPolicy(target, draft, options.signal);
+  const alreadyApplied =
+    (await readDraftContent(target, draft, options.signal)) === draft.content;
   if (draft.previousContent === draft.content)
-    return { targetPath: target.targetPath, recoveryPath: null };
+    return {
+      status: "unchanged",
+      targetPath: target.targetPath,
+      recoveryPath: null,
+    };
   const roots = await enclosingGitWorktreeRoots(
     target.repository,
     options.signal,
   );
   const protectedRoot = roots.at(-1) ?? target.repository;
   const recoveryDirectory =
-    draft.previousContent === null
+    alreadyApplied || draft.previousContent === null
       ? null
       : dirname(
           await requireScanFile(
@@ -829,57 +886,60 @@ export async function applySecurityPolicy(
         options.signal,
       );
     }
-    await resolveSecurityPolicyGuidance(
-      target,
-      python,
-      pluginRoot,
-      options.environment,
-      options.signal,
-    );
-    options.signal?.throwIfAborted();
     const temporary = join(
       dirname(target.targetPath),
       `.SECURITY.md.${randomUUID()}.tmp`,
     );
-    let written = false;
+    let written = alreadyApplied;
     let recoveryPath: string | null = null;
     try {
-      try {
-        await writeFile(temporary, draft.content, {
-          flag: "wx",
-          mode: draft.previousContent === null ? 0o644 : 0o600,
-          signal: options.signal,
-        });
-        if (
-          (await realpath(dirname(target.targetPath))) !==
-          dirname(target.targetPath)
-        ) {
-          throw new CodexSecurityError(
-            "The security-policy destination changed. Review a new draft before writing.",
-          );
-        }
-        await validatePolicyLinks(target, options.signal);
-        await requireUnchangedSecurityPolicy(target, draft, options.signal);
+      if (!alreadyApplied) {
+        await resolveSecurityPolicyGuidance(
+          target,
+          python,
+          pluginRoot,
+          options.environment,
+          options.signal,
+        );
         options.signal?.throwIfAborted();
-        if (draft.previousContent === null)
-          await installFileNoClobber(temporary, target.targetPath);
-        else
-          recoveryPath = await replaceExistingPolicy(
-            temporary,
-            target.targetPath,
-            draft.previousContent,
-            recoveryDirectory!,
-            options.signal,
-          );
-        written = true;
-        if (recoveryPath !== null)
-          recoveryPath = await retainPolicyRecovery(
-            recoveryPath,
-            recoveryDirectory!,
-          );
-      } finally {
-        // Preserve the write or recovery outcome if temporary cleanup fails.
-        await rm(temporary, { force: true }).catch(() => undefined);
+        try {
+          await writeFile(temporary, draft.content, {
+            flag: "wx",
+            mode: draft.previousContent === null ? 0o644 : 0o600,
+            signal: options.signal,
+          });
+          if (
+            (await realpath(dirname(target.targetPath))) !==
+            dirname(target.targetPath)
+          ) {
+            throw new CodexSecurityError(
+              "The security-policy destination changed. Review a new draft before writing.",
+            );
+          }
+          await resolveDraftTarget(draft, options.signal);
+          await validatePolicyLinks(target, options.signal);
+          await requireUnchangedSecurityPolicy(target, draft, options.signal);
+          options.signal?.throwIfAborted();
+          if (draft.previousContent === null)
+            await installFileNoClobber(temporary, target.targetPath);
+          else
+            recoveryPath = await replaceExistingPolicy(
+              temporary,
+              target.targetPath,
+              draft.previousContent,
+              recoveryDirectory!,
+              options.signal,
+            );
+          written = true;
+          if (recoveryPath !== null)
+            recoveryPath = await retainPolicyRecovery(
+              recoveryPath,
+              recoveryDirectory!,
+            );
+        } finally {
+          // Preserve the write or recovery outcome if temporary cleanup fails.
+          await rm(temporary, { force: true }).catch(() => undefined);
+        }
       }
       // Once committed, finish verification even if cancellation arrives.
       if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
@@ -901,6 +961,7 @@ export async function applySecurityPolicy(
         pluginRoot,
         options.environment,
       );
+      await resolveDraftTarget(draft);
       await validatePolicyLinks(target);
       await requireUnchangedSecurityPolicy(target, {
         previousContent: draft.content,
@@ -914,7 +975,11 @@ export async function applySecurityPolicy(
         });
       throw error;
     }
-    return { targetPath: target.targetPath, recoveryPath };
+    return {
+      status: alreadyApplied ? "unchanged" : "written",
+      targetPath: target.targetPath,
+      recoveryPath,
+    };
   } finally {
     if (pluginWorkspace !== undefined)
       await cleanupSdkDirectory(pluginWorkspace).catch(() => undefined);
@@ -944,9 +1009,14 @@ async function replaceExistingPolicy(
         "SECURITY.md changed while the policy was being applied. Review a new draft before writing.",
       );
     }
-    await chmod(temporary, (await stat(recoveryPath)).mode & 0o777);
+    const mode = (await stat(recoveryPath)).mode & 0o777;
+    await chmod(temporary, mode);
     signal?.throwIfAborted();
-    await installFileNoClobber(temporary, targetPath);
+    // Windows may chmod a read-only file before removing it. Keep its
+    // temporary inode separate so cleanup cannot change the installed mode.
+    if ((mode & 0o200) === 0)
+      await copyFile(temporary, targetPath, constants.COPYFILE_EXCL);
+    else await installFileNoClobber(temporary, targetPath);
   } catch (error) {
     let cause = error;
     try {
@@ -998,7 +1068,11 @@ async function resolveDraftTarget(
     dirname(draft.targetPath),
     signal,
   );
-  if (target.targetPath !== draft.targetPath) {
+  if (
+    target.repository !== draft.repository ||
+    target.scope !== draft.scope ||
+    target.targetPath !== draft.targetPath
+  ) {
     throw new CodexSecurityError(
       "The security-policy destination changed. Review a new draft before writing.",
     );

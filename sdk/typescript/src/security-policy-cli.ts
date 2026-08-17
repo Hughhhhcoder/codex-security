@@ -188,22 +188,23 @@ export async function runPolicyCommand(
     }
     controller.signal.throwIfAborted();
     const cost = draft.cost;
-    const changed = draft.content !== draft.previousContent;
-    const python = changed
-      ? await (dependencies.resolvePython ?? resolvePluginPython)({
-          configuredPath: options.config.pythonPath,
-          environment: dependencies.environment,
-          protectedRoot:
-            (
-              await enclosingGitWorktreeRoots(
-                draft.repository,
-                controller.signal,
-              )
-            ).at(-1) ?? draft.repository,
-          signal: controller.signal,
-        })
-      : undefined;
+    const python =
+      draft.content !== draft.previousContent
+        ? await (dependencies.resolvePython ?? resolvePluginPython)({
+            configuredPath: options.config.pythonPath,
+            environment: dependencies.environment,
+            protectedRoot:
+              (
+                await enclosingGitWorktreeRoots(
+                  draft.repository,
+                  controller.signal,
+                )
+              ).at(-1) ?? draft.repository,
+            signal: controller.signal,
+          })
+        : undefined;
     const diff = await securityPolicyDiff(draft, python, controller.signal);
+    const changed = diff.length > 0;
     const shouldPreview = options.format === "toon" || options.write;
     if (shouldPreview) {
       const preview = [
@@ -223,14 +224,14 @@ export async function runPolicyCommand(
       else write(preview);
     }
     const approved =
-      changed &&
-      (options.write ||
-        (interactive &&
-          (await prompt.confirm(
-            `Write this policy to ${display(draft.targetPath)}?`,
-            false,
-            controller.signal,
-          ))));
+      options.write ||
+      (changed &&
+        interactive &&
+        (await prompt.confirm(
+          `Write this policy to ${display(draft.targetPath)}?`,
+          false,
+          controller.signal,
+        )));
     controller.signal.throwIfAborted();
     let status: "draft" | "written" | "unchanged" = changed
       ? "draft"
@@ -245,8 +246,10 @@ export async function runPolicyCommand(
         signal: controller.signal,
       });
       recoveryPath = applied.recoveryPath;
-      status = "written";
-      write(`Wrote and verified ${display(draft.targetPath)}`);
+      status = applied.status;
+      write(
+        `${status === "written" ? "Wrote and verified" : "Verified"} ${display(draft.targetPath)}`,
+      );
       if (recoveryPath !== null)
         write(`Previous policy kept at ${display(recoveryPath)}`);
     } else if (options.format === "toon") {
