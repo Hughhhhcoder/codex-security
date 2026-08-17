@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -34,7 +34,7 @@ import {
   cleanupSdkDirectory,
   createIsolatedHome,
   installFileNoClobber,
-  requireOutputOutsideRepository,
+  requireOutputOutsideRepositories,
   resolvePluginPath,
   resolvePluginPython,
   type ProcessEnvironment,
@@ -43,6 +43,7 @@ import {
   abortable,
   enclosingGitWorktreeRoot,
   enclosingGitWorktreeRoots,
+  gitMetadataDirectories,
   normalizeRepository,
   normalizeTarget,
 } from "./targets.js";
@@ -75,6 +76,17 @@ export interface SecurityPolicyTarget {
   repository: string;
   scope: string;
   targetPath: string;
+}
+
+export async function securityPolicyProtectedRoots(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const roots = await enclosingGitWorktreeRoots(repository, signal);
+  const metadata = await Promise.all(
+    roots.map((root) => gitMetadataDirectories(root, signal)),
+  );
+  return [...new Set([roots.at(-1) ?? repository, ...metadata.flat()])];
 }
 
 export interface SecurityPolicyPreflight extends SecurityPolicyTarget {
@@ -227,6 +239,12 @@ export async function readSecurityPolicySnapshot(
   signal?: AbortSignal,
 ): Promise<SecurityPolicySnapshot> {
   const previousContent = await readSecurityPolicy(target.targetPath);
+  const canonicalTarget = await realpath(target.targetPath).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    },
+  );
   const inherited: [string, string][] = [];
   let directory = target.repository;
   for (const part of target.scope === "." ? [] : target.scope.split("/")) {
@@ -238,16 +256,25 @@ export async function readSecurityPolicySnapshot(
       throw error;
     });
     if (metadata?.isSymbolicLink()) {
-      const { status, ...links } = await policyLinkSnapshot(
-        path,
-        target.repository,
-        signal,
-      );
-      if (status === "cycle") {
+      const alias = await policyLinkSnapshot(path, target.repository, signal);
+      if (alias.status === "cycle") {
         throw new CodexSecurityError(
           `Inherited security-policy link contains a cycle: ${path}`,
         );
       }
+      const destination = await policyLinkDestination(target.repository, alias);
+      if (
+        destination !== null &&
+        policyPathsMatch(
+          canonicalTarget ?? target.targetPath,
+          destination,
+          canonicalTarget === null && alias.status === "missing",
+        )
+      )
+        throw new CodexSecurityError(
+          `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change guidance outside the selected component. Fix the link before drafting a policy.`,
+        );
+      const links = { links: alias.links, destination: alias.destination };
       inherited.push([policyPath, `link:${digest(JSON.stringify(links))}`]);
       metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
@@ -274,15 +301,17 @@ export async function readSecurityPolicySnapshot(
   };
 }
 
+interface PolicyLinkSnapshot {
+  links: [string, string][];
+  destination: string | null;
+  status: "resolved" | "missing" | "cycle";
+}
+
 async function policyLinkSnapshot(
   path: string,
   repository: string,
   signal?: AbortSignal,
-): Promise<{
-  links: [string, string][];
-  destination: string | null;
-  status: "resolved" | "missing" | "cycle";
-}> {
+): Promise<PolicyLinkSnapshot> {
   const links: [string, string][] = [];
   const seen = new Set<string>();
   let current = path;
@@ -302,16 +331,14 @@ async function policyLinkSnapshot(
     }
     const canonical = join(parent, basename(current));
     const relativePath = policyRelativePath(repository, canonical);
-    let metadata: Stats | null;
-    try {
-      metadata = await lstat(canonical);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOTDIR")
-        return { links, destination: null, status: "missing" };
-      if (code !== "ENOENT") throw error;
-      metadata = null;
-    }
+    if (!(await stat(parent)).isDirectory())
+      return { links, destination: null, status: "missing" };
+    const metadata = await lstat(canonical).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+        throw error;
+      },
+    );
     if (metadata !== null || links.length > 0)
       await requirePolicyOutsideGitMetadata(canonical, signal);
     if (!metadata?.isSymbolicLink())
@@ -329,6 +356,169 @@ async function policyLinkSnapshot(
       ? destination
       : `${parent}${sep}${destination}`;
   }
+}
+
+async function policyLinkDestination(
+  repository: string,
+  alias: PolicyLinkSnapshot,
+): Promise<string | null> {
+  if (alias.destination === null) return null;
+  let destination = join(repository, alias.destination);
+  if (alias.status === "resolved") destination = await realpath(destination);
+  policyRelativePath(repository, destination);
+  return destination;
+}
+
+function policyPathsMatch(
+  targetPath: string,
+  destination: string,
+  missing: boolean,
+): boolean {
+  return (
+    relative(targetPath, destination) === "" ||
+    (missing &&
+      relative(dirname(targetPath), dirname(destination)) === "" &&
+      basename(destination).toUpperCase() === "SECURITY.MD")
+  );
+}
+
+interface SecurityPolicyPath {
+  path: string;
+  repository: string;
+  reportingPolicy: boolean;
+  isSymbolicLink: boolean;
+}
+
+async function* securityPolicyPaths(
+  root: string,
+  repositories: readonly string[],
+  signal?: AbortSignal,
+): AsyncGenerator<SecurityPolicyPath> {
+  const knownRoots = new Set<string>();
+  const reportingPaths = new Map<string, string>();
+  const addRoot = async (repository: string) => {
+    if (knownRoots.has(repository)) return;
+    knownRoots.add(repository);
+    for (const name of [".github", "docs"]) {
+      let directory = join(repository, name);
+      const metadata = await lstat(directory).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+          throw error;
+        },
+      );
+      // Keep directory links distinct from their destinations.
+      if (metadata?.isDirectory()) {
+        directory = await realpath(directory);
+        policyRelativePath(repository, directory);
+      }
+      reportingPaths.set(join(directory, "SECURITY.md"), repository);
+    }
+  };
+  for (const repository of repositories) await addRoot(repository);
+  const directories = [
+    {
+      directory: root,
+      repository:
+        repositories.find(
+          (repository) => !relativePathIsOutside(relative(repository, root)),
+        ) ?? root,
+    },
+  ];
+  while (directories.length > 0) {
+    signal?.throwIfAborted();
+    const entry = directories.pop()!;
+    const { directory } = entry;
+    let repository = knownRoots.has(directory) ? directory : entry.repository;
+    const entries = await readdir(directory, { withFileTypes: true });
+    if (
+      !knownRoots.has(directory) &&
+      entries.some((entry) => entry.name.toLowerCase() === ".git") &&
+      (await lstat(join(directory, ".git")).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        },
+      )) !== null
+    ) {
+      repository =
+        (await enclosingGitWorktreeRoot(directory, signal, {
+          requireIfPresent: true,
+        })) ?? repository;
+      await addRoot(repository);
+    }
+    const path = join(directory, "SECURITY.md");
+    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      throw error;
+    });
+    if (
+      (metadata?.isFile() || metadata?.isSymbolicLink()) &&
+      !reportingPaths.has(path)
+    )
+      yield {
+        path,
+        repository,
+        reportingPolicy: false,
+        isSymbolicLink: metadata.isSymbolicLink(),
+      };
+    // Match the plugin inventory: do not follow directory links or Git data.
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === ".git") continue;
+      if (entry.name.toLowerCase() === ".git") {
+        const metadata = await realpath(join(directory, ".git")).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return null;
+            throw error;
+          },
+        );
+        if (
+          metadata !== null &&
+          relative(metadata, join(directory, entry.name)) === ""
+        )
+          continue;
+      }
+      directories.push({ directory: join(directory, entry.name), repository });
+    }
+  }
+  for (const [path, repository] of reportingPaths) {
+    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      throw error;
+    });
+    yield {
+      path,
+      repository,
+      reportingPolicy: true,
+      isSymbolicLink: metadata?.isSymbolicLink() ?? false,
+    };
+  }
+}
+
+export async function inspectSecurityPolicyPaths(
+  target: SecurityPolicyTarget,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const paths: string[] = [];
+  for await (const entry of securityPolicyPaths(
+    dirname(target.targetPath),
+    [target.repository],
+    signal,
+  )) {
+    const alias = await policyLinkSnapshot(
+      entry.path,
+      target.repository,
+      signal,
+    );
+    if (alias.status === "cycle")
+      throw new CodexSecurityError(
+        `Security-policy link contains a cycle: ${entry.path}`,
+      );
+    if (alias.status !== "resolved") continue;
+    if ((await stat(entry.path)).isFile())
+      paths.push(policyRelativePath(target.repository, entry.path));
+  }
+  return paths.sort();
 }
 
 async function requirePolicyOutsideGitMetadata(
@@ -442,6 +632,7 @@ export async function resolveSecurityPolicyGuidance(
 export async function runSecurityPolicyStages(options: {
   target: SecurityPolicyTarget;
   snapshot: SecurityPolicySnapshot;
+  policyPaths: readonly string[];
   outputDir: string;
   pluginRoot: string;
   pluginPath?: string;
@@ -485,6 +676,7 @@ export async function runSecurityPolicyStages(options: {
     "If you cannot inspect the selected source, required guidance, or previous-stage documents, explain the blocker in blockedReason. Do not substitute a generic document for missing evidence. Use null after the source review succeeds. An inspected empty repository, missing deployment configuration, or unanswered owner decision is not a tool failure; record those unknowns in questions and reviewNotes.",
     "Applicable SECURITY.md guidance follows as JSON-encoded evidence:",
     jsonForPrompt(options.guidance),
+    `The host checked these repository policy paths (JSON data): ${jsonForPrompt(options.policyPaths)}. Use the plugin's resolve_security_md.py helper for these paths. Do not read policy links directly or follow unlisted policy paths or directory links.`,
     ...(options.knowledgeBasePath === undefined
       ? []
       : [
@@ -517,7 +709,7 @@ export async function runSecurityPolicyStages(options: {
     "architecture",
     [
       "Establish the architecture before deriving threats. Write a source-backed project specification covering the product's normal use, important components, entry points, data flows, effective configuration, assets, trust boundaries, and component-owned controls.",
-      "Resolve inherited and descendant SECURITY.md policies and relevant ownership or deployment documents. Follow supporting code only to explain an in-scope boundary. Distinguish production and privileged workflows from tests and examples. Do not enumerate final threats or assign severity yet.",
+      "Use the provided policy guidance, listed policies, and relevant ownership or deployment documents. Follow supporting code only to explain an in-scope boundary. Distinguish production and privileged workflows from tests and examples. Do not enumerate final threats or assign severity yet.",
       `Return every owner question whose answer materially changes exposure, scope, or security policy. The host asks them in groups of at most ${OWNER_QUESTION_BATCH_SIZE}. Do not ask the user to restate facts available in source.`,
     ].join("\n"),
     specificationPath,
@@ -692,6 +884,7 @@ export async function securityPolicyDiff(
   python?: string | (() => Promise<string>),
   signal?: AbortSignal,
 ): Promise<string> {
+  draft = { ...draft };
   const target = await resolveDraftTarget(draft, signal);
   if ((await readDraftContent(target, draft, signal)) === draft.content)
     return "";
@@ -717,7 +910,7 @@ export async function securityPolicyDiff(
     "    sys.stdout.buffer.write(line.encode('utf-8'))",
     "    if not line.endswith('\\n'): sys.stdout.buffer.write(b'\\n\\\\ No newline at end of file\\n')",
   ].join("\n");
-  return await new Promise<string>((resolve, reject) => {
+  const diff = await new Promise<string>((resolve, reject) => {
     const child = execFile(
       interpreter,
       ["-I", "-c", script],
@@ -738,6 +931,12 @@ export async function securityPolicyDiff(
       ]),
     );
   });
+  const current = await readDraftContent(
+    await resolveDraftTarget(draft, signal),
+    draft,
+    signal,
+  );
+  return current === draft.content ? "" : diff;
 }
 
 async function validatePolicyLinks(
@@ -757,114 +956,39 @@ async function validatePolicyLinks(
       throw error;
     },
   );
-  const knownRoots = new Set<string>();
-  const reportingPaths = new Map<string, string>();
-  const addRoot = async (repository: string) => {
-    if (knownRoots.has(repository)) return;
-    knownRoots.add(repository);
-    for (const name of [".github", "docs"]) {
-      let directory = join(repository, name);
-      const metadata = await lstat(directory).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-          throw error;
-        },
-      );
-      // Normalize real directory casing, but keep directory links distinct.
-      if (metadata?.isDirectory()) {
-        directory = await realpath(directory);
-        policyRelativePath(repository, directory);
-      }
-      reportingPaths.set(join(directory, "SECURITY.md"), repository);
-    }
-  };
-  for (const repository of repositories) await addRoot(repository);
-  const check = async (
-    path: string,
-    repository: string,
-    reportingPolicy: boolean,
-  ) => {
+  for await (const entry of securityPolicyPaths(
+    protectedRoot,
+    repositories,
+    signal,
+  )) {
+    if (!entry.reportingPolicy && !entry.isSymbolicLink) continue;
     const boundary = repositories.find(
-      (root) => !relativePathIsOutside(relative(root, path)),
+      (root) => !relativePathIsOutside(relative(root, entry.path)),
     )!;
-    const alias = await policyLinkSnapshot(path, boundary, signal);
-    let destination =
-      alias.destination === null ? null : join(boundary, alias.destination);
-    if (destination !== null && alias.status === "resolved")
-      destination = await realpath(destination);
-    if (destination !== null) policyRelativePath(boundary, destination);
-    reportingPolicy &&= path !== target.targetPath;
+    const alias = await policyLinkSnapshot(entry.path, boundary, signal);
+    const destination = await policyLinkDestination(boundary, alias);
+    const reportingPolicy =
+      entry.reportingPolicy && entry.path !== target.targetPath;
     const outsideScope =
-      repository !== target.repository ||
-      relativePathIsOutside(relative(component, dirname(path)));
+      entry.repository !== target.repository ||
+      relativePathIsOutside(relative(component, dirname(entry.path)));
     if (
       (outsideScope || reportingPolicy) &&
       destination !== null &&
-      (relative(canonicalTarget ?? target.targetPath, destination) === "" ||
-        // A missing leaf can become live on a case-insensitive volume.
-        (canonicalTarget === null &&
-          alias.status === "missing" &&
-          relative(component, dirname(destination)) === "" &&
-          basename(destination).toUpperCase() === "SECURITY.MD"))
+      policyPathsMatch(
+        canonicalTarget ?? target.targetPath,
+        destination,
+        canonicalTarget === null && alias.status === "missing",
+      )
     ) {
-      const policyPath = relative(protectedRoot, path).split(sep).join("/");
+      const policyPath = relative(protectedRoot, entry.path)
+        .split(sep)
+        .join("/");
       throw new CodexSecurityError(
         `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${reportingPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before applying a policy.`,
       );
     }
-  };
-  const directories = [{ directory: protectedRoot, repository: protectedRoot }];
-  while (directories.length > 0) {
-    signal?.throwIfAborted();
-    const entry = directories.pop()!;
-    const { directory } = entry;
-    let repository = knownRoots.has(directory) ? directory : entry.repository;
-    const entries = await readdir(directory, { withFileTypes: true });
-    if (
-      !knownRoots.has(directory) &&
-      entries.some((entry) => entry.name.toLowerCase() === ".git") &&
-      (await lstat(join(directory, ".git")).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        },
-      )) !== null
-    ) {
-      repository =
-        (await enclosingGitWorktreeRoot(directory, signal, {
-          requireIfPresent: true,
-        })) ?? repository;
-      await addRoot(repository);
-    }
-    const path = join(directory, "SECURITY.md");
-    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
-    if (metadata?.isSymbolicLink() && !reportingPaths.has(path))
-      await check(path, repository, false);
-    // Do not follow directory links or inspect Git metadata.
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name === ".git") continue;
-      if (entry.name.toLowerCase() === ".git") {
-        const metadata = await realpath(join(directory, ".git")).catch(
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return null;
-            throw error;
-          },
-        );
-        if (
-          metadata !== null &&
-          relative(metadata, join(directory, entry.name)) === ""
-        )
-          continue;
-      }
-      directories.push({ directory: join(directory, entry.name), repository });
-    }
   }
-  // Reporting policies can alias the selected file through a directory link.
-  for (const [path, repository] of reportingPaths)
-    await check(path, repository, true);
 }
 
 export async function applySecurityPolicy(
@@ -889,11 +1013,11 @@ export async function applySecurityPolicy(
       targetPath: target.targetPath,
       recoveryPath: null,
     };
-  const roots = await enclosingGitWorktreeRoots(
+  const protectedRoots = await securityPolicyProtectedRoots(
     target.repository,
     options.signal,
   );
-  const protectedRoot = roots.at(-1) ?? target.repository;
+  const protectedRoot = protectedRoots[0]!;
   const recoveryDirectory =
     alreadyApplied || draft.previousContent === null
       ? null
@@ -906,7 +1030,7 @@ export async function applySecurityPolicy(
           ),
         );
   if (recoveryDirectory !== null)
-    requireOutputOutsideRepository(protectedRoot, recoveryDirectory);
+    requireOutputOutsideRepositories(protectedRoots, recoveryDirectory);
   const pluginPath = options.pluginPath ?? draft.pluginPath;
   if (draft.customPlugin && pluginPath === undefined) {
     throw new CodexSecurityError(
@@ -926,9 +1050,13 @@ export async function applySecurityPolicy(
       pluginRoot = await bundledPluginRoot();
     } else {
       const temporaryRoot = await realpath(tmpdir());
-      requireOutputOutsideRepository(protectedRoot, temporaryRoot, "temporary");
+      requireOutputOutsideRepositories(
+        protectedRoots,
+        temporaryRoot,
+        "temporary",
+      );
       pluginWorkspace = await createIsolatedHome(temporaryRoot, (path) =>
-        requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+        requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
       );
       pluginRoot = await resolvePluginPath(
         pluginPath,

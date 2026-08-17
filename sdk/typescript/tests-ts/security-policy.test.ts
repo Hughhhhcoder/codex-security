@@ -1177,20 +1177,31 @@ describe("security policy review and application", () => {
     }
   });
 
-  test("keeps recovery files outside the target and enclosing checkouts", async () => {
-    for (const path of [".", "services/api"]) {
+  test("keeps recovery files outside checkouts and Git metadata", async () => {
+    for (const kind of ["root", "submodule", "external_git"]) {
       const f = await fixture();
-      if (path !== ".") {
+      const path = kind === "submodule" ? "services/api" : ".";
+      let inside = join(f.repository, "artifacts");
+      if (kind === "submodule") {
         policyGit(f.repository, "init", "--quiet");
         await addPolicySubmodule(
           f.repository,
           join(f.root, "submodule-source"),
         );
+      } else if (kind === "external_git") {
+        const metadata = join(f.root, "git-data");
+        policyGit(
+          f.repository,
+          "init",
+          "--quiet",
+          "--separate-git-dir",
+          metadata,
+        );
+        inside = join(metadata, "artifacts");
       }
       const original = "# Original policy\n";
       await writeFile(join(f.repository, path, "SECURITY.md"), original);
       const draft = await f.generate({ path });
-      const inside = join(f.repository, "artifacts");
       await mkdir(inside, { mode: 0o700 });
       await writeFile(
         join(inside, "policy-draft.json"),
@@ -1529,6 +1540,25 @@ describe("security policy review and application", () => {
     await expect(applySecurityPolicy(draft)).rejects.toThrow("changed after");
   });
 
+  test("rechecks policy changes made while preparing a diff", async () => {
+    for (const changed of ["target", "inherited", "applied"]) {
+      const f = await fixture();
+      await mkdir(join(f.repository, "component"));
+      const rootPolicy = join(f.repository, "SECURITY.md");
+      await writeFile(rootPolicy, "# Original root policy\n");
+      const draft = await f.generate({ path: "component" });
+      const preview = securityPolicyDiff(draft, async () => {
+        await writeFile(
+          changed === "inherited" ? rootPolicy : draft.targetPath,
+          changed === "applied" ? draft.content : "# Concurrent policy\n",
+        );
+        return PYTHON;
+      });
+      if (changed === "applied") expect(await preview).toBe("");
+      else await expect(preview).rejects.toThrow("changed after");
+    }
+  });
+
   test("invalidates saved component drafts when inherited policies change", async () => {
     for (const change of ["edit", "add", "remove"] as const) {
       const f = await fixture();
@@ -1590,6 +1620,36 @@ describe("security policy review and application", () => {
     expect((await lstat(inherited)).isSymbolicLink()).toBe(true);
   });
 
+  test("rejects inherited aliases that would widen the policy scope", async () => {
+    for (const [ancestor, existing, chained, name] of [
+      [".", false, false, "SECURITY.md"],
+      [".", true, false, "SECURITY.md"],
+      ["services", true, true, "SECURITY.md"],
+      ["services", false, true, "\u017fECURITY.md"],
+    ] as const) {
+      const f = await fixture();
+      const component = join(f.repository, "services", "api");
+      await mkdir(component, { recursive: true });
+      if (existing)
+        await writeFile(join(component, "SECURITY.md"), "# Original policy\n");
+      let destination = join(component, name);
+      if (chained) {
+        const intermediate = join(f.repository, "policy-link.md");
+        await symlink(destination, intermediate, "file");
+        destination = intermediate;
+      }
+      await symlink(
+        destination,
+        join(f.repository, ancestor, "SECURITY.md"),
+        "file",
+      );
+      await expect(f.generate({ path: "services/api" })).rejects.toThrow(
+        "outside the selected component",
+      );
+      expect(await readdir(f.outputDir)).toEqual([]);
+    }
+  });
+
   test("tracks safe inherited policy links and rejects outside links", async () => {
     const f = await fixture();
     const linkedPolicy = join(f.repository, "owner-policy.md");
@@ -1620,35 +1680,33 @@ describe("security policy review and application", () => {
     expect(await readdir(outside.outputDir)).toEqual([]);
   });
 
-  test("rejects policy aliases outside the selected component", async () => {
-    for (const policyDirectory of [".", "component-other"]) {
-      for (const [existing, chained] of [
-        [false, false],
-        [true, false],
-        [false, true],
-        [true, true],
-      ]) {
-        const f = await fixture();
-        const component = join(f.repository, "component");
-        const target = join(component, "SECURITY.md");
-        const alias = join(f.repository, policyDirectory, "SECURITY.md");
-        await mkdir(component);
-        await mkdir(dirname(alias), { recursive: true });
-        if (existing) await writeFile(target, "# Original policy\n");
-        const destination = chained
-          ? join(f.repository, "policy-link.md")
-          : target;
-        if (chained) await symlink(target, destination, "file");
-        await symlink(destination, alias, "file");
-        const draft = await f.generate({ path: "component" });
-        await expect(applySecurityPolicy(draft)).rejects.toThrow(
-          "outside the selected component",
-        );
-        expect((await lstat(alias)).isSymbolicLink()).toBe(true);
-        expect(await readSecurityPolicy(target)).toBe(
-          existing ? "# Original policy\n" : null,
-        );
-      }
+  test("rejects policy aliases in a sibling component", async () => {
+    for (const [existing, chained] of [
+      [false, false],
+      [true, false],
+      [false, true],
+      [true, true],
+    ]) {
+      const f = await fixture();
+      const component = join(f.repository, "component");
+      const target = join(component, "SECURITY.md");
+      const alias = join(f.repository, "component-other", "SECURITY.md");
+      await mkdir(component);
+      await mkdir(dirname(alias));
+      if (existing) await writeFile(target, "# Original policy\n");
+      const destination = chained
+        ? join(f.repository, "policy-link.md")
+        : target;
+      if (chained) await symlink(target, destination, "file");
+      await symlink(destination, alias, "file");
+      const draft = await f.generate({ path: "component" });
+      await expect(applySecurityPolicy(draft)).rejects.toThrow(
+        "outside the selected component",
+      );
+      expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+      expect(await readSecurityPolicy(target)).toBe(
+        existing ? "# Original policy\n" : null,
+      );
     }
   });
 
@@ -1758,8 +1816,8 @@ describe("security policy review and application", () => {
         const outside = join(f.root, "outside-policy.md");
         await mkdir(dirname(alias), { recursive: true });
         if (existing) await writeFile(outside, "# Outside policy\n");
-        await symlink(outside, alias, "file");
         const draft = await f.generate({ path: scope });
+        await symlink(outside, alias, "file");
         expect(await securityPolicyDiff(draft, PYTHON)).toContain(
           "SECURITY.md",
         );
@@ -1972,6 +2030,7 @@ describe("security policy review and application", () => {
 
   test("treats inherited links through regular files as absent", async () => {
     const f = await fixture();
+    policyGit(f.repository, "init", "--quiet");
     await mkdir(join(f.repository, "component"));
     await writeFile(join(f.repository, "not-a-directory"), "source\n");
     await symlink(

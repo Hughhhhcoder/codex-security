@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  inspectSecurityPolicyPaths,
   readSecurityPolicySnapshot,
   resolveSecurityPolicyTarget,
   runSecurityPolicyStages,
@@ -106,6 +107,7 @@ export async function policyFixture(): Promise<{
       return await runSecurityPolicyStages({
         target,
         snapshot: await readSecurityPolicySnapshot(target, options.signal),
+        policyPaths: await inspectSecurityPolicyPaths(target, options.signal),
         outputDir,
         pluginRoot: PLUGIN_ROOT,
         pluginPath: options.pluginPath,
