@@ -65,6 +65,7 @@ function readClient(
       visibility: "public" | "private" | "restricted";
     }[];
     archivedProject?: boolean;
+    autoArchivedProject?: boolean;
     trashedProject?: boolean;
     retiredTeam?: boolean;
   } = {},
@@ -104,6 +105,7 @@ function readClient(
       calls.push(["project", id]);
       return {
         archivedAt: options.archivedProject ? new Date(0) : undefined,
+        autoArchivedAt: options.autoArchivedProject ? new Date(0) : undefined,
         trashed: options.trashedProject ?? false,
         teams: async (variables: unknown) => {
           calls.push(["project.teams", variables]);
@@ -237,6 +239,7 @@ describe("read-only publication preflight", () => {
     for (const [clientOptions, message] of [
       [{ teams: [] }, /does not belong/u],
       [{ archivedProject: true }, /project is archived/u],
+      [{ autoArchivedProject: true }, /project is archived/u],
       [{ trashedProject: true }, /project is archived or deleted/u],
       [{ retiredTeam: true }, /team is archived or retired/u],
       [{ active: false }, /assignee is inactive/u],

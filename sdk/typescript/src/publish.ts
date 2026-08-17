@@ -473,7 +473,7 @@ export async function checkScanPublicationInternal(
     if (prepared.destination.projectId !== undefined) {
       step = "project access";
       const project = await client.project(prepared.destination.projectId);
-      if (project.archivedAt || project.trashed) {
+      if (project.archivedAt || project.autoArchivedAt || project.trashed) {
         throw new ConfigurationError(
           "The selected Linear project is archived or deleted.",
         );
