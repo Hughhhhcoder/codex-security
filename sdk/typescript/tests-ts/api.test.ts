@@ -4488,7 +4488,7 @@ describe("CodexSecurity orchestration", () => {
 
     try {
       const results = await Promise.allSettled(
-        clients.map((client) => client.run(repository)),
+        clients.map((client) => client.run(repository).finally(releaseScans)),
       );
       for (const result of results) {
         expect(result).toMatchObject({
@@ -4500,6 +4500,7 @@ describe("CodexSecurity orchestration", () => {
       }
       expect(scansStarted).toBe(2);
     } finally {
+      releaseScans();
       await Promise.all(clients.map(async (client) => await client.close()));
     }
   });

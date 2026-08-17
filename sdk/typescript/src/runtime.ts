@@ -996,6 +996,10 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
   }
 }
 
+interface CredentialLockReadRetry {
+  deadline?: number;
+}
+
 export async function acquireCodexSecurityCredentialHomeLock(
   codexHome: string,
   signal?: AbortSignal,
@@ -1010,9 +1014,11 @@ export async function acquireCodexSecurityCredentialHomeLock(
   );
   const expectedDevice = homeMetadata.dev;
   const expectedInode = homeMetadata.ino;
+  const platform = securityOptions.platform ?? process.platform;
   const lock = join(codexHome, CREDENTIAL_LOCK_NAME);
   const ownerPath = join(lock, "owner.json");
   const token = randomUUID();
+  const readRetry: CredentialLockReadRetry = {};
 
   while (true) {
     throwIfSignalAborted(signal);
@@ -1027,10 +1033,12 @@ export async function acquireCodexSecurityCredentialHomeLock(
       throw error;
     });
     if (existingLock !== null) {
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, platform, readRetry))
+        continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
+    delete readRetry.deadline;
     await requireSecureCredentialHome(codexHome, {
       ...securityOptions,
       expectedDevice,
@@ -1040,7 +1048,8 @@ export async function acquireCodexSecurityCredentialHomeLock(
       await mkdir(lock, { mode: 0o700 });
     } catch (error) {
       if (nodeErrorCode(error) !== "EEXIST") throw error;
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, platform, readRetry))
+        continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
@@ -1078,12 +1087,19 @@ export async function acquireCodexSecurityCredentialHomeLock(
   }
 }
 
-async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
+async function recoverStaleCredentialHomeLock(
+  lock: string,
+  platform: NodeJS.Platform,
+  readRetry: CredentialLockReadRetry,
+): Promise<boolean> {
   const metadata = await lstat(lock).catch((error: unknown) => {
     if (nodeErrorCode(error) === "ENOENT") return null;
     throw error;
   });
-  if (metadata === null) return true;
+  if (metadata === null) {
+    delete readRetry.deadline;
+    return true;
+  }
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new OutputDirectoryError(
       `Codex Security credential-home lock is not a directory: ${lock}`,
@@ -1091,10 +1107,25 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
   }
 
   let owner: unknown;
+  const deadline =
+    platform === "win32"
+      ? (readRetry.deadline ??=
+          Date.now() + INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS)
+      : undefined;
   try {
     owner = JSON.parse(await readFile(join(lock, "owner.json"), "utf8"));
   } catch (error) {
-    if (nodeErrorCode(error) !== "ENOENT" && !(error instanceof SyntaxError)) {
+    const code = nodeErrorCode(error);
+    // Re-enter the acquisition loop so a Windows read retry rechecks the lock.
+    if (
+      deadline !== undefined &&
+      (code === "EPERM" || code === "EBUSY") &&
+      Date.now() < deadline
+    ) {
+      return false;
+    }
+    delete readRetry.deadline;
+    if (code !== "ENOENT" && !(error instanceof SyntaxError)) {
       throw error;
     }
     if (
@@ -1104,6 +1135,7 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
       return false;
     }
   }
+  delete readRetry.deadline;
 
   if (isRecord(owner) && typeof owner["pid"] === "number") {
     try {
