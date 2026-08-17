@@ -1,6 +1,9 @@
 name: test-quality
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/test-quality.yml
   workflow_dispatch:
   schedule:
     - cron: "23 9 * * 1"

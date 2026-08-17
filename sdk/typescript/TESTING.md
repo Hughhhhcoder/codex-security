@@ -60,8 +60,9 @@ lanes still test and inspect an installed package. Package inspection includes
 a strict NodeNext TypeScript consumer and the actual installed CLI. Failed
 tests block CI; a failed diagnostic upload does not.
 
-The separate `test-quality` workflow runs weekly and can be dispatched
-manually. It exercises Bun's native `--isolate`, `--parallel=2`, randomized
+The separate `test-quality` workflow runs weekly, can be dispatched manually,
+and runs on pull requests that change its workflow file. It exercises Bun's
+native `--isolate`, `--parallel=2`, randomized
 ordering, and seven-way Windows sharding. It compares test identities and
 outcomes against an unsharded run and records timings in the job summary.
 It is not a required check or part of the release trigger.
