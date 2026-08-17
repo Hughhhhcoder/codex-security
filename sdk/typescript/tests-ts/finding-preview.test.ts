@@ -36,7 +36,9 @@ describe("bundled finding previews", () => {
       absolute: null,
       redirected: null,
       escaped: null,
-      legacyScoped: null,
+      legacyScoped: "1  public source",
+      legacyUnmarkedFile: "1  selected file",
+      legacyUnmarkedFileDescendant: null,
       legacyRoot: "1  private source",
       legacyKnownDirectory: "1  public source",
       legacyKnownFile: "1  selected file",
@@ -69,6 +71,13 @@ describe("bundled finding previews", () => {
     });
   });
 
+  test("omits source authority when replacement refs changed the scanned tree", () => {
+    expect(sourceScopeProbe("replacement_snapshot")).toEqual({
+      mismatchedCaptureOmitted: true,
+      ambiguousLegacyViewOmitted: true,
+    });
+  });
+
   test("does not treat links or reparse points as filesystem alias evidence", () => {
     expect(sourceScopeProbe("alias_evidence")).toEqual({
       ordinary: true,
@@ -90,6 +99,7 @@ describe("bundled finding previews", () => {
       writers: 5,
       nativeRecipesUnchanged: true,
       cliRecipeUnchanged: true,
+      legacyExactScopesPreserved: true,
     });
   });
 

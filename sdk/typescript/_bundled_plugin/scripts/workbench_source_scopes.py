@@ -214,6 +214,28 @@ def capture_source_scopes(
     ):
         return result
     try:
+        repository, prefix = git_worktree_context(target)
+        replacements = offline_git_bytes(repository, "replace", "--list")
+        if replacements is None:
+            return result
+        if (
+            replacements
+            and offline_git_bytes(
+                repository,
+                "diff",
+                "--quiet",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--ignore-submodules=none",
+                revision,
+                "--",
+                prefix,
+            )
+            is None
+        ):
+            # The scan's normal Git snapshot may have used a replacement tree.
+            # Only grant immutable-source authority when that view agrees.
+            return result
         context = target_tree(target, revision)
         if context is None:
             return result
@@ -284,9 +306,8 @@ def load_source_scopes(
         ]
         return (git_worktree_context(target)[0], tree, scopes) if scopes else None
 
-    # Earlier path-scoped CLI scans recorded file kinds but not canonical Git
-    # objects. Exact Git spellings remain usable; missing kinds do not grant
-    # directory descendants. Repository-wide legacy scans are unambiguous.
+    # Exact, unambiguous historical entries establish legacy scope kinds.
+    # Keep any previously recorded file kinds as an additional constraint.
     recipe = scan["recipe_json"] if "recipe_json" in scan.keys() else None
     legacy_recipe = json.loads(recipe) if recipe else None
     legacy_files = (
@@ -294,33 +315,32 @@ def load_source_scopes(
         if isinstance(legacy_recipe, dict)
         else None
     )
+    repository, _ = git_worktree_context(target)
+    if offline_git_bytes(repository, "replace", "--list") != b"":
+        # Old records do not say which replacement view was scanned.
+        return None
     context = target_tree(target, scan["target_revision"])
     if context is None:
         return None
     repository, tree = context
     scopes = []
     for path in paths:
-        kind = (
-            "directory"
-            if path == "."
-            else ("file" if path in legacy_files else "directory")
-            if isinstance(legacy_files, list)
-            else None
+        entry = exact_tree_path(repository, tree, path, require_unambiguous=True)
+        if entry is None or entry[1] not in {"file", "directory"}:
+            continue
+        kind = entry[1]
+        if isinstance(legacy_files, list) and kind != (
+            "file" if path in legacy_files else "directory"
+        ):
+            continue
+        scopes.append(
+            {
+                "path": path,
+                "canonicalPath": path,
+                "kind": kind,
+                "objectId": entry[2],
+            }
         )
-        entry = (
-            exact_tree_path(repository, tree, path, require_unambiguous=True)
-            if kind is not None
-            else None
-        )
-        if entry is not None and entry[1] == kind:
-            scopes.append(
-                {
-                    "path": path,
-                    "canonicalPath": path,
-                    "kind": kind,
-                    "objectId": entry[2],
-                }
-            )
     return (repository, tree, scopes) if scopes else None
 
 

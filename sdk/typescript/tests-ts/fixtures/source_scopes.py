@@ -17,6 +17,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+os.environ.pop("GIT_NO_REPLACE_OBJECTS", None)
+os.environ.pop("GIT_REPLACE_REF_BASE", None)
+
 sys.path.insert(0, sys.argv[1])
 import workbench_source_excerpt as excerpts
 import workbench_source_scopes as scopes
@@ -117,6 +120,49 @@ def replacements(repository: Path) -> dict:
     return {"savedObjectsUnchanged": True, "captureIgnoresReplacements": True}
 
 
+def replacement_snapshot(repository: Path) -> dict:
+    from workbench_scan_start import scan_target_identity
+
+    write(repository, "src/public.py", "historical source\n")
+    write(repository, "src/removed.py", "historical-only source\n")
+    historical = commit(repository)
+    write(repository, "src/public.py", "scanned source\n")
+    (repository / "src/removed.py").unlink()
+    replacement = commit(repository)
+    git(repository, "reset", "--hard", historical)
+    git(repository, "replace", historical, replacement)
+    git(repository, "reset", "--hard", historical)
+    assert git(repository, "status", "--porcelain") == ""
+    assert not (repository / "src/removed.py").exists()
+    identity = scan_target_identity(repository, None)
+    assert identity[1] == clean_worktree_content_digest()
+    authority = scopes.capture_source_scopes(repository, identity, ["src"])
+    assert authority["scopes"] == []
+    record = {
+        "target_revision": identity[0],
+        "target_snapshot_digest": identity[1],
+        "source_scopes_json": json.dumps(authority),
+        "recipe_json": None,
+    }
+    assert excerpt(record, repository, "src/removed.py", ["src"]) is None
+    legacy = {**record, "source_scopes_json": None}
+    assert excerpt(legacy, repository, "src/removed.py", ["."]) is None
+    git(repository, "replace", "--delete", historical)
+    with patch.dict(
+        os.environ, {"GIT_REPLACE_REF_BASE": "refs/synthetic-replacements/"}
+    ):
+        git(repository, "replace", historical, replacement)
+        git(repository, "reset", "--hard", historical)
+        assert (
+            scopes.capture_source_scopes(
+                repository, scan_target_identity(repository, None), ["src"]
+            )["scopes"]
+            == []
+        )
+        assert excerpt(legacy, repository, "src/removed.py", ["."]) is None
+    return {"mismatchedCaptureOmitted": True, "ambiguousLegacyViewOmitted": True}
+
+
 def boundaries(repository: Path) -> dict:
     for name, content in {
         "src/public.py": "public source\n",
@@ -173,6 +219,12 @@ def boundaries(repository: Path) -> dict:
         if linked
         else None,
         "legacyScoped": excerpt(legacy, repository, "src/public.py", ["src"]),
+        "legacyUnmarkedFile": excerpt(
+            legacy, repository, "selected.py", ["selected.py"]
+        ),
+        "legacyUnmarkedFileDescendant": excerpt(
+            legacy, repository, "selected.py/private.py", ["selected.py"]
+        ),
         "legacyRoot": excerpt(legacy, repository, "private/secret.py", ["."]),
         "legacyKnownDirectory": excerpt(
             legacy_kinds, repository, "src/public.py", ["src"]
@@ -504,6 +556,16 @@ def writers(repository: Path) -> dict:
                 else {"src"}
             )
             assert {scope["path"] for scope in metadata["scopes"]} == expected
+            historical = {**dict(row), "source_scopes_json": None}
+            assert (
+                excerpt(historical, repository, "src/public.py", list(expected))
+                == "1  public source"
+            )
+            if row["id"] == registered["scanId"]:
+                assert (
+                    excerpt(historical, repository, "selected.py", list(expected))
+                    == "1  selected file"
+                )
             if row["id"] != registered["scanId"]:
                 assert row["recipe_json"] is None
                 assert "does not have a saved launch recipe" in command(
@@ -529,7 +591,12 @@ def writers(repository: Path) -> dict:
         assert (
             excerpt(deep_record, repository, "selected.py", ["."]) == "1  selected file"
         )
-    return {"writers": 5, "nativeRecipesUnchanged": True, "cliRecipeUnchanged": True}
+    return {
+        "writers": 5,
+        "nativeRecipesUnchanged": True,
+        "cliRecipeUnchanged": True,
+        "legacyExactScopesPreserved": True,
+    }
 
 
 def migration(_: Path) -> dict:
@@ -634,6 +701,7 @@ with tempfile.TemporaryDirectory(prefix="codex-security-source-scopes-") as temp
             {
                 "boundaries": boundaries,
                 "replacements": replacements,
+                "replacement_snapshot": replacement_snapshot,
                 "aliases": aliases,
                 "alias_evidence": alias_evidence,
                 "worktrees": worktrees,
