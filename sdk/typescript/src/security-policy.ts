@@ -290,11 +290,24 @@ async function validatePolicyLinks(
       throw error;
     },
   );
-  const reportingPaths = repositories.flatMap((repository) =>
-    [".github", "docs"].map((directory) =>
-      join(repository, directory, "SECURITY.md"),
-    ),
-  );
+  const reportingPaths: string[] = [];
+  for (const repository of repositories) {
+    for (const name of [".github", "docs"]) {
+      let directory = join(repository, name);
+      const metadata = await lstat(directory).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+          throw error;
+        },
+      );
+      // Normalize real directory casing, but keep directory links distinct.
+      if (metadata?.isDirectory()) {
+        directory = await realpath(directory);
+        policyRelativePath(repository, directory);
+      }
+      reportingPaths.push(join(directory, "SECURITY.md"));
+    }
+  }
   const check = async (path: string, reportingPolicy: boolean) => {
     const repository = repositories.find(
       (root) => !relativePathIsOutside(relative(root, path)),
@@ -305,7 +318,7 @@ async function validatePolicyLinks(
     if (destination !== null && alias.status === "resolved")
       destination = await realpath(destination);
     if (destination !== null) policyRelativePath(repository, destination);
-    reportingPolicy &&= relative(target.targetPath, path) !== "";
+    reportingPolicy &&= path !== target.targetPath;
     const outsideScope = relativePathIsOutside(
       relative(component, dirname(path)),
     );

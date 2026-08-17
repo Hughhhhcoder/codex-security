@@ -338,11 +338,43 @@ describe("security policy generation", () => {
   });
 
   test("allows an explicitly selected reporting policy", async () => {
+    for (const path of ["docs", "Docs", ".github", ".GITHUB"]) {
+      for (const existing of [false, true]) {
+        const f = await fixture();
+        const directory = join(f.repository, path);
+        await mkdir(directory);
+        if (existing)
+          await writeFile(
+            join(directory, "SECURITY.md"),
+            "# Existing policy\n",
+          );
+        const draft = await f.generate({ path });
+        await applySecurityPolicy(draft);
+        expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+      }
+    }
+  });
+
+  test("keeps linked reporting directories distinct from the selected directory", async () => {
     const f = await fixture();
-    await mkdir(join(f.repository, "docs"));
-    const draft = await f.generate({ path: "docs" });
-    await applySecurityPolicy(draft);
-    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+    const component = join(f.repository, "Docs");
+    await mkdir(component);
+    const lowerCaseExists = await lstat(join(f.repository, "docs")).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      },
+    );
+    await symlink(
+      component,
+      join(f.repository, lowerCaseExists ? ".github" : "docs"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await expect(f.generate({ path: "Docs" })).rejects.toThrow(
+      "separate vulnerability-reporting policy",
+    );
+    expect(await readdir(f.outputDir)).toEqual([]);
   });
 
   test("does not silently drop inherited policies when Git is unavailable", async () => {
