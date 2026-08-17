@@ -3,6 +3,38 @@ import { describe, expect, test } from "bun:test";
 import { CodexSecurity, CodexSecurityError, VERSION } from "../src/index.js";
 import { main } from "../src/cli.js";
 
+interface WorkflowStep {
+  name?: string;
+  run?: string;
+  if?: string;
+  env?: Record<string, unknown>;
+  "continue-on-error"?: boolean;
+}
+
+interface WorkflowJob {
+  name?: string;
+  needs?: string[];
+  strategy?: { matrix: Record<string, unknown> };
+  steps: WorkflowStep[];
+}
+
+async function workflow(name: string): Promise<{
+  on: Record<string, unknown>;
+  env?: Record<string, unknown>;
+  jobs: Record<string, WorkflowJob>;
+}> {
+  return Bun.YAML.parse(
+    await readFile(
+      new URL(`../../../.github/workflows/${name}`, import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    on: Record<string, unknown>;
+    env?: Record<string, unknown>;
+    jobs: Record<string, WorkflowJob>;
+  };
+}
+
 function capture(): {
   stream: Pick<NodeJS.WriteStream, "write">;
   text: () => string;
@@ -48,40 +80,108 @@ describe("TypeScript package skeleton", () => {
   });
 
   test("pins each Node.js minimum and preserves protected and latest LTS checks", async () => {
-    const ciWorkflow = await readFile(
-      new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
-      "utf8",
+    const { jobs } = await workflow("node-ci.yml");
+    expect(jobs["test"]?.name).toBe(
+      "${{ matrix.os }} / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
     );
-
-    expect(ciWorkflow).toContain(
-      "${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
+    expect(jobs["test"]?.strategy?.matrix).toEqual({
+      os: ["ubuntu-latest", "macos-latest"],
+      node: ["22.13.0"],
+      include: ["24.0.0", "24", "26.0.0", "26"].map((node) => ({
+        os: "ubuntu-latest",
+        node,
+      })),
+    });
+    expect(jobs["windows"]?.name).toBe(
+      "windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
     );
-    expect(ciWorkflow).toContain('node: ["22.13.0"]');
-    for (const version of ["24.0.0", "24", "26.0.0", "26"]) {
-      expect(ciWorkflow).toContain(`node: "${version}"`);
-    }
+    expect(jobs["windows"]?.needs).toEqual(["windows-test", "windows-verify"]);
+    expect(jobs["windows-test"]?.strategy?.matrix["node"]).toEqual([
+      "22.13.0",
+      "24",
+    ]);
   });
 
   test("uses the default test timeout consistently across CI platforms", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
-    const ciWorkflow = await readFile(
-      new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
-      "utf8",
-    );
+    const { jobs } = await workflow("node-ci.yml");
 
     expect(packageJson.scripts.test).toBe(
       "bun test --timeout 30000 ./tests-ts",
     );
-    expect(ciWorkflow).toContain(
-      "run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
+    expect(packageJson.scripts["test:ci"]).toContain(
+      `${packageJson.scripts.test} `,
     );
-    expect(ciWorkflow).toContain(
-      "name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",
+    expect(jobs["windows-test"]?.steps).toContainEqual(
+      expect.objectContaining({
+        run: "node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
+      }),
     );
-    expect(ciWorkflow).toContain("run: pnpm --dir sdk/typescript run test");
-    expect(ciWorkflow).not.toContain("--timeout 60000");
+  });
+
+  test("runs shared static checks once and keeps report upload non-blocking", async () => {
+    const { jobs } = await workflow("node-ci.yml");
+    const steps = Object.values(jobs).flatMap((job) => job.steps);
+    for (const name of ["Typecheck", "Check formatting"]) {
+      expect(steps.filter((step) => step.name === name)).toEqual([
+        expect.objectContaining({
+          if: "matrix.os == 'ubuntu-latest' && matrix.node == '22.13.0'",
+        }),
+      ]);
+    }
+    expect(steps.find((step) => step.name === "Test")).not.toHaveProperty(
+      "continue-on-error",
+    );
+    expect(
+      steps.find((step) => step.name === "Upload test reports"),
+    ).toMatchObject({
+      "continue-on-error": true,
+    });
+    for (const name of ["test", "windows-verify"]) {
+      expect(jobs[name]?.steps).toContainEqual(
+        expect.objectContaining({
+          run: "pnpm run check:package ../../dist/*.tgz",
+        }),
+      );
+    }
+  });
+
+  test("keeps machine-wide policy changes out of parallel and experimental runs", async () => {
+    const ci = await workflow("node-ci.yml");
+    const windows = ci.jobs["windows-test"]!.steps;
+    expect(
+      windows.find((step) => step.name === "Test shard ${{ matrix.shard }}")
+        ?.env?.["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"],
+    ).toBe("false");
+    expect(
+      windows.find(
+        (step) => step.name === "Test machine-wide PowerShell policy",
+      ),
+    ).toMatchObject({
+      if: "matrix.shard == 3 && runner.environment == 'github-hosted'",
+      env: { CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true" },
+      run: "bun test --timeout 30000 ./tests-ts/windows-machine-policy.test.ts",
+    });
+    const quality = await workflow("test-quality.yml");
+    expect(Object.keys(quality.on).sort()).toEqual([
+      "schedule",
+      "workflow_dispatch",
+    ]);
+    expect(quality.env?.["CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST"]).toBe(
+      "false",
+    );
+    expect(quality.env?.["CODEX_SECURITY_INTEGRATION"]).toBe("0");
+    for (let shard = 1; shard <= 7; shard += 1) {
+      expect(
+        quality.jobs["runner"]?.strategy?.matrix["include"],
+      ).toContainEqual({
+        os: "windows-latest",
+        mode: `shard-${shard}`,
+        args: `--shard=${shard}/7`,
+      });
+    }
   });
 
   test("builds packages without a preinstalled package manager and provides a production audit", async () => {
@@ -100,14 +200,17 @@ describe("TypeScript package skeleton", () => {
 
   test("keeps production dependency audits non-blocking in CI and releases", async () => {
     for (const workflowName of ["node-ci.yml", "node-release.yml"]) {
-      const workflow = await readFile(
-        new URL(`../../../.github/workflows/${workflowName}`, import.meta.url),
-        "utf8",
-      );
-
-      expect(workflow).toMatch(
-        /- name: Audit production dependencies\n(?:\s+if: [^\n]+\n)?\s+continue-on-error: true\n\s+run: (?:sfw )?pnpm --dir sdk\/typescript run audit:prod/u,
-      );
+      const { jobs } = await workflow(workflowName);
+      const audits = Object.values(jobs)
+        .flatMap((job) => job.steps)
+        .filter((step) => step.name === "Audit production dependencies");
+      expect(audits.length).toBeGreaterThan(0);
+      for (const audit of audits) {
+        expect(audit["continue-on-error"]).toBe(true);
+        expect(audit.run).toMatch(
+          /^(?:sfw )?pnpm --dir sdk\/typescript run audit:prod$/u,
+        );
+      }
     }
   });
 

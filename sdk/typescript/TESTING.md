@@ -1,0 +1,83 @@
+# Testing the SDK and CLI
+
+Use the pnpm version in `package.json` and Bun 1.3.14, matching CI. Run these
+commands from `sdk/typescript`:
+
+```sh
+pnpm install --frozen-lockfile
+bun test --timeout 30000 ./tests-ts/worker-progress.test.ts
+pnpm run types
+pnpm run format
+pnpm run test
+pnpm run test:ci
+pnpm pack --pack-destination ../../dist
+pnpm run check:package ../../dist/*.tgz
+```
+
+The test commands pass a 30-second per-test timeout explicitly. `test:ci` writes
+`reports/junit.xml` and `coverage/lcov.info`. Coverage measures loaded
+JavaScript and TypeScript, not the Python helpers or child processes. It is
+diagnostic for now. Use several successful CI runs to establish a baseline
+before proposing a coverage floor.
+
+## Writing tests
+
+- Test observable results, failures, cancellation, and cleanup. Prefer a
+  regression case that fails before a fix over assertions about private calls
+  or exact prose.
+- Keep fixtures synthetic and independent. Use real temporary directories,
+  Git repositories, SQLite databases, and installed packages when those
+  boundaries are the behavior under test. Do not use live model credentials.
+- Use the typed `TestClient` and `createApiTestFixtures` helpers for API tests.
+  Do not add a production abstraction solely to support a mock.
+- Restore spies, timers, and environment changes. Tests that change the process
+  cwd or install persistent ESM module mocks use `runTestInSubprocess`.
+  Per-file Bun isolation does not isolate process-wide state inside one file.
+- Keep shared behavior enabled on Linux, macOS, and Windows. The constrained
+  PowerShell test changes machine-wide policy and runs alone, only on an
+  explicitly enabled GitHub-hosted Windows runner.
+- Add property tests for meaningful invariants, with accepted and rejected
+  inputs. Keep example-based regression tests for readable failure cases.
+
+Property tests use a fixed default seed. Fast-check prints the seed, shrink
+path, and counterexample on failure. To replay one property, select its file
+and test name, then set `CODEX_SECURITY_PROPERTY_SEED` and
+`CODEX_SECURITY_PROPERTY_PATH` to the reported values. Set
+`CODEX_SECURITY_PROPERTY_RUNS` to increase the case count. Pure properties
+default to 100 cases; filesystem contract properties default to 20.
+
+## GitHub Actions
+
+`node-ci` retains the required `ubuntu-latest / node-22`,
+`macos-latest / node-22`, and `windows-latest / node-22` checks. Its Ubuntu
+Node 22 job runs static checks and uploads JUnit and LCOV. All supported runtime
+lanes still test and inspect an installed package. Package inspection includes
+a strict NodeNext TypeScript consumer and the actual installed CLI. Failed
+tests block CI; a failed diagnostic upload does not.
+
+The separate `test-quality` workflow runs weekly and can be dispatched
+manually. It exercises Bun's native `--isolate`, `--parallel=2`, randomized
+ordering, and seven-way Windows sharding. It compares test identities and
+outcomes against an unsharded run and records timings in the job summary.
+It is not a required check or part of the release trigger.
+
+Keep the current file-balanced Windows runner until the native runner has
+matching inventories and acceptable Windows timings. Before promotion, compare
+the slowest native shard with the current required shards on the same commit.
+Keep the machine-policy test serial. Do not replace the full required suite
+with `--changed`: Python files, schemas, fixtures, and workflows loaded at
+runtime are not necessarily part of Bun's import graph.
+
+## Mutation testing
+
+```sh
+pnpm run test:mutation
+pnpm exec stryker run --mutate src/worker-progress.ts
+```
+
+The initial Stryker trial covers progress parsing, safe error messages, and
+pure cost arithmetic. It runs a small Bun suite without live services and
+writes HTML and JSON under `reports/mutation`. Review surviving mutants for
+missing behavior assertions or equivalent changes. There is no score gate yet;
+set one only after the trial has a stable, useful baseline. Do not make a
+surviving mutant disappear by adding assertions about implementation details.
