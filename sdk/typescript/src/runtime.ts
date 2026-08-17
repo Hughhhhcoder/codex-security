@@ -1775,8 +1775,9 @@ export async function installFileNoClobber(
   try {
     await link(source, destination);
   } catch (error) {
+    // Windows reports unsupported FAT/exFAT hard links as EISDIR.
     if (
-      !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"].includes(
+      !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK", "EISDIR"].includes(
         nodeErrorCode(error) ?? "",
       )
     ) {

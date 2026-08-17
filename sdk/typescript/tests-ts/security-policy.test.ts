@@ -884,6 +884,7 @@ describe("security policy review and application", () => {
     if (runMockInSubprocess(import.meta.path, name)) return;
     const originalLink = fsPromises.link;
     const originalCopyFile = fsPromises.copyFile;
+    let linkErrorCode = "ENOTSUP";
     let collision = false;
     let copyFailure = false;
     mock.module("node:fs/promises", () => ({
@@ -891,7 +892,7 @@ describe("security policy review and application", () => {
       link: async (_source: string, destination: string) => {
         if (collision) await writeFile(destination, "# Concurrent policy\n");
         throw Object.assign(new Error("hard links are unsupported"), {
-          code: "ENOTSUP",
+          code: linkErrorCode,
         });
       },
       copyFile: async (source: string, destination: string, mode?: number) => {
@@ -905,19 +906,22 @@ describe("security policy review and application", () => {
       },
     }));
     try {
-      const f = await fixture();
-      const draft = await f.generate();
-      await applySecurityPolicy(draft);
-      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
-      const existing = await fixture();
-      await writeFile(
-        join(existing.repository, "SECURITY.md"),
-        "# Existing policy\n",
-      );
-      const replacement = await existing.generate();
-      await applySecurityPolicy(replacement);
-      expect(await readFile(replacement.targetPath, "utf8")).toBe(POLICY);
-      expect(await readdir(existing.repository)).toEqual(["SECURITY.md"]);
+      for (linkErrorCode of ["ENOTSUP", "EISDIR"]) {
+        const f = await fixture();
+        const draft = await f.generate();
+        await applySecurityPolicy(draft);
+        expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+        const existing = await fixture();
+        await writeFile(
+          join(existing.repository, "SECURITY.md"),
+          "# Existing policy\n",
+        );
+        const replacement = await existing.generate();
+        await applySecurityPolicy(replacement);
+        expect(await readFile(replacement.targetPath, "utf8")).toBe(POLICY);
+        expect(await readdir(existing.repository)).toEqual(["SECURITY.md"]);
+      }
+      linkErrorCode = "ENOTSUP";
       const other = await fixture();
       const racing = await other.generate();
       collision = true;
