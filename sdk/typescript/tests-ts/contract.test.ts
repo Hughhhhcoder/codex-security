@@ -162,9 +162,10 @@ describe("canonical scan contract", () => {
         fc.stringMatching(/^[a-z]{1,16}$/u),
         fc.constantFrom(...prefixes),
         async (name, prefix) => {
+          const filename = `artifact-${name}`;
           const bytes = Buffer.from(name);
           const artifact = {
-            path: `artifacts/${name}`,
+            path: `artifacts/${filename}`,
             sha256: createHash("sha256").update(bytes).digest("hex"),
             mediaType: "application/octet-stream",
           };
@@ -172,11 +173,11 @@ describe("canonical scan contract", () => {
             ...manifest["scan"],
             artifacts: [...manifest["scan"]["artifacts"], artifact],
           };
-          await writeFile(join(scanDir, "artifacts", name), bytes);
+          await writeFile(join(scanDir, "artifacts", filename), bytes);
           await writeJson(manifestPath, { ...manifest, scan });
           await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
 
-          artifact.path = `${prefix}${name}`;
+          artifact.path = `${prefix}${filename}`;
           await writeJson(manifestPath, { ...manifest, scan });
           const rejected = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
           await expect(rejected).rejects.toBeInstanceOf(
@@ -190,10 +191,10 @@ describe("canonical scan contract", () => {
       {
         ...propertyOptions,
         numRuns: Number(process.env["CODEX_SECURITY_PROPERTY_RUNS"] ?? "20"),
-        examples: prefixes.map((prefix): [string, string] => [
-          "synthetic",
-          prefix,
-        ]),
+        examples: [
+          ...prefixes.map((prefix): [string, string] => ["synthetic", prefix]),
+          ["con", "C:/"],
+        ],
       },
     );
   });
