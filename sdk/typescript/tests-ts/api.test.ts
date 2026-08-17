@@ -38,6 +38,7 @@ import {
 import {
   classifyConnectionFailure,
   initialCredentialsAvailable,
+  workbenchRecipeTransport,
 } from "../src/api.js";
 import {
   FIREWORKS_CODEX_PROVIDER,
@@ -135,8 +136,12 @@ const TestClientBase = CodexSecurity as unknown as new (
   dependencies: Record<string, unknown>,
 ) => CodexSecurity;
 
-function mockScanRegistration(args: readonly string[]) {
-  const recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!) as {
+function mockScanRegistration(args: readonly string[], input?: string) {
+  const recipeJson = args.includes("--recipe-json-stdin")
+    ? input
+    : args[args.indexOf("--recipe-json") + 1];
+  if (recipeJson === undefined) throw new Error("missing scan recipe");
+  const recipe = JSON.parse(recipeJson) as {
     repositoryRevision?: string;
     target: { kind: string };
   };
@@ -169,15 +174,18 @@ class TestClient extends TestClientBase {
     dependencies: Record<string, unknown>,
   ) {
     super(config, {
-      runWorkbench: async (_options: unknown, args: readonly string[]) =>
-        mockWorkbench(args),
+      runWorkbench: async (
+        _options: unknown,
+        args: readonly string[],
+        input?: string,
+      ) => mockWorkbench(args, input),
       ...dependencies,
     });
   }
 }
 
-function mockWorkbench(args: readonly string[]) {
-  if (args[0] === "register-cli-scan") return mockScanRegistration(args);
+function mockWorkbench(args: readonly string[], input?: string) {
+  if (args[0] === "register-cli-scan") return mockScanRegistration(args, input);
   if (args[0] === "get-scan-feedback") {
     return {
       scanId: "scan_example_001",
@@ -277,6 +285,19 @@ async function* completedEvents(): AsyncGenerator<ThreadEvent> {
 }
 
 describe("CodexSecurity orchestration", () => {
+  test("moves oversized workbench recipes off the process command line", () => {
+    const short = '{"mode":"standard"}';
+    expect(workbenchRecipeTransport(short)).toEqual({
+      args: ["--recipe-json", short],
+    });
+
+    const oversized = "x".repeat(64 * 1024);
+    expect(workbenchRecipeTransport(oversized)).toEqual({
+      args: ["--recipe-json-stdin"],
+      input: oversized,
+    });
+  });
+
   test("distinguishes local workbench and database errors from model transport failures", () => {
     for (const message of [
       "sqlite3.OperationalError: unable to open database file\nwith closing(connect()) as connection:",

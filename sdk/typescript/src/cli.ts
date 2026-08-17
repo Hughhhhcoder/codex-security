@@ -734,10 +734,11 @@ interface CliDependencies {
     args: readonly string[],
     output?: SkillCommandOutput,
     environment?: NodeJS.ProcessEnv,
+    input?: string,
   ): Promise<number>;
   bulkScan?: BulkScanDiscoveryDependencies;
   linearClient?: LinearClientFactory;
-  runWorkbench(args: readonly string[]): Promise<JsonObject>;
+  runWorkbench(args: readonly string[], input?: string): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
@@ -790,12 +791,13 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     writeSync(stream.fd, value);
   },
   forceExit: (signal) => process.kill(process.pid, signal),
-  runCodex: (args, output, environment) =>
+  runCodex: (args, output, environment, input) =>
     runCodexSkillCommand(
       args,
       output,
       resolveCodexCommand(environment),
       environment,
+      input,
     ),
   exportFindings: async (arguments_, output) => {
     const environment = exportEnvironment();
@@ -859,7 +861,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     }
     return undefined;
   },
-  runWorkbench: async (args) => {
+  runWorkbench: async (args, input) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
@@ -873,6 +875,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         failureMessage: "Could not read Codex Security scan history",
       },
       args,
+      input,
     );
   },
   matchFindings: (input, options) =>
@@ -884,6 +887,7 @@ export async function runCodexSkillCommand(
   output?: SkillCommandOutput,
   command: CodexCommand = resolveCodexCommand(),
   processEnvironment: NodeJS.ProcessEnv = process.env,
+  input?: string,
 ): Promise<number> {
   const configuredHome = processEnvironment["CODEX_HOME"];
   const environment = { ...processEnvironment };
@@ -898,10 +902,22 @@ export async function runCodexSkillCommand(
     cwd: output?.appServer?.directory ?? parse(process.execPath).root,
     stdio:
       output === undefined
-        ? "inherit"
-        : [output.appServer === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+        ? input === undefined
+          ? "inherit"
+          : ["pipe", "inherit", "inherit"]
+        : [
+            output.appServer !== undefined || input !== undefined
+              ? "pipe"
+              : "ignore",
+            "pipe",
+            "pipe",
+          ],
     windowsHide: true,
   });
+  if (input !== undefined) {
+    invocation.stdin?.on("error", () => {});
+    invocation.stdin?.end(input);
+  }
   let requestedSignal: SignalName | null = null;
   let forcedTermination: ReturnType<typeof setTimeout> | undefined;
   let forceStatusCompletion: (() => void) | null = null;
@@ -1178,19 +1194,21 @@ export async function main(
       ],
       async ({ matchingCached, matchingInputs, ...comparison }) => {
         if (matchingCached && !force) return comparison;
-        return await dependencies.runWorkbench([
-          "save-scan-comparison",
-          "--before-scan-id",
-          beforeId,
-          "--after-scan-id",
-          afterId,
-          "--matches-json",
+        return await dependencies.runWorkbench(
+          [
+            "save-scan-comparison",
+            "--before-scan-id",
+            beforeId,
+            "--after-scan-id",
+            afterId,
+            "--matches-json-stdin",
+          ],
           JSON.stringify(
             await dependencies.matchFindings(
               matchingInputs as JsonObject & ScanComparisonInput,
             ),
           ),
-        ]);
+        );
       },
     );
   const presentHistory = (
@@ -3166,15 +3184,17 @@ async function matchAllScans(
       return { scanId, matches, uncertain };
     });
     for (const { scanId, matches, uncertain } of comparisons) {
-      await dependencies.runWorkbench([
-        "save-scan-comparison",
-        "--before-scan-id",
-        scanId,
-        "--after-scan-id",
-        afterScanId,
-        "--matches-json",
+      await dependencies.runWorkbench(
+        [
+          "save-scan-comparison",
+          "--before-scan-id",
+          scanId,
+          "--after-scan-id",
+          afterScanId,
+          "--matches-json-stdin",
+        ],
         JSON.stringify({ matches, uncertain }),
-      ]);
+      );
       matchedPairs += 1;
       findingMatches += matches.reduce(
         (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>
@@ -3335,7 +3355,7 @@ async function runSkill(
             "--skip-git-repo-check",
             "--cd",
             directory,
-            prompt,
+            "-",
           ]),
     ],
     {
@@ -3345,6 +3365,7 @@ async function runSkill(
       ...(patch ? { appServer: { directory, prompt } } : {}),
     },
     environment,
+    patch ? undefined : prompt,
   );
 }
 

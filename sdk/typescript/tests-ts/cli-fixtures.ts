@@ -193,7 +193,10 @@ export function dependencies(
     onCodex?: (...args: Parameters<MainDependencies["runCodex"]>) => number;
     linearClient?: MainDependencies["linearClient"];
     bulkScan?: MainDependencies["bulkScan"];
-    onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
+    onWorkbench?: (
+      args: readonly string[],
+      input?: string,
+    ) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
@@ -259,8 +262,8 @@ export function dependencies(
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
-    runWorkbench: async (args) =>
-      (await options.onWorkbench?.(args)) ?? { scans: [] },
+    runWorkbench: async (args, input) =>
+      (await options.onWorkbench?.(args, input)) ?? { scans: [] },
     matchFindings: async (input) =>
       (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
     exportFindings: async (arguments_) =>
