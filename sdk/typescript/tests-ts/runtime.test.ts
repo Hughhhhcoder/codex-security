@@ -19,6 +19,7 @@ import {
 import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
+  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -1730,6 +1731,104 @@ describe("plugin runtime preparation", () => {
 
     expect(installed.pluginRoot).toBe(staged);
     expect(installed.installedRoot).toBe(staged);
+  });
+
+  test("restores or retains the previous marketplace when activation fails", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "restores or retains the previous marketplace when activation fails",
+      )
+    ) {
+      return;
+    }
+    const originalRename = fsPromises.rename;
+    for (const failRestoration of [false, true]) {
+      const root = await temporaryDirectory();
+      const previous = await plugin(join(root, "previous"));
+      const next = await plugin(join(root, "next"));
+      await writeFile(join(next, "scripts", "helper.py"), "print('updated')\n");
+      const home = join(root, "home");
+      const marketplace = await createMarketplace(home, previous);
+      const config = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
+      await writeFile(join(home, "config.toml"), config);
+      await writeFile(join(home, "auth.json"), '{"token":"preserved"}\n');
+      const activationError = Object.assign(new Error("activation failed"), {
+        code: "EPERM",
+      });
+      const restorationError = Object.assign(new Error("restoration failed"), {
+        code: "EACCES",
+      });
+      let backup: string | undefined;
+      let registrationCalls = 0;
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        rename: async (...args: Parameters<typeof originalRename>) => {
+          const source = String(args[0]);
+          const destination = String(args[1]);
+          if (source === marketplace) backup = destination;
+          if (destination === marketplace) {
+            if (basename(source) === "sdk-marketplace") {
+              throw activationError;
+            }
+            if (failRestoration) throw restorationError;
+          }
+          return await originalRename(...args);
+        },
+      }));
+      let failure: unknown;
+      try {
+        failure = await bootstrapPlugin(home, next, {
+          codexCommand: { command: "/codex" },
+          runCodex: async () => {
+            registrationCalls += 1;
+            return "";
+          },
+        }).then(
+          () => null,
+          (error: unknown) => error,
+        );
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          rename: originalRename,
+        }));
+      }
+
+      expect(registrationCalls).toBe(0);
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(config);
+      expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
+        '{"token":"preserved"}\n',
+      );
+      if (failRestoration) {
+        expect(failure).toBeInstanceOf(PluginBootstrapError);
+        expect((failure as Error).message).toContain(backup!);
+        expect(((failure as Error).cause as AggregateError).errors).toEqual([
+          activationError,
+          restorationError,
+        ]);
+        expect(existsSync(marketplace)).toBe(false);
+      } else {
+        expect(failure).toBe(activationError);
+        expect(
+          (await readdir(home)).filter((path) =>
+            path.startsWith(".sdk-marketplace-"),
+          ),
+        ).toEqual([]);
+      }
+      expect(
+        await readFile(
+          join(
+            failRestoration ? backup! : marketplace,
+            "plugins",
+            "codex-security",
+            "scripts",
+            "helper.py",
+          ),
+          "utf8",
+        ),
+      ).toBe("print('ok')\n");
+    }
   });
 
   test("upgrades a cached plugin without deleting persistent credentials", async () => {
