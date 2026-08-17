@@ -81,6 +81,9 @@ describe("security policy generation", () => {
     const f = await fixture();
     const original = "# Existing policy\n\nReport privately.\n";
     await writeFile(join(f.repository, "SECURITY.md"), original);
+    const reportingPolicy = join(f.repository, ".github", "SECURITY.md");
+    await mkdir(join(f.repository, ".github"));
+    await symlink("../SECURITY.md", reportingPolicy, "file");
     const stages: SecurityPolicyStage[] = [];
     const prompts: string[] = [];
     const draft = await f.generate({
@@ -107,6 +110,7 @@ describe("security policy generation", () => {
     expect(prompts[1]).toContain("Only authenticated clients can reach it.");
     expect(prompts[2]).toContain("Only authenticated clients can reach it.");
     expect(await readFile(draft.targetPath, "utf8")).toBe(original);
+    expect(await readFile(reportingPolicy, "utf8")).toBe(original);
     expect(draft.previousContent).toBe(original);
     expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
     if (process.platform !== "win32")
@@ -1649,36 +1653,6 @@ describe("security policy review and application", () => {
       );
       await expect(f.generate({ path: "services/api" })).rejects.toThrow(
         "outside the selected component",
-      );
-      expect(await readdir(f.outputDir)).toEqual([]);
-    }
-  });
-
-  test("rejects reporting-policy aliases to the draft target", async () => {
-    for (const [name, scope, existing, directoryAlias] of [
-      [".github", ".", false, false],
-      ["docs", "component", true, false],
-      [".github", ".", true, true],
-      ["docs", "component", false, true],
-    ] as const) {
-      const f = await fixture();
-      const component = join(f.repository, scope);
-      await mkdir(component, { recursive: true });
-      const target = join(component, "SECURITY.md");
-      if (existing) await writeFile(target, "# Original policy\n");
-      const reportingDirectory = join(f.repository, name);
-      if (directoryAlias)
-        await symlink(
-          component,
-          reportingDirectory,
-          process.platform === "win32" ? "junction" : "dir",
-        );
-      else {
-        await mkdir(reportingDirectory);
-        await symlink(target, join(reportingDirectory, "SECURITY.md"), "file");
-      }
-      await expect(f.generate({ path: scope })).rejects.toThrow(
-        "a separate vulnerability-reporting policy",
       );
       expect(await readdir(f.outputDir)).toEqual([]);
     }
