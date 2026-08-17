@@ -39,12 +39,12 @@ function testcase(name: string, status = "") {
   return `<testcase file="tests-ts/example.test.ts" classname="example" name="${name}">${status}</testcase>`;
 }
 
-function compare(baseline: string, ...candidates: string[]) {
+async function compare(baseline: string, ...candidates: string[]) {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   if (python === null) throw new Error("A Python interpreter is required.");
-  return spawnSync(
-    python,
-    [
+  const child = Bun.spawn({
+    cmd: [
+      python,
       "-I",
       "-B",
       fileURLToPath(
@@ -53,8 +53,16 @@ function compare(baseline: string, ...candidates: string[]) {
       baseline,
       ...candidates,
     ],
-    { encoding: "utf8" },
-  );
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { status, stdout, stderr };
 }
 
 describe("JUnit inventory comparison", () => {
@@ -114,7 +122,7 @@ describe("JUnit inventory comparison", () => {
     const baseline = await fixture.report("baseline.xml", [passed, skipped]);
     await fixture.report("shard-1.xml", [skipped]);
     await fixture.report("shard-2.xml", [passed]);
-    const result = compare(baseline, join(fixture.root, "shard-*.xml"));
+    const result = await compare(baseline, join(fixture.root, "shard-*.xml"));
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("Identical test inventory and outcomes");
     expect(result.stdout).toContain("combined test time: 2.50s");
@@ -135,7 +143,7 @@ describe("JUnit inventory comparison", () => {
         first,
         repeated,
       ]);
-      const result = compare(baseline, candidate);
+      const result = await compare(baseline, candidate);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("duplicate test identity");
     }
@@ -161,10 +169,10 @@ describe("JUnit inventory comparison", () => {
         failures,
         count,
       );
-      expect(compare(baseline, candidate).status, name).toBe(1);
+      expect((await compare(baseline, candidate)).status, name).toBe(1);
     }
-    expect(compare(baseline, join(fixture.root, "absent-*.xml")).status).toBe(
-      1,
-    );
+    expect(
+      (await compare(baseline, join(fixture.root, "absent-*.xml"))).status,
+    ).toBe(1);
   });
 });

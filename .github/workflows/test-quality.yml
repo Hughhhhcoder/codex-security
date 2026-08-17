@@ -18,7 +18,7 @@ concurrency:
 env:
   CODEX_SECURITY_INTEGRATION: "0"
   CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-  CODEX_SECURITY_PROPERTY_SEED: ${{ github.run_number }}
+  CODEX_SECURITY_PROPERTY_SEED: ${{ github.event_name == 'pull_request' && 1 || github.run_number }}
 
 jobs:
   runner:
@@ -38,7 +38,7 @@ jobs:
           - mode: parallel
             args: --parallel=2
           - mode: randomized
-            args: --isolate --randomize --seed=${{ github.run_number }}
+            args: --isolate --randomize --seed=${{ github.event_name == 'pull_request' && 1 || github.run_number }}
           - os: windows-latest
             mode: shard-1
             args: --shard=1/7

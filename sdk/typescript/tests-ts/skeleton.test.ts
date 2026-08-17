@@ -194,11 +194,14 @@ describe("TypeScript package skeleton", () => {
     const ci = await workflow("node-ci.yml");
     const quality = await workflow("test-quality.yml");
     const runner = quality.jobs["runner"]!;
+    const seed =
+      "${{ github.event_name == 'pull_request' && 1 || github.run_number }}";
+    expect(quality.env?.["CODEX_SECURITY_PROPERTY_SEED"]).toBe(seed);
     for (const [mode, args] of [
       ["baseline", ""],
       ["isolated", "--isolate"],
       ["parallel", "--parallel=2"],
-      ["randomized", "--isolate --randomize --seed=${{ github.run_number }}"],
+      ["randomized", `--isolate --randomize --seed=${seed}`],
     ] as const) {
       expect(runner.strategy?.matrix["include"]).toContainEqual({
         mode,

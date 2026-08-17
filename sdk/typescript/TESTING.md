@@ -65,6 +65,8 @@ and runs on pull requests that change its workflow file. It exercises Bun's
 native `--isolate`, `--parallel=2`, randomized
 ordering, and seven-way Windows sharding. It compares test identities and
 outcomes against an unsharded run and records timings in the job summary.
+Pull requests replay seed 1; scheduled and manual runs use the workflow run
+number for both property cases and test ordering.
 It is not a required check or part of the release trigger.
 
 Keep the current file-balanced Windows runner until the native runner has
