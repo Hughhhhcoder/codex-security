@@ -87,48 +87,37 @@ incomplete or their original location was not reviewed.
 
 ## Generate SECURITY.md
 
-Generate a source-backed security policy for a repository or one component:
+Draft a security policy for a repository or one component:
 
 ```bash
 npx @openai/codex-security policy .
 npx @openai/codex-security policy . --path services/api --knowledge-base architecture.md
+npx @openai/codex-security policy . --headless --output-dir /path/outside/repository/policy --json
 ```
 
-The command first maps the system, builds a detailed threat model, and then
-drafts a concise `SECURITY.md`. In a terminal, it asks about material unknowns,
-shows the proposed diff, and asks before writing. Existing reporting instructions
-and owner-confirmed policy decisions are preserved. Scans automatically read the
-resulting root and nested `SECURITY.md` files.
+The command reads the source, describes the system, builds a detailed threat
+model, and drafts a short `SECURITY.md`. In a terminal, it asks about important
+facts the code cannot establish, shows the proposed diff, and asks before
+writing. Later scans read the approved root and nested `SECURITY.md` files.
 
-For a noninteractive review, save a draft outside the repository and any enclosing
-Git checkout:
+To review a saved draft, edit its `SECURITY.md`, then run:
 
 ```bash
-npx @openai/codex-security policy . --headless --output-dir /path/outside/repository/policy --json
-# Review and, if needed, edit the saved SECURITY.md draft.
 npx @openai/codex-security policy . --apply /path/outside/repository/policy --write
 ```
 
-Use the same repository and `--path` when applying a component draft. Applying
-does not call the model. Before writing, it checks that the original policy,
-inherited policies, and links to those policies have not changed. `--write`
-requires a previously generated `--apply` draft. If you generated with a custom
-`--plugin-path`, select that plugin again when applying a saved draft. Updates
-keep the previous file at the reported recovery path; remove it only after other
-writers have closed it and any edits are reconciled.
+Use the same repository and `--path` as generation. Applying does not call the
+model. It checks that the original and inherited policies are unchanged, keeps
+the write inside the approved scope, and verifies the result. Updates retain the
+previous file at the reported recovery path. Keep it until other writers have
+closed it and any edits are reconciled.
 
-If a parent or sibling `SECURITY.md` links to the selected component's policy,
-fix that link first. Otherwise, changing the component policy would also change
-guidance outside the scope you reviewed.
-Root policies also leave the reporting policies in `.github/SECURITY.md` and
-`docs/SECURITY.md` unchanged.
-
-The private artifact directory also contains `project-spec.md` and
-`THREAT_MODEL.md`. Review these detailed documents before sharing them; only the
-approved policy is applied to the repository. Generated policy is not owner
-sign-off, and threat scenarios are not confirmed vulnerabilities. See the
-[package README](sdk/typescript/README.md#generate-a-security-policy) for SDK use,
-output formats, and generation options.
+Drafts are stored outside the repository and any enclosing Git checkout. The
+same private directory contains `project-spec.md`, `THREAT_MODEL.md`, and review
+notes. Review those documents before sharing them. Generated decisions still
+need owner approval, and threat scenarios are not confirmed vulnerabilities.
+See the [package README](sdk/typescript/README.md#generate-a-security-policy)
+for SDK use and command options.
 
 ## Publish scan findings
 

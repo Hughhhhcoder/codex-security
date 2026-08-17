@@ -271,106 +271,6 @@ export async function readSecurityPolicySnapshot(
   };
 }
 
-async function validatePolicyLinks(
-  target: SecurityPolicyTarget,
-  signal?: AbortSignal,
-): Promise<void> {
-  const repositories = await enclosingGitWorktreeRoots(
-    target.repository,
-    signal,
-  );
-  if (repositories.length === 0) repositories.push(target.repository);
-  const protectedRoot = repositories.at(-1)!;
-  const component = dirname(target.targetPath);
-  const canonicalTarget = await realpath(target.targetPath).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    },
-  );
-  const reportingPaths: string[] = [];
-  for (const repository of repositories) {
-    for (const name of [".github", "docs"]) {
-      let directory = join(repository, name);
-      const metadata = await lstat(directory).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-          throw error;
-        },
-      );
-      // Normalize real directory casing, but keep directory links distinct.
-      if (metadata?.isDirectory()) {
-        directory = await realpath(directory);
-        policyRelativePath(repository, directory);
-      }
-      reportingPaths.push(join(directory, "SECURITY.md"));
-    }
-  }
-  const check = async (path: string, reportingPolicy: boolean) => {
-    const repository = repositories.find(
-      (root) => !relativePathIsOutside(relative(root, path)),
-    )!;
-    const alias = await policyLinkSnapshot(path, repository, signal);
-    let destination =
-      alias.destination === null ? null : join(repository, alias.destination);
-    if (destination !== null && alias.status === "resolved")
-      destination = await realpath(destination);
-    if (destination !== null) policyRelativePath(repository, destination);
-    reportingPolicy &&= path !== target.targetPath;
-    const outsideScope = relativePathIsOutside(
-      relative(component, dirname(path)),
-    );
-    if (
-      (outsideScope || reportingPolicy) &&
-      destination !== null &&
-      (relative(canonicalTarget ?? target.targetPath, destination) === "" ||
-        // A missing leaf can become live with different casing on macOS.
-        (canonicalTarget === null &&
-          alias.status === "missing" &&
-          process.platform === "darwin" &&
-          relative(component, dirname(destination)) === "" &&
-          basename(destination).toLowerCase() === "security.md"))
-    ) {
-      const policyPath = relative(protectedRoot, path).split(sep).join("/");
-      throw new CodexSecurityError(
-        `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${reportingPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before applying a policy.`,
-      );
-    }
-  };
-  const directories = [protectedRoot];
-  while (directories.length > 0) {
-    signal?.throwIfAborted();
-    const directory = directories.pop()!;
-    const path = join(directory, "SECURITY.md");
-    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
-    if (metadata?.isSymbolicLink() && !reportingPaths.includes(path))
-      await check(path, false);
-    // Do not follow directory links or inspect Git metadata.
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name === ".git") continue;
-      if (entry.name.toLowerCase() === ".git") {
-        const metadata = await realpath(join(directory, ".git")).catch(
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return null;
-            throw error;
-          },
-        );
-        if (
-          metadata !== null &&
-          relative(metadata, join(directory, entry.name)) === ""
-        )
-          continue;
-      }
-      directories.push(join(directory, entry.name));
-    }
-  }
-  // Reporting policies can alias the selected file through a directory link.
-  for (const path of reportingPaths) await check(path, true);
-}
-
 async function policyLinkSnapshot(
   path: string,
   repository: string,
@@ -764,6 +664,106 @@ export async function securityPolicyDiff(
       ]),
     );
   });
+}
+
+async function validatePolicyLinks(
+  target: SecurityPolicyTarget,
+  signal?: AbortSignal,
+): Promise<void> {
+  const repositories = await enclosingGitWorktreeRoots(
+    target.repository,
+    signal,
+  );
+  if (repositories.length === 0) repositories.push(target.repository);
+  const protectedRoot = repositories.at(-1)!;
+  const component = dirname(target.targetPath);
+  const canonicalTarget = await realpath(target.targetPath).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    },
+  );
+  const reportingPaths: string[] = [];
+  for (const repository of repositories) {
+    for (const name of [".github", "docs"]) {
+      let directory = join(repository, name);
+      const metadata = await lstat(directory).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+          throw error;
+        },
+      );
+      // Normalize real directory casing, but keep directory links distinct.
+      if (metadata?.isDirectory()) {
+        directory = await realpath(directory);
+        policyRelativePath(repository, directory);
+      }
+      reportingPaths.push(join(directory, "SECURITY.md"));
+    }
+  }
+  const check = async (path: string, reportingPolicy: boolean) => {
+    const repository = repositories.find(
+      (root) => !relativePathIsOutside(relative(root, path)),
+    )!;
+    const alias = await policyLinkSnapshot(path, repository, signal);
+    let destination =
+      alias.destination === null ? null : join(repository, alias.destination);
+    if (destination !== null && alias.status === "resolved")
+      destination = await realpath(destination);
+    if (destination !== null) policyRelativePath(repository, destination);
+    reportingPolicy &&= path !== target.targetPath;
+    const outsideScope = relativePathIsOutside(
+      relative(component, dirname(path)),
+    );
+    if (
+      (outsideScope || reportingPolicy) &&
+      destination !== null &&
+      (relative(canonicalTarget ?? target.targetPath, destination) === "" ||
+        // A missing leaf can become live with different casing on macOS.
+        (canonicalTarget === null &&
+          alias.status === "missing" &&
+          process.platform === "darwin" &&
+          relative(component, dirname(destination)) === "" &&
+          basename(destination).toLowerCase() === "security.md"))
+    ) {
+      const policyPath = relative(protectedRoot, path).split(sep).join("/");
+      throw new CodexSecurityError(
+        `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${reportingPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before applying a policy.`,
+      );
+    }
+  };
+  const directories = [protectedRoot];
+  while (directories.length > 0) {
+    signal?.throwIfAborted();
+    const directory = directories.pop()!;
+    const path = join(directory, "SECURITY.md");
+    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+      throw error;
+    });
+    if (metadata?.isSymbolicLink() && !reportingPaths.includes(path))
+      await check(path, false);
+    // Do not follow directory links or inspect Git metadata.
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name === ".git") continue;
+      if (entry.name.toLowerCase() === ".git") {
+        const metadata = await realpath(join(directory, ".git")).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return null;
+            throw error;
+          },
+        );
+        if (
+          metadata !== null &&
+          relative(metadata, join(directory, entry.name)) === ""
+        )
+          continue;
+      }
+      directories.push(join(directory, entry.name));
+    }
+  }
+  // Reporting policies can alias the selected file through a directory link.
+  for (const path of reportingPaths) await check(path, true);
 }
 
 export async function applySecurityPolicy(

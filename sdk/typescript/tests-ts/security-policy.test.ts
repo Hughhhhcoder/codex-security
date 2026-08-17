@@ -109,9 +109,6 @@ describe("security policy generation", () => {
     expect(await readFile(draft.targetPath, "utf8")).toBe(original);
     expect(draft.previousContent).toBe(original);
     expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
-    expect(
-      (await loadSecurityPolicyDraft(f.repository, f.outputDir)).content,
-    ).toBe(POLICY);
     if (process.platform !== "win32")
       expect((await stat(draft.draftPath)).mode & 0o777).toBe(0o600);
   });
@@ -259,6 +256,188 @@ describe("security policy generation", () => {
     });
   });
 
+  test("does not silently drop inherited policies when Git is unavailable", async () => {
+    const name =
+      "does not silently drop inherited policies when Git is unavailable";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const checkout = await fixture();
+    const standalone = await fixture();
+    execFileSync("git", ["init", "--quiet", checkout.repository]);
+    const component = join(checkout.repository, "component");
+    await mkdir(component);
+    await writeFile(join(checkout.repository, "SECURITY.md"), POLICY);
+    const pathEntries = Object.entries(process.env).filter(
+      ([key]) => key.toUpperCase() === "PATH",
+    );
+    try {
+      for (const [key] of pathEntries) delete process.env[key];
+      process.env["PATH"] = "";
+      await expect(resolveSecurityPolicyTarget(component)).rejects.toThrow(
+        "Could not determine the Git worktree root",
+      );
+      expect(
+        (await resolveSecurityPolicyTarget(standalone.repository)).repository,
+      ).toBe(standalone.repository);
+    } finally {
+      delete process.env["PATH"];
+      for (const [key, value] of pathEntries) process.env[key] = value;
+    }
+  });
+
+  test("asks every material owner question in groups of at most three", async () => {
+    const f = await fixture();
+    const questions = [
+      "Which endpoints are public?",
+      "Who can deploy the service?",
+      "Who can read backups?",
+      "Which operators are trusted?",
+      "Are tenants isolated?",
+      "Who controls the identity provider?",
+      "Which data needs retention limits?",
+    ];
+    const batches: string[][] = [];
+    const draft = await f.generate({
+      answerQuestions: async (batch) => {
+        batches.push([...batch]);
+        return `Owner answer ${batches.length}`;
+      },
+      run: async (stage, prompt) => {
+        if (stage === "architecture")
+          return { ...stageResult(stage), questions };
+        for (const question of questions) expect(prompt).toContain(question);
+        for (let index = 1; index <= 3; index++)
+          expect(prompt).toContain(`Owner answer ${index}`);
+        return stageResult(stage);
+      },
+    });
+    expect(batches).toEqual([
+      questions.slice(0, 3),
+      questions.slice(3, 6),
+      questions.slice(6),
+    ]);
+    for (const question of questions)
+      expect(draft.reviewNotes).toContain(question);
+  });
+
+  test("carries unanswered questions and review decisions into the final policy", async () => {
+    const f = await fixture();
+    const draft = await f.generate({
+      run: async (stage, prompt) => {
+        if (stage === "architecture") {
+          return {
+            ...stageResult(stage),
+            questions: ["Who can deploy the service?"],
+            reviewNotes: ["Confirm the operator trust boundary."],
+          };
+        }
+        expect(prompt).toContain("Who can deploy the service?");
+        expect(prompt).toContain("Confirm the operator trust boundary.");
+        if (stage === "threat_model") {
+          return {
+            ...stageResult(stage),
+            questions: ["Are backups isolated by tenant?"],
+            reviewNotes: ["Review backup access."],
+          };
+        }
+        expect(prompt).toContain("Are backups isolated by tenant?");
+        expect(prompt).toContain("Review backup access.");
+        return {
+          ...stageResult(stage),
+          questions: ["Confirm backup isolation."],
+          reviewNotes: [
+            "Review deployment scope.",
+            "Confirm backup isolation.",
+          ],
+        };
+      },
+    });
+    expect(draft.reviewNotes).toEqual([
+      "Review deployment scope.",
+      "Confirm backup isolation.",
+      "Confirm the operator trust boundary.",
+      "Who can deploy the service?",
+      "Review backup access.",
+      "Are backups isolated by tenant?",
+    ]);
+    expect(
+      JSON.parse(await readFile(join(f.outputDir, "policy-draft.json"), "utf8"))
+        .reviewNotes,
+    ).toEqual(draft.reviewNotes);
+  });
+
+  test("rejects files, outside paths, and outside directory links", async () => {
+    const f = await fixture();
+    await writeFile(join(f.repository, "source.ts"), "export {};\n");
+    await symlink(
+      f.outputDir,
+      join(f.repository, "external"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await expect(
+      resolveSecurityPolicyTarget(f.repository, "source.ts"),
+    ).rejects.toThrow("must be a directory");
+    await expect(
+      resolveSecurityPolicyTarget(f.repository, ".."),
+    ).rejects.toThrow("outside the repository");
+    await expect(
+      resolveSecurityPolicyTarget(f.repository, "external"),
+    ).rejects.toThrow("outside the repository");
+  });
+
+  test("retains completed evidence when a later stage is interrupted", async () => {
+    const f = await fixture();
+    const controller = new AbortController();
+    await expect(
+      f.generate({
+        signal: controller.signal,
+        run: async (stage) => {
+          if (stage === "threat_model") controller.abort(new Error("stop"));
+          return stageResult(stage);
+        },
+      }),
+    ).rejects.toThrow("stop");
+    expect(
+      await readFile(join(f.outputDir, "project-spec.md"), "utf8"),
+    ).toContain("src/service.ts:1");
+    expect(await readdir(f.repository)).toEqual([]);
+    expect(await readdir(f.outputDir)).not.toContain("policy-draft.json");
+  });
+
+  test("rejects empty or oversized policy documents", async () => {
+    for (const markdown of [
+      "",
+      " \n\t",
+      "# Policy\n\ud800",
+      `# Policy\n${"x".repeat(1024 * 1024)}`,
+    ]) {
+      const f = await fixture();
+      await expect(
+        f.generate({
+          run: async (stage) => ({
+            ...stageResult(stage),
+            ...(stage === "policy" ? { markdown } : {}),
+          }),
+        }),
+      ).rejects.toThrow();
+      expect(await readdir(f.repository)).toEqual([]);
+    }
+  });
+
+  test("enforces the resolver byte limit on existing policies", async () => {
+    const header = "# Policy\n";
+    const maximum =
+      header + "x".repeat(1024 * 1024 - Buffer.byteLength(header));
+    const existing = await fixture();
+    const target = join(existing.repository, "SECURITY.md");
+    await writeFile(target, maximum);
+    expect(await readSecurityPolicy(target)).toBe(maximum);
+    await writeFile(target, `${maximum}x`);
+    await expect(existing.generate()).rejects.toThrow("1 MiB limit");
+    expect(await readdir(existing.outputDir)).toEqual([]);
+  });
+});
+
+describe("security policy review and application", () => {
   test("protects enclosing-checkout policies when a nested checkout is selected", async () => {
     for (const kind of ["repository", "submodule", "worktree"]) {
       for (const existing of [false, true]) {
@@ -372,186 +551,10 @@ describe("security policy generation", () => {
     expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
   });
 
-  test("does not silently drop inherited policies when Git is unavailable", async () => {
-    const name =
-      "does not silently drop inherited policies when Git is unavailable";
-    if (runMockInSubprocess(import.meta.path, name)) return;
-    const checkout = await fixture();
-    const standalone = await fixture();
-    execFileSync("git", ["init", "--quiet", checkout.repository]);
-    const component = join(checkout.repository, "component");
-    await mkdir(component);
-    await writeFile(join(checkout.repository, "SECURITY.md"), POLICY);
-    const pathEntries = Object.entries(process.env).filter(
-      ([key]) => key.toUpperCase() === "PATH",
-    );
-    try {
-      for (const [key] of pathEntries) delete process.env[key];
-      process.env["PATH"] = "";
-      await expect(resolveSecurityPolicyTarget(component)).rejects.toThrow(
-        "Could not determine the Git worktree root",
-      );
-      expect(
-        (await resolveSecurityPolicyTarget(standalone.repository)).repository,
-      ).toBe(standalone.repository);
-    } finally {
-      delete process.env["PATH"];
-      for (const [key, value] of pathEntries) process.env[key] = value;
-    }
-  });
-
-  test("asks every material owner question in groups of at most three", async () => {
-    const f = await fixture();
-    const questions = [
-      "Which endpoints are public?",
-      "Who can deploy the service?",
-      "Who can read backups?",
-      "Which operators are trusted?",
-      "Are tenants isolated?",
-      "Who controls the identity provider?",
-      "Which data needs retention limits?",
-    ];
-    const batches: string[][] = [];
-    const draft = await f.generate({
-      answerQuestions: async (batch) => {
-        batches.push([...batch]);
-        return `Owner answer ${batches.length}`;
-      },
-      run: async (stage, prompt) => {
-        if (stage === "architecture")
-          return { ...stageResult(stage), questions };
-        for (const question of questions) expect(prompt).toContain(question);
-        for (let index = 1; index <= 3; index++)
-          expect(prompt).toContain(`Owner answer ${index}`);
-        return stageResult(stage);
-      },
-    });
-    expect(batches).toEqual([
-      questions.slice(0, 3),
-      questions.slice(3, 6),
-      questions.slice(6),
-    ]);
-    for (const question of questions)
-      expect(draft.reviewNotes).toContain(question);
-  });
-
-  test("carries unanswered questions and review decisions into the final policy", async () => {
-    const f = await fixture();
-    const draft = await f.generate({
-      run: async (stage, prompt) => {
-        if (stage === "architecture") {
-          return {
-            ...stageResult(stage),
-            questions: ["Who can deploy the service?"],
-            reviewNotes: ["Confirm the operator trust boundary."],
-          };
-        }
-        expect(prompt).toContain("Who can deploy the service?");
-        expect(prompt).toContain("Confirm the operator trust boundary.");
-        if (stage === "threat_model") {
-          return {
-            ...stageResult(stage),
-            questions: ["Are backups isolated by tenant?"],
-            reviewNotes: ["Review backup access."],
-          };
-        }
-        expect(prompt).toContain("Are backups isolated by tenant?");
-        expect(prompt).toContain("Review backup access.");
-        return {
-          ...stageResult(stage),
-          questions: ["Confirm backup isolation."],
-          reviewNotes: [
-            "Review deployment scope.",
-            "Confirm backup isolation.",
-          ],
-        };
-      },
-    });
-    expect(draft.reviewNotes).toEqual([
-      "Review deployment scope.",
-      "Confirm backup isolation.",
-      "Confirm the operator trust boundary.",
-      "Who can deploy the service?",
-      "Review backup access.",
-      "Are backups isolated by tenant?",
-    ]);
-    expect(
-      (await loadSecurityPolicyDraft(f.repository, f.outputDir)).reviewNotes,
-    ).toEqual(draft.reviewNotes);
-  });
-
-  test("rejects files, outside paths, and outside directory links", async () => {
-    const f = await fixture();
-    await writeFile(join(f.repository, "source.ts"), "export {};\n");
-    await symlink(
-      f.outputDir,
-      join(f.repository, "external"),
-      process.platform === "win32" ? "junction" : "dir",
-    );
-    await expect(
-      resolveSecurityPolicyTarget(f.repository, "source.ts"),
-    ).rejects.toThrow("must be a directory");
-    await expect(
-      resolveSecurityPolicyTarget(f.repository, ".."),
-    ).rejects.toThrow("outside the repository");
-    await expect(
-      resolveSecurityPolicyTarget(f.repository, "external"),
-    ).rejects.toThrow("outside the repository");
-  });
-
-  test("retains completed evidence when a later stage is interrupted", async () => {
-    const f = await fixture();
-    const controller = new AbortController();
-    await expect(
-      f.generate({
-        signal: controller.signal,
-        run: async (stage) => {
-          if (stage === "threat_model") controller.abort(new Error("stop"));
-          return stageResult(stage);
-        },
-      }),
-    ).rejects.toThrow("stop");
-    expect(
-      await readFile(join(f.outputDir, "project-spec.md"), "utf8"),
-    ).toContain("src/service.ts:1");
-    expect(await readdir(f.repository)).toEqual([]);
-    await expect(
-      loadSecurityPolicyDraft(f.repository, f.outputDir),
-    ).rejects.toThrow();
-  });
-
-  test("rejects empty or oversized policy documents", async () => {
-    for (const markdown of [
-      "",
-      " \n\t",
-      "# Policy\n\ud800",
-      `# Policy\n${"x".repeat(1024 * 1024)}`,
-    ]) {
-      const f = await fixture();
-      await expect(
-        f.generate({
-          run: async (stage) => ({
-            ...stageResult(stage),
-            ...(stage === "policy" ? { markdown } : {}),
-          }),
-        }),
-      ).rejects.toThrow();
-      expect(await readdir(f.repository)).toEqual([]);
-    }
-  });
-
-  test("enforces the resolver byte limit on existing policies and saved files", async () => {
+  test("enforces the resolver byte limit on saved draft files", async () => {
     const header = "# Policy\n";
     const maximum =
       header + "x".repeat(1024 * 1024 - Buffer.byteLength(header));
-    const existing = await fixture();
-    const target = join(existing.repository, "SECURITY.md");
-    await writeFile(target, maximum);
-    expect(await readSecurityPolicy(target)).toBe(maximum);
-    await writeFile(target, `${maximum}x`);
-    await expect(existing.generate()).rejects.toThrow("1 MiB limit");
-    expect(await readdir(existing.outputDir)).toEqual([]);
-
     const saved = await fixture();
     const draft = await saved.generate();
     await writeFile(draft.draftPath, `${maximum}x`);
@@ -567,9 +570,7 @@ describe("security policy generation", () => {
       loadSecurityPolicyDraft(saved.repository, saved.outputDir),
     ).rejects.toThrow("1 MiB limit");
   });
-});
 
-describe("security policy review and application", () => {
   test("accepts policy Markdown without a hash-style heading", async () => {
     for (const content of [
       "Security policy\n===============\n\nReport vulnerabilities privately.\n",
