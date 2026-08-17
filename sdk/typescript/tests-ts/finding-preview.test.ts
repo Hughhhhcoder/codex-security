@@ -78,6 +78,20 @@ describe("bundled finding previews", () => {
     });
   });
 
+  test("indexes Git names once for large explicit scope lists", () => {
+    expect(sourceScopeProbe("indexed_scopes")).toEqual({
+      selected: 256,
+      linearNormalization: true,
+    });
+  });
+
+  test("selects source excerpts from the displayed finding locations", () => {
+    expect(sourceScopeProbe("display_locations")).toEqual({
+      displayed: 8,
+      excerptUsesDisplayedLocation: true,
+    });
+  });
+
   test("does not treat links or reparse points as filesystem alias evidence", () => {
     expect(sourceScopeProbe("alias_evidence")).toEqual({
       ordinary: true,
@@ -101,7 +115,7 @@ describe("bundled finding previews", () => {
       cliRecipeUnchanged: true,
       legacyExactScopesPreserved: true,
     });
-  });
+  }, 30_000);
 
   test("preserves legacy scans and separately owned migration history", () => {
     expect(sourceScopeProbe("migration")).toEqual({

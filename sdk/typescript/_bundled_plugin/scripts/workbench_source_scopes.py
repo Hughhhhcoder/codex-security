@@ -63,11 +63,11 @@ def offline_git_bytes(repository: Path, *arguments: str) -> bytes | None:
 @cache
 def tree_entries(
     repository: Path, tree: str
-) -> tuple[tuple[str, str, str], ...] | None:
+) -> dict[str, tuple[tuple[str, str, str], ...]] | None:
     content = offline_git_bytes(repository, "ls-tree", "-z", tree)
     if content is None:
         return None
-    entries = []
+    entries: dict[str, list[tuple[str, str, str]]] = {}
     for record in content.split(b"\0"):
         if not record:
             continue
@@ -86,8 +86,11 @@ def tree_entries(
             if mode in {b"100644", b"100755"} and object_type == b"blob"
             else "other"
         )
-        entries.append((os.fsdecode(name), kind, object_id))
-    return tuple(entries)
+        decoded_name = os.fsdecode(name)
+        entries.setdefault(normalized_path_component(decoded_name), []).append(
+            (decoded_name, kind, object_id)
+        )
+    return {name: tuple(matches) for name, matches in entries.items()}
 
 
 def exact_tree_path(
@@ -100,17 +103,11 @@ def exact_tree_path(
     for name in path.parts:
         if kind != "directory":
             return None
-        entries = tree_entries(repository, object_id)
-        if (
-            require_unambiguous
-            and sum(
-                normalized_path_component(entry[0]) == normalized_path_component(name)
-                for entry in entries or ()
-            )
-            != 1
-        ):
+        entries = tree_entries(repository, object_id) or {}
+        aliases = entries.get(normalized_path_component(name), ())
+        if require_unambiguous and len(aliases) != 1:
             return None
-        entry = next((entry for entry in entries or () if entry[0] == name), None)
+        entry = next((entry for entry in aliases if entry[0] == name), None)
         if entry is None:
             return None
         _, kind, object_id = entry
@@ -158,12 +155,8 @@ def existing_tree_path(
     for index, name in enumerate(path.parts, start=1):
         if kind != "directory":
             return None
-        entries = tree_entries(repository, object_id)
-        aliases = [
-            entry
-            for entry in entries or ()
-            if normalized_path_component(entry[0]) == normalized_path_component(name)
-        ]
+        entries = tree_entries(repository, object_id) or {}
+        aliases = entries.get(normalized_path_component(name), ())
         selected = filesystem_root / PurePosixPath(*path.parts[:index])
         matches = []
         try:

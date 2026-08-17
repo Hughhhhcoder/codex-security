@@ -3473,6 +3473,7 @@ def finding_result(
     severity = details.get("severity")
     severity = severity if isinstance(severity, dict) else {}
     locations = []
+    excerpt_locations = []
     try:
         target = require_scan_target_identity(scan)
     except SystemExit:
@@ -3487,6 +3488,14 @@ def finding_result(
         """,
         (occurrence["id"], FINDING_LOCATIONS_LIMIT),
     ):
+        excerpt_locations.append(
+            {
+                "endLine": row["end_line"],
+                "path": row["relative_path"],
+                "role": row["role"],
+                "startLine": row["start_line"],
+            }
+        )
         absolute_path = safe_source_path(target, row["relative_path"]) if target else None
         location = {
             "endLine": row["end_line"],
@@ -3531,12 +3540,6 @@ def finding_result(
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
     result.pop("artifactPaths", None)
-    stored_locations = stored_details.get("locations")
-    excerpt_locations = (
-        [location for location in stored_locations if isinstance(location, dict)]
-        if isinstance(stored_locations, list)
-        else locations
-    )
     source_excerpt = finding_source_excerpt(
         scan, target, excerpt_locations, requested_scan_paths(scan)
     )

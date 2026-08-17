@@ -163,6 +163,88 @@ def replacement_snapshot(repository: Path) -> dict:
     return {"mismatchedCaptureOmitted": True, "ambiguousLegacyViewOmitted": True}
 
 
+def indexed_scopes(repository: Path) -> dict:
+    selected = [f"source-{index}.py" for index in range(256)]
+    for name in selected:
+        write(repository, name, "synthetic source\n")
+    revision = commit(repository)
+    scopes.tree_entries.cache_clear()
+    normalize = scopes.normalized_path_component
+    calls = 0
+
+    def counted(value: str) -> str:
+        nonlocal calls
+        calls += 1
+        return normalize(value)
+
+    with patch.object(scopes, "normalized_path_component", counted):
+        record = scan(repository, revision, selected)
+    assert len(json.loads(record["source_scopes_json"])["scopes"]) == len(selected)
+    assert calls <= 3 * len(selected), calls
+    return {"selected": len(selected), "linearNormalization": True}
+
+
+def display_locations(repository: Path) -> dict:
+    import workbench_db as db
+    from filesystem_identity import serialize_filesystem_identity
+
+    selected = [f"selected/location{index}.py" for index in range(9)]
+    for index, name in enumerate(selected):
+        write(repository, name, f"source {index}\n")
+    record = {
+        **scan(repository, commit(repository), ["selected"]),
+        "id": "synthetic-scan",
+        "started_at": "2026-08-01T00:00:00Z",
+        "scan_dir": str(repository.parent / "scan"),
+        "target_path": str(repository),
+        "target_inode": serialize_filesystem_identity(repository.stat().st_ino),
+        "scope": "selected",
+    }
+    locations = [
+        {
+            "path": name,
+            "startLine": 1,
+            "endLine": 1,
+            "role": "evidence:root_control" if index == 8 else "evidence",
+        }
+        for index, name in enumerate(selected)
+    ]
+    occurrence = {
+        "id": "synthetic-occurrence",
+        "finding_id": "synthetic-finding",
+        "details_json": json.dumps({"locations": locations}),
+        "confidence": "high",
+        "created_at": record["started_at"],
+        "remediation": "Synthetic remediation",
+        "severity": "low",
+        "summary": "Synthetic summary",
+        "title": "Synthetic finding",
+    }
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, "
+        "start_line INTEGER, end_line INTEGER, role TEXT, sort_order INTEGER)"
+    )
+    connection.executemany(
+        "INSERT INTO finding_locations VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (occurrence["id"], item["path"], 1, 1, item["role"], index)
+            for index, item in enumerate(locations)
+        ],
+    )
+    with (
+        patch.object(db, "finding_remediation_result", return_value=None),
+        patch.object(db, "finding_triage_result", return_value=None),
+        patch.object(db.scan_history, "finding_matches", return_value=([], None, [])),
+    ):
+        result = db.finding_result(connection, record, occurrence)
+    assert [item["path"] for item in result["locations"]] == selected[:8]
+    assert result["sourceExcerpt"] == "1  source 0"
+    connection.close()
+    return {"displayed": 8, "excerptUsesDisplayedLocation": True}
+
+
 def boundaries(repository: Path) -> dict:
     for name, content in {
         "src/public.py": "public source\n",
@@ -702,6 +784,8 @@ with tempfile.TemporaryDirectory(prefix="codex-security-source-scopes-") as temp
                 "boundaries": boundaries,
                 "replacements": replacements,
                 "replacement_snapshot": replacement_snapshot,
+                "indexed_scopes": indexed_scopes,
+                "display_locations": display_locations,
                 "aliases": aliases,
                 "alias_evidence": alias_evidence,
                 "worktrees": worktrees,
