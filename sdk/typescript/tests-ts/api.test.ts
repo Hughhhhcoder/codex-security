@@ -34,6 +34,7 @@ import {
   ScanCostLimitExceededError,
   type ScanOptions,
   type ScanProgress,
+  type ScanSessionEvent,
   ScanInterruptedError,
 } from "../src/index.js";
 import {
@@ -2584,7 +2585,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("normalizes real worker review batches to the registered file total", async () => {
+  test("normalizes worker progress while streaming related session events", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -2593,6 +2594,8 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
     const updates: ScanProgress[] = [];
+    const sessionEvents: ScanSessionEvent[] = [];
+    const observerErrors: ScanObserverName[] = [];
     const usage = { input_tokens: 100, output_tokens: 10 };
     const client = new TestClient(
       {},
@@ -2671,6 +2674,13 @@ describe("CodexSecurity orchestration", () => {
 
     const result = await client.run(repository, {
       onProgress: (progress) => updates.push(progress),
+      onSessionEvent: (event) => {
+        sessionEvents.push(event);
+        if (sessionEvents.length === 1) {
+          throw new Error("session observer exploded");
+        }
+      },
+      onObserverError: (observer) => observerErrors.push(observer),
     });
 
     expect(result.threadId).toBe("thread-1");
@@ -2680,6 +2690,15 @@ describe("CodexSecurity orchestration", () => {
       { phase: "discovery", filesCompleted: 1_249, filesTotal: 1_258 },
       { phase: "validation", filesCompleted: 1_249, filesTotal: 1_258 },
     ]);
+    expect(sessionEvents).toHaveLength(10);
+    expect(
+      new Set(
+        sessionEvents.map(
+          ({ threadId, parentThreadId }) => `${threadId}:${parentThreadId}`,
+        ),
+      ),
+    ).toEqual(new Set(["thread-1:null", "worker-thread:thread-1"]));
+    expect(observerErrors).toEqual(["onSessionEvent"]);
     await client.close();
   });
 
@@ -4845,8 +4864,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(repository);
     await mkdir(ambientHome);
     await writeFile(join(ambientHome, "auth.json"), "{}\n");
-    let activeScans = 0;
-    let maximumActiveScans = 0;
+    let scansStarted = 0;
     const deepScanConfigPaths = new Set<string>();
     let releaseScans!: () => void;
     const concurrentScans = new Promise<void>((resolve) => {
@@ -4890,40 +4908,28 @@ describe("CodexSecurity orchestration", () => {
                         join(credentialHome, ".codex-security-scan.lock"),
                       ),
                     ).toBe(false);
-                    activeScans += 1;
-                    maximumActiveScans = Math.max(
-                      maximumActiveScans,
-                      activeScans,
+                    if (++scansStarted === 2) releaseScans();
+                    const credentialConfig = parseToml(
+                      await readFile(
+                        join(credentialHome, "config.toml"),
+                        "utf8",
+                      ),
                     );
-                    if (activeScans === 2) releaseScans();
-                    try {
-                      const credentialConfig = parseToml(
-                        await readFile(
-                          join(credentialHome, "config.toml"),
-                          "utf8",
-                        ),
-                      );
-                      expect(credentialConfig["model"]).toBeUndefined();
-                      const before = parseToml(
-                        await readFile(deepScanConfigPath!, "utf8"),
-                      );
-                      expect(before["deep_scan"]).toMatchObject({
-                        workers: index + 2,
-                      });
-                      await Promise.race([
-                        concurrentScans,
-                        new Promise((resolve) => setTimeout(resolve, 5_000)),
-                      ]);
-                      const after = parseToml(
-                        await readFile(deepScanConfigPath!, "utf8"),
-                      );
-                      expect(after["deep_scan"]).toMatchObject({
-                        workers: index + 2,
-                      });
-                      throw new Error("parallel managed scan reached");
-                    } finally {
-                      activeScans -= 1;
-                    }
+                    expect(credentialConfig["model"]).toBeUndefined();
+                    const before = parseToml(
+                      await readFile(deepScanConfigPath!, "utf8"),
+                    );
+                    expect(before["deep_scan"]).toMatchObject({
+                      workers: index + 2,
+                    });
+                    await concurrentScans;
+                    const after = parseToml(
+                      await readFile(deepScanConfigPath!, "utf8"),
+                    );
+                    expect(after["deep_scan"]).toMatchObject({
+                      workers: index + 2,
+                    });
+                    throw new Error("parallel managed scan reached");
                   },
                 }),
               };
@@ -4936,7 +4942,9 @@ describe("CodexSecurity orchestration", () => {
     try {
       const results = await Promise.allSettled(
         clients.map((client, index) =>
-          client.run(repository, { mode: "deep", workers: index + 2 }),
+          client
+            .run(repository, { mode: "deep", workers: index + 2 })
+            .finally(releaseScans),
         ),
       );
       for (const result of results) {
@@ -4948,7 +4956,7 @@ describe("CodexSecurity orchestration", () => {
         });
       }
       expect(existsSync(credentialHome)).toBe(true);
-      expect(maximumActiveScans).toBe(2);
+      expect(scansStarted).toBe(2);
       expect(deepScanConfigPaths.size).toBe(2);
       const pluginConfiguration = JSON.parse(
         await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
@@ -4959,6 +4967,7 @@ describe("CodexSecurity orchestration", () => {
         ),
       ).toBe(true);
     } finally {
+      releaseScans();
       await Promise.all(clients.map(async (client) => await client.close()));
     }
   });
