@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import {
   lstat,
   open,
@@ -274,12 +274,16 @@ async function policyLinkSnapshot(
     }
     const canonical = join(parent, basename(current));
     const relativePath = policyRelativePath(repository, canonical);
-    const metadata = await lstat(canonical).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-        throw error;
-      },
-    );
+    let metadata: Stats | null;
+    try {
+      metadata = await lstat(canonical);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOTDIR")
+        return { links, destination: null, status: "missing" };
+      if (code !== "ENOENT") throw error;
+      metadata = null;
+    }
     if (metadata !== null || links.length > 0)
       await requirePolicyOutsideGitMetadata(canonical, signal);
     if (!metadata?.isSymbolicLink())

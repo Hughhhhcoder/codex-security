@@ -644,6 +644,21 @@ describe("security policy preview", () => {
     expect(await readdir(outside.outputDir)).toEqual([]);
   });
 
+  test("treats inherited links through regular files as absent", async () => {
+    const f = await fixture();
+    await mkdir(join(f.repository, "component"));
+    await writeFile(join(f.repository, "not-a-directory"), "source\n");
+    await symlink(
+      join(f.repository, "not-a-directory", "policy.md"),
+      join(f.repository, "SECURITY.md"),
+      "file",
+    );
+    const draft = await f.generate({ path: "component" });
+    expect(await securityPolicyDiff(draft, PYTHON)).toContain(
+      "b/component/SECURITY.md",
+    );
+  });
+
   test("invalidates component drafts when inherited links change", async () => {
     for (const change of ["add", "remove", "retarget", "dangle"] as const) {
       const f = await fixture();
