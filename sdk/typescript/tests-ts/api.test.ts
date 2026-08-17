@@ -1856,6 +1856,7 @@ describe("CodexSecurity orchestration", () => {
     const warningDetails: Array<{ kind: "target_changed" } | undefined> = [];
     const reconnects: Array<[number, number]> = [];
     const commands: Array<readonly string[]> = [];
+    let registrationInput: string | undefined;
     const completionWarning =
       "Repository HEAD changed while the scan was running; results were saved for the original revision.";
     const recoveryWarning =
@@ -1894,6 +1895,7 @@ describe("CodexSecurity orchestration", () => {
         ) => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
+            registrationInput = input;
             return mockScanRegistration(args, input);
           }
           if (args[0] === "get-scan-feedback") {
@@ -2046,9 +2048,8 @@ describe("CodexSecurity orchestration", () => {
       "Additional scan instructions:\nFocus on authentication and authorization.",
     );
     expect(followUpPrompt).toBe("Draft fixes for confirmed findings.");
-    expect(
-      JSON.parse(commands[0]![commands[0]!.indexOf("--recipe-json") + 1]!),
-    ).toMatchObject({
+    expect(commands[0]).toContain("--recipe-json-stdin");
+    expect(JSON.parse(registrationInput!)).toMatchObject({
       repository,
       target: { kind: "repository", paths: [] },
       mode: "standard",
@@ -3949,9 +3950,10 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           options: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
+          input?: string,
         ) => {
           commands.push(args);
-          const result = await runWorkbench(options, args);
+          const result = await runWorkbench(options, args, input);
           if (args[0] === "fail-scan") {
             throw new Error("failure recording also failed");
           }
@@ -4027,9 +4029,10 @@ describe("CodexSecurity orchestration", () => {
         runWorkbench: async (
           options: Parameters<typeof runWorkbench>[0],
           args: readonly string[],
+          input?: string,
         ) => {
           commands.push(args);
-          return await runWorkbench(options, args);
+          return await runWorkbench(options, args, input);
         },
         createCodex: () => ({
           startThread: () => ({
