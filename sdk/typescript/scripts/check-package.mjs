@@ -184,6 +184,8 @@ const distFiles = new Set(
     "scan-dashboard",
     "scan-history-renderer",
     "scan-logs",
+    "security-policy",
+    "security-policy-cli",
     "targets",
     "trusted-executable",
     "version",

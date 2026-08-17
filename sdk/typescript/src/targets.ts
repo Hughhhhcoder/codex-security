@@ -136,17 +136,74 @@ export function resolveRepositoryPath(repository: string): string {
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
+  options: { requireIfPresent?: boolean } = {},
 ): Promise<string | null> {
+  const strict = options.requireIfPresent === true;
+  const markerRoot = strict
+    ? await gitMarkerRoot(repository, signal, "nearest")
+    : null;
+  let canonicalRoot: string;
   try {
+    if (strict) {
+      if (
+        (await gitOutput(
+          repository,
+          ["rev-parse", "--is-inside-git-dir"],
+          signal,
+        )) === "true"
+      ) {
+        throw new InvalidTargetError(
+          "The selected path is inside Git metadata. Select a worktree directory instead.",
+        );
+      }
+      if (markerRoot === null) return null;
+    }
     const root = await gitOutput(
       repository,
       ["rev-parse", "--show-toplevel"],
       signal,
     );
-    return await abortable(() => realpath(root), signal);
-  } catch {
+    canonicalRoot = await abortable(() => realpath(root), signal);
+  } catch (error) {
     throwIfAborted(signal);
+    if (strict && error instanceof InvalidTargetError) throw error;
+    if (markerRoot !== null) {
+      throw new InvalidTargetError(
+        "Could not determine the Git worktree root. Check that Git is installed and the checkout is accessible.",
+        { cause: error },
+      );
+    }
     return null;
+  }
+  if (
+    markerRoot !== null &&
+    relative(
+      await abortable(() => realpath(markerRoot), signal),
+      canonicalRoot,
+    ) !== ""
+  ) {
+    throw new InvalidTargetError(
+      "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
+    );
+  }
+  return canonicalRoot;
+}
+
+export async function enclosingGitWorktreeRoots(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const roots: string[] = [];
+  let directory = repository;
+  for (;;) {
+    const root = await enclosingGitWorktreeRoot(directory, signal, {
+      requireIfPresent: true,
+    });
+    if (root === null) return roots;
+    roots.push(root);
+    const parent = dirname(root);
+    if (parent === root) return roots;
+    directory = parent;
   }
 }
 
@@ -401,7 +458,7 @@ async function gitOutput(
   const command = await resolveTrustedExecutable(
     "git",
     isolatedGitEnvironment(args[0] === "rev-parse"),
-    await outermostGitMarkerRoot(repository, signal),
+    (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
   );
   if (command === null)
     throw new Error("Git is not available on a trusted PATH.");
@@ -418,16 +475,18 @@ async function gitOutput(
   return stdout.trim();
 }
 
-async function outermostGitMarkerRoot(
+async function gitMarkerRoot(
   repository: string,
-  signal?: AbortSignal,
-): Promise<string> {
+  signal: AbortSignal | undefined,
+  search: "nearest" | "outermost",
+): Promise<string | null> {
   let current = repository;
-  let root = repository;
+  let root: string | null = null;
   while (true) {
     throwIfAborted(signal);
     try {
       await lstat(join(current, ".git"));
+      if (search === "nearest") return current;
       root = current;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -456,7 +515,7 @@ function isolatedGitEnvironment(
   return environment;
 }
 
-async function abortable<T>(
+export async function abortable<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
@@ -465,16 +524,18 @@ async function abortable<T>(
   return await new Promise<T>((resolvePromise, reject) => {
     const onAbort = (): void => reject(abortReason(signal));
     signal.addEventListener("abort", onAbort, { once: true });
-    void operation().then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolvePromise(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
+    void Promise.resolve()
+      .then(operation)
+      .then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolvePromise(value);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
   });
 }
 

@@ -339,6 +339,13 @@ describe("CodexSecurity preflight configuration", () => {
             [stateDirectory]: "write",
           },
         },
+        codex_security_policy: {
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": "read",
+          },
+          network: { enabled: false },
+        },
       },
     });
     expect(original).toMatchObject({
@@ -364,6 +371,14 @@ describe("CodexSecurity preflight configuration", () => {
             [stateDirectory]: "write",
             [credentialHome]: "read",
           },
+        },
+        codex_security_policy: {
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": "read",
+            [credentialHome]: "read",
+          },
+          network: { enabled: false },
         },
       },
     });

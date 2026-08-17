@@ -16,11 +16,11 @@ npx @openai/codex-security --version
 ```
 
 The package supports macOS, Linux, and Windows and requires Node.js 22.13.0 or
-later in the 22.x release line, Node.js 24.x, or Node.js 26.x. Scans, bulk
-scans, exports, scan history, and saved findings also require Python 3.10 or
-later. Python 3.10 also requires `tomli`. Use `--python` with `scan`,
-`bulk-scan`, or `export`; use `pythonPath` with the SDK. Set `PYTHON` to select
-an interpreter for any Python-backed command.
+later in the 22.x release line, Node.js 24.x, or Node.js 26.x. The `policy`
+command, scans, bulk scans, exports, scan history, and saved findings also require
+Python 3.10 or later. Python 3.10 also requires `tomli`. Use `--python` with
+`policy`, `scan`, `bulk-scan`, or `export`; use `pythonPath` with the SDK. Set
+`PYTHON` to select an interpreter for any Python-backed command.
 
 When a newer version is available, the CLI shows the update command for your
 installation method. Set `CODEX_SECURITY_NO_UPDATE_NOTICE=1` to hide the
@@ -197,9 +197,102 @@ Some cybersecurity requests and protected findings require approval through
 Trusted Access for Cyber. To apply or check your access, visit
 [chatgpt.com/cyber](https://chatgpt.com/cyber).
 
+## Generate a security policy
+
+`policy` drafts a `SECURITY.md` for owner review. It uses the same Codex runtime,
+authentication, model settings, and security guidance as scans, but does not
+look for vulnerabilities or create a scan record. Codex can read files but
+cannot write them. Network access, web search, apps, and MCP servers are disabled.
+The SDK saves the responses in a private directory outside the checkout.
+
+```bash
+npx @openai/codex-security policy .
+npx @openai/codex-security policy . --path services/api
+npx @openai/codex-security policy . --knowledge-base architecture.md --model gpt-5.6-terra --effort high
+npx @openai/codex-security policy . --dry-run --json
+```
+
+The repository defaults to the current directory. `--path` selects a component
+directory. A component inherits policies from its Git root; the closest policy
+takes precedence when guidance conflicts. Linked worktrees and initialized
+submodules use their own roots. Git metadata and paths outside the selected
+checkout cannot be policy targets.
+
+Generation has three stages: describe the system, build a detailed threat model,
+and draft the policy. In a terminal, the command asks about important facts the
+source cannot establish, then shows the exact diff and decisions that need
+review. If both a ChatGPT sign-in and an API key are available, it asks which to
+use. Set `--auth chatgpt` or `--auth api-key` to choose explicitly.
+
+### Review the draft
+
+The command never changes repository files. Review the saved `SECURITY.md`
+before copying it to the reported target path. Preserve existing reporting
+instructions and obtain owner approval for exclusions, accepted risks, and
+severity decisions. Later scans read the approved policy.
+
+Use `--headless` or an explicit output format to skip questions. Unanswered
+questions remain in the review notes. Drafts default to the Codex Security state
+directory; `--output-dir` selects an empty directory outside every enclosing
+Git checkout.
+
+```bash
+npx @openai/codex-security policy . --path services/api \
+  --headless --output-dir /path/outside/repository/api-policy --json
+```
+
+The artifact directory contains:
+
+| File                   | Purpose                                                   |
+| ---------------------- | --------------------------------------------------------- |
+| `SECURITY.md`          | Editable policy draft.                                    |
+| `THREAT_MODEL.md`      | Detailed threat model with source references.             |
+| `project-spec.md`      | System description and security boundaries.               |
+| `previous-SECURITY.md` | Original policy used for the diff.                        |
+| `policy-draft.json`    | Target, policy hashes, revision, model, and review notes. |
+
+Keep detailed models and intermediate files private until they have been
+reviewed for disclosure. Generation does not imply owner approval or confirm
+that a threat scenario is a vulnerability.
+
+`--format md` writes the draft to stdout. `--json` returns paths, review notes,
+status, and estimated cost. Global filters and token options work with these
+formats. Progress goes to stderr. `--full-output` reports failures with
+`ok: false`. `--max-cost` applies to the whole generation. If a stage cannot
+inspect required source evidence, generation stops and preserves completed
+documents. Fix the reported problem and use a new output directory to retry.
+
+### Generate a policy from TypeScript
+
+```ts
+import { CodexSecurity, securityPolicyDiff } from "@openai/codex-security";
+
+const security = new CodexSecurity();
+try {
+  const draft = await security.generatePolicy("/path/to/repository", {
+    path: "services/api",
+    knowledgeBasePaths: ["/path/to/architecture.md"],
+    onStage: (stage) => console.error(stage),
+  });
+
+  console.log(await securityPolicyDiff(draft));
+  console.log(`Review the saved draft at ${draft.draftPath}`);
+} finally {
+  await security.close();
+}
+```
+
+`preflightPolicy()` checks local inputs without starting Codex.
+`generatePolicy()` accepts `auth`, `path`, `knowledgeBasePaths`, `outputDir`,
+`maxCostUsd`, `signal`, and progress and cost callbacks. An optional
+`answerQuestions` callback receives each group of up to three owner questions
+and a cancellation signal. Without it, the questions remain unresolved.
+
 ## CLI
 
 ```bash
+npx @openai/codex-security policy
+npx @openai/codex-security policy . --path services/api
 npx @openai/codex-security scan
 npx @openai/codex-security scan /path/to/repository
 npx @openai/codex-security scan /path/to/repository --headless

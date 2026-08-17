@@ -119,13 +119,23 @@ import {
   type HistoryCommand,
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
+import {
+  runPolicyCommand,
+  type PolicyPrompt,
+  type PolicySecurity,
+} from "./security-policy-cli.js";
 import type {
   ScanPhase,
   ScanProgress,
   ScanWorkerPhase,
   ScanWorkerStatus,
 } from "./worker-progress.js";
-import { DiffTarget, type ScanMode, type ScanTarget } from "./targets.js";
+import {
+  abortable,
+  DiffTarget,
+  type ScanMode,
+  type ScanTarget,
+} from "./targets.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   checkForUpdate,
@@ -141,7 +151,7 @@ const PROGRESS_REFRESH_MILLISECONDS = 1_000;
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
-const SCAN_HISTORY_OUTPUT_OPTION =
+const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
@@ -710,11 +720,14 @@ interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
+  policyPrompt?: PolicyPrompt;
+  resolvePolicyPython?: typeof resolvePluginPython;
   environment: NodeJS.ProcessEnv;
   prepareAuthenticationHome?: (
     environment: NodeJS.ProcessEnv,
   ) => Promise<string>;
-  hasStoredChatGPTSignIn?: () => Promise<boolean>;
+  hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   publishScan?: typeof publishScan;
@@ -745,11 +758,14 @@ interface CliDependencies {
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
     createSecurityInternal(config, { surface: "cli" }),
+  createPolicySecurity: (config) =>
+    createSecurityInternal(config, { surface: "cli" }),
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
   checkForUpdate: (signal) =>
     checkForUpdate({ environment: process.env, signal }),
-  hasStoredChatGPTSignIn: async () => {
+  hasStoredChatGPTSignIn: async (signal) => {
+    signal?.throwIfAborted();
     const environment = Object.fromEntries(
       Object.entries(process.env).filter(
         ([name]) =>
@@ -759,10 +775,14 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     );
     const command = resolveCodexCommand(environment);
     if (existsSync(codexSecurityCredentialHome(process.env))) {
-      const dedicatedStatus = await accountStatus(command, {
-        ...environment,
-        CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
-      });
+      const dedicatedStatus = await accountStatus(
+        command,
+        {
+          ...environment,
+          CODEX_HOME: await prepareCodexSecurityCredentialHome(process.env),
+        },
+        signal,
+      );
       if (
         dedicatedStatus.authenticated &&
         /\bchatgpt\b/iu.test(dedicatedStatus.details)
@@ -770,7 +790,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         return true;
       }
     }
-    const ambientStatus = await accountStatus(command, environment);
+    const ambientStatus = await accountStatus(command, environment, signal);
     return (
       ambientStatus.authenticated && /\bchatgpt\b/iu.test(ambientStatus.details)
     );
@@ -1090,9 +1110,11 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
   argv = defaultListCommand(argv);
+  const policyFullOutput =
+    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const positionals: string[] = [];
   const argumentError = validateCliArguments(argv, positionals);
-  if (argumentError !== undefined) {
+  if (argumentError !== undefined && !policyFullOutput) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
   }
@@ -1122,6 +1144,7 @@ export async function main(
   let frameworkOutput = "";
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
+  let renderedPolicy: string | undefined;
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1207,7 +1230,7 @@ export async function main(
       result === undefined ||
       format !== "toon" ||
       output.isTTY !== true ||
-      argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+      argv.some((argument) => OUTPUT_OPTION.test(argument))
     ) {
       return result;
     }
@@ -1863,7 +1886,7 @@ export async function main(
           format === "toon" &&
           !formatExplicit &&
           !options.dryRun &&
-          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+          !argv.some((argument) => OUTPUT_OPTION.test(argument))
         ) {
           renderedPublication = renderPublicationSummary(
             result,
@@ -1900,8 +1923,7 @@ export async function main(
     },
   });
   const cli = Cli.create("codex-security", {
-    description:
-      "Run, validate, patch, export, and publish Codex Security findings.",
+    description: "Generate security policies, scan code, and manage findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -1909,6 +1931,198 @@ export async function main(
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
     },
   })
+    .command("policy", {
+      description: "Draft a source-backed SECURITY.md for owner review.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .optional()
+          .describe(
+            "Repository or component directory (default: current directory).",
+          ),
+      }),
+      options: z.object({
+        path: optionValue("--path")
+          .optional()
+          .describe(
+            "Generate SECURITY.md for this repository-relative component directory.",
+          ),
+        knowledgeBase: z
+          .array(optionValue("--knowledge-base"))
+          .default([])
+          .describe(
+            "Add architecture or security-context files; repeat for multiple paths.",
+          ),
+        outputDir: optionValue("--output-dir")
+          .optional()
+          .describe(
+            "Private artifact directory outside the repository (default: Codex Security state).",
+          ),
+        headless: z
+          .boolean()
+          .default(false)
+          .describe("Do not ask owner questions."),
+        dryRun: z
+          .boolean()
+          .default(false)
+          .describe("Validate local generation inputs without starting Codex."),
+        auth: z
+          .enum(["auto", "chatgpt", "api-key"])
+          .default("auto")
+          .describe("Select ChatGPT, API-key, or automatic authentication."),
+        model: optionValue("--model")
+          .optional()
+          .describe(
+            `Model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+          ),
+        effort: effortOption(),
+        provider: PROVIDER_OPTION.describe(
+          "Inference provider for policy generation.",
+        ),
+        maxCost: z
+          .number()
+          .positive()
+          .optional()
+          .describe("Stop if estimated USD cost exceeds AMOUNT."),
+        pluginPath: optionValue("--plugin-path")
+          .optional()
+          .describe(PLUGIN_PATH_DESCRIPTION),
+        python: optionValue("--python")
+          .optional()
+          .describe(PYTHON_PATH_DESCRIPTION),
+        codex: z
+          .array(optionValue("--codex"))
+          .default([])
+          .describe(CODEX_OVERRIDE_DESCRIPTION),
+      }),
+      examples: [
+        { args: { repository: "." } },
+        { args: { repository: "." }, options: { path: "services/api" } },
+      ],
+      hint:
+        "Save a draft for review:\n" +
+        "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
+      output: z
+        .union([z.record(z.string(), z.unknown()), z.string()])
+        .optional(),
+      async run({ args, error: incurError, options, format, formatExplicit }) {
+        const outputOptions = argv.filter((argument) =>
+          OUTPUT_OPTION.test(argument),
+        );
+        const explicitOutput = formatExplicit || outputOptions.length > 0;
+        const transformOutput = outputOptions.some(
+          (argument) => !argument.startsWith("--format"),
+        );
+        const filterOutput = outputOptions.some((argument) =>
+          argument.startsWith("--filter-output"),
+        );
+        const fail = (message: string, failureExitCode: number) => {
+          exitCode = failureExitCode;
+          return incurError({
+            code: "POLICY_FAILED",
+            message,
+            exitCode: failureExitCode,
+          });
+        };
+        try {
+          if (argumentError !== undefined) return fail(argumentError, 2);
+          const directory = dependencies.currentDirectory();
+          const outcome = await withTerminalErrorsHandled(errorOutput, () =>
+            runPolicyCommand(
+              {
+                repository: resolve(
+                  directory,
+                  expandHome(args.repository ?? "."),
+                ),
+                config: {
+                  pluginPath: options.pluginPath,
+                  pythonPath: options.python,
+                  codexOverrides: parseCodexOverrides(
+                    options.codex,
+                    options.model,
+                    options.effort,
+                    options.provider,
+                  ),
+                },
+                generation: {
+                  auth: options.auth,
+                  path: options.path,
+                  knowledgeBasePaths: options.knowledgeBase.map((path) =>
+                    resolve(directory, expandHome(path)),
+                  ),
+                  outputDir:
+                    options.outputDir === undefined
+                      ? undefined
+                      : resolve(directory, expandHome(options.outputDir)),
+                  maxCostUsd: options.maxCost,
+                },
+                headless: options.headless || explicitOutput,
+                dryRun: options.dryRun,
+                format,
+              },
+              {
+                createSecurity:
+                  dependencies.createPolicySecurity ??
+                  ((config) =>
+                    createSecurityInternal(config, { surface: "cli" })),
+                chooseAuthentication: (config, auth, signal) =>
+                  chooseInteractiveAuthentication(
+                    {
+                      auth,
+                      provider: scanModelProvider({
+                        ...DEFAULT_CODEX_CONFIG,
+                        ...config.codexOverrides,
+                      }),
+                      command: "policy",
+                      signal,
+                    },
+                    errorOutput,
+                    dependencies,
+                  ),
+                prompt:
+                  dependencies.policyPrompt ??
+                  createBulkScanDiscoveryDependencies({
+                    output: errorOutput,
+                    now: dependencies.now,
+                    currentDirectory: dependencies.currentDirectory,
+                  }).prompt,
+                environment: dependencies.environment,
+                errorOutput,
+                writePreview: (value) => writeCliOutput(errorOutput, value),
+                now: dependencies.now,
+                addSignalListener: dependencies.addSignalListener,
+                removeSignalListener: dependencies.removeSignalListener,
+                forceExit: dependencies.forceExit,
+                resolvePython: dependencies.resolvePolicyPython,
+              },
+            ),
+          );
+          exitCode = outcome.exitCode;
+          if (exitCode !== 0) {
+            return fail(outcome.error ?? "Policy command failed.", exitCode);
+          }
+          if (
+            format === "md" &&
+            outcome.markdown !== undefined &&
+            !filterOutput
+          ) {
+            if (!transformOutput) renderedPolicy = outcome.markdown;
+            return outcome.markdown;
+          }
+          return format === "toon" && !explicitOutput && !options.dryRun
+            ? undefined
+            : outcome.data;
+        } catch (error) {
+          const message = safeErrorMessage(error);
+          try {
+            errorOutput.write(`codex-security: ${message}\n`);
+          } catch {}
+          return fail(message, 2);
+        }
+      },
+    })
     .command("scan", {
       description: "Run a Codex Security scan.",
       destructive: true,
@@ -2123,7 +2337,7 @@ export async function main(
         if (
           !options.dryRun &&
           format === "toon" &&
-          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+          !argv.some((argument) => OUTPUT_OPTION.test(argument))
         ) {
           return;
         }
@@ -2772,17 +2986,24 @@ export async function main(
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
-    if (exitCode !== 0) return exitCode;
-    errorOutput.write(
-      `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
-    );
-    return 2;
+    if (policyFullOutput) {
+      if (exitCode === 0) exitCode = 2;
+    } else {
+      if (exitCode !== 0) return exitCode;
+      errorOutput.write(
+        `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,
+      );
+      return 2;
+    }
   }
   if (frameworkOutput.length === 0) return exitCode;
   try {
     await writeCliOutput(
       output,
-      renderedPublication ?? renderedHistory ?? frameworkOutput,
+      renderedPolicy ??
+        renderedPublication ??
+        renderedHistory ??
+        frameworkOutput,
     );
     return exitCode;
   } catch (error) {
@@ -2791,11 +3012,15 @@ export async function main(
   }
 }
 
-function defaultListCommand(argv: readonly string[]): readonly string[] {
-  const commandIndex = argv.findIndex((value, index) => {
+function cliCommandIndex(argv: readonly string[]): number {
+  return argv.findIndex((value, index) => {
     if (value.startsWith("-")) return false;
     return index === 0 || !VALUE_OPTIONS.has(argv[index - 1]!);
   });
+}
+
+function defaultListCommand(argv: readonly string[]): readonly string[] {
+  const commandIndex = cliCommandIndex(argv);
   if (
     commandIndex < 0 ||
     !["scans", "findings"].includes(argv[commandIndex]!) ||
@@ -2962,9 +3187,13 @@ function validateCliArguments(
   positionals: string[],
 ): string | undefined {
   if (argv.includes("--help") || argv.includes("-h")) return undefined;
-  const commandIndex = argv.findIndex((value) =>
-    [
+  const commandIndex = cliCommandIndex(argv);
+  const command = argv[commandIndex];
+  if (
+    command === undefined ||
+    ![
       "scan",
+      "policy",
       "install-hook",
       "bulk-scan",
       "scans",
@@ -2976,10 +3205,10 @@ function validateCliArguments(
       "login",
       "logout",
       "info",
-    ].includes(value),
-  );
-  if (commandIndex < 0) return undefined;
-  const command = argv[commandIndex]!;
+    ].includes(command)
+  ) {
+    return undefined;
+  }
   const structuredOutput = argv.some(
     (value, index) =>
       value === "--json" ||
@@ -3636,12 +3865,81 @@ function diagnosticValue(value: unknown): string {
   );
 }
 
+async function chooseInteractiveAuthentication(
+  options: {
+    auth: ScanAuthMode | undefined;
+    provider: unknown;
+    command: "scan" | "policy";
+    signal: AbortSignal;
+  },
+  errorOutput: Writable,
+  dependencies: CliDependencies,
+): Promise<ScanAuthMode | undefined> {
+  const { auth, provider, signal } = options;
+  if (
+    errorOutput.isTTY !== true ||
+    isExternalModelProvider(provider) ||
+    (auth !== undefined && auth !== "auto")
+  )
+    return auth;
+  const authentication = scanAuthentication(
+    dependencies.environment,
+    auth,
+    provider,
+  );
+  if (authentication.method !== "api_key") return auth;
+  const prompt =
+    dependencies.scanAuthenticationPrompt ??
+    createBulkScanDiscoveryDependencies({
+      output: errorOutput,
+      now: dependencies.now,
+      currentDirectory: dependencies.currentDirectory,
+    }).prompt;
+  const hasStoredSignIn = dependencies.hasStoredChatGPTSignIn;
+  if (
+    !prompt.isInteractive() ||
+    hasStoredSignIn === undefined ||
+    !(await abortable(() => hasStoredSignIn(signal), signal))
+  )
+    return auth;
+  const source = authentication.source;
+  try {
+    errorOutput.write(
+      `Both a ChatGPT sign-in and an API key from ${source} are available.\n`,
+    );
+  } catch {}
+  return await abortable(
+    () =>
+      prompt.select<ScanAuthMode>(
+        options.command === "scan"
+          ? "How would you like to authenticate this scan?"
+          : "How would you like to authenticate policy generation?",
+        [
+          { label: "ChatGPT subscription", value: "chatgpt" },
+          { label: `API key from ${source}`, value: "api-key" },
+        ],
+        undefined,
+        signal,
+      ),
+    signal,
+  );
+}
+
 async function runScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
   dependencies: CliDependencies,
   interactive = true,
 ): Promise<ScanOutcome> {
+  return await withTerminalErrorsHandled(errorOutput, () =>
+    executeScan(arguments_, errorOutput, dependencies, interactive),
+  );
+}
+
+async function withTerminalErrorsHandled<T>(
+  errorOutput: Writable,
+  operation: () => Promise<T>,
+): Promise<T> {
   const observeTerminalErrors =
     typeof errorOutput.on === "function" &&
     typeof errorOutput.off === "function";
@@ -3650,12 +3948,7 @@ async function runScan(
     errorOutput.on?.("error", ignoreTerminalError);
   }
   try {
-    return await executeScan(
-      arguments_,
-      errorOutput,
-      dependencies,
-      interactive,
-    );
+    return await operation();
   } finally {
     if (observeTerminalErrors) {
       try {
@@ -3802,50 +4095,25 @@ async function executeScan(
     };
     ({ model: effectiveModel, reasoningEffort: effectiveReasoningEffort } =
       scanModelConfiguration(effectiveConfiguration));
-    let auth = arguments_.auth;
     const provider = scanModelProvider(effectiveConfiguration);
+    const auth =
+      !arguments_.dryRun && interactive
+        ? await chooseInteractiveAuthentication(
+            {
+              auth: arguments_.auth,
+              provider,
+              command: "scan",
+              signal: preparationAbortController.signal,
+            },
+            errorOutput,
+            dependencies,
+          )
+        : arguments_.auth;
     selectedAuthentication = scanAuthentication(
       dependencies.environment,
       auth,
       provider,
     );
-    if (
-      !isExternalModelProvider(provider) &&
-      (auth === undefined || auth === "auto") &&
-      !arguments_.dryRun &&
-      interactive &&
-      errorOutput.isTTY === true &&
-      selectedAuthentication.method === "api_key"
-    ) {
-      const prompt =
-        dependencies.scanAuthenticationPrompt ??
-        createBulkScanDiscoveryDependencies({
-          output: errorOutput,
-          now: dependencies.now,
-          currentDirectory: dependencies.currentDirectory,
-        }).prompt;
-      if (
-        prompt.isInteractive() &&
-        (await dependencies.hasStoredChatGPTSignIn?.()) === true
-      ) {
-        const source = selectedAuthentication.source;
-        errorOutput.write(
-          `Both a ChatGPT sign-in and an API key from ${source} are available.\n`,
-        );
-        auth = await prompt.select<ScanAuthMode>(
-          "How would you like to authenticate this scan?",
-          [
-            { label: "ChatGPT subscription", value: "chatgpt" },
-            { label: `API key from ${source}`, value: "api-key" },
-          ],
-        );
-        selectedAuthentication = scanAuthentication(
-          dependencies.environment,
-          auth,
-          provider,
-        );
-      }
-    }
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,

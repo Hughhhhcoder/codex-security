@@ -1,6 +1,6 @@
 # Codex Security
 
-`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code.
+`@openai/codex-security` is a CLI and TypeScript SDK for defining security policy and finding, validating, and fixing security vulnerabilities in your code.
 
 **See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for more details.
 
@@ -16,6 +16,7 @@ Node.js 26.x; Python 3.10 or later; and access to Codex Security.
 ```bash
 npm install @openai/codex-security
 npx @openai/codex-security login
+npx @openai/codex-security policy .
 npx @openai/codex-security scan .
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
@@ -83,6 +84,29 @@ to fix matching open issues from a project. Set
 root cause, reuses saved matches, and identifies new, persisting, reopened,
 resolved, or unknown findings. Missing findings remain unknown when coverage is
 incomplete or their original location was not reviewed.
+
+## Generate SECURITY.md
+
+Draft a security policy for a repository or one component:
+
+```bash
+npx @openai/codex-security policy .
+npx @openai/codex-security policy . --path services/api --knowledge-base architecture.md
+npx @openai/codex-security policy . --headless --output-dir /path/outside/repository/policy --json
+```
+
+The command reads the source, describes the system, builds a detailed threat
+model, and drafts a short `SECURITY.md`. In a terminal, it asks about important
+facts the code cannot establish and shows the proposed diff. It does not change
+repository files. Review the saved policy before copying it to the reported
+target path. Later scans read the root and nested `SECURITY.md` files.
+
+Drafts are stored outside the repository and any enclosing Git checkout. The
+same private directory contains `project-spec.md`, `THREAT_MODEL.md`, and review
+notes. Review those documents before sharing them. Generated decisions still
+need owner approval, and threat scenarios are not confirmed vulnerabilities.
+See the [package README](sdk/typescript/README.md#generate-a-security-policy)
+for SDK use and command options.
 
 ## Publish scan findings
 
