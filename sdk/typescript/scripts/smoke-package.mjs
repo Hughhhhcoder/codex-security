@@ -519,6 +519,45 @@ try {
     await readFile(policyPreflight.targetPath, "utf8"),
     policyMarkdown,
   );
+  run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      [
+        'import assert from "node:assert/strict";',
+        'import { createHash } from "node:crypto";',
+        'import { readFile, realpath, writeFile } from "node:fs/promises";',
+        'import { dirname, join } from "node:path";',
+        `const { loadSecurityPolicyDraft, applySecurityPolicy } = await import(${JSON.stringify(packageManifest.name)});`,
+        "const repository = await realpath(process.argv[1]);",
+        "const artifacts = await realpath(process.argv[2]);",
+        'const target = join(repository, "SECURITY.md");',
+        'const previous = await readFile(target, "utf8");',
+        'const next = previous + "\\nOwner-reviewed update.\\n";',
+        'const manifestPath = join(artifacts, "policy-draft.json");',
+        'const manifest = JSON.parse(await readFile(manifestPath, "utf8"));',
+        'manifest.previousPolicySha256 = createHash("sha256").update(previous).digest("hex");',
+        'await writeFile(join(artifacts, "previous-SECURITY.md"), previous);',
+        'await writeFile(join(artifacts, "SECURITY.md"), next);',
+        "await writeFile(manifestPath, JSON.stringify(manifest));",
+        "const applied = await applySecurityPolicy(await loadSecurityPolicyDraft(repository, artifacts));",
+        "assert.equal(applied.targetPath, target);",
+        "assert.equal(dirname(applied.recoveryPath), artifacts);",
+        'assert.equal(await readFile(applied.recoveryPath, "utf8"), previous);',
+        'assert.equal(await readFile(target, "utf8"), next);',
+      ].join("\n"),
+      policyTarget,
+      policyArtifacts,
+    ],
+    {
+      cwd: consumer,
+      env: {
+        ...process.env,
+        CODEX_CLI_PATH: join(consumer, "codex-must-not-run"),
+      },
+    },
+  );
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(

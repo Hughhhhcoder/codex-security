@@ -124,6 +124,11 @@ export interface SecurityPolicyDraft extends SecurityPolicyTarget {
   cost: Readonly<ScanCost> | null;
 }
 
+export interface SecurityPolicyApplication {
+  targetPath: string;
+  recoveryPath: string | null;
+}
+
 const execFileAsync = promisify(execFile);
 const MANIFEST_NAME = "policy-draft.json";
 const ORIGINAL_NAME = "previous-SECURITY.md";
@@ -514,10 +519,24 @@ export async function applySecurityPolicy(
     environment?: ProcessEnvironment;
     signal?: AbortSignal;
   } = {},
-): Promise<string> {
+): Promise<SecurityPolicyApplication> {
   validatePolicyContent(draft.content);
   const target = await unchangedPolicyTarget(draft, options.signal);
-  if (draft.previousContent === draft.content) return target.targetPath;
+  if (draft.previousContent === draft.content)
+    return { targetPath: target.targetPath, recoveryPath: null };
+  const recoveryDirectory =
+    draft.previousContent === null
+      ? null
+      : dirname(
+          await requireScanFile(
+            draft.outputDir,
+            MANIFEST_NAME,
+            MANIFEST_NAME,
+            options.signal,
+          ),
+        );
+  if (recoveryDirectory !== null)
+    requireOutputOutsideRepository(target.repository, recoveryDirectory);
   const pluginPath = options.pluginPath ?? draft.pluginPath;
   if (draft.customPlugin && pluginPath === undefined) {
     throw new CodexSecurityError(
@@ -564,6 +583,7 @@ export async function applySecurityPolicy(
       `.SECURITY.md.${randomUUID()}.tmp`,
     );
     let written = false;
+    let recoveryPath: string | null = null;
     try {
       try {
         await writeFile(temporary, draft.content, {
@@ -585,13 +605,19 @@ export async function applySecurityPolicy(
         if (draft.previousContent === null)
           await installFileNoClobber(temporary, target.targetPath);
         else
-          await replaceExistingPolicy(
+          recoveryPath = await replaceExistingPolicy(
             temporary,
             target.targetPath,
             draft.previousContent,
+            recoveryDirectory!,
             options.signal,
           );
         written = true;
+        if (recoveryPath !== null)
+          recoveryPath = await retainPolicyRecovery(
+            recoveryPath,
+            recoveryDirectory!,
+          );
       } finally {
         // Preserve the write or recovery outcome if temporary cleanup fails.
         await rm(temporary, { force: true }).catch(() => undefined);
@@ -600,6 +626,14 @@ export async function applySecurityPolicy(
       if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
         throw new CodexSecurityError(
           "The written policy contents do not match the reviewed draft.",
+        );
+      }
+      if (
+        recoveryPath !== null &&
+        (await readSecurityPolicy(recoveryPath)) !== draft.previousContent
+      ) {
+        throw new CodexSecurityError(
+          "The previous SECURITY.md changed while the replacement was being installed.",
         );
       }
       await resolveSecurityPolicyGuidance(
@@ -612,10 +646,11 @@ export async function applySecurityPolicy(
       if (written)
         throw new SecurityPolicyVerificationError(target.targetPath, {
           cause: error,
+          ...(recoveryPath === null ? {} : { recoveryPath }),
         });
       throw error;
     }
-    return target.targetPath;
+    return { targetPath: target.targetPath, recoveryPath };
   } finally {
     if (pluginWorkspace !== undefined)
       await cleanupSdkDirectory(pluginWorkspace).catch(() => undefined);
@@ -626,8 +661,9 @@ async function replaceExistingPolicy(
   temporary: string,
   targetPath: string,
   previousContent: string,
+  recoveryDirectory: string,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<string> {
   const recoveryPath = `${temporary}.previous`;
   await writeFile(recoveryPath, "", { flag: "wx", mode: 0o600 });
   try {
@@ -648,6 +684,7 @@ async function replaceExistingPolicy(
     signal?.throwIfAborted();
     await installFileNoClobber(temporary, targetPath);
   } catch (error) {
+    let cause = error;
     try {
       const metadata = await lstat(recoveryPath);
       if (!metadata.isFile() || metadata.isSymbolicLink()) {
@@ -656,27 +693,35 @@ async function replaceExistingPolicy(
         );
       }
       await installFileNoClobber(recoveryPath, targetPath);
-      await rm(recoveryPath);
     } catch (restoreError) {
-      throw new SecurityPolicyRecoveryError(targetPath, recoveryPath, {
-        cause: new AggregateError([error, restoreError]),
-      });
+      cause = new AggregateError([error, restoreError]);
     }
-    throw error;
+    throw new SecurityPolicyRecoveryError(
+      targetPath,
+      await retainPolicyRecovery(recoveryPath, recoveryDirectory),
+      { cause },
+    );
+  }
+  return recoveryPath;
+}
+
+async function retainPolicyRecovery(
+  recoveryPath: string,
+  directory: string,
+): Promise<string> {
+  const retained = join(directory, `recovery-SECURITY-${randomUUID()}.md`);
+  try {
+    await writeFile(retained, "", { flag: "wx", mode: 0o600 });
+  } catch {
+    return recoveryPath;
   }
   try {
-    // Another writer may still hold the displaced file open.
-    if ((await readSecurityPolicy(recoveryPath)) !== previousContent) {
-      throw new CodexSecurityError(
-        "The previous SECURITY.md changed while the replacement was being installed.",
-      );
-    }
-    await rm(recoveryPath);
-  } catch (error) {
-    throw new SecurityPolicyVerificationError(targetPath, {
-      cause: error,
-      recoveryPath,
-    });
+    // Preserve the inode: copying it would lose writes through an open handle.
+    await rename(recoveryPath, retained);
+    return retained;
+  } catch {
+    await rm(retained, { force: true }).catch(() => undefined);
+    return recoveryPath;
   }
 }
 

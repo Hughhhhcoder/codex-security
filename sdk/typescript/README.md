@@ -249,11 +249,16 @@ component must match the draft, and the original `SECURITY.md` must be unchanged
 The command writes the reviewed bytes and verifies that the policy resolver can
 read them. It does not stage, commit, or publish anything.
 
-Avoid editing the target while application is in progress. If the command
-detects a concurrent save, it preserves the competing files instead of
-overwriting them. A `recovery_required` result includes the recovery file's
-path. Inspect it and `targetPath` before retrying; do not delete the recovery
-file until the changes are reconciled.
+An update keeps the previous file so an editor with an old file handle cannot
+lose a late save. The command tries to move it into the private artifact
+directory. If that move fails, including across filesystems, it keeps a
+`.SECURITY.md.*.previous` file beside the target. The CLI prints the recovery path
+and includes `recoveryPath` in JSON output. Remove it only after other writers
+have closed it and any edits are reconciled.
+
+Avoid editing the target while application is in progress. A
+`recovery_required` result means the replacement needs manual reconciliation.
+Inspect its `recoveryPath` and `targetPath` before retrying.
 
 Save edited drafts as UTF-8. If generation used a custom `--plugin-path`, pass
 that option again when applying a saved draft; the saved metadata never selects
@@ -274,7 +279,10 @@ The artifact directory contains:
 | `previous-SECURITY.md` | Original policy used for review and overwrite protection. |
 | `policy-draft.json`    | Target, revision, model, and review metadata.             |
 
-Only the approved `SECURITY.md` is copied into the checkout. Keep detailed models
+After an update, `recovery-SECURITY-*.md` files can also contain retained previous
+policies. They are not removed automatically.
+
+Only the approved `SECURITY.md` is applied to the checkout. Keep detailed models
 and intermediate artifacts private until they have been reviewed for disclosure.
 Generated exclusions, accepted risks, and severity decisions still require the
 appropriate owner's review; generation does not imply approval. This command
@@ -321,9 +329,10 @@ it receives each group of up to three questions and a cancellation signal.
 Without one, questions remain unresolved. Use
 `loadSecurityPolicyDraft(repository, artifactDirectory, { path })` to load an
 edited saved draft before reviewing and applying it. For a saved custom-plugin
-draft, pass `{ pluginPath }` to `applySecurityPolicy()`. A
-`SecurityPolicyVerificationError` means the file was written but verification
-failed; its `targetPath` identifies the file to inspect. A
+draft, pass `{ pluginPath }` to `applySecurityPolicy()`. Applying returns
+`{ targetPath, recoveryPath }`; `recoveryPath` is `null` when no existing file
+was replaced. A `SecurityPolicyVerificationError` means the file was written
+but verification failed; its `targetPath` identifies the file to inspect. A
 `SecurityPolicyRecoveryError` means replacement needs manual reconciliation.
 Both errors can identify a `recoveryPath` to preserve.
 

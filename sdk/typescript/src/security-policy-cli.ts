@@ -93,7 +93,7 @@ export async function runPolicyCommand(
         return;
       if (applyingTarget !== undefined)
         write(
-          `Policy application is being stopped. Check ${display(applyingTarget)} and any .SECURITY.md.*.previous recovery files before retrying.`,
+          `Policy application is being stopped. Check ${display(applyingTarget)}${outputDir === undefined ? "" : ` and saved artifacts at ${display(outputDir)}`} for recovery files before retrying.`,
         );
       removeSignalListeners();
       dependencies.forceExit(signal);
@@ -212,16 +212,20 @@ export async function runPolicyCommand(
     let status: "draft" | "written" | "unchanged" = changed
       ? "draft"
       : "unchanged";
+    let recoveryPath: string | null = null;
     if (approved) {
       applyingTarget = draft.targetPath;
-      await applySecurityPolicy(draft, {
+      const applied = await applySecurityPolicy(draft, {
         pythonPath: python,
         pluginPath: options.config.pluginPath,
         environment: dependencies.environment,
         signal: controller.signal,
       });
+      recoveryPath = applied.recoveryPath;
       status = "written";
       write(`Wrote and verified ${display(draft.targetPath)}`);
+      if (recoveryPath !== null)
+        write(`Previous policy kept at ${display(recoveryPath)}`);
     } else if (options.format === "toon") {
       write(`\nDraft: ${display(draft.draftPath)}`);
       write(`Threat model: ${display(draft.threatModelPath)}`);
@@ -244,6 +248,7 @@ export async function runPolicyCommand(
         repository: draft.repository,
         scope: draft.scope,
         targetPath: draft.targetPath,
+        ...(recoveryPath === null ? {} : { recoveryPath }),
         outputDir: draft.outputDir,
         draftPath: draft.draftPath,
         specificationPath: draft.specificationPath,

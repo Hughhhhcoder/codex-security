@@ -55,6 +55,7 @@ export {
   securityPolicyDiff,
 } from "./security-policy.js";
 export type {
+  SecurityPolicyApplication,
   SecurityPolicyDraft,
   SecurityPolicyOptions,
   SecurityPolicyPreflight,

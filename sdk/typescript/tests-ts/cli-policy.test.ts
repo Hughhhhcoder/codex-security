@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
@@ -449,6 +449,30 @@ describe("policy CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text()).status).toBe("written");
     expect(await readFile(draft.targetPath, "utf8")).toBe(edited);
+  });
+
+  test("reports the retained previous file after updating a policy", async () => {
+    const f = await fixture();
+    const original = "# Original policy\n";
+    await writeFile(join(f.repository, "SECURITY.md"), original);
+    const draft = await f.generate();
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["policy", "--apply", f.outputDir, "--write", "--json"],
+        stdout.stream,
+        stderr.stream,
+        policyDependencies(f),
+      ),
+    ).toBe(0);
+    const result = JSON.parse(stdout.text());
+    expect(result.status).toBe("written");
+    expect(dirname(result.recoveryPath)).toBe(f.outputDir);
+    expect(stderr.text()).toContain(result.recoveryPath);
+    expect(await readFile(result.recoveryPath, "utf8")).toBe(original);
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+    expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
   });
 
   test("reports a written policy when verification fails after cancellation", async () => {
