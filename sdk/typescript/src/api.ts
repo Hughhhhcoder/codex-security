@@ -2283,6 +2283,7 @@ interface ScanEventRunOptions {
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
 
+/** @internal */
 export async function runScanEvents(
   options: ScanEventRunOptions,
 ): Promise<ScanResult> {
