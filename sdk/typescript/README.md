@@ -290,7 +290,10 @@ appropriate owner's review; generation does not imply approval. This command
 does not validate threat scenarios as vulnerabilities.
 
 `--format md` writes the draft's Markdown to stdout. `--json` returns artifact
-paths, review notes, status, and estimated cost. Progress goes to stderr.
+paths, review notes, status, and estimated cost. Explicit output options disable
+interactive questions and write prompts. Global filters select fields from the
+result; token options apply to the selected format, including Markdown. Progress
+goes to stderr.
 `--max-cost` applies to the entire generation, not separately to each stage.
 If a stage cannot inspect its required source evidence, generation stops instead
 of substituting a generic policy. Failures and cancellation preserve intermediate

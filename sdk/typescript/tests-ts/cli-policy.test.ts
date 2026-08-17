@@ -663,6 +663,98 @@ describe("policy CLI", () => {
     expect(await readdir(f.repository)).toEqual([]);
   });
 
+  test("returns policy metadata for explicit formats and filters without prompting", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const deps = policyDependencies(f, {
+      draft,
+      prompt: prompt({ isInteractive: () => true }),
+      onGenerate: (_repository, options) =>
+        expect(options.answerQuestions).toBeUndefined(),
+    });
+    for (const [args, marker] of [
+      [["--json"], '"status": "draft"'],
+      [["--format", "jsonl"], '"status":"draft"'],
+      [["--format", "toon"], "status: draft"],
+      [["--format=toon"], "status: draft"],
+      [["--format", "yaml"], "status: draft"],
+      [["--full-output"], "ok: true"],
+      [["--filter-output", "status"], "draft"],
+      [["--format", "md", "--filter-output", "status"], "draft"],
+    ] as const) {
+      const stdout = capture(true);
+      expect(
+        await main(
+          ["policy", ...args],
+          stdout.stream,
+          capture(true).stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(stdout.text()).toContain(marker);
+    }
+    const stdout = capture();
+    expect(
+      await main(
+        ["policy", "--json", "--full-output"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true,
+      data: { status: "draft", draftPath: draft.draftPath },
+    });
+    expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("honors token transforms for policy metadata and Markdown", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const deps = policyDependencies(f, {
+      draft,
+      prompt: prompt({ isInteractive: () => true }),
+    });
+    for (const format of [[], ["--format", "md"]]) {
+      for (const transform of [
+        ["--token-count"],
+        ["--token-limit", "4"],
+        ["--token-offset", "1"],
+        ["--token-offset", "1", "--token-limit", "4"],
+      ]) {
+        const stdout = capture();
+        expect(
+          await main(
+            ["policy", ...format, ...transform],
+            stdout.stream,
+            capture().stream,
+            deps,
+          ),
+        ).toBe(0);
+        if (transform[0] === "--token-count") {
+          expect(stdout.text().trim()).toMatch(/^\d+$/u);
+          expect(Number(stdout.text())).toBeGreaterThan(0);
+        } else {
+          expect(stdout.text()).toContain("[truncated: showing tokens ");
+          expect(stdout.text()).not.toContain(POLICY);
+        }
+      }
+    }
+    const stdout = capture();
+    expect(
+      await main(
+        ["policy", "--format", "md", "--full-output"],
+        stdout.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(stdout.text()).toContain("## data");
+    expect(stdout.text()).toContain(POLICY.trim());
+    expect(await readdir(f.repository)).toEqual([]);
+  });
+
   test("reports an unchanged saved policy without starting Codex or Python", async () => {
     const f = await fixture();
     await writeFile(join(f.repository, "SECURITY.md"), POLICY);

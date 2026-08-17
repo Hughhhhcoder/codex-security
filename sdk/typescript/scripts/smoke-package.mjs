@@ -472,6 +472,39 @@ try {
   })) {
     await writeFile(join(policyArtifacts, name), contents, { mode: 0o600 });
   }
+  const savedPolicyEnvironment = {
+    ...process.env,
+    CODEX_CLI_PATH: join(consumer, "codex-must-not-run"),
+    OPENAI_API_KEY: "",
+    CODEX_API_KEY: "",
+    CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
+  };
+  const previewPolicy = (args) =>
+    run(
+      process.execPath,
+      [launcher, "policy", policyTarget, "--apply", policyArtifacts, ...args],
+      { cwd: consumer, capture: true, env: savedPolicyEnvironment },
+    );
+  assert.equal(previewPolicy(["--format", "md"]), policyMarkdown);
+  assert.match(previewPolicy(["--format=toon"]), /status: draft/u);
+  assert.equal(
+    JSON.parse(previewPolicy(["--json", "--filter-output", "status"])),
+    "draft",
+  );
+  for (const format of [[], ["--format", "md"]]) {
+    const count = previewPolicy([...format, "--token-count"]).trim();
+    assert.match(count, /^\d+$/u);
+    assert.ok(Number(count) > 0);
+    assert.match(
+      previewPolicy([...format, "--token-limit", "4"]),
+      /\[truncated: showing tokens /u,
+    );
+  }
+  assert.equal(
+    JSON.parse(previewPolicy(["--json", "--full-output"])).data.status,
+    "draft",
+  );
+  assert.deepEqual(await readdir(policyTarget), []);
   // Node rejects Python's flags before reading stdin. Report that failure
   // without an uncaught stream error in the installed Node.js entrypoint.
   run(
@@ -506,13 +539,7 @@ try {
       {
         cwd: consumer,
         capture: true,
-        env: {
-          ...process.env,
-          CODEX_CLI_PATH: join(consumer, "codex-must-not-run"),
-          OPENAI_API_KEY: "",
-          CODEX_API_KEY: "",
-          CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
-        },
+        env: savedPolicyEnvironment,
       },
     ),
   );

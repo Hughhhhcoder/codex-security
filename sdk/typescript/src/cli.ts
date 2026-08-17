@@ -140,7 +140,7 @@ const PROGRESS_REFRESH_MILLISECONDS = 1_000;
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
-const SCAN_HISTORY_OUTPUT_OPTION =
+const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
@@ -1179,7 +1179,7 @@ export async function main(
       result === undefined ||
       format !== "toon" ||
       output.isTTY !== true ||
-      argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+      argv.some((argument) => OUTPUT_OPTION.test(argument))
     ) {
       return result;
     }
@@ -1826,7 +1826,7 @@ export async function main(
           format === "toon" &&
           !formatExplicit &&
           !options.dryRun &&
-          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+          !argv.some((argument) => OUTPUT_OPTION.test(argument))
         ) {
           renderedPublication = renderPublicationSummary(
             result,
@@ -1983,10 +1983,22 @@ export async function main(
         "Noninteractive review:\n" +
         "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json\n" +
         "  codex-security policy . --apply /path/outside/repository/policy --write",
-      output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, options, format }) {
+      output: z
+        .union([z.record(z.string(), z.unknown()), z.string()])
+        .optional(),
+      async run({ args, options, format, formatExplicit }) {
         try {
           const directory = dependencies.currentDirectory();
+          const outputOptions = argv.filter((argument) =>
+            OUTPUT_OPTION.test(argument),
+          );
+          const explicitOutput = formatExplicit || outputOptions.length > 0;
+          const transformOutput = outputOptions.some(
+            (argument) => !argument.startsWith("--format"),
+          );
+          const filterOutput = outputOptions.some((argument) =>
+            argument.startsWith("--filter-output"),
+          );
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
               {
@@ -2021,7 +2033,7 @@ export async function main(
                     ? undefined
                     : resolve(directory, expandHome(options.apply)),
                 write: options.write,
-                headless: options.headless,
+                headless: options.headless || explicitOutput,
                 dryRun: options.dryRun,
                 format,
               },
@@ -2049,10 +2061,15 @@ export async function main(
             ),
           );
           exitCode = outcome.exitCode;
-          if (format === "md" && outcome.markdown !== undefined) {
-            renderedPolicy = outcome.markdown;
+          if (
+            format === "md" &&
+            outcome.markdown !== undefined &&
+            !filterOutput
+          ) {
+            if (!transformOutput) renderedPolicy = outcome.markdown;
+            return outcome.markdown;
           }
-          return format === "toon" && !options.dryRun
+          return format === "toon" && !explicitOutput && !options.dryRun
             ? undefined
             : outcome.data;
         } catch (error) {
@@ -2276,7 +2293,7 @@ export async function main(
         if (
           !options.dryRun &&
           format === "toon" &&
-          !argv.some((argument) => SCAN_HISTORY_OUTPUT_OPTION.test(argument))
+          !argv.some((argument) => OUTPUT_OPTION.test(argument))
         ) {
           return;
         }
