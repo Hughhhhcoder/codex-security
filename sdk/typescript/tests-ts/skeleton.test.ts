@@ -5,6 +5,8 @@ import { main } from "../src/cli.js";
 
 interface WorkflowStep {
   name?: string;
+  uses?: string;
+  with?: Record<string, unknown>;
   run?: string;
   if?: string;
   env?: Record<string, unknown>;
@@ -181,6 +183,36 @@ describe("TypeScript package skeleton", () => {
         mode: `shard-${shard}`,
         args: `--shard=${shard}/7`,
       });
+    }
+  });
+
+  test("keeps runner modes distinct and report uploads rerunnable", async () => {
+    const ci = await workflow("node-ci.yml");
+    const quality = await workflow("test-quality.yml");
+    const runner = quality.jobs["runner"]!;
+    for (const [mode, args] of [
+      ["baseline", ""],
+      ["isolated", "--isolate"],
+      ["parallel", "--parallel=2"],
+      ["randomized", "--isolate --randomize --seed=${{ github.run_number }}"],
+    ] as const) {
+      expect(runner.strategy?.matrix["include"]).toContainEqual({
+        mode,
+        args,
+      });
+    }
+    const command = runner.steps.find(
+      (step) => step.name === "Test runner mode",
+    )?.run;
+    expect(command).toContain("${{ matrix.args }}");
+    expect(command).not.toContain("--seed=");
+
+    const uploads = [...Object.values(ci.jobs), ...Object.values(quality.jobs)]
+      .flatMap((job) => job.steps)
+      .filter((step) => step.uses?.startsWith("actions/upload-artifact@"));
+    expect(uploads).toHaveLength(3);
+    for (const upload of uploads) {
+      expect(upload.with?.["overwrite"]).toBe(true);
     }
   });
 

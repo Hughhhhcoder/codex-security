@@ -71,6 +71,27 @@ describe("JUnit inventory comparison", () => {
     expect(result.stdout).toContain("combined test time: 2.50s");
   });
 
+  test("rejects ambiguous test identities even when totals match", async () => {
+    const fixture = await fixtures();
+    const first = testcase("same parameterized name");
+    for (const [name, repeated] of [
+      ["same-outcome", first],
+      ["different-outcome", testcase("same parameterized name", "<skipped/>")],
+    ] as const) {
+      const baseline = await fixture.report(`${name}-baseline.xml`, [
+        first,
+        repeated,
+      ]);
+      const candidate = await fixture.report(`${name}-candidate.xml`, [
+        first,
+        repeated,
+      ]);
+      const result = compare(baseline, candidate);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("duplicate test identity");
+    }
+  });
+
   test("rejects dropped, duplicated, skipped, failed, or incomplete results", async () => {
     const fixture = await fixtures();
     const first = testcase("first");

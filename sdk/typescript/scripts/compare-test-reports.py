@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 def read_report(path: Path) -> tuple[Counter, float]:
     root = ET.parse(path).getroot()
     cases = Counter()
+    identities = set()
     for case in root.iter("testcase"):
         status = "passed"
         if case.find("skipped") is not None:
@@ -21,9 +22,11 @@ def read_report(path: Path) -> tuple[Counter, float]:
             case.get("file", "").replace("\\", "/").removeprefix("./"),
             case.get("classname", ""),
             case.get("name", ""),
-            status,
         )
-        cases[identity] += 1
+        if identity in identities:
+            raise ValueError(f"{path}: duplicate test identity: {' > '.join(identity)}")
+        identities.add(identity)
+        cases[(*identity, status)] += 1
     if not cases:
         raise ValueError(f"{path}: no test cases")
     if int(root.get("tests", str(sum(cases.values())))) != sum(cases.values()):

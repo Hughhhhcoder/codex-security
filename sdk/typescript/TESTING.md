@@ -11,8 +11,11 @@ pnpm run format
 pnpm run test
 pnpm run test:ci
 pnpm pack --pack-destination ../../dist
-pnpm run check:package ../../dist/*.tgz
+pnpm run test:package
 ```
+
+For CI's full archive inspection, pass the exact `.tgz` path printed by
+`pnpm pack` to `pnpm run check:package`.
 
 The test commands pass a 30-second per-test timeout explicitly. `test:ci` writes
 `reports/junit.xml` and `coverage/lcov.info`. Coverage measures loaded
@@ -38,6 +41,8 @@ before proposing a coverage floor.
   explicitly enabled GitHub-hosted Windows runner.
 - Add property tests for meaningful invariants, with accepted and rejected
   inputs. Keep example-based regression tests for readable failure cases.
+- Give parameterized cases distinct names. Use `%p`, `%j`, or `%#` for values
+  that are not strings. The JUnit comparison rejects duplicate identities.
 
 Property tests use a fixed default seed. Fast-check prints the seed, shrink
 path, and counterexample on failure. To replay one property, select its file

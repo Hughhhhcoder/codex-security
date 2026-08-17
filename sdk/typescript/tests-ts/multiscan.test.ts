@@ -385,7 +385,7 @@ describe("multiscan", () => {
   });
 
   test.each([false, true])(
-    "continues scanning when a progress observer fails %s",
+    "continues scanning when a progress observer fails %p",
     async (asynchronous) => {
       const paths = await fixture();
       const source = await repository(paths.root, "observer-failure");
@@ -1388,7 +1388,7 @@ describe("multiscan", () => {
   });
 
   test.each([false, true])(
-    "never removes a replacement lock when owner creation fails (owner published: %s)",
+    "never removes a replacement lock when owner creation fails (owner published: %p)",
     async (ownerPublished) => {
       const paths = await fixture();
       const source = await repository(paths.root, "owner-creation-race");
