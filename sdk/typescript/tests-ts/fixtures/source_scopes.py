@@ -13,7 +13,7 @@ import sys
 import tempfile
 import unicodedata
 import uuid
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -114,7 +114,7 @@ def register_recipe(
         check=True,
     )
     registered = json.loads(result.stdout)
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
         connection.row_factory = sqlite3.Row
         record = dict(
             connection.execute(
@@ -785,7 +785,7 @@ def writer(repository: Path, kind: str) -> dict:
     else:
         raise AssertionError("Unknown scan writer: " + kind)
 
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute("SELECT * FROM scans").fetchall()
         assert len(rows) == 1
