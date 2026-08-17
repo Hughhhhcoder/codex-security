@@ -189,6 +189,24 @@ export async function enclosingGitWorktreeRoot(
   return canonicalRoot;
 }
 
+export async function enclosingGitWorktreeRoots(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const roots: string[] = [];
+  let directory = repository;
+  for (;;) {
+    const root = await enclosingGitWorktreeRoot(directory, signal, {
+      requireIfPresent: true,
+    });
+    if (root === null) return roots;
+    roots.push(root);
+    const parent = dirname(root);
+    if (parent === root) return roots;
+    directory = parent;
+  }
+}
+
 export function validatedGitEnvironment(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): void {

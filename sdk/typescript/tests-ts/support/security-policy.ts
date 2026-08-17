@@ -22,6 +22,41 @@ export const PYTHON = execFileSync(
   { encoding: "utf8" },
 ).trim();
 
+export function policyGit(repository: string, ...args: string[]): void {
+  execFileSync("git", [
+    "-C",
+    repository,
+    "-c",
+    "user.name=Synthetic Test",
+    "-c",
+    "user.email=test@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+    ...args,
+  ]);
+}
+
+export async function addPolicySubmodule(
+  repository: string,
+  source: string,
+  path = "services/api",
+): Promise<string> {
+  await mkdir(source);
+  policyGit(source, "init", "--quiet");
+  policyGit(source, "commit", "--allow-empty", "--quiet", "-m", "initial");
+  policyGit(
+    repository,
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "add",
+    "--quiet",
+    source,
+    path,
+  );
+  return join(repository, path);
+}
+
 export function stageResult(
   stage: SecurityPolicyStage,
 ): SecurityPolicyStageResult {

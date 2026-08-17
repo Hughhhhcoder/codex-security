@@ -90,6 +90,7 @@ import {
   type SecurityPolicyPreflight,
   type SecurityPolicyStage,
   type SecurityPolicyStageResult,
+  type SecurityPolicyTarget,
 } from "./security-policy.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
@@ -137,6 +138,7 @@ import {
 } from "./runtime.js";
 import {
   enclosingGitWorktreeRoot,
+  enclosingGitWorktreeRoots,
   normalizeRepository,
   normalizeTarget,
   repositoryRevision,
@@ -414,6 +416,13 @@ export class CodexSecurity {
       options,
       options.signal,
     );
+    return await this.#preflightInputs(inputs, options);
+  }
+
+  async #preflightInputs(
+    inputs: LocalScanInputs,
+    options: ScanOptions,
+  ): Promise<ScanPreflight> {
     requireOutputOutsideRepository(
       inputs.protectedRoot,
       await realpath(tmpdir()),
@@ -469,15 +478,12 @@ export class CodexSecurity {
       options.signal,
     );
     await readSecurityPolicySnapshot(target, options.signal);
-    const preflight = await this.preflight(target.repository, {
-      auth: options.auth,
-      target:
-        target.scope === "." ? "repository" : [dirname(target.targetPath)],
-      knowledgeBasePaths: options.knowledgeBasePaths,
-      outputDir: options.outputDir,
-      maxCostUsd: options.maxCostUsd,
-      signal: options.signal,
-    }).catch(rethrowPolicyOutputError);
+    const inputs = await this.#validatePolicyInputs(
+      target,
+      options,
+      options.signal,
+    ).catch(rethrowPolicyOutputError);
+    const preflight = await this.#preflightInputs(inputs, options);
     return {
       ...target,
       outputDir: preflight.outputDir,
@@ -527,17 +533,7 @@ export class CodexSecurity {
         signal,
       );
       const snapshot = await readSecurityPolicySnapshot(target, signal);
-      const inputs = await this.#validateLocalInputs(
-        target.repository,
-        {
-          auth: options.auth,
-          target:
-            target.scope === "." ? "repository" : [dirname(target.targetPath)],
-          outputDir: options.outputDir,
-          maxCostUsd: options.maxCostUsd,
-        },
-        signal,
-      );
+      const inputs = await this.#validatePolicyInputs(target, options, signal);
       const temporaryRoot = await realpath(tmpdir());
       requireOutputOutsideRepository(
         inputs.protectedRoot,
@@ -2210,10 +2206,31 @@ export class CodexSecurity {
     runtime.effectiveConfig = mergedConfig;
   }
 
+  async #validatePolicyInputs(
+    target: SecurityPolicyTarget,
+    options: SecurityPolicyOptions,
+    signal?: AbortSignal,
+  ): Promise<LocalScanInputs> {
+    const roots = await enclosingGitWorktreeRoots(target.repository, signal);
+    return await this.#validateLocalInputs(
+      target.repository,
+      {
+        auth: options.auth,
+        target:
+          target.scope === "." ? "repository" : [dirname(target.targetPath)],
+        outputDir: options.outputDir,
+        maxCostUsd: options.maxCostUsd,
+      },
+      signal,
+      roots.at(-1) ?? target.repository,
+    );
+  }
+
   async #validateLocalInputs(
     repository: string,
     options: ScanOptions,
     signal?: AbortSignal,
+    protectedRoot?: string,
   ): Promise<LocalScanInputs> {
     deepScanOptions(options);
     if (
@@ -2235,8 +2252,7 @@ export class CodexSecurity {
     validateMode(normalized, mode);
     await validateCommittedDiffCheckout(repo, normalized, signal);
     throwIfAborted(signal);
-    const protectedRoot =
-      (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
+    protectedRoot ??= (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
     const requestedOutput = await validateOutputDir(
       options.outputDir,
       options.archiveExisting,

@@ -95,7 +95,8 @@ shows the proposed diff, and asks before writing. Existing reporting instruction
 and owner-confirmed policy decisions are preserved. Scans automatically read the
 resulting root and nested `SECURITY.md` files.
 
-For a noninteractive review, save a draft outside the repository:
+For a noninteractive review, save a draft outside the repository and any enclosing
+Git checkout:
 
 ```bash
 npx @openai/codex-security policy . --headless --output-dir /path/outside/repository/policy --json

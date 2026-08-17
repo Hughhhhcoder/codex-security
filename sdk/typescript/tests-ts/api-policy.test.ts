@@ -22,7 +22,9 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
   PYTHON,
+  addPolicySubmodule,
   policyFixture,
+  policyGit,
   policyPlugin,
   stageResult,
 } from "./support/security-policy.js";
@@ -234,6 +236,63 @@ describe("CodexSecurity policy API", () => {
     expect(await readdir(join(f.repository, ".git", "refs", "heads"))).toEqual(
       [],
     );
+    await f.security.close();
+  });
+
+  test("keeps submodule artifacts outside every enclosing checkout", async () => {
+    let prepared = false;
+    const f = await setup({
+      onPrepare: () => {
+        prepared = true;
+      },
+    });
+    policyGit(f.repository, "init", "--quiet");
+    const nested = await addPolicySubmodule(
+      f.repository,
+      join(f.root, "submodule-source"),
+    );
+    const inside = join(f.repository, "policy-artifacts");
+    for (const [repository, path] of [
+      [f.repository, "services/api"],
+      [nested, "."],
+    ] as const) {
+      const options = { path, outputDir: inside };
+      await expect(
+        f.security.preflightPolicy(repository, options),
+      ).rejects.toThrow("outside the protected scan root");
+      await expect(
+        f.security.generatePolicy(repository, options),
+      ).rejects.toThrow("outside the protected scan root");
+    }
+    const stateInside = new InternalSecurity(
+      {},
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: join(f.repository, "state") },
+      },
+    );
+    await expect(stateInside.preflightPolicy(nested)).rejects.toThrow(
+      "outside the protected scan root",
+    );
+    await stateInside.close();
+    expect(prepared).toBe(false);
+    expect(f.threads).toHaveLength(0);
+    expect(await readdir(f.outputDir)).toEqual([]);
+    await expect(readdir(inside)).rejects.toMatchObject({ code: "ENOENT" });
+    const preflight = await f.security.preflightPolicy(nested, {
+      outputDir: f.outputDir,
+    });
+    expect(preflight.repository).toBe(nested);
+    expect(preflight.scope).toBe(".");
+    const draft = await f.security.generatePolicy(f.repository, {
+      path: "services/api",
+      outputDir: f.outputDir,
+    });
+    expect(draft.repository).toBe(nested);
+    expect(draft.outputDir).toBe(f.outputDir);
+    expect(
+      f.threads.every((thread) => thread.workingDirectory === f.outputDir),
+    ).toBe(true);
+    expect(f.configuration()?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(nested);
     await f.security.close();
   });
 
