@@ -120,6 +120,7 @@ import {
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
 import {
+  policyDisplayData,
   runPolicyCommand,
   type PolicyPrompt,
   type PolicySecurity,
@@ -2106,6 +2107,7 @@ export async function main(
                 headless: options.headless || explicitOutput,
                 dryRun: options.dryRun,
                 format,
+                explicitOutput,
               },
               {
                 createSecurity:
@@ -2161,7 +2163,9 @@ export async function main(
           }
           return format === "toon" && !explicitOutput && !options.dryRun
             ? undefined
-            : outcome.data;
+            : format === "toon"
+              ? policyDisplayData(outcome.data)
+              : outcome.data;
         } catch (error) {
           const message = safeErrorMessage(error);
           try {

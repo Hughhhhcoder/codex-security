@@ -1390,6 +1390,24 @@ describe("security policy review and application", () => {
     expect(diff).toContain("+# New policy\n\\ No newline at end of file\n");
   });
 
+  test("keeps non-LF separators inside their original diff lines", async () => {
+    const f = await fixture();
+    const before = "Old\rpolicy\u0085with\u2028separators\u2029";
+    const after = "New\rpolicy\u0085with\u2028separators\u2029";
+    await writeFile(join(f.repository, "SECURITY.md"), before);
+    const draft = await f.generate({
+      run: async (stage) => ({
+        ...stageResult(stage),
+        ...(stage === "policy" ? { markdown: after } : {}),
+      }),
+    });
+    const diff = await securityPolicyDiff(draft, PYTHON);
+    expect(diff).toContain("@@ -1 +1 @@\n");
+    expect(diff).toContain(`-${before}\n\\ No newline at end of file\n`);
+    expect(diff).toContain(`+${after}\n\\ No newline at end of file\n`);
+    expect(diff.match(/No newline at end of file/gu)).toHaveLength(2);
+  });
+
   test("reports an early diff subprocess exit without an unhandled stdin error", async () => {
     const name =
       "reports an early diff subprocess exit without an unhandled stdin error";
@@ -1464,7 +1482,11 @@ describe("security policy review and application", () => {
     const f = await fixture();
     await writeFile(join(f.repository, "SECURITY.md"), POLICY);
     const draft = await f.generate();
-    expect(await securityPolicyDiff(draft, "missing-python")).toBe("");
+    expect(
+      await securityPolicyDiff(draft, async () => {
+        throw new Error("An unchanged preview must not resolve Python");
+      }),
+    ).toBe("");
     expect(
       await applySecurityPolicy(draft, { pythonPath: "missing-python" }),
     ).toEqual({
@@ -1907,8 +1929,9 @@ describe("security policy review and application", () => {
       expect(await readFile(target, "utf8")).toBe(POLICY);
     } else {
       await expect(applySecurityPolicy(draft)).rejects.toThrow(
-        "outside the selected component",
+        /outside the selected component|Git metadata/u,
       );
+      expect(await readSecurityPolicy(target)).toBe(null);
     }
   });
 

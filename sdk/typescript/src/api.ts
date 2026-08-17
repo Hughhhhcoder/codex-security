@@ -41,6 +41,11 @@ import {
   type AccountStatus,
 } from "./auth.js";
 import {
+  jsonForPrompt,
+  pluginPythonCommand,
+  shellEnvironmentReference,
+} from "./codex-prompt.js";
+import {
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergedCodexConfig,
@@ -65,6 +70,7 @@ import {
 import {
   AuthenticationRequiredError,
   CodexSecurityError,
+  ConfigurationError,
   IncompleteScanError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
@@ -522,10 +528,11 @@ export class CodexSecurity {
         this.#abortController.signal,
         ...(options.signal === undefined ? [] : [options.signal]),
       ]);
-      const python =
-        draft.previousContent === draft.content
-          ? undefined
-          : await (
+      return formatSecurityPolicyText(
+        await securityPolicyDiff(
+          draft,
+          async () =>
+            await (
               this.#dependencies.resolvePluginPython ?? resolvePluginPython
             )({
               configuredPath: this.config.pythonPath,
@@ -535,9 +542,9 @@ export class CodexSecurity {
                   -1,
                 ) ?? draft.repository,
               signal,
-            });
-      return formatSecurityPolicyText(
-        await securityPolicyDiff(draft, python, signal),
+            }),
+          signal,
+        ),
         true,
       );
     });
@@ -1317,12 +1324,7 @@ export class CodexSecurity {
         approvalPolicy,
       });
       const serializedPaths =
-        normalized.kind === "paths"
-          ? JSON.stringify(normalized.paths)
-              .replaceAll("\u0085", "\\u0085")
-              .replaceAll("\u2028", "\\u2028")
-              .replaceAll("\u2029", "\\u2029")
-          : null;
+        normalized.kind === "paths" ? jsonForPrompt(normalized.paths) : null;
       checkOpen();
       if (serializedPaths !== null && targetPathsFile !== null) {
         await writeFile(targetPathsFile, `${serializedPaths}\n`, {
@@ -2258,6 +2260,7 @@ export class CodexSecurity {
     options: SecurityPolicyOptions,
     signal?: AbortSignal,
   ): Promise<LocalScanInputs> {
+    requirePolicyConfigKeys(this.config.codexOverrides);
     const roots = await enclosingGitWorktreeRoots(target.repository, signal);
     return await this.#validateLocalInputs(
       target.repository,
@@ -2943,7 +2946,7 @@ function scanPrompt(
   additionalPrompt?: string,
   enforceCostLimit = false,
 ): string {
-  const python = `${process.platform === "win32" ? "& " : ""}${shellEnvironmentReference("PYTHON")}`;
+  const python = pluginPythonCommand();
   return [
     `Use the installed $codex-security:${skillName} skill at ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", `/skills/${skillName}/SKILL.md`)}.`,
     "Run this Codex Security scan non-interactively.",
@@ -3018,11 +3021,6 @@ function scanPrompt(
       ? ["Additional scan instructions:", additionalPrompt]
       : []),
   ].join("\n");
-}
-
-function shellEnvironmentReference(name: string, suffix = ""): string {
-  const prefix = process.platform === "win32" ? "$env:" : "$";
-  return `"${prefix}${name}${suffix}"`;
 }
 
 function skillNameFor(target: NormalizedTarget, mode: ScanMode): string {
@@ -3461,7 +3459,32 @@ function rethrowPolicyOutputError(error: unknown): never {
   throw error;
 }
 
+function requirePolicyConfigKeys(config: unknown): void {
+  if (!isRecord(config)) return;
+  const tables = [config];
+  if (isRecord(config["features"])) tables.push(config["features"]);
+  const profiles = config["profiles"];
+  if (isRecord(profiles)) {
+    tables.push(profiles);
+    for (const profile of Object.values(profiles)) {
+      if (!isRecord(profile)) continue;
+      tables.push(profile);
+      if (isRecord(profile["features"])) tables.push(profile["features"]);
+    }
+  }
+  // The Codex SDK flattens these keys without quoting their components.
+  if (
+    tables.some((table) =>
+      Object.keys(table).some((key) => !/^[A-Za-z0-9_-]+$/u.test(key)),
+    )
+  )
+    throw new ConfigurationError(
+      "Policy generation does not accept dotted or quoted Codex override keys. Use nested objects and profile names with letters, numbers, underscores, or hyphens.",
+    );
+}
+
 function policyCodexOverrides(config: JsonObject): JsonObject {
+  requirePolicyConfigKeys(config);
   const features = isRecord(config["features"]) ? config["features"] : {};
   const profiles = isRecord(config["profiles"])
     ? structuredClone(config["profiles"])

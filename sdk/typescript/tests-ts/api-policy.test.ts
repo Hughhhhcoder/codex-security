@@ -148,6 +148,36 @@ async function* events(
 }
 
 describe("CodexSecurity policy API", () => {
+  test("keeps prompt data on one encoded line and binds plugin Python", async () => {
+    const marker = "source\u0085line\u2028separator\u2029end";
+    const scope = `component-${marker}`;
+    const f = await setup({
+      stream: async function* (stage) {
+        yield* events(stage, {
+          ...stageResult(stage),
+          questions: [marker],
+          reviewNotes: [marker],
+        });
+      },
+    });
+    await mkdir(join(f.repository, scope));
+    await writeFile(join(f.repository, "SECURITY.md"), `# Policy\n${marker}\n`);
+    const draft = await f.security.generatePolicy(f.repository, {
+      path: scope,
+      outputDir: f.outputDir,
+      answerQuestions: async () => marker,
+    });
+    const python =
+      process.platform === "win32" ? '& "$env:PYTHON"' : '"$PYTHON"';
+    for (const prompt of f.prompts) {
+      expect(prompt).not.toMatch(/[\u0085\u2028\u2029]/u);
+      expect(prompt).toContain("source\\u0085line\\u2028separator\\u2029end");
+      expect(prompt).toContain(`Use ${python} as <python_command>`);
+    }
+    expect(draft.reviewNotes).toContain(marker);
+    await f.security.close();
+  });
+
   test("uses the client's Python and renders preview controls visibly", async () => {
     const content = `${POLICY}\n\u001b]52;c;c3ludGhldGlj\u0007\u202eOwner note\n`;
     const f = await setup({
@@ -368,7 +398,13 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("validates inherited policies before preflight or runtime setup", async () => {
-    for (const invalid of ["utf8", "outside"] as const) {
+    for (const invalid of [
+      "utf8",
+      "outside",
+      "git_config",
+      "git_file",
+      "separate_git",
+    ] as const) {
       let prepared = false;
       const f = await setup({
         onPrepare: () => {
@@ -381,11 +417,36 @@ describe("CodexSecurity policy API", () => {
       if (invalid === "utf8") {
         await writeFile(policy, Buffer.from([0xff]));
         message = "valid UTF-8";
-      } else {
+      } else if (invalid === "outside") {
         const outside = join(f.root, "outside-policy.md");
         await writeFile(outside, "# Outside policy\n");
         await symlink(outside, policy, "file");
         message = "outside the repository";
+      } else {
+        const metadata = join(
+          f.repository,
+          invalid === "git_config" ? ".git" : "git-data",
+        );
+        policyGit(
+          f.repository,
+          "init",
+          "--quiet",
+          ...(invalid === "git_config" ? [] : ["--separate-git-dir", metadata]),
+        );
+        policyGit(
+          f.repository,
+          "config",
+          "http.extraHeader",
+          "synthetic-value",
+        );
+        await symlink(
+          invalid === "git_file"
+            ? join(f.repository, ".git")
+            : join(metadata, "config"),
+          policy,
+          "file",
+        );
+        message = "Git metadata";
       }
       const options = { path: "component", outputDir: f.outputDir };
       await expect(
@@ -603,6 +664,33 @@ describe("CodexSecurity policy API", () => {
     expect(serialized).not.toContain('"plugins":true');
     expect(serialized).not.toContain('"apps":true');
     await f.security.close();
+  });
+
+  test("rejects Codex override aliases before policy runtime setup", async () => {
+    for (const codexOverrides of [
+      { "features.plugins": true },
+      { "mcp_servers.synthetic.command": "synthetic-tool" },
+      { features: { '"apps"': true } },
+      { profiles: { selected: { "features.apps": true } } },
+      { profiles: { "selected.features": { apps: true } } },
+    ]) {
+      let prepared = false;
+      const f = await setup({
+        config: { codexOverrides },
+        onPrepare: () => {
+          prepared = true;
+        },
+      });
+      await expect(f.security.preflightPolicy(f.repository)).rejects.toThrow(
+        "dotted or quoted Codex override keys",
+      );
+      await expect(f.security.generatePolicy(f.repository)).rejects.toThrow(
+        "dotted or quoted Codex override keys",
+      );
+      expect(prepared).toBe(false);
+      expect(f.threads).toHaveLength(0);
+      await f.security.close();
+    }
   });
 
   test("retains an explicit plugin selection without persisting its location", async () => {

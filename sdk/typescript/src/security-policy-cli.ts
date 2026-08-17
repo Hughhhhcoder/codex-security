@@ -39,6 +39,7 @@ export interface PolicyCommandOptions {
   headless: boolean;
   dryRun: boolean;
   format: string;
+  explicitOutput: boolean;
 }
 
 export interface PolicyCommandDependencies {
@@ -189,25 +190,25 @@ export async function runPolicyCommand(
     }
     controller.signal.throwIfAborted();
     const cost = draft.cost;
-    const python =
-      draft.content !== draft.previousContent
-        ? await (dependencies.resolvePython ?? resolvePluginPython)({
-            configuredPath: options.config.pythonPath,
-            environment: dependencies.environment,
-            protectedRoot:
-              (
-                await enclosingGitWorktreeRoots(
-                  draft.repository,
-                  controller.signal,
-                )
-              ).at(-1) ?? draft.repository,
-            signal: controller.signal,
-          })
-        : undefined;
-    const diff = await securityPolicyDiff(draft, python, controller.signal);
+    let python: string | undefined;
+    const resolvePython = async () =>
+      (python ??= await (dependencies.resolvePython ?? resolvePluginPython)({
+        configuredPath: options.config.pythonPath,
+        environment: dependencies.environment,
+        protectedRoot:
+          (
+            await enclosingGitWorktreeRoots(draft.repository, controller.signal)
+          ).at(-1) ?? draft.repository,
+        signal: controller.signal,
+      }));
+    const diff = await securityPolicyDiff(
+      draft,
+      resolvePython,
+      controller.signal,
+    );
     const changed = diff.length > 0;
-    const shouldPreview = options.format === "toon" || options.write;
-    if (shouldPreview) {
+    const humanOutput = options.format === "toon" && !options.explicitOutput;
+    if (humanOutput) {
       const preview = [
         `\nPolicy target: ${display(draft.targetPath)}`,
         changed
@@ -241,7 +242,10 @@ export async function runPolicyCommand(
     if (approved) {
       applyingTarget = draft.targetPath;
       const applied = await applySecurityPolicy(draft, {
-        pythonPath: python,
+        pythonPath:
+          draft.content === draft.previousContent
+            ? undefined
+            : await resolvePython(),
         pluginPath: options.config.pluginPath,
         environment: dependencies.environment,
         signal: controller.signal,
@@ -253,7 +257,7 @@ export async function runPolicyCommand(
       );
       if (recoveryPath !== null)
         write(`Previous policy kept at ${display(recoveryPath)}`);
-    } else if (options.format === "toon") {
+    } else if (humanOutput) {
       write(`\nDraft: ${display(draft.draftPath)}`);
       write(`Threat model: ${display(draft.threatModelPath)}`);
       if (changed)
@@ -329,4 +333,21 @@ export async function runPolicyCommand(
       );
     }
   }
+}
+
+export function policyDisplayData(
+  data: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const displayValue = (value: unknown): unknown => {
+    if (typeof value === "string") return display(value);
+    if (Array.isArray(value)) return value.map(displayValue);
+    if (value !== null && typeof value === "object")
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, displayValue(item)]),
+      );
+    return value;
+  };
+  return data === undefined
+    ? undefined
+    : (displayValue(data) as Record<string, unknown>);
 }
