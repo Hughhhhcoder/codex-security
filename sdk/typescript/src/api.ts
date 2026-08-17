@@ -51,7 +51,12 @@ import {
   type JsonObject,
   writeCodexConfig,
 } from "./config.js";
-import { estimateScanCost, ScanCostTracker, type ScanCost } from "./cost.js";
+import {
+  estimateScanCost,
+  ScanCostTracker,
+  type ScanCost,
+  type ScanSessionEvent,
+} from "./cost.js";
 import {
   loadContract,
   requireScanFile,
@@ -233,6 +238,7 @@ export interface ScanOptions extends DeepScanOptions {
     details?: ScanReconnectDetails,
   ) => void;
   onActivity?: (activity: ScanActivity) => void;
+  onSessionEvent?: (event: ScanSessionEvent) => void;
   onProgress?: (progress: ScanProgress) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
@@ -290,6 +296,7 @@ type ScanObserverName =
   | "onTrustedAccessStatus"
   | "onReconnect"
   | "onActivity"
+  | "onSessionEvent"
   | "onProgress"
   | "onWorkerStatus"
   | "onStage"
@@ -1017,6 +1024,16 @@ export class CodexSecurity {
                   options.onActivity,
                   options.onObserverError,
                   activity,
+                ),
+        onSessionEvent:
+          options.onSessionEvent === undefined
+            ? undefined
+            : (event) =>
+                notifyObserver(
+                  "onSessionEvent",
+                  options.onSessionEvent,
+                  options.onObserverError,
+                  event,
                 ),
         onProgress:
           options.onProgress === undefined ? undefined : reportProgress,
