@@ -1296,18 +1296,22 @@ export async function runWorkbench(
       options.python,
       [
         "-I",
+        "-X",
+        "utf8",
         "-B",
         join(options.pluginRoot, "scripts", "workbench_db.py"),
         ...args,
       ],
       {
-        env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY" &&
-              name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-              name.toUpperCase() !== "FIREWORKS_API_KEY",
+        env: pythonUtf8Environment(
+          Object.fromEntries(
+            Object.entries(options.environment).filter(
+              ([name]) =>
+                name.toUpperCase() !== "OPENAI_API_KEY" &&
+                name.toUpperCase() !== "CODEX_API_KEY" &&
+                name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+                name.toUpperCase() !== "FIREWORKS_API_KEY",
+            ),
           ),
         ),
         encoding: "utf8",
@@ -2228,10 +2232,20 @@ export function pluginExecutionEnvironment(
   environment: ProcessEnvironment = process.env,
 ): ProcessEnvironment {
   return {
-    ...environment,
+    ...pythonUtf8Environment(environment),
     PYTHON: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
+}
+
+export function pythonUtf8Environment(
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  const normalized = { ...environment };
+  for (const name of Object.keys(normalized)) {
+    if (name.toUpperCase() === "PYTHONUTF8") delete normalized[name];
+  }
+  return { ...normalized, PYTHONUTF8: "1" };
 }
 
 export async function cleanupSdkDirectory(path: string): Promise<void> {

@@ -2906,7 +2906,7 @@ def require_reviewed_patch_applied(
         applied = git_command(
             checkout if unversioned else checkout_root,
             *arguments,
-            text=True,
+            text=False,
             git_dir=Path(git_dir) if git_dir is not None else None,
             work_tree=checkout_root if git_dir is not None else None,
         )

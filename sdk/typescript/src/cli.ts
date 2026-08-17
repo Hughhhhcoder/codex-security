@@ -101,6 +101,7 @@ import {
   codexSecurityStateDirectory,
   expandHome,
   prepareCodexSecurityCredentialHome,
+  pythonUtf8Environment,
   resolveCodexCommand,
   resolvePluginPython,
   runWorkbench,
@@ -808,6 +809,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       python,
       [
         "-I",
+        "-X",
+        "utf8",
         join(plugin, "scripts", "finalize_scan_contract.py"),
         "--scan-dir",
         arguments_.scanDir,
@@ -1062,24 +1065,26 @@ async function writeCliOutput(
 export function exportEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    [
-      "PATH",
-      "Path",
-      "PATHEXT",
-      "SystemRoot",
-      "SYSTEMROOT",
-      "WINDIR",
-      "TMP",
-      "TEMP",
-      "TMPDIR",
-      "PYTHON",
-      "LANG",
-      "LC_ALL",
-      "LC_CTYPE",
-    ]
-      .filter((key) => environment[key] !== undefined)
-      .map((key) => [key, environment[key]]),
+  return pythonUtf8Environment(
+    Object.fromEntries(
+      [
+        "PATH",
+        "Path",
+        "PATHEXT",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "WINDIR",
+        "TMP",
+        "TEMP",
+        "TMPDIR",
+        "PYTHON",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+      ]
+        .filter((key) => environment[key] !== undefined)
+        .map((key) => [key, environment[key]]),
+    ),
   );
 }
 
