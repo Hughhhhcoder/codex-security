@@ -427,9 +427,10 @@ describe("security policy review and application", () => {
       pythonPath: PYTHON,
       environment: { ...process.env, POLICY_TEST_LOG: log },
     });
-    expect(await readFile(log, "utf8")).toBe(
-      "custom resolver\ncustom resolver\n",
-    );
+    expect((await readFile(log, "utf8")).trimEnd().split(/\r?\n/u)).toEqual([
+      "custom resolver",
+      "custom resolver",
+    ]);
     expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
   });
 
@@ -463,7 +464,7 @@ describe("security policy review and application", () => {
       environment: { ...process.env, POLICY_TEST_LOG: log },
     });
     expect(await readFile(saved.targetPath, "utf8")).toBe(POLICY);
-    const resolverPaths = (await readFile(log, "utf8")).trim().split("\n");
+    const resolverPaths = (await readFile(log, "utf8")).trim().split(/\r?\n/u);
     expect(resolverPaths).toHaveLength(2);
     for (const path of resolverPaths)
       await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
@@ -516,7 +517,7 @@ describe("security policy review and application", () => {
           `if target.read_text() == ${JSON.stringify(POLICY)}:`,
           change === "remove"
             ? "    target.unlink()"
-            : "    target.write_text('# Concurrent policy\\n')",
+            : "    target.write_bytes(b'# Concurrent policy\\n')",
           "print('resolver accepted the current policy chain')",
         ].join("\n"),
       );

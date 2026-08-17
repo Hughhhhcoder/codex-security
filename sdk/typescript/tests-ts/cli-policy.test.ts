@@ -567,7 +567,10 @@ describe("policy CLI", () => {
         deps,
       ),
     ).toBe(0);
-    expect(await readFile(log, "utf8")).toBe("used\nused\n");
+    expect((await readFile(log, "utf8")).trimEnd().split(/\r?\n/u)).toEqual([
+      "used",
+      "used",
+    ]);
     expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
   });
 

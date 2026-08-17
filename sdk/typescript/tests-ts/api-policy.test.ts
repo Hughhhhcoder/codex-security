@@ -276,7 +276,7 @@ describe("CodexSecurity policy API", () => {
           "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
           "policy = root / 'SECURITY.md'",
           "previous = policy.read_text()",
-          "policy.write_text('# Concurrent policy\\n')",
+          "policy.write_bytes(b'# Concurrent policy\\n')",
           "print(previous)",
         ].join("\n"),
       );
@@ -424,7 +424,9 @@ describe("CodexSecurity policy API", () => {
     });
     const extracted = f.configuration()?.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"];
     expect(extracted).toBeDefined();
-    expect(f.prompts.every((prompt) => prompt.includes(extracted!))).toBe(true);
+    expect(
+      f.prompts.every((prompt) => prompt.includes(JSON.stringify(extracted))),
+    ).toBe(true);
     await expect(readFile(extracted!)).rejects.toThrow();
     expect(await readdir(f.repository)).toEqual([]);
     await f.security.close();
