@@ -539,12 +539,12 @@ describe("security policy review and application", () => {
         throw error;
       },
     );
+    const draft = await f.generate({ path: "Docs" });
     await symlink(
       component,
       join(f.repository, lowerCaseExists ? ".github" : "docs"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    const draft = await f.generate({ path: "Docs" });
     await expect(applySecurityPolicy(draft)).rejects.toThrow(
       "separate vulnerability-reporting policy",
     );
@@ -1654,6 +1654,36 @@ describe("security policy review and application", () => {
     }
   });
 
+  test("rejects reporting-policy aliases to the draft target", async () => {
+    for (const [name, scope, existing, directoryAlias] of [
+      [".github", ".", false, false],
+      ["docs", "component", true, false],
+      [".github", ".", true, true],
+      ["docs", "component", false, true],
+    ] as const) {
+      const f = await fixture();
+      const component = join(f.repository, scope);
+      await mkdir(component, { recursive: true });
+      const target = join(component, "SECURITY.md");
+      if (existing) await writeFile(target, "# Original policy\n");
+      const reportingDirectory = join(f.repository, name);
+      if (directoryAlias)
+        await symlink(
+          component,
+          reportingDirectory,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      else {
+        await mkdir(reportingDirectory);
+        await symlink(target, join(reportingDirectory, "SECURITY.md"), "file");
+      }
+      await expect(f.generate({ path: scope })).rejects.toThrow(
+        "a separate vulnerability-reporting policy",
+      );
+      expect(await readdir(f.outputDir)).toEqual([]);
+    }
+  });
+
   test("tracks safe inherited policy links and rejects outside links", async () => {
     const f = await fixture();
     const linkedPolicy = join(f.repository, "owner-policy.md");
@@ -1751,6 +1781,7 @@ describe("security policy review and application", () => {
           : join(child, ".github");
         await mkdir(reporting);
         const target = join(f.repository, "SECURITY.md");
+        const draft = await f.generate();
         await symlink(target, join(reporting, "SECURITY.md"), "file");
         if (linkedDirectory)
           await symlink(
@@ -1758,7 +1789,6 @@ describe("security policy review and application", () => {
             join(child, ".github"),
             process.platform === "win32" ? "junction" : "dir",
           );
-        const draft = await f.generate();
         await expect(applySecurityPolicy(draft)).rejects.toThrow(
           "separate vulnerability-reporting policy",
         );
@@ -1868,12 +1898,12 @@ describe("security policy review and application", () => {
   test("rejects reporting-policy aliases through directory links", async () => {
     for (const directory of [".github", "docs"]) {
       const f = await fixture();
+      const draft = await f.generate();
       await symlink(
         f.repository,
         join(f.repository, directory),
         process.platform === "win32" ? "junction" : "dir",
       );
-      const draft = await f.generate();
       await expect(applySecurityPolicy(draft)).rejects.toThrow(
         "separate vulnerability-reporting policy",
       );

@@ -471,6 +471,30 @@ describe("CodexSecurity policy API", () => {
     }
   });
 
+  test("validates descendant policy contents before starting Codex", async () => {
+    for (const [content, message] of [
+      [Buffer.alloc(1024 * 1024 + 1, "x"), "1 MiB"],
+      [Buffer.from([0xff]), "UTF-8"],
+    ] as const) {
+      let prepared = false;
+      const f = await setup({ onPrepare: () => (prepared = true) });
+      const child = join(f.repository, "child");
+      await mkdir(child);
+      await writeFile(join(child, "SECURITY.md"), content);
+      const options = { outputDir: f.outputDir };
+      await expect(
+        f.security.preflightPolicy(f.repository, options),
+      ).rejects.toThrow(message);
+      await expect(
+        f.security.generatePolicy(f.repository, options),
+      ).rejects.toThrow(message);
+      expect(prepared).toBe(false);
+      expect(f.threads).toHaveLength(0);
+      expect(await readdir(f.outputDir)).toEqual([]);
+      await f.security.close();
+    }
+  });
+
   test("gives Codex only the checked policy inventory", async () => {
     const f = await setup();
     policyGit(f.repository, "init", "--quiet");

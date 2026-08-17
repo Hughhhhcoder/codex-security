@@ -500,6 +500,12 @@ export async function inspectSecurityPolicyPaths(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const paths: string[] = [];
+  const canonicalTarget = await realpath(target.targetPath).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    },
+  );
   for await (const entry of securityPolicyPaths(
     dirname(target.targetPath),
     [target.repository],
@@ -514,9 +520,25 @@ export async function inspectSecurityPolicyPaths(
       throw new CodexSecurityError(
         `Security-policy link contains a cycle: ${entry.path}`,
       );
-    if (alias.status !== "resolved") continue;
-    if ((await stat(entry.path)).isFile())
+    const destination = await policyLinkDestination(target.repository, alias);
+    if (
+      entry.reportingPolicy &&
+      entry.path !== target.targetPath &&
+      destination !== null &&
+      policyPathsMatch(
+        canonicalTarget ?? target.targetPath,
+        destination,
+        canonicalTarget === null && alias.status === "missing",
+      )
+    )
+      throw new CodexSecurityError(
+        `SECURITY.md ${JSON.stringify(policyRelativePath(target.repository, entry.path))} points to the selected policy and would change a separate vulnerability-reporting policy. Fix the link before drafting a policy.`,
+      );
+    if (alias.status !== "resolved" || destination === null) continue;
+    if ((await stat(destination)).isFile()) {
+      await readPolicyFile(destination);
       paths.push(policyRelativePath(target.repository, entry.path));
+    }
   }
   return paths.sort();
 }
