@@ -19,7 +19,6 @@ import {
 import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
-  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -1428,7 +1427,6 @@ describe("plugin runtime preparation", () => {
   test("uses the installed plugin path returned by Codex", async () => {
     const root = await temporaryDirectory();
     const selected = await plugin(root);
-    await writeFile(join(selected, "scripts", "obsolete.py"), "obsolete\n");
     const home = join(root, "home");
     await mkdir(home);
     await writeFile(join(home, "config.toml"), "[features]\nplugins = true\n");
@@ -1485,22 +1483,10 @@ describe("plugin runtime preparation", () => {
       join(selected, "scripts", "helper.py"),
       "print('updated')\n",
     );
-    await rm(join(selected, "scripts", "obsolete.py"));
     const reused = await bootstrapPlugin(home, selected, {
       codexCommand: { command: "/codex" },
       runCodex: async (_command, args) => {
         calls.push([...args]);
-        const scripts = join(
-          home,
-          "sdk-marketplace",
-          "plugins",
-          "codex-security",
-          "scripts",
-        );
-        expect(await readFile(join(scripts, "helper.py"), "utf8")).toBe(
-          "print('updated')\n",
-        );
-        expect(existsSync(join(scripts, "obsolete.py"))).toBe(false);
         return JSON.stringify({ installedPath: installed, version: "1.2.3" });
       },
     });
@@ -1513,67 +1499,73 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("refreshes cached plugins before forwarding delegated scan attribution", async () => {
-    const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "0.1.19");
-    await writeFile(
-      join(previous, ".mcp.json"),
-      JSON.stringify({
-        mcpServers: { "codex-security": { env_vars: [] } },
-      }),
-    );
-    const home = join(root, "home");
-    const marketplace = join(home, "sdk-marketplace");
-    await mkdir(home);
-    const runCodex: NonNullable<
-      NonNullable<Parameters<typeof bootstrapPlugin>[2]>["runCodex"]
-    > = async (_command, args) => {
-      if (args[1] === "marketplace") {
-        await writeFile(
-          join(home, "config.toml"),
-          `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
-        );
-        return "";
-      }
-      const manifest = JSON.parse(
-        await readFile(
-          join(
-            marketplace,
-            "plugins",
-            "codex-security",
-            ".codex-plugin",
-            "plugin.json",
+  test.each(["0.1.19", "0.1.20"])(
+    "refreshes cached %s plugins before forwarding worker configuration",
+    async (previousVersion) => {
+      const root = await temporaryDirectory();
+      const previous = await plugin(join(root, "previous"), previousVersion);
+      await writeFile(
+        join(previous, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: { "codex-security": { env_vars: [] } },
+        }),
+      );
+      const home = join(root, "home");
+      const marketplace = join(home, "sdk-marketplace");
+      await mkdir(home);
+      const runCodex: NonNullable<
+        NonNullable<Parameters<typeof bootstrapPlugin>[2]>["runCodex"]
+      > = async (_command, args) => {
+        if (args[1] === "marketplace") {
+          await writeFile(
+            join(home, "config.toml"),
+            `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+          );
+          return "";
+        }
+        const manifest = JSON.parse(
+          await readFile(
+            join(
+              marketplace,
+              "plugins",
+              "codex-security",
+              ".codex-plugin",
+              "plugin.json",
+            ),
+            "utf8",
           ),
+        ) as { version: string };
+        return JSON.stringify({
+          installedPath: join(home, "installed", manifest.version),
+          version: manifest.version,
+        });
+      };
+      const options = {
+        codexCommand: { command: "/codex", prefixArgs: [] },
+        runCodex,
+      };
+
+      expect((await bootstrapPlugin(home, previous, options)).version).toBe(
+        previousVersion,
+      );
+      const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
+      const configuration = JSON.parse(
+        await readFile(
+          join(marketplace, "plugins", "codex-security", ".mcp.json"),
           "utf8",
         ),
-      ) as { version: string };
-      return JSON.stringify({
-        installedPath: join(home, "installed", manifest.version),
-        version: manifest.version,
-      });
-    };
-    const options = {
-      codexCommand: { command: "/codex", prefixArgs: [] },
-      runCodex,
-    };
+      ) as { mcpServers: Record<string, { env_vars: string[] }> };
 
-    expect((await bootstrapPlugin(home, previous, options)).version).toBe(
-      "0.1.19",
-    );
-    const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
-    const configuration = JSON.parse(
-      await readFile(
-        join(marketplace, "plugins", "codex-security", ".mcp.json"),
-        "utf8",
-      ),
-    ) as { mcpServers: Record<string, { env_vars: string[] }> };
-
-    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
-    expect(upgraded.version).not.toBe("0.1.19");
-    expect(configuration.mcpServers["codex-security"]?.env_vars).toContain(
-      "CODEX_SECURITY_SURFACE",
-    );
-  });
+      expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+      expect(upgraded.version).not.toBe(previousVersion);
+      expect(configuration.mcpServers["codex-security"]?.env_vars).toContain(
+        "CODEX_SECURITY_SURFACE",
+      );
+      expect(configuration.mcpServers["codex-security"]?.env_vars).toContain(
+        "CODEX_MANAGED_PACKAGE_ROOT",
+      );
+    },
+  );
 
   test("rejects plugin installs without the selected path and version", async () => {
     for (const output of [
@@ -1659,176 +1651,6 @@ describe("plugin runtime preparation", () => {
       ["plugin", "marketplace", "add", marketplace],
       ["plugin", "add", "--json", "codex-security@codex-security-sdk"],
     ]);
-  });
-
-  test("keeps the existing marketplace when its replacement cannot be staged", async () => {
-    const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "1.2.3");
-    const next = await plugin(join(root, "next"), "1.2.4");
-    const outside = join(root, "outside");
-    await mkdir(outside);
-    await writeFile(join(outside, "untouched"), "preserved\n");
-    await symlink(
-      outside,
-      join(next, "linked"),
-      process.platform === "win32" ? "junction" : "dir",
-    );
-    const home = join(root, "home");
-    const marketplace = await createMarketplace(home, previous);
-    const config = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
-    await writeFile(join(home, "config.toml"), config);
-    await writeFile(join(home, "auth.json"), '{"token":"preserved"}\n');
-    let registrationCalls = 0;
-
-    await expect(
-      bootstrapPlugin(home, next, {
-        codexCommand: { command: "/codex" },
-        runCodex: async () => {
-          registrationCalls += 1;
-          return "";
-        },
-      }),
-    ).rejects.toThrow(PluginBootstrapError);
-
-    expect(registrationCalls).toBe(0);
-    expect(
-      await readFile(
-        join(marketplace, "plugins", "codex-security", "scripts", "helper.py"),
-        "utf8",
-      ),
-    ).toBe("print('ok')\n");
-    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(config);
-    expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
-      '{"token":"preserved"}\n',
-    );
-    expect(await readFile(join(outside, "untouched"), "utf8")).toBe(
-      "preserved\n",
-    );
-    expect(
-      (await readdir(home)).filter((path) =>
-        path.startsWith(".sdk-marketplace-"),
-      ),
-    ).toEqual([]);
-  });
-
-  test("can restage a plugin selected from its current marketplace", async () => {
-    const root = await temporaryDirectory();
-    const selected = await plugin(root);
-    const home = join(root, "home");
-    const marketplace = await createMarketplace(home, selected);
-    const staged = join(marketplace, "plugins", "codex-security");
-
-    const installed = await bootstrapPlugin(home, staged, {
-      codexCommand: { command: "/codex" },
-      runCodex: async (_command, args) => {
-        if (args[1] === "marketplace") return "";
-        expect(
-          await readFile(join(staged, "scripts", "helper.py"), "utf8"),
-        ).toBe("print('ok')\n");
-        return JSON.stringify({ installedPath: staged, version: "1.2.3" });
-      },
-    });
-
-    expect(installed.pluginRoot).toBe(staged);
-    expect(installed.installedRoot).toBe(staged);
-  });
-
-  test("restores or retains the previous marketplace when activation fails", async () => {
-    if (
-      runMockInSubprocess(
-        import.meta.path,
-        "restores or retains the previous marketplace when activation fails",
-      )
-    ) {
-      return;
-    }
-    const originalRename = fsPromises.rename;
-    for (const failRestoration of [false, true]) {
-      const root = await temporaryDirectory();
-      const previous = await plugin(join(root, "previous"));
-      const next = await plugin(join(root, "next"));
-      await writeFile(join(next, "scripts", "helper.py"), "print('updated')\n");
-      const home = join(root, "home");
-      const marketplace = await createMarketplace(home, previous);
-      const config = `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`;
-      await writeFile(join(home, "config.toml"), config);
-      await writeFile(join(home, "auth.json"), '{"token":"preserved"}\n');
-      const activationError = Object.assign(new Error("activation failed"), {
-        code: "EPERM",
-      });
-      const restorationError = Object.assign(new Error("restoration failed"), {
-        code: "EACCES",
-      });
-      let backup: string | undefined;
-      let registrationCalls = 0;
-      mock.module("node:fs/promises", () => ({
-        ...fsPromises,
-        rename: async (...args: Parameters<typeof originalRename>) => {
-          const source = String(args[0]);
-          const destination = String(args[1]);
-          if (source === marketplace) backup = destination;
-          if (destination === marketplace) {
-            if (basename(source) === "sdk-marketplace") {
-              throw activationError;
-            }
-            if (failRestoration) throw restorationError;
-          }
-          return await originalRename(...args);
-        },
-      }));
-      let failure: unknown;
-      try {
-        failure = await bootstrapPlugin(home, next, {
-          codexCommand: { command: "/codex" },
-          runCodex: async () => {
-            registrationCalls += 1;
-            return "";
-          },
-        }).then(
-          () => null,
-          (error: unknown) => error,
-        );
-      } finally {
-        mock.module("node:fs/promises", () => ({
-          ...fsPromises,
-          rename: originalRename,
-        }));
-      }
-
-      expect(registrationCalls).toBe(0);
-      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(config);
-      expect(await readFile(join(home, "auth.json"), "utf8")).toBe(
-        '{"token":"preserved"}\n',
-      );
-      if (failRestoration) {
-        expect(failure).toBeInstanceOf(PluginBootstrapError);
-        expect((failure as Error).message).toContain(backup!);
-        expect(((failure as Error).cause as AggregateError).errors).toEqual([
-          activationError,
-          restorationError,
-        ]);
-        expect(existsSync(marketplace)).toBe(false);
-      } else {
-        expect(failure).toBe(activationError);
-        expect(
-          (await readdir(home)).filter((path) =>
-            path.startsWith(".sdk-marketplace-"),
-          ),
-        ).toEqual([]);
-      }
-      expect(
-        await readFile(
-          join(
-            failRestoration ? backup! : marketplace,
-            "plugins",
-            "codex-security",
-            "scripts",
-            "helper.py",
-          ),
-          "utf8",
-        ),
-      ).toBe("print('ok')\n");
-    }
   });
 
   test("upgrades a cached plugin without deleting persistent credentials", async () => {
@@ -1925,11 +1747,13 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("refreshes and upgrades a plugin with the real bundled Codex executable", async () => {
+  test("upgrades a cached 0.1.20 plugin with the real bundled Codex executable", async () => {
     const root = await temporaryDirectory();
-    const previous = await plugin(join(root, "previous"), "1.2.3");
-    const next = await plugin(join(root, "next"), "1.2.4");
-    await writeFile(join(previous, "scripts", "obsolete.py"), "obsolete\n");
+    const previous = await plugin(join(root, "previous"), "0.1.20");
+    await writeFile(
+      join(previous, ".mcp.json"),
+      JSON.stringify({ mcpServers: { "codex-security": { env_vars: [] } } }),
+    );
     const home = join(root, "home");
     await mkdir(home, { mode: 0o700 });
     await writeFile(
@@ -1955,32 +1779,18 @@ describe("plugin runtime preparation", () => {
 
     const options = { codexCommand: command, environment };
     const first = await bootstrapPlugin(home, previous, options);
-    expect(first.version).toBe("1.2.3");
-    expect(
-      await readFile(join(first.installedRoot, "scripts", "helper.py"), "utf8"),
-    ).toBe("print('ok')\n");
+    expect(first.version).toBe("0.1.20");
+    const upgraded = await bootstrapPlugin(home, PLUGIN_ROOT, options);
+    const configuration = JSON.parse(
+      await readFile(join(upgraded.installedRoot, ".mcp.json"), "utf8"),
+    ) as { mcpServers: Record<string, { env_vars: string[] }> };
 
-    await writeFile(
-      join(previous, "scripts", "helper.py"),
-      "print('updated')\n",
+    expect(upgraded.version).toBe(BUNDLED_PLUGIN_VERSION);
+    expect(upgraded.version).not.toBe(first.version);
+    expect(upgraded.installedRoot).not.toBe(first.installedRoot);
+    expect(configuration.mcpServers["codex-security"]?.env_vars).toContain(
+      "CODEX_MANAGED_PACKAGE_ROOT",
     );
-    await rm(join(previous, "scripts", "obsolete.py"));
-    const refreshed = await bootstrapPlugin(home, previous, options);
-    expect(refreshed.version).toBe("1.2.3");
-    expect(refreshed.installedRoot).toBe(first.installedRoot);
-    expect(
-      await readFile(
-        join(refreshed.installedRoot, "scripts", "helper.py"),
-        "utf8",
-      ),
-    ).toBe("print('updated')\n");
-    expect(
-      existsSync(join(refreshed.installedRoot, "scripts", "obsolete.py")),
-    ).toBe(false);
-
-    const upgraded = await bootstrapPlugin(home, next, options);
-
-    expect(upgraded.version).toBe("1.2.4");
     expect(await readFile(join(home, "auth.json"), "utf8")).toBe(credentials);
     expect(
       spawnSync(command.command, ["login", "status"], {

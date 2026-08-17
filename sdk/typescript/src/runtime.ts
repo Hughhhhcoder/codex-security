@@ -2054,45 +2054,17 @@ export async function bootstrapPlugin(
     );
   }
 
-  // A bundled plugin can change without changing its upstream version.
-  // Finish the replacement before removing the currently staged plugin.
-  await mkdir(codexHome, { recursive: true, mode: 0o700 });
-  const stagingHome = await mkdtemp(join(codexHome, ".sdk-marketplace-"));
-  const previous = join(stagingHome, "previous-marketplace");
-  let preserveStaging = false;
-  try {
-    const staged = await createMarketplace(stagingHome, root, options.signal);
-    throwIfSignalAborted(options.signal);
+  const staged =
+    existing === null
+      ? null
+      : await pluginMetadata(join(marketplace, "plugins", PLUGIN_NAME)).catch(
+          () => null,
+        );
+  if (staged?.version !== version) {
     if (existing !== null) {
-      await rename(marketplace, previous);
+      await rm(marketplace, { recursive: true, force: true });
     }
-    try {
-      await rename(staged, marketplace);
-    } catch (error) {
-      if (existing !== null) {
-        try {
-          await rename(previous, marketplace);
-        } catch (restorationError) {
-          preserveStaging = true;
-          throw new PluginBootstrapError(
-            `Unable to activate the Codex Security plugin marketplace. The previous marketplace remains at ${previous}.`,
-            {
-              cause: new AggregateError(
-                [error, restorationError],
-                "Marketplace activation and rollback failed.",
-              ),
-            },
-          );
-        }
-      }
-      throw error;
-    }
-  } finally {
-    if (!preserveStaging) {
-      await rm(stagingHome, { recursive: true, force: true }).catch(
-        () => undefined,
-      );
-    }
+    await createMarketplace(codexHome, root, options.signal);
   }
   const config = await readFile(join(codexHome, "config.toml"), "utf8").catch(
     (error: unknown) => {
