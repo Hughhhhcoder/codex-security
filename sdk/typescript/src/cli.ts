@@ -1094,6 +1094,7 @@ export async function main(
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
   let renderedPolicy: string | undefined;
+  let renderPolicyError = false;
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1986,19 +1987,31 @@ export async function main(
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])
         .optional(),
-      async run({ args, options, format, formatExplicit }) {
+      async run({ args, error: incurError, options, format, formatExplicit }) {
+        const outputOptions = argv.filter((argument) =>
+          OUTPUT_OPTION.test(argument),
+        );
+        const explicitOutput = formatExplicit || outputOptions.length > 0;
+        const transformOutput = outputOptions.some(
+          (argument) => !argument.startsWith("--format"),
+        );
+        const filterOutput = outputOptions.some((argument) =>
+          argument.startsWith("--filter-output"),
+        );
+        const fullOutput = outputOptions.some((argument) =>
+          argument.startsWith("--full-output"),
+        );
+        const fail = (message: string, failureExitCode: number) => {
+          exitCode = failureExitCode;
+          renderPolicyError = fullOutput;
+          return incurError({
+            code: "POLICY_FAILED",
+            message,
+            exitCode: failureExitCode,
+          });
+        };
         try {
           const directory = dependencies.currentDirectory();
-          const outputOptions = argv.filter((argument) =>
-            OUTPUT_OPTION.test(argument),
-          );
-          const explicitOutput = formatExplicit || outputOptions.length > 0;
-          const transformOutput = outputOptions.some(
-            (argument) => !argument.startsWith("--format"),
-          );
-          const filterOutput = outputOptions.some((argument) =>
-            argument.startsWith("--filter-output"),
-          );
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
               {
@@ -2061,6 +2074,9 @@ export async function main(
             ),
           );
           exitCode = outcome.exitCode;
+          if (exitCode !== 0 && (fullOutput || outcome.data === undefined)) {
+            return fail(outcome.error ?? "Policy command failed.", exitCode);
+          }
           if (
             format === "md" &&
             outcome.markdown !== undefined &&
@@ -2073,9 +2089,11 @@ export async function main(
             ? undefined
             : outcome.data;
         } catch (error) {
-          exitCode = 2;
-          errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
-          return undefined;
+          const message = safeErrorMessage(error);
+          try {
+            errorOutput.write(`codex-security: ${message}\n`);
+          } catch {}
+          return fail(message, 2);
         }
       },
     })
@@ -2884,7 +2902,7 @@ export async function main(
     updateController.abort();
   }
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
-  if (frameworkExit !== undefined) {
+  if (frameworkExit !== undefined && !renderPolicyError) {
     if (exitCode !== 0) return exitCode;
     errorOutput.write(
       `codex-security: ${errorMessage(incurErrorMessage(frameworkOutput))}\n`,

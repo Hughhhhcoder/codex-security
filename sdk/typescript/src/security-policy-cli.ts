@@ -65,6 +65,7 @@ export async function runPolicyCommand(
   exitCode: number;
   data?: Record<string, unknown>;
   markdown?: string;
+  error?: string;
 }> {
   const { errorOutput, prompt } = dependencies;
   const controller = new AbortController();
@@ -267,13 +268,18 @@ export async function runPolicyCommand(
         ? "SIGINT"
         : undefined);
     const exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
-    write(
-      `codex-security: ${signal === "SIGINT" ? "Policy generation canceled by Ctrl-C." : signal === "SIGTERM" ? "Policy generation terminated by SIGTERM." : display(safeErrorMessage(error))}`,
-    );
+    const message =
+      signal === "SIGINT"
+        ? "Policy generation canceled by Ctrl-C."
+        : signal === "SIGTERM"
+          ? "Policy generation terminated by SIGTERM."
+          : display(safeErrorMessage(error));
+    write(`codex-security: ${message}`);
     if (outputDir !== undefined)
       write(`Saved artifacts: ${display(outputDir)}`);
     return {
       exitCode,
+      error: message,
       ...(written || recovery
         ? {
             data: {

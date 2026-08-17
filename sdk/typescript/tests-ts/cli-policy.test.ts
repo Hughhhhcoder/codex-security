@@ -4,6 +4,10 @@ import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
+import {
+  SecurityPolicyRecoveryError,
+  SecurityPolicyVerificationError,
+} from "../src/errors.js";
 import type {
   SecurityPolicyDraft,
   SecurityPolicyOptions,
@@ -753,6 +757,163 @@ describe("policy CLI", () => {
     expect(stdout.text()).toContain("## data");
     expect(stdout.text()).toContain(POLICY.trim());
     expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("marks failed generation and cancellation envelopes as errors", async () => {
+    const f = await fixture();
+    for (const [signal, expectedExit] of [
+      [undefined, 2],
+      ["SIGINT", 130],
+      ["SIGTERM", 143],
+    ] as const) {
+      const signals = new FakeSignals();
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["policy", "--json", "--full-output"],
+          stdout.stream,
+          stderr.stream,
+          policyDependencies(f, {
+            signals,
+            onGenerate: (_repository, options) => {
+              if (signal !== undefined) {
+                signals.emit(signal);
+                options.signal!.throwIfAborted();
+              }
+              throw new Error("Synthetic generation failure");
+            },
+          }),
+        ),
+      ).toBe(expectedExit);
+      const result = JSON.parse(stdout.text());
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "POLICY_FAILED" },
+      });
+      expect(result).not.toHaveProperty("data");
+      expect(stderr.text()).toContain(result.error.message);
+    }
+    expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("preserves plain JSON recovery records while marking full-output errors", async () => {
+    const f = await fixture();
+    const targetPath = join(f.repository, "SECURITY.md");
+    const recoveryPath = join(f.outputDir, "recovery-SECURITY.md");
+    for (const [error, status] of [
+      [
+        new SecurityPolicyVerificationError(targetPath, { recoveryPath }),
+        "written_unverified",
+      ],
+      [
+        new SecurityPolicyRecoveryError(targetPath, recoveryPath),
+        "recovery_required",
+      ],
+    ] as const) {
+      const deps = policyDependencies(f, {
+        onGenerate: () => {
+          throw error;
+        },
+      });
+      for (const fullOutput of [false, true]) {
+        const stdout = capture();
+        expect(
+          await main(
+            ["policy", "--json", ...(fullOutput ? ["--full-output"] : [])],
+            stdout.stream,
+            capture().stream,
+            deps,
+          ),
+        ).toBe(2);
+        const result = JSON.parse(stdout.text());
+        if (fullOutput) {
+          expect(result).toMatchObject({
+            ok: false,
+            error: { code: "POLICY_FAILED", message: error.message },
+          });
+          expect(result).not.toHaveProperty("data");
+        } else {
+          expect(result).toMatchObject({ status, targetPath, recoveryPath });
+        }
+      }
+    }
+  });
+
+  test("returns a full-output error when policy setup fails", async () => {
+    const f = await fixture();
+    const deps = policyDependencies(f);
+    deps.currentDirectory = () => {
+      throw new Error("Working directory is unavailable");
+    };
+    const stdout = capture();
+    expect(
+      await main(
+        ["policy", "--json", "--full-output"],
+        stdout.stream,
+        {
+          write: () => {
+            throw new Error("Diagnostic output failed");
+          },
+        },
+        deps,
+      ),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      error: {
+        code: "POLICY_FAILED",
+        message: "Working directory is unavailable",
+      },
+    });
+  });
+
+  test("keeps the written and previous files after a full-output verification error", async () => {
+    const f = await fixture();
+    const original = "# Original policy\n";
+    await writeFile(join(f.repository, "SECURITY.md"), original);
+    const pluginPath = await policyPlugin(
+      f.root,
+      [
+        "import pathlib, sys",
+        "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+        "if (root / 'SECURITY.md').read_text() != '# Original policy\\n': raise SystemExit('synthetic verification failure')",
+        "print('preflight passed')",
+      ].join("\n"),
+    );
+    const draft = await f.generate({ pluginPath });
+    const stdout = capture();
+    expect(
+      await main(
+        [
+          "policy",
+          "--apply",
+          f.outputDir,
+          "--plugin-path",
+          pluginPath,
+          "--write",
+          "--json",
+          "--full-output",
+        ],
+        stdout.stream,
+        capture().stream,
+        policyDependencies(f),
+      ),
+    ).toBe(2);
+    const result = JSON.parse(stdout.text());
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "POLICY_FAILED" },
+    });
+    expect(result.error.message).toContain(draft.targetPath);
+    const recovery = (await readdir(f.outputDir)).find((name) =>
+      name.startsWith("recovery-SECURITY-"),
+    );
+    expect(recovery).toBeDefined();
+    const recoveryPath = join(f.outputDir, recovery!);
+    expect(result.error.message).toContain(recoveryPath);
+    expect(await readFile(recoveryPath, "utf8")).toBe(original);
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
   });
 
   test("reports an unchanged saved policy without starting Codex or Python", async () => {

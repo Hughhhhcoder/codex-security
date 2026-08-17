@@ -293,7 +293,9 @@ does not validate threat scenarios as vulnerabilities.
 paths, review notes, status, and estimated cost. Explicit output options disable
 interactive questions and write prompts. Global filters select fields from the
 result; token options apply to the selected format, including Markdown. Progress
-goes to stderr.
+goes to stderr. With `--full-output`, a failed operation returns `ok: false` and
+an error message. Plain `--json` retains the recovery status and paths described
+above when a write needs attention.
 `--max-cost` applies to the entire generation, not separately to each stage.
 If a stage cannot inspect its required source evidence, generation stops instead
 of substituting a generic policy. Failures and cancellation preserve intermediate

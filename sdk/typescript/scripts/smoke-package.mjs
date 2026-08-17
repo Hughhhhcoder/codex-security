@@ -72,7 +72,13 @@ async function resolveArchive() {
 function run(
   command,
   args,
-  { cwd, env, capture = false, windowsVerbatimArguments = false } = {},
+  {
+    cwd,
+    env,
+    capture = false,
+    windowsVerbatimArguments = false,
+    expectedStatus = 0,
+  } = {},
 ) {
   const result = spawnSync(command, args, {
     cwd,
@@ -94,10 +100,10 @@ function run(
   if (result.error !== undefined) {
     throw new Error(`Failed to run ${command}.`, { cause: result.error });
   }
-  if (result.status !== 0) {
+  if (result.status !== expectedStatus) {
     const details = capture ? `\n${result.stderr.trim()}` : "";
     throw new Error(
-      `${command} exited with status ${result.status}.${details}`,
+      `${command} exited with status ${result.status} (expected ${expectedStatus}).${details}`,
     );
   }
 
@@ -504,6 +510,28 @@ try {
     JSON.parse(previewPolicy(["--json", "--full-output"])).data.status,
     "draft",
   );
+  const failedPolicy = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "policy",
+        policyTarget,
+        "--apply",
+        join(consumer, "missing-policy-draft"),
+        "--json",
+        "--full-output",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: savedPolicyEnvironment,
+        expectedStatus: 2,
+      },
+    ),
+  );
+  assert.equal(failedPolicy.ok, false);
+  assert.equal(failedPolicy.error.code, "POLICY_FAILED");
   assert.deepEqual(await readdir(policyTarget), []);
   // Node rejects Python's flags before reading stdin. Report that failure
   // without an uncaught stream error in the installed Node.js entrypoint.
