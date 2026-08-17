@@ -267,7 +267,7 @@ documents. Fix the reported problem and use a new output directory to retry.
 ### Generate a policy from TypeScript
 
 ```ts
-import { CodexSecurity, securityPolicyDiff } from "@openai/codex-security";
+import { CodexSecurity } from "@openai/codex-security";
 
 const security = new CodexSecurity();
 try {
@@ -277,14 +277,17 @@ try {
     onStage: (stage) => console.error(stage),
   });
 
-  console.log(await securityPolicyDiff(draft));
-  console.log(`Review the saved draft at ${draft.draftPath}`);
+  console.log(await security.previewPolicy(draft));
+  // Open draft.draftPath in an editor to review the saved policy.
 } finally {
   await security.close();
 }
 ```
 
 `preflightPolicy()` checks local inputs without starting Codex.
+`previewPolicy()` uses the client's Python setting and makes terminal control
+characters visible. The standalone `securityPolicyDiff()` returns a raw diff
+for files or other non-terminal uses; pass an interpreter explicitly if needed.
 `generatePolicy()` accepts `auth`, `path`, `knowledgeBasePaths`, `outputDir`,
 `maxCostUsd`, `signal`, and progress and cost callbacks. An optional
 `answerQuestions` callback receives each group of up to three owner questions

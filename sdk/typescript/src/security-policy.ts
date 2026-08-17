@@ -538,6 +538,7 @@ export async function runSecurityPolicyStages(options: {
   };
 }
 
+/** Raw unified diff. Use CodexSecurity.previewPolicy() for terminal output. */
 export async function securityPolicyDiff(
   draft: SecurityPolicyDraft,
   python?: string,
@@ -587,6 +588,19 @@ export async function securityPolicyDiff(
   });
 }
 
+export function formatSecurityPolicyText(
+  value: string,
+  multiline = false,
+): string {
+  return value.replaceAll(
+    multiline
+      ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu
+      : /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu,
+    (character) =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 async function resolveDraftTarget(
   draft: SecurityPolicyDraft,
   signal?: AbortSignal,
@@ -596,7 +610,11 @@ async function resolveDraftTarget(
     dirname(draft.targetPath),
     signal,
   );
-  if (target.targetPath !== draft.targetPath) {
+  if (
+    target.repository !== draft.repository ||
+    target.scope !== draft.scope ||
+    target.targetPath !== draft.targetPath
+  ) {
     throw new CodexSecurityError(
       "The security-policy destination changed. Review a new draft before writing.",
     );
@@ -642,11 +660,7 @@ function diffLabel(path: string): string {
     !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}"\\]/u.test(path)
   )
     return path;
-  return JSON.stringify(path).replaceAll(
-    /[\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu,
-    (character) =>
-      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
-  );
+  return formatSecurityPolicyText(JSON.stringify(path));
 }
 
 function digest(value: string): string {

@@ -3,6 +3,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -451,6 +452,23 @@ describe("security policy preview", () => {
     expect(diff).toContain("--- /dev/null\n+++ b/SECURITY.md\n");
     expect(diff).toContain("+Requests must be authorized");
     expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("rejects preview after a component changes Git roots", async () => {
+    for (const change of ["add", "remove"] as const) {
+      const f = await fixture();
+      policyGit(f.repository, "init", "--quiet");
+      const component = join(f.repository, "component");
+      await mkdir(component);
+      if (change === "remove") policyGit(component, "init", "--quiet");
+      const draft = await f.generate({ path: "component" });
+      if (change === "add") policyGit(component, "init", "--quiet");
+      else await rename(join(component, ".git"), join(f.root, "previous-git"));
+      await expect(securityPolicyDiff(draft, PYTHON)).rejects.toThrow(
+        "destination changed",
+      );
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
+    }
   });
 
   test("shows missing final newlines in the exact diff", async () => {

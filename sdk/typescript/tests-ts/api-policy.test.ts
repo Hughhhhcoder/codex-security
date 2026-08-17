@@ -16,6 +16,7 @@ import {
   type SecurityPolicyStage,
 } from "../src/index.js";
 import { preparedRuntime } from "./support/api-events.js";
+import type { PluginPythonOptions } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
@@ -58,6 +59,7 @@ async function setup(
   const threads: ThreadOptions[] = [];
   const prompts: string[] = [];
   const turns: TurnOptions[] = [];
+  const pythonSelections: PluginPythonOptions[] = [];
   const stages: SecurityPolicyStage[] = [
     "architecture",
     "threat_model",
@@ -71,7 +73,10 @@ async function setup(
         options.onPrepare?.();
         return runtime;
       },
-      resolvePluginPython: async () => PYTHON,
+      resolvePluginPython: async (selection: PluginPythonOptions) => {
+        pythonSelections.push(selection);
+        return PYTHON;
+      },
       repositoryRevision: async () => {
         await options.onRevision?.();
         return "synthetic-revision";
@@ -109,6 +114,7 @@ async function setup(
     threads,
     prompts,
     turns,
+    pythonSelections,
     configuration: () => configuration,
   };
 }
@@ -140,6 +146,37 @@ async function* events(
 }
 
 describe("CodexSecurity policy API", () => {
+  test("uses the client's Python and renders preview controls visibly", async () => {
+    const content = `${POLICY}\n\u001b]52;c;c3ludGhldGlj\u0007\u202eOwner note\n`;
+    const f = await setup({
+      config: { pythonPath: "configured-policy-python" },
+      stream: async function* (stage) {
+        yield* events(stage, {
+          ...stageResult(stage),
+          ...(stage === "policy" ? { markdown: content } : {}),
+        });
+      },
+    });
+    const draft = await f.security.generatePolicy(f.repository, {
+      outputDir: f.outputDir,
+    });
+    const preview = await f.security.previewPolicy(draft);
+    expect(f.pythonSelections).toHaveLength(2);
+    for (const selection of f.pythonSelections)
+      expect(selection).toMatchObject({
+        configuredPath: "configured-policy-python",
+        protectedRoot: f.repository,
+      });
+    expect(preview).not.toMatch(/[\u001b\u0007\p{Bidi_Control}]/u);
+    expect(preview).toContain("\\u001b]52;c;c3ludGhldGlj\\u0007\\u202e");
+    expect(await securityPolicyDiff(draft, PYTHON)).toContain(
+      "\u001b]52;c;c3ludGhldGlj\u0007\u202eOwner note",
+    );
+    expect(await readFile(draft.draftPath, "utf8")).toBe(content);
+    expect(draft).not.toHaveProperty("pythonPath");
+    await f.security.close();
+  });
+
   test("preflights without runtime initialization or output creation", async () => {
     let prepared = false;
     const f = await setup({
