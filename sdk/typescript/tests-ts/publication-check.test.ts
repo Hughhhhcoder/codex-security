@@ -58,10 +58,38 @@ function readClient(
     teams?: readonly string[];
     active?: boolean;
     assignable?: boolean;
+    publicTeamAccess?: boolean;
+    memberTeams?: readonly string[];
+    teamHierarchy?: readonly {
+      id: string;
+      visibility: "public" | "private" | "restricted";
+    }[];
     archivedProject?: boolean;
     retiredTeam?: boolean;
   } = {},
 ): ReadClient {
+  const hierarchy = options.teamHierarchy ?? [
+    { id: "canonical-team", visibility: "public" },
+  ];
+  function teamAt(index: number): object {
+    const team = hierarchy[index]!;
+    return {
+      ...team,
+      retiredAt: options.retiredTeam ? new Date(0) : undefined,
+      members: async (variables: { filter: { id: { eq: string } } }) => {
+        calls.push(["team.members", team.id, variables]);
+        return {
+          nodes: (options.memberTeams ?? ["canonical-team"]).includes(team.id)
+            ? [{ id: variables.filter.id.eq }]
+            : [],
+        };
+      },
+      parent:
+        index + 1 < hierarchy.length
+          ? Promise.resolve(teamAt(index + 1))
+          : undefined,
+    };
+  }
   return {
     get viewer() {
       calls.push("viewer");
@@ -69,10 +97,7 @@ function readClient(
     },
     team: async (id: string) => {
       calls.push(["team", id]);
-      return {
-        id: "canonical-team",
-        retiredAt: options.retiredTeam ? new Date(0) : undefined,
-      };
+      return teamAt(0);
     },
     project: async (id: string) => {
       calls.push(["project", id]);
@@ -98,6 +123,7 @@ function readClient(
         id,
         active: options.active ?? true,
         isAssignable: options.assignable ?? true,
+        canAccessAnyPublicTeam: options.publicTeamAccess ?? true,
       };
     },
     createIssue: () => {
@@ -226,6 +252,116 @@ describe("read-only publication preflight", () => {
           }),
         ),
       ).rejects.toThrow(message);
+    }
+  });
+
+  test("checks assignee access without requiring public-team membership", async () => {
+    const cases = [
+      {
+        name: "public workspace member",
+        visibility: "public",
+        publicTeamAccess: true,
+        memberTeams: [],
+        allowed: true,
+        checkedTeams: [],
+      },
+      {
+        name: "limited user outside a public team",
+        visibility: "public",
+        publicTeamAccess: false,
+        memberTeams: [],
+        allowed: false,
+        checkedTeams: ["canonical-team"],
+      },
+      {
+        name: "limited user in a public team",
+        visibility: "public",
+        publicTeamAccess: false,
+        memberTeams: ["canonical-team"],
+        allowed: true,
+        checkedTeams: ["canonical-team"],
+      },
+      {
+        name: "private-team member",
+        visibility: "private",
+        publicTeamAccess: true,
+        memberTeams: ["canonical-team"],
+        allowed: true,
+        checkedTeams: ["canonical-team"],
+      },
+      {
+        name: "private-team nonmember",
+        visibility: "private",
+        publicTeamAccess: true,
+        memberTeams: [],
+        allowed: false,
+        checkedTeams: ["canonical-team"],
+      },
+      {
+        name: "restricted-team parent member",
+        visibility: "restricted",
+        publicTeamAccess: true,
+        memberTeams: ["private-parent"],
+        allowed: true,
+        checkedTeams: ["canonical-team", "private-parent"],
+      },
+      {
+        name: "restricted-team nonmember",
+        visibility: "restricted",
+        publicTeamAccess: true,
+        memberTeams: [],
+        allowed: false,
+        checkedTeams: ["canonical-team", "private-parent"],
+      },
+      {
+        name: "limited user outside a restricted team",
+        visibility: "restricted",
+        publicTeamAccess: false,
+        memberTeams: ["private-parent"],
+        allowed: false,
+        checkedTeams: ["canonical-team"],
+      },
+    ] as const;
+
+    for (const example of cases) {
+      const calls: unknown[] = [];
+      const checking = checkScanPublicationInternal(
+        "scan",
+        {
+          ...OPTIONS,
+          linearApiKey: "synthetic-key",
+          assigneeId: "assignee-example",
+        },
+        dependencies({
+          linearClient: () =>
+            readClient(calls, {
+              ...example,
+              teamHierarchy: [
+                { id: "canonical-team", visibility: example.visibility },
+                { id: "private-parent", visibility: "private" },
+              ],
+            }),
+        }),
+      );
+      if (example.allowed) {
+        expect((await checking).access.assignee, example.name).toBe("verified");
+      } else {
+        await expect(checking, example.name).rejects.toThrow(
+          /assignee cannot access the selected team/u,
+        );
+      }
+      expect(
+        calls.filter(
+          (call) => Array.isArray(call) && call[0] === "team.members",
+        ),
+        example.name,
+      ).toEqual(
+        example.checkedTeams.map((id) => [
+          "team.members",
+          id,
+          { filter: { id: { eq: "assignee-example" } }, first: 1 },
+        ]),
+      );
     }
   });
 

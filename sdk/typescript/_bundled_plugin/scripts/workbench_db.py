@@ -21,6 +21,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 try:
     import fcntl as posix_file_lock
@@ -2486,6 +2487,8 @@ def verify_linear_publication_scan(
         raise SystemExit(
             "The selected scan directory does not match its local Codex Security scan history."
         )
+    if "seal_manifest_digest" in scan.keys():
+        require_recorded_manifest_digest(scan, recorded_directory)
 
     stored_findings = {
         row["id"]: row["finding_id"]
@@ -2509,9 +2512,8 @@ def verify_linear_publication_scan(
 
 def inspect_linear_publication(args: argparse.Namespace) -> dict[str, Any]:
     payload, destination, findings = linear_publication_input(args, recording=False)
-    with closing(
-        sqlite3.connect(f"{database_path().as_uri()}?mode=ro", uri=True, timeout=5)
-    ) as connection:
+    database_uri = f"file:{quote(str(database_path()), safe='')}?mode=ro"
+    with closing(sqlite3.connect(database_uri, uri=True, timeout=5)) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("BEGIN")
         scan = verify_linear_publication_scan(connection, payload, findings)
