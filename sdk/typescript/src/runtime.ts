@@ -1212,7 +1212,8 @@ export async function acquireCodexSecurityCredentialHomeLock(
       throw error;
     });
     if (existingLock !== null) {
-      if (await recoverStaleCredentialHomeLock(lock, platform)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, platform, signal))
+        continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
@@ -1225,7 +1226,8 @@ export async function acquireCodexSecurityCredentialHomeLock(
       await mkdir(lock, { mode: 0o700 });
     } catch (error) {
       if (nodeErrorCode(error) !== "EEXIST") throw error;
-      if (await recoverStaleCredentialHomeLock(lock, platform)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, platform, signal))
+        continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
@@ -1263,9 +1265,36 @@ export async function acquireCodexSecurityCredentialHomeLock(
   }
 }
 
+async function readCredentialHomeLockOwner(
+  path: string,
+  platform: NodeJS.Platform,
+  signal?: AbortSignal,
+): Promise<string> {
+  const deadline = Date.now() + INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS;
+  while (true) {
+    throwIfSignalAborted(signal);
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      const code = nodeErrorCode(error);
+      // A Windows deletion or sharing race can deny this read temporarily.
+      // Preserve persistent failures after the existing incomplete-lock grace.
+      if (
+        platform !== "win32" ||
+        (code !== "EPERM" && code !== "EBUSY") ||
+        Date.now() >= deadline
+      ) {
+        throw error;
+      }
+      await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
+    }
+  }
+}
+
 async function recoverStaleCredentialHomeLock(
   lock: string,
   platform: NodeJS.Platform,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const metadata = await lstat(lock).catch((error: unknown) => {
     if (nodeErrorCode(error) === "ENOENT") return null;
@@ -1280,11 +1309,15 @@ async function recoverStaleCredentialHomeLock(
 
   let owner: unknown;
   try {
-    owner = JSON.parse(await readFile(join(lock, "owner.json"), "utf8"));
+    owner = JSON.parse(
+      await readCredentialHomeLockOwner(
+        join(lock, "owner.json"),
+        platform,
+        signal,
+      ),
+    );
   } catch (error) {
     const code = nodeErrorCode(error);
-    // Windows can deny this read while the owner file is being written or removed.
-    if (platform === "win32" && code === "EPERM") return false;
     if (code !== "ENOENT" && !(error instanceof SyntaxError)) {
       throw error;
     }

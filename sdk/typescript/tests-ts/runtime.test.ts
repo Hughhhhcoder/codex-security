@@ -30,7 +30,7 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import {
   BUNDLED_PLUGIN_VERSION,
@@ -2138,82 +2138,208 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
-  test("retries temporarily unreadable Windows credential-lock owners", async () => {
+  test.each(["EPERM", "EBUSY"])(
+    "retries temporarily unreadable Windows credential-lock owners with %s",
+    async (code) => {
+      if (
+        runMockInSubprocess(
+          import.meta.path,
+          `retries temporarily unreadable Windows credential-lock owners with ${code}`,
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const home = join(root, "credential-home");
+      const lock = join(home, ".codex-security-scan.lock");
+      const ownerPath = join(lock, "owner.json");
+      await mkdir(home, { mode: 0o700 });
+      const securityOptions = {
+        platform: "win32" as const,
+        secureWindowsHome: async () => {},
+      };
+      const releaseFirst = await acquireCodexSecurityCredentialHomeLock(
+        home,
+        undefined,
+        securityOptions,
+      );
+      const originalReadFile = fsPromises.readFile;
+      let ownerReads = 0;
+      let retryObserved!: () => void;
+      const retried = new Promise<void>((resolve) => {
+        retryObserved = resolve;
+      });
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        readFile: async (...args: Parameters<typeof originalReadFile>) => {
+          if (String(args[0]) === ownerPath) {
+            ownerReads += 1;
+            if (ownerReads === 1) {
+              throw Object.assign(new Error("temporarily unreadable owner"), {
+                code,
+              });
+            }
+            if (ownerReads === 2) retryObserved();
+          }
+          return originalReadFile(...args);
+        },
+      }));
+      const controller = new AbortController();
+      const waiting = acquireCodexSecurityCredentialHomeLock(
+        home,
+        controller.signal,
+        securityOptions,
+      );
+      void waiting.catch(() => undefined);
+
+      try {
+        await Promise.race([
+          retried,
+          waiting.then(() => {
+            throw new Error("The held credential lock was acquired early.");
+          }),
+        ]);
+        expect(ownerReads).toBeGreaterThanOrEqual(2);
+        expect(existsSync(ownerPath)).toBe(true);
+        await releaseFirst();
+        const releaseSecond = await waiting;
+        await releaseSecond();
+        expect(existsSync(lock)).toBe(false);
+      } finally {
+        controller.abort();
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          readFile: originalReadFile,
+        }));
+        await releaseFirst();
+        await waiting.then(
+          (release) => release(),
+          () => undefined,
+        );
+      }
+    },
+  );
+
+  test.each(["EPERM", "EBUSY"])(
+    "reports persistent Windows credential-lock read failures with %s",
+    async (code) => {
+      if (
+        runMockInSubprocess(
+          import.meta.path,
+          `reports persistent Windows credential-lock read failures with ${code}`,
+        )
+      ) {
+        return;
+      }
+      const root = await temporaryDirectory();
+      const home = join(root, "credential-home");
+      const ownerPath = join(home, ".codex-security-scan.lock", "owner.json");
+      await mkdir(home, { mode: 0o700 });
+      const securityOptions = {
+        platform: "win32" as const,
+        secureWindowsHome: async () => {},
+      };
+      const release = await acquireCodexSecurityCredentialHomeLock(
+        home,
+        undefined,
+        securityOptions,
+      );
+      const originalReadFile = fsPromises.readFile;
+      const failure = Object.assign(
+        new Error("persistent owner read failure"),
+        {
+          code,
+        },
+      );
+      let now = Date.now();
+      let ownerReads = 0;
+      const clock = spyOn(Date, "now").mockImplementation(() => now);
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        readFile: async (...args: Parameters<typeof originalReadFile>) => {
+          if (String(args[0]) === ownerPath) {
+            ownerReads += 1;
+            now += 15_000;
+            throw failure;
+          }
+          return originalReadFile(...args);
+        },
+      }));
+      const controller = new AbortController();
+      const watchdog = setTimeout(() => controller.abort(), 1_000);
+      try {
+        await expect(
+          acquireCodexSecurityCredentialHomeLock(
+            home,
+            controller.signal,
+            securityOptions,
+          ),
+        ).rejects.toBe(failure);
+        expect(ownerReads).toBe(2);
+        expect(existsSync(ownerPath)).toBe(true);
+      } finally {
+        clearTimeout(watchdog);
+        controller.abort();
+        clock.mockRestore();
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          readFile: originalReadFile,
+        }));
+        await release();
+      }
+    },
+  );
+
+  test("cancels unreadable Windows credential-lock retries", async () => {
     if (
       runMockInSubprocess(
         import.meta.path,
-        "retries temporarily unreadable Windows credential-lock owners",
+        "cancels unreadable Windows credential-lock retries",
       )
     ) {
       return;
     }
     const root = await temporaryDirectory();
     const home = join(root, "credential-home");
-    const lock = join(home, ".codex-security-scan.lock");
-    const ownerPath = join(lock, "owner.json");
+    const ownerPath = join(home, ".codex-security-scan.lock", "owner.json");
     await mkdir(home, { mode: 0o700 });
     const securityOptions = {
       platform: "win32" as const,
       secureWindowsHome: async () => {},
     };
-    const releaseFirst = await acquireCodexSecurityCredentialHomeLock(
+    const release = await acquireCodexSecurityCredentialHomeLock(
       home,
       undefined,
       securityOptions,
     );
     const originalReadFile = fsPromises.readFile;
-    let ownerReads = 0;
-    let retryObserved!: () => void;
-    const retried = new Promise<void>((resolve) => {
-      retryObserved = resolve;
-    });
+    const controller = new AbortController();
     mock.module("node:fs/promises", () => ({
       ...fsPromises,
       readFile: async (...args: Parameters<typeof originalReadFile>) => {
         if (String(args[0]) === ownerPath) {
-          ownerReads += 1;
-          if (ownerReads === 1) {
-            throw Object.assign(new Error("temporary sharing violation"), {
-              code: "EPERM",
-            });
-          }
-          if (ownerReads === 2) retryObserved();
+          controller.abort();
+          throw Object.assign(new Error("unreadable owner"), { code: "EPERM" });
         }
         return originalReadFile(...args);
       },
     }));
-    const controller = new AbortController();
-    const waiting = acquireCodexSecurityCredentialHomeLock(
-      home,
-      controller.signal,
-      securityOptions,
-    );
-    void waiting.catch(() => undefined);
-
     try {
-      await Promise.race([
-        retried,
-        waiting.then(() => {
-          throw new Error("The held credential lock was acquired early.");
-        }),
-      ]);
-      expect(ownerReads).toBeGreaterThanOrEqual(2);
+      await expect(
+        acquireCodexSecurityCredentialHomeLock(
+          home,
+          controller.signal,
+          securityOptions,
+        ),
+      ).rejects.toMatchObject({ name: "AbortError" });
       expect(existsSync(ownerPath)).toBe(true);
-      await releaseFirst();
-      const releaseSecond = await waiting;
-      await releaseSecond();
-      expect(existsSync(lock)).toBe(false);
     } finally {
       controller.abort();
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
         readFile: originalReadFile,
       }));
-      await releaseFirst();
-      await waiting.then(
-        (release) => release(),
-        () => undefined,
-      );
+      await release();
     }
   });
 
