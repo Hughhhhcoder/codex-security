@@ -238,9 +238,7 @@ def capture_source_scopes(
             selected = safe_source_path(target, requested)
             if selected is None:
                 continue
-            canonical = existing_tree_path(
-                repository, tree, selected.relative_to(target).as_posix(), target
-            )
+            canonical = existing_tree_path(repository, tree, requested, target)
             if canonical is None or canonical[1] not in {"file", "directory"}:
                 continue
             try:

@@ -92,6 +92,15 @@ describe("bundled finding previews", () => {
     });
   });
 
+  test("does not grant source scope through a selected directory link", () => {
+    expect(sourceScopeProbe("selected_redirects")).toEqual({
+      selectedLinkOmitted: true,
+      linkedAncestorOmitted: true,
+      registrationRecipeUnchanged: true,
+      directSelectionPreserved: true,
+    });
+  }, 30_000);
+
   test("does not treat links or reparse points as filesystem alias evidence", () => {
     expect(sourceScopeProbe("alias_evidence")).toEqual({
       ordinary: true,

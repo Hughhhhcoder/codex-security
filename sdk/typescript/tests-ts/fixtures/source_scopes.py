@@ -245,6 +245,85 @@ def display_locations(repository: Path) -> dict:
     return {"displayed": 8, "excerptUsesDisplayedLocation": True}
 
 
+def selected_redirects(repository: Path) -> dict:
+    write(repository, ".gitignore", "/selected/link\n")
+    write(repository, "selected/public.py", "selected source\n")
+    write(repository, "private/secret.py", "private source\n")
+    revision = commit(repository)
+    link = repository / "selected/link"
+    if os.name == "nt":
+        subprocess.run(
+            [
+                "node",
+                "-e",
+                "require('node:fs').symlinkSync(process.argv[1], process.argv[2], 'junction')",
+                str(repository / "private"),
+                str(link),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        link.symlink_to("../private", target_is_directory=True)
+    assert git(repository, "status", "--porcelain") == ""
+
+    requested = ["selected/link"]
+    state = repository.parent / "state"
+    scan_dir = Path(tempfile.mkdtemp(prefix="cli-scan-", dir=repository.parent))
+    recipe = {
+        "config": {},
+        "mode": "standard",
+        "repository": str(repository),
+        "target": {"kind": "paths", "paths": requested},
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            str(Path(sys.argv[1]) / "workbench_db.py"),
+            "register-cli-scan",
+            "--repository",
+            str(repository),
+            "--scan-dir",
+            str(scan_dir),
+            "--recipe-json",
+            json.dumps(recipe),
+        ],
+        env=dict(os.environ, CODEX_SECURITY_STATE_DIR=str(state)),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    registered = json.loads(result.stdout)
+    assert registered["contract"]["scope"]["requiredIncludePaths"] == requested
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        record = connection.execute(
+            "SELECT * FROM scans WHERE id = ?", (registered["scanId"],)
+        ).fetchone()
+        assert record["target_snapshot_digest"] == clean_worktree_content_digest()
+        assert excerpt(record, repository, "private/secret.py", requested) is None
+        assert json.loads(record["source_scopes_json"])["scopes"] == []
+        assert json.loads(record["recipe_json"]) == recipe
+
+    descendant = ["selected/link/secret.py"]
+    record = scan(repository, revision, descendant)
+    assert json.loads(record["source_scopes_json"])["scopes"] == []
+    assert excerpt(record, repository, "private/secret.py", descendant) is None
+    direct = scan(repository, revision, ["private"])
+    assert (
+        excerpt(direct, repository, "private/secret.py", ["private"])
+        == "1  private source"
+    )
+    return {
+        "selectedLinkOmitted": True,
+        "linkedAncestorOmitted": True,
+        "registrationRecipeUnchanged": True,
+        "directSelectionPreserved": True,
+    }
+
+
 def boundaries(repository: Path) -> dict:
     for name, content in {
         "src/public.py": "public source\n",
@@ -786,6 +865,7 @@ with tempfile.TemporaryDirectory(prefix="codex-security-source-scopes-") as temp
                 "replacement_snapshot": replacement_snapshot,
                 "indexed_scopes": indexed_scopes,
                 "display_locations": display_locations,
+                "selected_redirects": selected_redirects,
                 "aliases": aliases,
                 "alias_evidence": alias_evidence,
                 "worktrees": worktrees,
