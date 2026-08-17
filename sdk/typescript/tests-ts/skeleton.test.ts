@@ -62,7 +62,7 @@ describe("TypeScript package skeleton", () => {
     }
   });
 
-  test("uses the default test timeout consistently across CI platforms", async () => {
+  test("keeps the default and Windows CI test timeouts", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
@@ -76,6 +76,9 @@ describe("TypeScript package skeleton", () => {
     );
     expect(ciWorkflow).toContain(
       "run: node sdk/typescript/scripts/run-windows-ci-tests.mjs ${{ matrix.shard }}",
+    );
+    expect(ciWorkflow).toContain(
+      "run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts",
     );
     expect(ciWorkflow).toContain(
       "name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }}",

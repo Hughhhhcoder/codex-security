@@ -31,6 +31,7 @@ import {
   ScanCostLimitExceededError,
   type ScanOptions,
   type ScanProgress,
+  type ScanSessionEvent,
   ScanInterruptedError,
 } from "../src/index.js";
 import {
@@ -2503,7 +2504,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("normalizes real worker review batches to the registered file total", async () => {
+  test("normalizes worker progress while streaming related session events", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -2512,6 +2513,8 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
     const updates: ScanProgress[] = [];
+    const sessionEvents: ScanSessionEvent[] = [];
+    const observerErrors: ScanObserverName[] = [];
     const usage = { input_tokens: 100, output_tokens: 10 };
     const client = new TestClient(
       {},
@@ -2593,6 +2596,13 @@ describe("CodexSecurity orchestration", () => {
 
     const result = await client.run(repository, {
       onProgress: (progress) => updates.push(progress),
+      onSessionEvent: (event) => {
+        sessionEvents.push(event);
+        if (sessionEvents.length === 1) {
+          throw new Error("session observer exploded");
+        }
+      },
+      onObserverError: (observer) => observerErrors.push(observer),
     });
 
     expect(result.threadId).toBe("thread-1");
@@ -2602,6 +2612,15 @@ describe("CodexSecurity orchestration", () => {
       { phase: "discovery", filesCompleted: 1_249, filesTotal: 1_258 },
       { phase: "validation", filesCompleted: 1_249, filesTotal: 1_258 },
     ]);
+    expect(sessionEvents).toHaveLength(10);
+    expect(
+      new Set(
+        sessionEvents.map(
+          ({ threadId, parentThreadId }) => `${threadId}:${parentThreadId}`,
+        ),
+      ),
+    ).toEqual(new Set(["thread-1:null", "worker-thread:thread-1"]));
+    expect(observerErrors).toEqual(["onSessionEvent"]);
     await client.close();
   });
 

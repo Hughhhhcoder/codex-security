@@ -71,7 +71,9 @@ const results = await Promise.all(
             ": " +
             paths.join(" "),
         );
-        const child = spawn("bun", ["test", "--timeout", "30000", ...paths], {
+        // Native Windows credential and document checks can exceed 30 seconds.
+        // The workflow still bounds each complete shard to ten minutes.
+        const child = spawn("bun", ["test", "--timeout", "120000", ...paths], {
           cwd: packageDirectory,
           stdio: "inherit",
           windowsHide: true,
