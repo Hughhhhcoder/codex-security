@@ -138,7 +138,10 @@ describe("progress invariants", () => {
           ).toEqual({ kind: "dispatch", ...dispatch });
         }
       }),
-      propertyOptions,
+      {
+        ...propertyOptions,
+        examples: [[0], [Number.MAX_SAFE_INTEGER]],
+      },
     );
   });
 });

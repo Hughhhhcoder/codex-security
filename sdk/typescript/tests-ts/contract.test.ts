@@ -155,33 +155,45 @@ describe("canonical scan contract", () => {
     const scanDir = await copyExample();
     const manifestPath = join(scanDir, "scan-manifest.json");
     const manifest = await readJson(manifestPath);
+    const prefixes = ["../", "/", "C:/", "artifacts/../", "artifacts\\"];
+    await mkdir(join(scanDir, "artifacts"), { recursive: true });
     await fc.assert(
       fc.asyncProperty(
         fc.stringMatching(/^[a-z]{1,16}$/u),
-        fc.constantFrom("../", "/", "C:/", "artifacts/../", "artifacts\\"),
+        fc.constantFrom(...prefixes),
         async (name, prefix) => {
-          await writeJson(manifestPath, {
-            ...manifest,
-            scan: {
-              ...manifest["scan"],
-              artifacts: [
-                ...manifest["scan"]["artifacts"],
-                {
-                  path: `${prefix}${name}`,
-                  sha256: "0".repeat(64),
-                  mediaType: "application/octet-stream",
-                },
-              ],
-            },
-          });
-          await expect(
-            loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-          ).rejects.toBeInstanceOf(ContractValidationError);
+          const bytes = Buffer.from(name);
+          const artifact = {
+            path: `artifacts/${name}`,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+            mediaType: "application/octet-stream",
+          };
+          const scan = {
+            ...manifest["scan"],
+            artifacts: [...manifest["scan"]["artifacts"], artifact],
+          };
+          await writeFile(join(scanDir, "artifacts", name), bytes);
+          await writeJson(manifestPath, { ...manifest, scan });
+          await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+
+          artifact.path = `${prefix}${name}`;
+          await writeJson(manifestPath, { ...manifest, scan });
+          const rejected = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+          await expect(rejected).rejects.toBeInstanceOf(
+            ContractValidationError,
+          );
+          await expect(rejected).rejects.toThrow(
+            /safe scan-relative POSIX path|schema validation failed \(pattern/u,
+          );
         },
       ),
       {
         ...propertyOptions,
         numRuns: Number(process.env["CODEX_SECURITY_PROPERTY_RUNS"] ?? "20"),
+        examples: prefixes.map((prefix): [string, string] => [
+          "synthetic",
+          prefix,
+        ]),
       },
     );
   });
