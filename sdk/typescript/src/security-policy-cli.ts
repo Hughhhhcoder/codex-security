@@ -1,8 +1,8 @@
 import type { CodexSecurity } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
-import { formatUsd, type ScanCost } from "./cost.js";
-import { safeErrorMessage } from "./errors.js";
+import { formatUsd } from "./cost.js";
+import { SecurityPolicyVerificationError, safeErrorMessage } from "./errors.js";
 import {
   applySecurityPolicy,
   loadSecurityPolicyDraft,
@@ -75,7 +75,6 @@ export async function runPolicyCommand(
   const started = dependencies.now();
   let security: PolicySecurity | undefined;
   let outputDir: string | undefined;
-  let cost: Readonly<ScanCost> | null = null;
   const write = (message: string): void => {
     try {
       errorOutput.write(`${message}\n`);
@@ -111,24 +110,24 @@ export async function runPolicyCommand(
           write(`Policy artifacts: ${display(directory)}`);
         },
         onStage: (stage) => write(STAGES[stage]),
-        onCost: (current) => {
-          cost = current;
-        },
         onWarning: (warning) =>
           write(`codex-security: ${display(safeErrorMessage(warning))}`),
         ...(interactive
           ? {
-              answerQuestions: async (questions: readonly string[]) => {
+              answerQuestions: async (
+                questions: readonly string[],
+                signal: AbortSignal,
+              ) => {
                 write(
                   "A few details could change this policy. Leave an answer blank to keep it unresolved.",
                 );
                 const answers: string[] = [];
                 for (const question of questions) {
-                  controller.signal.throwIfAborted();
+                  signal.throwIfAborted();
                   const answer = await prompt.input(
                     display(question),
                     undefined,
-                    controller.signal,
+                    signal,
                   );
                   if (answer.trim()) answers.push(`${question}\n${answer}`);
                 }
@@ -139,7 +138,7 @@ export async function runPolicyCommand(
       });
     }
     controller.signal.throwIfAborted();
-    cost = draft.cost ?? cost;
+    const cost = draft.cost;
     const changed = draft.content !== draft.previousContent;
     const python = changed
       ? await (dependencies.resolvePython ?? resolvePluginPython)({
@@ -155,7 +154,7 @@ export async function runPolicyCommand(
       const preview = [
         `\nPolicy target: ${display(draft.targetPath)}`,
         changed
-          ? display(diff, true).trimEnd()
+          ? display(diff, true).replace(/\n$/u, "")
           : "SECURITY.md is already up to date.",
         ...(draft.reviewNotes.length === 0
           ? []
@@ -184,6 +183,7 @@ export async function runPolicyCommand(
     if (approved) {
       await applySecurityPolicy(draft, {
         pythonPath: python,
+        pluginPath: options.config.pluginPath,
         environment: dependencies.environment,
         signal: controller.signal,
       });
@@ -215,13 +215,15 @@ export async function runPolicyCommand(
         draftPath: draft.draftPath,
         specificationPath: draft.specificationPath,
         threatModelPath: draft.threatModelPath,
+        customPlugin: draft.customPlugin,
         reviewNotes: draft.reviewNotes,
         cost,
       },
     };
   } catch (error) {
+    const written = error instanceof SecurityPolicyVerificationError;
     const signal =
-      controller.signal.reason ??
+      (written ? undefined : controller.signal.reason) ??
       (error instanceof Error && error.name === "ExitPromptError"
         ? "SIGINT"
         : undefined);
@@ -231,11 +233,28 @@ export async function runPolicyCommand(
     );
     if (outputDir !== undefined)
       write(`Saved artifacts: ${display(outputDir)}`);
-    return { exitCode };
+    return {
+      exitCode,
+      ...(written
+        ? {
+            data: {
+              status: "written_unverified",
+              targetPath: error.targetPath,
+              ...(outputDir === undefined ? {} : { outputDir }),
+            },
+          }
+        : {}),
+    };
   } finally {
     dependencies.removeSignalListener("SIGINT", interrupt);
     dependencies.removeSignalListener("SIGTERM", terminate);
-    await security?.close();
+    try {
+      await security?.close();
+    } catch (error) {
+      write(
+        `codex-security: Could not clean up the policy runtime: ${display(safeErrorMessage(error))}`,
+      );
+    }
   }
 }
 

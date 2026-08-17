@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type {
   CodexOptions,
   ThreadEvent,
@@ -10,6 +10,7 @@ import Ajv, { type AnySchema } from "ajv";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CodexSecurity, type SecurityPolicyStage } from "../src/index.js";
 import { preparedRuntime } from "./support/api-events.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
   POLICY,
   PYTHON,
@@ -35,6 +36,7 @@ async function setup(
     ) => AsyncGenerator<ThreadEvent>;
     onPrepare?: () => void;
     surface?: "cli" | "sdk";
+    config?: Record<string, unknown>;
   } = {},
 ) {
   const f = await policyFixture();
@@ -51,7 +53,7 @@ async function setup(
     "policy",
   ];
   const security = new InternalSecurity(
-    {},
+    options.config ?? {},
     {
       environment: { CODEX_SECURITY_STATE_DIR: join(f.root, "state") },
       prepareRuntime: async () => {
@@ -181,6 +183,12 @@ describe("CodexSecurity policy API", () => {
       plugins: false,
       apps: false,
     });
+    expect(f.configuration()?.config).toMatchObject({
+      default_permissions: "codex_security_policy",
+      mcp_servers: {},
+      web_search: "disabled",
+      sandbox_workspace_write: { network_access: false },
+    });
     expect(f.configuration()?.config?.["responses_api_metadata"]).toMatchObject(
       { codex_security_surface: "cli" },
     );
@@ -195,6 +203,64 @@ describe("CodexSecurity policy API", () => {
     expect(await readFile(result.targetPath, "utf8")).toContain(
       "Keep the reporting channel.",
     );
+    await f.security.close();
+  });
+
+  test("removes external tools and wider sandbox settings from selected profiles", async () => {
+    const f = await setup({
+      config: {
+        codexOverrides: {
+          profile: "selected",
+          features: { apps: true },
+          mcp_servers: { synthetic: { command: "synthetic-tool" } },
+          sandbox_workspace_write: {
+            network_access: true,
+            writable_roots: ["/synthetic"],
+          },
+          profiles: {
+            selected: {
+              model: "gpt-5.6-terra",
+              features: { apps: true, goals: true },
+              mcp_servers: { synthetic: { command: "synthetic-profile-tool" } },
+              web_search: "live",
+              sandbox_workspace_write: { network_access: true },
+            },
+          },
+        },
+      },
+    });
+    await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
+    expect(f.configuration()?.config).toMatchObject({
+      default_permissions: "codex_security_policy",
+      features: { plugins: false, apps: false },
+      mcp_servers: {},
+      web_search: "disabled",
+      sandbox_workspace_write: { network_access: false },
+      profiles: {
+        selected: { model: "gpt-5.6-terra", features: { goals: true } },
+      },
+    });
+    const serialized = JSON.stringify(f.configuration()?.config);
+    expect(serialized).not.toContain("synthetic-tool");
+    expect(serialized).not.toContain("synthetic-profile-tool");
+    expect(serialized).not.toContain("writable_roots");
+    expect(serialized).not.toContain('"plugins":true');
+    expect(serialized).not.toContain('"apps":true');
+    await f.security.close();
+  });
+
+  test("retains an explicit plugin selection without persisting its location", async () => {
+    const f = await setup({ config: { pluginPath: PLUGIN_ROOT } });
+    const draft = await f.security.generatePolicy(f.repository, {
+      outputDir: f.outputDir,
+    });
+    expect(draft.customPlugin).toBe(true);
+    expect(draft.pluginPath).toBe(resolve(PLUGIN_ROOT));
+    const manifest = JSON.parse(
+      await readFile(join(f.outputDir, "policy-draft.json"), "utf8"),
+    );
+    expect(manifest.customPlugin).toBe(true);
+    expect(manifest).not.toHaveProperty("pluginPath");
     await f.security.close();
   });
 
@@ -397,5 +463,32 @@ describe("CodexSecurity policy API", () => {
     ).rejects.toThrow("interrupted");
     expect(await readdir(f.repository)).toEqual([]);
     await f.security.close();
+  });
+
+  test("close cancels an owner-question callback even if it never settles", async () => {
+    const f = await setup();
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let promptSignal: AbortSignal | undefined;
+    const generation = f.security.generatePolicy(f.repository, {
+      outputDir: f.outputDir,
+      answerQuestions: (_questions, signal) => {
+        promptSignal = signal;
+        entered();
+        return new Promise(() => {});
+      },
+    });
+    const interrupted = generation.catch((error: unknown) => error);
+    await waiting;
+    await f.security.close();
+    expect(await interrupted).toMatchObject({
+      message: expect.stringContaining("interrupted"),
+    });
+    expect(promptSignal?.aborted).toBe(true);
+    expect(f.threads).toHaveLength(1);
+    expect(await readdir(f.repository)).toEqual([]);
+    expect(await readdir(f.outputDir)).not.toContain("policy-draft.json");
   });
 });

@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   resolveSecurityPolicyTarget,
   runSecurityPolicyStages,
   type SecurityPolicyDraft,
+  type SecurityPolicyOptions,
   type SecurityPolicyStage,
   type SecurityPolicyStageResult,
 } from "../../src/security-policy.js";
@@ -40,13 +41,12 @@ export async function policyFixture(): Promise<{
   outputDir: string;
   generate(options?: {
     path?: string;
+    pluginPath?: string;
     run?: (
       stage: SecurityPolicyStage,
       prompt: string,
     ) => Promise<SecurityPolicyStageResult>;
-    answerQuestions?: (
-      questions: readonly string[],
-    ) => Promise<string | undefined>;
+    answerQuestions?: SecurityPolicyOptions["answerQuestions"];
     signal?: AbortSignal;
   }): Promise<SecurityPolicyDraft>;
   cleanup(): Promise<void>;
@@ -67,6 +67,7 @@ export async function policyFixture(): Promise<{
         target: await resolveSecurityPolicyTarget(repository, options.path),
         outputDir,
         pluginRoot: PLUGIN_ROOT,
+        pluginPath: options.pluginPath,
         guidance: "Synthetic inherited guidance",
         revision: null,
         model: "gpt-5.6-sol",
@@ -79,4 +80,19 @@ export async function policyFixture(): Promise<{
       }),
     cleanup: async () => rm(root, { recursive: true, force: true }),
   };
+}
+
+export async function policyPlugin(
+  root: string,
+  script: string,
+): Promise<string> {
+  const plugin = await mkdtemp(join(root, "custom-plugin-"));
+  await mkdir(join(plugin, ".codex-plugin"));
+  await mkdir(join(plugin, "scripts"));
+  await writeFile(
+    join(plugin, ".codex-plugin", "plugin.json"),
+    JSON.stringify({ name: "codex-security", version: "test-policy-plugin" }),
+  );
+  await writeFile(join(plugin, "scripts", "resolve_security_md.py"), script);
+  return plugin;
 }

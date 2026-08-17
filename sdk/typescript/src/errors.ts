@@ -78,3 +78,15 @@ export class ScanCostLimitExceededError extends ScanInterruptedError {
     this.cost = cost;
   }
 }
+
+export class SecurityPolicyVerificationError extends CodexSecurityError {
+  public constructor(
+    public readonly targetPath: string,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `SECURITY.md was written to ${targetPath}, but verification failed. Review the file before retrying.`,
+      options,
+    );
+  }
+}

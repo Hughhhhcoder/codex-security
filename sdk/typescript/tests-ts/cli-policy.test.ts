@@ -1,7 +1,8 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import type {
   SecurityPolicyDraft,
@@ -9,10 +10,12 @@ import type {
 } from "../src/index.js";
 import type { PolicyPrompt } from "../src/security-policy-cli.js";
 import { capture, dependencies, FakeSignals } from "./cli-fixtures.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 import {
   POLICY,
   PYTHON,
   policyFixture,
+  policyPlugin,
   stageResult,
 } from "./support/security-policy.js";
 
@@ -168,6 +171,34 @@ describe("policy CLI", () => {
     expect(closed).toBe(true);
   });
 
+  test("does not present a partial cost as the final estimate", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["policy", "--headless", "--json"],
+        stdout.stream,
+        stderr.stream,
+        policyDependencies(f, {
+          draft,
+          onGenerate: (_repository, options) =>
+            options.onCost?.({
+              model: "synthetic-model",
+              inputTokens: 1,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              outputTokens: 1,
+              estimatedUsd: 0.5,
+            }),
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text()).cost).toBeNull();
+    expect(stderr.text()).not.toContain("$0.50");
+  });
+
   test("preserves a headless result when optional progress writes throw", async () => {
     const f = await fixture();
     const stdout = capture();
@@ -185,6 +216,26 @@ describe("policy CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text()).status).toBe("draft");
     expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("preserves a completed draft when runtime cleanup fails", async () => {
+    const f = await fixture();
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["policy", "--headless", "--json"],
+        stdout.stream,
+        stderr.stream,
+        policyDependencies(f, {
+          onClose: () => {
+            throw new Error("synthetic cleanup failure");
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text()).status).toBe("draft");
+    expect(stderr.text()).toContain("Could not clean up the policy runtime");
   });
 
   test("isolates asynchronous progress stream errors", async () => {
@@ -301,6 +352,63 @@ describe("policy CLI", () => {
     expect(await readFile(draft.draftPath, "utf8")).toBe(POLICY);
   });
 
+  test("preserves significant trailing spaces in the proposed diff", async () => {
+    const f = await fixture();
+    const draft = await f.generate({
+      run: async (stage) => ({
+        ...stageResult(stage),
+        ...(stage === "policy"
+          ? { markdown: "# Policy\n\nLast line  \n" }
+          : {}),
+      }),
+    });
+    const stderr = capture(true);
+    expect(
+      await main(
+        ["policy"],
+        capture(true).stream,
+        stderr.stream,
+        policyDependencies(f, {
+          draft,
+          prompt: prompt({
+            isInteractive: () => true,
+            confirm: async () => false,
+          }),
+        }),
+      ),
+    ).toBe(0);
+    expect(stderr.text()).toContain("+Last line  \n");
+  });
+
+  test("uses the selected plugin when approving a generated policy", async () => {
+    const f = await fixture();
+    const log = join(f.root, "resolver.log");
+    const pluginPath = await policyPlugin(
+      f.root,
+      [
+        "import os, pathlib",
+        "with pathlib.Path(os.environ['POLICY_TEST_LOG']).open('a') as output: output.write('used\\n')",
+        "print('custom guidance')",
+      ].join("\n"),
+    );
+    const draft = await f.generate({ pluginPath });
+    const deps = policyDependencies(f, {
+      draft,
+      prompt: prompt({ isInteractive: () => true, confirm: async () => true }),
+    });
+    deps.environment = { ...deps.environment, POLICY_TEST_LOG: log };
+    expect(
+      await main(
+        ["policy", "--plugin-path", pluginPath],
+        capture(true).stream,
+        capture(true).stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(await readFile(log, "utf8")).toBe("used\nused\n");
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+  });
+
   test("applies a reviewed, edited saved draft without initializing Codex", async () => {
     const f = await fixture();
     await mkdir(join(f.repository, "component"));
@@ -333,6 +441,68 @@ describe("policy CLI", () => {
     expect(await readFile(draft.targetPath, "utf8")).toBe(edited);
   });
 
+  test("reports a written policy when verification fails after cancellation", async () => {
+    const name =
+      "reports a written policy when verification fails after cancellation";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const pluginPath = await policyPlugin(
+      f.root,
+      [
+        "import pathlib, sys",
+        "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+        "if (root / 'SECURITY.md').exists(): raise SystemExit('synthetic verification failure')",
+        "print('preflight passed')",
+      ].join("\n"),
+    );
+    const draft = await f.generate({ pluginPath });
+    const signals = new FakeSignals();
+    const deps = policyDependencies(f, { signals });
+    deps.createPolicySecurity = () => {
+      throw new Error("Must not initialize Codex for --apply");
+    };
+    const originalLink = fsPromises.link;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      link: async (source: string, destination: string) => {
+        await originalLink(source, destination);
+        if (destination === draft.targetPath) signals.emit("SIGINT");
+      },
+    }));
+    try {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          [
+            "policy",
+            "--apply",
+            f.outputDir,
+            "--plugin-path",
+            pluginPath,
+            "--write",
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        status: "written_unverified",
+        targetPath: draft.targetPath,
+      });
+      expect(stderr.text()).toContain("was written");
+      expect(stderr.text()).not.toContain("canceled by Ctrl-C");
+      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+      }));
+    }
+  });
+
   test("rejects writing an unseen model-generated policy", async () => {
     const f = await fixture();
     const stderr = capture();
@@ -363,7 +533,6 @@ describe("policy CLI", () => {
       ["--model", "gpt-5.6-terra"],
       ["--auth", "chatgpt"],
       ["--provider", "fireworks"],
-      ["--plugin-path", "/synthetic/plugin"],
       ["--output-dir", f.outputDir],
     ]) {
       const stderr = capture();

@@ -1966,7 +1966,6 @@ export async function main(
               options.effort === undefined &&
               options.provider === "openai" &&
               options.maxCost === undefined &&
-              options.pluginPath === undefined &&
               options.codex.length === 0),
           {
             message: "--apply cannot be combined with generation options.",

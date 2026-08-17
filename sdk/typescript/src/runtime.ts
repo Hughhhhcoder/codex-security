@@ -22,7 +22,16 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -33,8 +42,10 @@ import { parse } from "smol-toml";
 import {
   CodexSecurityError,
   OutputDirectoryError,
+  OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
+  type ProtectedScanPathKind,
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -1290,6 +1301,31 @@ export async function preparePersistentPolicyRoot(
   );
 }
 
+export function requireOutputOutsideRepository(
+  repository: string,
+  outputDirectory: string,
+  pathKind: ProtectedScanPathKind = "output",
+): void {
+  const outputRelative = relative(repository, outputDirectory);
+  const repositoryRelative = relative(outputDirectory, repository);
+  if (
+    outputRelative === "" ||
+    (outputRelative !== ".." &&
+      !outputRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(outputRelative)) ||
+    (pathKind === "output" &&
+      repositoryRelative !== ".." &&
+      !repositoryRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(repositoryRelative))
+  ) {
+    throw new OutputInsideProtectedRootError(
+      outputDirectory,
+      repository,
+      pathKind,
+    );
+  }
+}
+
 async function preparePersistentOutputRoot(
   stateDirectory: string,
   category: "scans" | "policies",
@@ -1722,18 +1758,7 @@ export async function importAmbientAuth(
     await copyFile(source, temporary, constants.COPYFILE_EXCL);
     await chmod(temporary, 0o600);
     try {
-      try {
-        await link(temporary, destination);
-      } catch (error) {
-        if (
-          !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"].includes(
-            nodeErrorCode(error) ?? "",
-          )
-        ) {
-          throw error;
-        }
-        await copyFile(temporary, destination, constants.COPYFILE_EXCL);
-      }
+      await installFileNoClobber(temporary, destination);
     } catch (error) {
       if (
         nodeErrorCode(error) === "EEXIST" &&
@@ -1754,6 +1779,24 @@ export async function importAmbientAuth(
     );
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+export async function installFileNoClobber(
+  source: string,
+  destination: string,
+): Promise<void> {
+  try {
+    await link(source, destination);
+  } catch (error) {
+    if (
+      !["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"].includes(
+        nodeErrorCode(error) ?? "",
+      )
+    ) {
+      throw error;
+    }
+    await copyFile(source, destination, constants.COPYFILE_EXCL);
   }
 }
 

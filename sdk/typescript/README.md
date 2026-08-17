@@ -202,7 +202,8 @@ Trusted Access for Cyber. To apply or check your access, visit
 `policy` generates or updates the `SECURITY.md` that future scans read. It uses
 the same Codex runtime, authentication, model settings, and bundled security
 guidance as scans, but does not run vulnerability discovery or create a scan
-record.
+record. Generation can read the source, but can write only in its private
+artifact workspace. Network access, web search, apps, and MCP tools are disabled.
 
 ```bash
 npx @openai/codex-security policy .
@@ -245,6 +246,13 @@ noninteractive write always selects an existing draft. The repository and
 component must match the draft, and the original `SECURITY.md` must be unchanged.
 The command writes the reviewed bytes and verifies that the policy resolver can
 read them. It does not stage, commit, or publish anything.
+
+Save edited drafts as UTF-8. If generation used a custom `--plugin-path`, pass
+that option again when applying a saved draft; the saved metadata never selects
+executable code. Plugin directories and ZIP files are both supported. Once a
+write commits, the command finishes verification even if cancellation arrives.
+If verification fails, it exits with an error and reports `written_unverified`
+in JSON output. Review the written file before retrying.
 
 The artifact directory contains:
 
@@ -299,9 +307,13 @@ Use `security.preflightPolicy()` to validate local inputs without starting Codex
 `generatePolicy()` never edits the repository. It accepts `auth`, `path`,
 `knowledgeBasePaths`, `outputDir`, `maxCostUsd`, and `signal`, plus progress and
 cost callbacks. An optional `answerQuestions` callback supplies owner context;
-without one, questions remain unresolved. Use
+it receives the questions and a cancellation signal. Without one, questions
+remain unresolved. Use
 `loadSecurityPolicyDraft(repository, artifactDirectory, { path })` to load an
-edited saved draft before reviewing and applying it.
+edited saved draft before reviewing and applying it. For a saved custom-plugin
+draft, pass `{ pluginPath }` to `applySecurityPolicy()`. A
+`SecurityPolicyVerificationError` means the file was written but verification
+failed; its `targetPath` identifies the file to inspect.
 
 ## CLI
 

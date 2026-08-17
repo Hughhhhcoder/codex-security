@@ -333,63 +333,79 @@ describe("Codex configuration", () => {
     });
   });
 
-  test("denies writes outside the scan workspace and state directory", async () => {
-    const root = await temporaryDirectory();
-    const codexHome = join(root, "codex-home");
-    const workspace = join(root, "workspace");
-    const stateDirectory = join(root, "state");
-    await Promise.all(
-      [codexHome, workspace, stateDirectory].map((path) => mkdir(path)),
-    );
-    await writeCodexConfig(
-      join(codexHome, "config.toml"),
-      scanRuntimeCodexConfig(
-        await mergedCodexConfig({}),
-        stateDirectory,
-        codexHome,
-      ),
-    );
-    const node = Bun.which("node");
-    expect(node).not.toBeNull();
-    const attemptWrite = (path: string) =>
-      runPinnedCodex(codexHome, [
-        "sandbox",
-        "--config",
-        "permissions.codex_security_scan.network.enabled=true",
-        "--permission-profile",
-        "codex_security_scan",
-        "--cd",
-        workspace,
-        node!,
-        "-e",
-        "require('node:fs').writeFileSync(process.argv[1], 'probe')",
-        path,
-      ]);
-
-    const allowed = join(workspace, "inside.txt");
-    const permitted = attemptWrite(allowed);
-    const outside = join(root, "outside.txt");
-    expect(attemptWrite(outside).exitCode).not.toBe(0);
-    await expect(stat(outside)).rejects.toMatchObject({ code: "ENOENT" });
-    if (permitted.exitCode !== 0) {
-      const details = new TextDecoder().decode(permitted.stderr);
-      if (
-        process.platform === "linux" &&
-        /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
-          details,
-        )
-      ) {
-        expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
-          0,
-        );
-        return;
-      }
-      throw new Error(
-        `The pinned Codex CLI rejected an allowed scan write: ${details}`,
+  for (const [purpose, profile, stateWritable] of [
+    ["scan", "codex_security_scan", true],
+    ["policy", "codex_security_policy", false],
+  ] as const) {
+    test(`limits ${purpose} writes to its approved directories`, async () => {
+      const root = await temporaryDirectory();
+      const codexHome = join(root, "codex-home");
+      const workspace = join(root, "workspace");
+      const stateDirectory = join(root, "state");
+      await Promise.all(
+        [codexHome, workspace, stateDirectory].map((path) => mkdir(path)),
       );
-    }
-    expect(await readFile(allowed, "utf8")).toBe("probe");
-  });
+      await writeCodexConfig(
+        join(codexHome, "config.toml"),
+        scanRuntimeCodexConfig(
+          await mergedCodexConfig({}),
+          stateDirectory,
+          codexHome,
+        ),
+      );
+      const node = Bun.which("node");
+      expect(node).not.toBeNull();
+      const attemptWrite = (path: string) =>
+        runPinnedCodex(codexHome, [
+          "sandbox",
+          "--config",
+          `permissions.${profile}.network.enabled=true`,
+          "--permission-profile",
+          profile,
+          "--cd",
+          workspace,
+          node!,
+          "-e",
+          "require('node:fs').writeFileSync(process.argv[1], 'probe')",
+          path,
+        ]);
+
+      const allowed = join(workspace, "inside.txt");
+      const permitted = attemptWrite(allowed);
+      const outside = join(root, "outside.txt");
+      expect(attemptWrite(outside).exitCode).not.toBe(0);
+      await expect(stat(outside)).rejects.toMatchObject({ code: "ENOENT" });
+      if (permitted.exitCode !== 0) {
+        const details = new TextDecoder().decode(permitted.stderr);
+        if (
+          process.platform === "linux" &&
+          /bwrap: (?:setting up uid map: Permission denied|loopback: Failed RTM_NEWADDR: Operation not permitted)/u.test(
+            details,
+          )
+        ) {
+          expect(runPinnedCodex(codexHome, ["features", "list"]).exitCode).toBe(
+            0,
+          );
+          return;
+        }
+        throw new Error(
+          `The pinned Codex CLI rejected an allowed ${purpose} write: ${details}`,
+        );
+      }
+      expect(await readFile(allowed, "utf8")).toBe("probe");
+      const stateFile = join(stateDirectory, `${purpose}.txt`);
+      expect(attemptWrite(stateFile).exitCode === 0).toBe(stateWritable);
+      if (stateWritable)
+        expect(await readFile(stateFile, "utf8")).toBe("probe");
+      else
+        await expect(stat(stateFile)).rejects.toMatchObject({ code: "ENOENT" });
+      const credentialFile = join(codexHome, `${purpose}.txt`);
+      expect(attemptWrite(credentialFile).exitCode).not.toBe(0);
+      await expect(stat(credentialFile)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  }
 
   test("writes Windows sandbox settings accepted by the pinned Codex CLI", async () => {
     const root = await temporaryDirectory();

@@ -12,7 +12,15 @@ import {
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -54,8 +62,6 @@ import {
   CodexSecurityError,
   IncompleteScanError,
   OutputDirectoryError,
-  OutputInsideProtectedRootError,
-  type ProtectedScanPathKind,
   errorMessage,
   safeErrorMessage,
   ScanCostLimitExceededError,
@@ -104,6 +110,7 @@ import {
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   createIsolatedHome,
+  expandHome,
   importAmbientAuth,
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
@@ -113,6 +120,7 @@ import {
   preparePersistentScanRoot,
   preparePersistentPolicyRoot,
   requireModelSafeOutputDir,
+  requireOutputOutsideRepository,
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginPython,
@@ -337,6 +345,7 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 };
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+const POLICY_PERMISSION_PROFILE = "codex_security_policy";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
   "https://openai.com/form/enterprise-trusted-access-for-cyber/";
@@ -591,9 +600,6 @@ export class CodexSecurity {
         session.scanEnvironment,
         signal,
       );
-      const features = isRecord(session.sessionConfig["features"])
-        ? session.sessionConfig["features"]
-        : {};
       const { codex } = this.#createSessionCodex(
         session,
         {
@@ -607,10 +613,7 @@ export class CodexSecurity {
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
         options.auth,
-        {
-          approval_policy: "never",
-          features: { ...features, plugins: false, apps: false },
-        },
+        policyCodexOverrides(session.sessionConfig),
       );
       const reportCost = (current: Readonly<ScanCost>): void => {
         const total = addScanCosts(accumulatedCost, current);
@@ -732,6 +735,9 @@ export class CodexSecurity {
         outputDir,
         guidance,
         pluginRoot: runtime.plugin.pluginRoot,
+        ...(this.config.pluginPath === undefined
+          ? {}
+          : { pluginPath: resolve(expandHome(this.config.pluginPath)) }),
         ...(knowledgeBase === null
           ? {}
           : { knowledgeBasePath: knowledgeBase.path }),
@@ -1903,7 +1909,10 @@ export class CodexSecurity {
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
         approvals_reviewer: "auto_review",
-        default_permissions: SCAN_PERMISSION_PROFILE,
+        default_permissions:
+          overrides["default_permissions"] === POLICY_PERMISSION_PROFILE
+            ? POLICY_PERMISSION_PROFILE
+            : SCAN_PERMISSION_PROFILE,
         allow_login_shell: false,
         responses_api_metadata: {
           ...configuredResponsesMetadata,
@@ -3357,7 +3366,46 @@ export function scanRuntimeCodexConfig(
             : { [protectedCredentialHome]: "read" }),
         },
       },
+      [POLICY_PERMISSION_PROFILE]: {
+        filesystem: {
+          ":root": "read",
+          ":workspace_roots": "write",
+          ...(protectedCredentialHome === undefined
+            ? {}
+            : { [protectedCredentialHome]: "read" }),
+        },
+        network: { enabled: false },
+      },
     },
+  };
+}
+
+function policyCodexOverrides(config: JsonObject): JsonObject {
+  const features = isRecord(config["features"]) ? config["features"] : {};
+  const profiles = isRecord(config["profiles"])
+    ? structuredClone(config["profiles"])
+    : undefined;
+  if (profiles !== undefined) {
+    for (const profile of Object.values(profiles)) {
+      if (!isRecord(profile)) continue;
+      delete profile["mcp_servers"];
+      delete profile["web_search"];
+      delete profile["sandbox_workspace_write"];
+      const profileFeatures = profile["features"];
+      if (isRecord(profileFeatures)) {
+        delete profileFeatures["plugins"];
+        delete profileFeatures["apps"];
+      }
+    }
+  }
+  return {
+    approval_policy: "never",
+    default_permissions: POLICY_PERMISSION_PROFILE,
+    features: { ...features, plugins: false, apps: false },
+    mcp_servers: {},
+    web_search: "disabled",
+    sandbox_workspace_write: { network_access: false },
+    ...(profiles === undefined ? {} : { profiles }),
   };
 }
 
@@ -3534,31 +3582,6 @@ async function pluginSupportsIsolatedDeepScanConfig(
     Array.isArray(environment) &&
     environment.includes(DEEP_SCAN_CONFIG_PATH_ENVIRONMENT)
   );
-}
-
-function requireOutputOutsideRepository(
-  repository: string,
-  outputDirectory: string,
-  pathKind: ProtectedScanPathKind = "output",
-): void {
-  const outputRelative = relative(repository, outputDirectory);
-  const repositoryRelative = relative(outputDirectory, repository);
-  if (
-    outputRelative === "" ||
-    (outputRelative !== ".." &&
-      !outputRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(outputRelative)) ||
-    (pathKind === "output" &&
-      repositoryRelative !== ".." &&
-      !repositoryRelative.startsWith(`..${sep}`) &&
-      !isAbsolute(repositoryRelative))
-  ) {
-    throw new OutputInsideProtectedRootError(
-      outputDirectory,
-      repository,
-      pathKind,
-    );
-  }
 }
 
 function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {

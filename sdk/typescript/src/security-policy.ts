@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
-  link,
+  chmod,
   lstat,
   open,
   readFile,
@@ -12,19 +12,30 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "incur";
 import type { ScanAuthentication, ScanOptions } from "./api.js";
 import type { ScanCost } from "./cost.js";
 import { requireScanFile } from "./contract.js";
-import { CodexSecurityError, InvalidTargetError } from "./errors.js";
+import {
+  CodexSecurityError,
+  InvalidTargetError,
+  SecurityPolicyVerificationError,
+} from "./errors.js";
 import {
   bundledPluginRoot,
+  cleanupSdkDirectory,
+  createIsolatedHome,
+  installFileNoClobber,
+  requireOutputOutsideRepository,
+  resolvePluginPath,
   resolvePluginPython,
   type ProcessEnvironment,
 } from "./runtime.js";
 import {
+  abortable,
   enclosingGitWorktreeRoot,
   normalizeRepository,
   normalizeTarget,
@@ -50,6 +61,7 @@ export interface SecurityPolicyOptions
   onStage?: (stage: SecurityPolicyStage) => void;
   answerQuestions?: (
     questions: readonly string[],
+    signal: AbortSignal,
   ) => Promise<string | undefined>;
 }
 
@@ -91,6 +103,7 @@ const manifestSchema = z.object({
   model: z.string(),
   reasoningEffort: z.string(),
   pluginVersion: z.string(),
+  customPlugin: z.boolean().default(false),
   reviewNotes: z.array(z.string()),
 });
 
@@ -103,6 +116,9 @@ export interface SecurityPolicyDraft extends SecurityPolicyTarget {
   threatModelPath: string;
   content: string;
   previousContent: string | null;
+  customPlugin: boolean;
+  // Only an explicit in-memory selection can choose executable plugin code.
+  pluginPath?: string;
   reviewNotes: string[];
   cost: Readonly<ScanCost> | null;
 }
@@ -158,7 +174,7 @@ export async function readSecurityPolicy(path: string): Promise<string | null> {
         `Security policy must be a regular file: ${path}`,
       );
     }
-    return await file.readFile("utf8");
+    return decodePolicyText(await file.readFile(), path);
   } finally {
     await file.close();
   }
@@ -192,6 +208,7 @@ export async function runSecurityPolicyStages(options: {
   target: SecurityPolicyTarget;
   outputDir: string;
   pluginRoot: string;
+  pluginPath?: string;
   guidance: string;
   knowledgeBasePath?: string;
   revision: string | null;
@@ -269,9 +286,12 @@ export async function runSecurityPolicyStages(options: {
     specificationPath,
   );
   const answers =
-    architecture.questions.length === 0
+    architecture.questions.length === 0 || options.answerQuestions === undefined
       ? undefined
-      : await options.answerQuestions?.(architecture.questions);
+      : await abortable(
+          () => options.answerQuestions!(architecture.questions, signal),
+          signal,
+        );
   const ownerContext = [
     `Architecture questions and review notes (JSON data): ${JSON.stringify({ questions: architecture.questions, reviewNotes: architecture.reviewNotes })}`,
     answers?.trim()
@@ -319,6 +339,7 @@ export async function runSecurityPolicyStages(options: {
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     pluginVersion: options.pluginVersion,
+    customPlugin: options.pluginPath !== undefined,
     reviewNotes,
   };
   await writeFile(
@@ -338,6 +359,10 @@ export async function runSecurityPolicyStages(options: {
     threatModelPath,
     content: policy.markdown,
     previousContent,
+    customPlugin: manifest.customPlugin,
+    ...(options.pluginPath === undefined
+      ? {}
+      : { pluginPath: options.pluginPath }),
     reviewNotes,
     cost: options.cost(),
   };
@@ -367,7 +392,8 @@ export async function loadSecurityPolicyDraft(
       "The saved policy draft belongs to a different repository or component. Select its original target explicitly.",
     );
   }
-  const original = await readFile(await file(ORIGINAL_NAME), "utf8");
+  const originalPath = await file(ORIGINAL_NAME);
+  const original = decodePolicyText(await readFile(originalPath), originalPath);
   if (
     manifest.previousPolicySha256 === null
       ? original !== ""
@@ -378,7 +404,7 @@ export async function loadSecurityPolicyDraft(
     );
   }
   const draftPath = await file("SECURITY.md");
-  const content = await readFile(draftPath, "utf8");
+  const content = decodePolicyText(await readFile(draftPath), draftPath);
   validatePolicyContent(content);
   return {
     ...target,
@@ -388,6 +414,7 @@ export async function loadSecurityPolicyDraft(
     threatModelPath: await file("THREAT_MODEL.md"),
     content,
     previousContent: manifest.previousPolicySha256 === null ? null : original,
+    customPlugin: manifest.customPlugin,
     reviewNotes: manifest.reviewNotes,
     cost: null,
   };
@@ -408,8 +435,8 @@ export async function securityPolicyDiff(
     .join("/");
   const script = [
     "import difflib, json, sys",
-    "before, after, label, existed = json.loads(sys.stdin.buffer.read().decode('utf-8'))",
-    "for line in difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True), fromfile='a/' + label if existed else '/dev/null', tofile='b/' + label):",
+    "before, after, fromfile, tofile = json.loads(sys.stdin.buffer.read().decode('utf-8'))",
+    "for line in difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True), fromfile=fromfile, tofile=tofile):",
     "    sys.stdout.buffer.write(line.encode('utf-8'))",
     "    if not line.endswith('\\n'): sys.stdout.buffer.write(b'\\n\\\\ No newline at end of file\\n')",
   ].join("\n");
@@ -428,8 +455,8 @@ export async function securityPolicyDiff(
       JSON.stringify([
         draft.previousContent ?? "",
         draft.content,
-        label,
-        draft.previousContent !== null,
+        draft.previousContent === null ? "/dev/null" : diffLabel(`a/${label}`),
+        diffLabel(`b/${label}`),
       ]),
     );
   });
@@ -439,7 +466,7 @@ export async function applySecurityPolicy(
   draft: SecurityPolicyDraft,
   options: {
     pythonPath?: string;
-    pluginRoot?: string;
+    pluginPath?: string;
     environment?: ProcessEnvironment;
     signal?: AbortSignal;
   } = {},
@@ -447,50 +474,39 @@ export async function applySecurityPolicy(
   validatePolicyContent(draft.content);
   const target = await unchangedPolicyTarget(draft, options.signal);
   if (draft.previousContent === draft.content) return target.targetPath;
+  const pluginPath = options.pluginPath ?? draft.pluginPath;
+  if (draft.customPlugin && pluginPath === undefined) {
+    throw new CodexSecurityError(
+      "This draft used a custom plugin. Select it explicitly with --plugin-path or the SDK's pluginPath option before applying.",
+    );
+  }
   const python = await resolvePluginPython({
     configuredPath: options.pythonPath,
     environment: options.environment,
     protectedRoot: target.repository,
     signal: options.signal,
   });
-  const pluginRoot = options.pluginRoot ?? (await bundledPluginRoot());
-  options.signal?.throwIfAborted();
-  const mode =
-    draft.previousContent === null
-      ? 0o644
-      : (await stat(target.targetPath)).mode & 0o777;
-  const temporary = join(
-    dirname(target.targetPath),
-    `.SECURITY.md.${randomUUID()}.tmp`,
-  );
+  let pluginWorkspace: string | undefined;
   try {
-    await writeFile(temporary, draft.content, {
-      flag: "wx",
-      mode,
-      signal: options.signal,
-    });
-    if (
-      (await realpath(dirname(target.targetPath))) !==
-        dirname(target.targetPath) ||
-      (await readSecurityPolicy(target.targetPath)) !== draft.previousContent
-    ) {
-      throw new CodexSecurityError(
-        "The security-policy destination changed. Review a new draft before writing.",
+    let pluginRoot: string;
+    if (pluginPath === undefined) {
+      pluginRoot = await bundledPluginRoot();
+    } else {
+      const temporaryRoot = await realpath(tmpdir());
+      requireOutputOutsideRepository(
+        target.repository,
+        temporaryRoot,
+        "temporary",
+      );
+      pluginWorkspace = await createIsolatedHome(temporaryRoot, (path) =>
+        requireOutputOutsideRepository(target.repository, path, "runtime"),
+      );
+      pluginRoot = await resolvePluginPath(
+        pluginPath,
+        pluginWorkspace,
+        options.signal,
       );
     }
-    options.signal?.throwIfAborted();
-    if (draft.previousContent === null)
-      await link(temporary, target.targetPath);
-    else await rename(temporary, target.targetPath);
-  } finally {
-    await rm(temporary, { force: true });
-  }
-  if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
-    throw new CodexSecurityError(
-      "SECURITY.md was written, but its contents could not be verified.",
-    );
-  }
-  try {
     await resolveSecurityPolicyGuidance(
       target,
       python,
@@ -498,13 +514,66 @@ export async function applySecurityPolicy(
       options.environment,
       options.signal,
     );
-  } catch (error) {
-    throw new CodexSecurityError(
-      "SECURITY.md was written, but the policy resolver could not verify it.",
-      { cause: error },
+    options.signal?.throwIfAborted();
+    const mode =
+      draft.previousContent === null
+        ? 0o644
+        : (await stat(target.targetPath)).mode & 0o777;
+    const temporary = join(
+      dirname(target.targetPath),
+      `.SECURITY.md.${randomUUID()}.tmp`,
     );
+    let written = false;
+    try {
+      try {
+        await writeFile(temporary, draft.content, {
+          flag: "wx",
+          mode,
+          signal: options.signal,
+        });
+        if (draft.previousContent !== null) await chmod(temporary, mode);
+        if (
+          (await realpath(dirname(target.targetPath))) !==
+            dirname(target.targetPath) ||
+          (await readSecurityPolicy(target.targetPath)) !==
+            draft.previousContent
+        ) {
+          throw new CodexSecurityError(
+            "The security-policy destination changed. Review a new draft before writing.",
+          );
+        }
+        options.signal?.throwIfAborted();
+        if (draft.previousContent === null)
+          await installFileNoClobber(temporary, target.targetPath);
+        else await rename(temporary, target.targetPath);
+        written = true;
+      } finally {
+        await rm(temporary, { force: true });
+      }
+      // Once committed, finish verification even if cancellation arrives.
+      if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
+        throw new CodexSecurityError(
+          "The written policy contents do not match the reviewed draft.",
+        );
+      }
+      await resolveSecurityPolicyGuidance(
+        target,
+        python,
+        pluginRoot,
+        options.environment,
+      );
+    } catch (error) {
+      if (written)
+        throw new SecurityPolicyVerificationError(target.targetPath, {
+          cause: error,
+        });
+      throw error;
+    }
+    return target.targetPath;
+  } finally {
+    if (pluginWorkspace !== undefined)
+      await cleanupSdkDirectory(pluginWorkspace).catch(() => undefined);
   }
-  return target.targetPath;
 }
 
 async function unchangedPolicyTarget(
@@ -530,7 +599,15 @@ async function unchangedPolicyTarget(
 }
 
 function validatePolicyContent(content: string): void {
-  if (!/^#\s+\S/mu.test(content) || content.trim().length === 0) {
+  if (!content.isWellFormed()) {
+    throw new CodexSecurityError(
+      "The security policy must contain valid Unicode text.",
+    );
+  }
+  if (
+    !/^#\s+\S/mu.test(content.replace(/^\uFEFF/u, "")) ||
+    content.trim().length === 0
+  ) {
     throw new CodexSecurityError(
       "The generated security policy must be a nonempty Markdown document.",
     );
@@ -540,6 +617,29 @@ function validatePolicyContent(content: string): void {
       "SECURITY.md exceeds the policy resolver's 1 MiB limit.",
     );
   }
+}
+
+function decodePolicyText(bytes: Uint8Array, path: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
+  } catch (error) {
+    throw new CodexSecurityError(
+      `Security policy must use valid UTF-8: ${path}`,
+      { cause: error },
+    );
+  }
+}
+
+function diffLabel(path: string): string {
+  if (!/[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069"\\]/u.test(path))
+    return path;
+  return JSON.stringify(path).replaceAll(
+    /[\u007f-\u009f\u2028-\u202e\u2066-\u2069]/gu,
+    (character) =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
 }
 
 function digest(value: string): string {

@@ -458,6 +458,7 @@ try {
       model: "synthetic-model",
       reasoningEffort: "high",
       pluginVersion: packageManifest.version,
+      customPlugin: false,
       reviewNotes: [],
     }),
   })) {

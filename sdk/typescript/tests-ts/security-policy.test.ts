@@ -11,8 +11,11 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import { strToU8, zipSync } from "fflate";
+import { SecurityPolicyVerificationError } from "../src/errors.js";
 import {
   applySecurityPolicy,
   loadSecurityPolicyDraft,
@@ -23,10 +26,12 @@ import {
 } from "../src/security-policy.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { preparePersistentPolicyRoot } from "../src/runtime.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 import {
   POLICY,
   PYTHON,
   policyFixture,
+  policyPlugin,
   stageResult,
 } from "./support/security-policy.js";
 
@@ -208,6 +213,7 @@ describe("security policy generation", () => {
   test("rejects empty or oversized policy documents", async () => {
     for (const markdown of [
       "not a Markdown policy",
+      "# Policy\n\ud800",
       `# Policy\n${"x".repeat(1024 * 1024)}`,
     ]) {
       const f = await fixture();
@@ -256,6 +262,248 @@ describe("security policy review and application", () => {
       expect((await stat(draft.targetPath)).mode & 0o777).toBe(0o640);
   });
 
+  test("rejects malformed UTF-8 in existing policies and saved drafts", async () => {
+    const f = await fixture();
+    const malformed = Buffer.concat([
+      Buffer.from("# Policy\n"),
+      Buffer.from([0xe9]),
+    ]);
+    const draft = await f.generate();
+    await writeFile(draft.draftPath, malformed);
+    await expect(
+      loadSecurityPolicyDraft(f.repository, f.outputDir),
+    ).rejects.toThrow("valid UTF-8");
+    expect(await readdir(f.repository)).toEqual([]);
+    await writeFile(draft.targetPath, malformed);
+    await expect(resolveSecurityPolicyTarget(f.repository)).rejects.toThrow(
+      "valid UTF-8",
+    );
+    expect(await readFile(draft.targetPath)).toEqual(malformed);
+  });
+
+  test("preserves a valid UTF-8 byte-order mark in a reviewed draft", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const bytes = Buffer.from(
+      "\uFEFF# Security Policy\r\n\r\nReviewed text.\r\n",
+    );
+    await writeFile(draft.draftPath, bytes);
+    const loaded = await loadSecurityPolicyDraft(f.repository, f.outputDir);
+    await applySecurityPolicy(loaded);
+    expect(await readFile(draft.targetPath)).toEqual(bytes);
+  });
+
+  test("uses the selected plugin and requires an explicit selection for saved custom drafts", async () => {
+    const f = await fixture();
+    const log = join(f.root, "resolver.log");
+    const pluginPath = await policyPlugin(
+      f.root,
+      [
+        "import os, pathlib",
+        "with pathlib.Path(os.environ['POLICY_TEST_LOG']).open('a') as output:",
+        "    output.write('custom resolver\\n')",
+        "print('custom guidance')",
+      ].join("\n"),
+    );
+    const draft = await f.generate({ pluginPath });
+    const manifestPath = join(f.outputDir, "policy-draft.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    expect(manifest.customPlugin).toBe(true);
+    expect(manifest).not.toHaveProperty("pluginPath");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({ ...manifest, pluginPath: "/unapproved/plugin" }),
+    );
+    const saved = await loadSecurityPolicyDraft(f.repository, f.outputDir);
+    expect(saved.pluginPath).toBeUndefined();
+    await expect(applySecurityPolicy(saved)).rejects.toThrow(
+      "Select it explicitly",
+    );
+    expect(await readdir(f.repository)).toEqual([]);
+    await applySecurityPolicy(draft, {
+      pythonPath: PYTHON,
+      environment: { ...process.env, POLICY_TEST_LOG: log },
+    });
+    expect(await readFile(log, "utf8")).toBe(
+      "custom resolver\ncustom resolver\n",
+    );
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+  });
+
+  test("applies a saved draft with an explicitly selected plugin ZIP", async () => {
+    const f = await fixture();
+    const log = join(f.root, "resolver-paths.log");
+    const archive = join(f.root, "policy-plugin.zip");
+    const script = [
+      "import os, pathlib",
+      "with pathlib.Path(os.environ['POLICY_TEST_LOG']).open('a') as output:",
+      "    output.write(str(pathlib.Path(__file__).resolve()) + '\\n')",
+      "print('custom guidance')",
+    ].join("\n");
+    await writeFile(
+      archive,
+      zipSync({
+        ".codex-plugin/plugin.json": strToU8(
+          JSON.stringify({
+            name: "codex-security",
+            version: "test-policy-plugin",
+          }),
+        ),
+        "scripts/resolve_security_md.py": strToU8(script),
+      }),
+    );
+    await f.generate({ pluginPath: archive });
+    const saved = await loadSecurityPolicyDraft(f.repository, f.outputDir);
+    await applySecurityPolicy(saved, {
+      pluginPath: archive,
+      pythonPath: PYTHON,
+      environment: { ...process.env, POLICY_TEST_LOG: log },
+    });
+    expect(await readFile(saved.targetPath, "utf8")).toBe(POLICY);
+    const resolverPaths = (await readFile(log, "utf8")).trim().split("\n");
+    expect(resolverPaths).toHaveLength(2);
+    for (const path of resolverPaths)
+      await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("checks the selected resolver before changing repository files", async () => {
+    const f = await fixture();
+    const pluginPath = await policyPlugin(
+      f.root,
+      "raise SystemExit('synthetic preflight failure')\n",
+    );
+    const draft = await f.generate({ pluginPath });
+    await expect(applySecurityPolicy(draft)).rejects.toThrow(
+      "synthetic preflight failure",
+    );
+    expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("reports a committed policy when post-write verification fails", async () => {
+    const f = await fixture();
+    const pluginPath = await policyPlugin(
+      f.root,
+      [
+        "import pathlib, sys",
+        "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+        "if (root / 'SECURITY.md').exists(): raise SystemExit('synthetic verification failure')",
+        "print('preflight passed')",
+      ].join("\n"),
+    );
+    const draft = await f.generate({ pluginPath });
+    const error = await applySecurityPolicy(draft).catch(
+      (value: unknown) => value,
+    );
+    expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
+    expect(error).toMatchObject({ targetPath: draft.targetPath });
+    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+  });
+
+  test("creates policies without hard-link support and never clobbers a racing file", async () => {
+    const name =
+      "creates policies without hard-link support and never clobbers a racing file";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const originalLink = fsPromises.link;
+    let collision = false;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      link: async (_source: string, destination: string) => {
+        if (collision) await writeFile(destination, "# Concurrent policy\n");
+        throw Object.assign(new Error("hard links are unsupported"), {
+          code: "ENOTSUP",
+        });
+      },
+    }));
+    try {
+      const f = await fixture();
+      const draft = await f.generate();
+      await applySecurityPolicy(draft);
+      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+      const other = await fixture();
+      const racing = await other.generate();
+      collision = true;
+      await expect(applySecurityPolicy(racing)).rejects.toMatchObject({
+        code: "EEXIST",
+      });
+      expect(await readFile(racing.targetPath, "utf8")).toBe(
+        "# Concurrent policy\n",
+      );
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+      }));
+    }
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves an existing policy mode under a restrictive umask",
+    async () => {
+      const name =
+        "preserves an existing policy mode under a restrictive umask";
+      if (runMockInSubprocess(import.meta.path, name)) return;
+      const f = await fixture();
+      const target = join(f.repository, "SECURITY.md");
+      await writeFile(target, "# Existing policy\n");
+      await chmod(target, 0o644);
+      const draft = await f.generate();
+      const previous = process.umask(0o077);
+      try {
+        await applySecurityPolicy(draft);
+        expect((await stat(target)).mode & 0o777).toBe(0o644);
+      } finally {
+        process.umask(previous);
+      }
+    },
+  );
+
+  test("finishes verification when cancellation arrives after the write commits", async () => {
+    const name =
+      "finishes verification when cancellation arrives after the write commits";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const originalLink = fsPromises.link;
+    const originalRename = fsPromises.rename;
+    for (const existing of [false, true]) {
+      const f = await fixture();
+      if (existing)
+        await writeFile(
+          join(f.repository, "SECURITY.md"),
+          "# Existing policy\n",
+        );
+      const draft = await f.generate();
+      const controller = new AbortController();
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: async (source: string, destination: string) => {
+          await originalLink(source, destination);
+          if (destination === draft.targetPath)
+            controller.abort(new Error("cancel after commit"));
+        },
+        rename: async (source: string, destination: string) => {
+          await originalRename(source, destination);
+          if (destination === draft.targetPath)
+            controller.abort(new Error("cancel after commit"));
+        },
+      }));
+      try {
+        expect(
+          await applySecurityPolicy(draft, {
+            pythonPath: PYTHON,
+            signal: controller.signal,
+          }),
+        ).toBe(draft.targetPath);
+        expect(controller.signal.aborted).toBe(true);
+        expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          link: originalLink,
+          rename: originalRename,
+        }));
+      }
+    }
+  });
+
   test("shows missing final newlines in the exact diff", async () => {
     const f = await fixture();
     await writeFile(join(f.repository, "SECURITY.md"), "# Old policy");
@@ -290,6 +538,22 @@ describe("security policy review and application", () => {
     expect(diff).toContain("+New π 🛡️\r\n");
     expect(diff).not.toContain("\r\r\n");
   });
+
+  test.skipIf(process.platform === "win32")(
+    "quotes control characters in repository-controlled diff labels",
+    async () => {
+      const f = await fixture();
+      const scope = "component\n+++ forged\tname";
+      await mkdir(join(f.repository, scope));
+      const draft = await f.generate({ path: scope });
+      const diff = await securityPolicyDiff(draft, PYTHON);
+      expect(diff).toContain(
+        `+++ ${JSON.stringify(`b/${scope}/SECURITY.md`)}\n`,
+      );
+      expect(diff).not.toContain("\n+++ forged");
+      expect(diff).not.toContain("\tname");
+    },
+  );
 
   test("checks source freshness even for an unchanged draft", async () => {
     const f = await fixture();
