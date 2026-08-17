@@ -159,7 +159,13 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("validates inherited policies before preflight or runtime setup", async () => {
-    for (const invalid of ["utf8", "size", "outside"] as const) {
+    for (const invalid of [
+      "utf8",
+      "size",
+      "outside",
+      "alias",
+      "dangling",
+    ] as const) {
       let prepared = false;
       const f = await setup({
         onPrepare: () => {
@@ -175,11 +181,20 @@ describe("CodexSecurity policy API", () => {
       } else if (invalid === "size") {
         await writeFile(policy, Buffer.alloc(1024 * 1024 + 1, "x"));
         message = "1 MiB";
-      } else {
+      } else if (invalid === "outside") {
         const outside = join(f.root, "outside-policy.md");
         await writeFile(outside, "# Outside policy\n");
         await symlink(outside, policy, "file");
         message = "outside the repository";
+      } else {
+        const target = join(f.repository, "component", "SECURITY.md");
+        if (invalid === "alias")
+          await writeFile(target, "# Component policy\n");
+        await symlink(target, policy, "file");
+        message =
+          invalid === "alias"
+            ? "outside the selected component"
+            : "dangling link";
       }
       const options = { path: "component", outputDir: f.outputDir };
       await expect(

@@ -218,6 +218,9 @@ repository-relative component directory. When invoked from a component inside a
 Git checkout, the command still resolves inherited policies from the Git root.
 Existing root and nested `SECURITY.md` files compose from root to leaf; the
 closest policy takes precedence when guidance conflicts.
+Broken parent-policy links are rejected, as are links back to the selected
+component's own policy. Fix these links first; otherwise, changing a component
+policy could also change guidance for a parent scope.
 
 Generation has three stages: a code-backed architecture specification, a detailed
 threat model, and a concise policy draft. In an interactive terminal, the command

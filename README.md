@@ -111,6 +111,10 @@ requires a previously generated `--apply` draft. If you generated with a custom
 keep the previous file at the reported recovery path; remove it only after other
 writers have closed it and any edits are reconciled.
 
+Fix broken parent-policy links or links back to the selected component policy
+before running the command. Such links can make component guidance apply to a
+broader scope than the reviewed file.
+
 The private artifact directory also contains `project-spec.md` and
 `THREAT_MODEL.md`. Review these detailed documents before sharing them; only the
 approved policy is applied to the repository. Generated policy is not owner

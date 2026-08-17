@@ -238,14 +238,18 @@ export async function readSecurityPolicySnapshot(
       throw error;
     });
     if (metadata?.isSymbolicLink()) {
-      inherited.push([
-        policyPath,
-        `link:${digest(JSON.stringify(await policyLinkSnapshot(path, target.repository, signal)))}`,
-      ]);
-      metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return null;
+      try {
+        const links = await policyLinkSnapshot(path, target.repository, signal);
+        metadata = await stat(path);
+        inherited.push([policyPath, `link:${digest(JSON.stringify(links))}`]);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+          throw new CodexSecurityError(
+            `Inherited SECURITY.md ${JSON.stringify(policyPath)} is a dangling link. Fix or remove it before generating or applying a component policy.`,
+          );
+        }
         throw error;
-      });
+      }
     }
     if (metadata?.isFile()) {
       // Inherited policies may link to another file inside the repository.
@@ -255,11 +259,13 @@ export async function readSecurityPolicySnapshot(
         signal,
       );
       const canonical = join(target.repository, normalized.paths[0]!);
-      // The target checkpoint covers its contents; the link stays in the hash.
-      if (canonical !== canonicalTarget) {
-        const content = await readPolicyFile(canonical);
-        inherited.push([policyPath, digest(content)]);
+      if (relative(canonicalTarget, canonical) === "") {
+        throw new CodexSecurityError(
+          `Inherited SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change guidance outside the selected component. Fix the link before generating or applying a component policy.`,
+        );
       }
+      const content = await readPolicyFile(canonical);
+      inherited.push([policyPath, digest(content)]);
     }
     directory = join(directory, part);
   }
@@ -274,29 +280,17 @@ async function policyLinkSnapshot(
   path: string,
   repository: string,
   signal?: AbortSignal,
-): Promise<{ links: [string, string][]; destination: string | null }> {
+): Promise<{ links: [string, string][]; destination: string }> {
   const links: [string, string][] = [];
   const seen = new Set<string>();
   let current = path;
   for (;;) {
     signal?.throwIfAborted();
-    const parent = await realpath(dirname(current)).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return null;
-        throw error;
-      },
-    );
-    if (parent === null) return { links, destination: null };
+    const parent = await realpath(dirname(current));
     const canonical = join(parent, basename(current));
-    const metadata = await lstat(canonical).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return null;
-        throw error;
-      },
-    );
+    const metadata = await lstat(canonical);
     const relativePath = relative(repository, canonical).split(sep).join("/");
-    if (!metadata?.isSymbolicLink())
-      return { links, destination: relativePath };
+    if (!metadata.isSymbolicLink()) return { links, destination: relativePath };
     if (seen.has(canonical)) {
       throw new CodexSecurityError(
         `Inherited security-policy link contains a cycle: ${path}`,
