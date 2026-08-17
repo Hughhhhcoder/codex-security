@@ -115,6 +115,7 @@ describe("publish check", () => {
         projectId: "project-from-flags",
         linearApiKey: "explicit-key",
         assigneeId: "teammate@example.com",
+        signal: expect.any(AbortSignal),
       });
       return result;
     };
@@ -168,6 +169,72 @@ describe("publish check", () => {
     ).toBe(2);
     expect(stderr.text()).toContain("The selected project is unavailable.");
     expect(stdout.text().trim()).toBe("");
+  });
+
+  test("waits for read-only publication cleanup on terminal signals", async () => {
+    for (const command of [
+      ["check"],
+      ["scan", "--dry-run", "--skip-existing"],
+    ]) {
+      for (const [signal, expectedCode] of [
+        ["SIGINT", 130],
+        ["SIGTERM", 143],
+      ] as const) {
+        const stdout = capture();
+        const stderr = capture();
+        const signals = new FakeSignals();
+        const deps = dependencies({ signals });
+        let started!: () => void;
+        const operationStarted = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        let finishCleanup!: () => void;
+        const cleanup = new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        });
+        const operation = async (
+          _directory: string,
+          options: { signal?: AbortSignal },
+        ): Promise<never> => {
+          expect(options.signal).toBeInstanceOf(AbortSignal);
+          started();
+          await cleanup;
+          expect(options.signal?.reason).toBe(signal);
+          options.signal!.throwIfAborted();
+          throw new Error("Expected cancellation.");
+        };
+        deps.publishScan = operation;
+        deps.checkScanPublication = operation;
+        let finished = false;
+        const running = main(
+          [
+            "publish",
+            command[0]!,
+            "completed-scan",
+            ...command.slice(1),
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ).then((status) => {
+          finished = true;
+          return status;
+        });
+        await operationStarted;
+        signals.emit(signal);
+        expect(finished).toBe(false);
+        finishCleanup();
+        expect(await running).toBe(expectedCode);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(
+          signal === "SIGINT" ? "canceled by Ctrl-C" : "terminated by SIGTERM",
+        );
+        expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+        expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      }
+    }
   });
 });
 
@@ -852,13 +919,11 @@ describe("publish scan", () => {
 
     const stdout = capture();
     const stderr = capture(true);
-    const deps = dependencies();
-    let observedSignals = false;
-    deps.addSignalListener = () => {
-      observedSignals = true;
-    };
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
     deps.publishScan = async (_scanDirectory, options) => {
       expect(options.onProgress).toBeUndefined();
+      expect(options.signal).toBeInstanceOf(AbortSignal);
       return { ...publicationResult(), dryRun: true, issues: [] };
     };
 
@@ -879,7 +944,8 @@ describe("publish scan", () => {
     expect(stdout.text()).toContain("dryRun: true");
     expect(stdout.text()).not.toContain("Linear publication complete");
     expect(stderr.text()).toBe("");
-    expect(observedSignals).toBe(false);
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   });
 
   test("reports every created Linear issue with a successful exit code", async () => {

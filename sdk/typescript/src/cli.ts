@@ -1626,6 +1626,21 @@ export async function main(
         );
       },
     });
+  const reportPublicationError = (error: unknown, signal: unknown): void => {
+    if (signal === "SIGINT" || signal === "SIGTERM") {
+      const reason =
+        signal === "SIGINT"
+          ? "Publication canceled by Ctrl-C."
+          : "Publication terminated by SIGTERM.";
+      const recovery =
+        error === signal ? "" : ` ${diagnosticValue(safeErrorMessage(error))}`;
+      errorOutput.write(`codex-security: ${reason}${recovery}\n`);
+      exitCode = signal === "SIGINT" ? 130 : 143;
+    } else {
+      errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+      exitCode = 2;
+    }
+  };
   const publication = Cli.create("publish", {
     description: "Publish completed Codex Security scan findings.",
   }).command("scan", {
@@ -1833,10 +1848,10 @@ export async function main(
           publicationRepository,
         );
         presentation = progress;
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        observingSignals = true;
         if (!options.dryRun) {
-          dependencies.addSignalListener("SIGINT", onInterrupt);
-          dependencies.addSignalListener("SIGTERM", onTerminate);
-          observingSignals = true;
           progress.start();
         }
         let result;
@@ -1846,11 +1861,11 @@ export async function main(
             {
               ...destination,
               dryRun: options.dryRun,
+              signal: controller.signal,
               ...(options.skipExisting ? { skipExisting: true } : {}),
               ...(options.dryRun
                 ? {}
                 : {
-                    signal: controller.signal,
                     onProgress: (event: PublishScanProgress) =>
                       progress.observe(event),
                   }),
@@ -1884,22 +1899,7 @@ export async function main(
         }
         return { ...result };
       } catch (error) {
-        const signal = controller.signal.reason;
-        if (signal === "SIGINT" || signal === "SIGTERM") {
-          const reason =
-            signal === "SIGINT"
-              ? "Publication canceled by Ctrl-C."
-              : "Publication terminated by SIGTERM.";
-          const recovery =
-            error === signal
-              ? ""
-              : ` ${diagnosticValue(safeErrorMessage(error))}`;
-          errorOutput.write(`codex-security: ${reason}${recovery}\n`);
-          exitCode = signal === "SIGINT" ? 130 : 143;
-        } else {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
-          exitCode = 2;
-        }
+        reportPublicationError(error, controller.signal.reason);
         return undefined;
       } finally {
         if (observingSignals) {
@@ -1919,17 +1919,26 @@ export async function main(
     options: PUBLICATION_DESTINATION_OPTIONS,
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, options }) {
+      const controller = new AbortController();
+      const onInterrupt = (): void => controller.abort("SIGINT");
+      const onTerminate = (): void => controller.abort("SIGTERM");
+      dependencies.addSignalListener("SIGINT", onInterrupt);
+      dependencies.addSignalListener("SIGTERM", onTerminate);
       try {
-        return {
-          ...(await (dependencies.checkScanPublication ?? checkScanPublication)(
-            resolve(dependencies.currentDirectory(), args.scanDir),
-            publicationDestination(options, dependencies.environment),
-          )),
-        };
+        const result = await (
+          dependencies.checkScanPublication ?? checkScanPublication
+        )(resolve(dependencies.currentDirectory(), args.scanDir), {
+          ...publicationDestination(options, dependencies.environment),
+          signal: controller.signal,
+        });
+        controller.signal.throwIfAborted();
+        return { ...result };
       } catch (error) {
-        errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
-        exitCode = 2;
+        reportPublicationError(error, controller.signal.reason);
         return undefined;
+      } finally {
+        dependencies.removeSignalListener("SIGINT", onInterrupt);
+        dependencies.removeSignalListener("SIGTERM", onTerminate);
       }
     },
   });

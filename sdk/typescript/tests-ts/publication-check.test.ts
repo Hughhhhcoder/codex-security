@@ -57,6 +57,7 @@ function readClient(
   options: {
     teams?: readonly string[];
     active?: boolean;
+    assignable?: boolean;
     archivedProject?: boolean;
     retiredTeam?: boolean;
   } = {},
@@ -93,7 +94,11 @@ function readClient(
     },
     user: async (id: string) => {
       calls.push(["user", id]);
-      return { id, active: options.active ?? true };
+      return {
+        id,
+        active: options.active ?? true,
+        isAssignable: options.assignable ?? true,
+      };
     },
     createIssue: () => {
       throw new Error("Preflight must not create issues.");
@@ -200,12 +205,13 @@ describe("read-only publication preflight", () => {
     expect(result.access.issueCreation).toBe("not-tested");
   });
 
-  test("rejects unavailable or incompatible destinations and inactive assignees", async () => {
+  test("rejects unavailable destinations and unusable assignees", async () => {
     for (const [clientOptions, message] of [
       [{ teams: [] }, /does not belong/u],
       [{ archivedProject: true }, /project is archived/u],
       [{ retiredTeam: true }, /team is archived or retired/u],
       [{ active: false }, /assignee is inactive/u],
+      [{ assignable: false }, /cannot be assigned/u],
     ] as const) {
       await expect(
         checkScanPublicationInternal(
@@ -277,6 +283,30 @@ describe("read-only publication preflight", () => {
         }),
       ),
     ).rejects.toBe(reason);
+  });
+
+  test("stops before inspecting history when preparation is canceled", async () => {
+    const controller = new AbortController();
+    const reason = new Error("Preparation canceled.");
+    let inspected = false;
+    await expect(
+      checkScanPublicationInternal(
+        "scan",
+        { ...OPTIONS, signal: controller.signal },
+        dependencies({
+          prepare: async (_directory, options) => {
+            expect(options.signal).toBe(controller.signal);
+            controller.abort(reason);
+            return PUBLICATION;
+          },
+          inspectPublicationStore: async () => {
+            inspected = true;
+            return [];
+          },
+        }),
+      ),
+    ).rejects.toBe(reason);
+    expect(inspected).toBe(false);
   });
 
   test("does not echo provider response data on an access failure", async () => {

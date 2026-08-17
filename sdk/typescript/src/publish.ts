@@ -424,6 +424,7 @@ export async function checkScanPublicationInternal(
     scanDirectory,
     options,
   );
+  options.signal?.throwIfAborted();
   const recorded = await (
     dependencies.inspectPublicationStore ?? inspectPublicationStore
   )(prepared, environment, options.signal);
@@ -498,6 +499,11 @@ export async function checkScanPublicationInternal(
       if (!assignee.active) {
         throw new ConfigurationError(
           "The selected Linear assignee is inactive.",
+        );
+      }
+      if (!assignee.isAssignable) {
+        throw new ConfigurationError(
+          "The selected Linear user cannot be assigned to issues.",
         );
       }
       result.access.assignee = "verified";

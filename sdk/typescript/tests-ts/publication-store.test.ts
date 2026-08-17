@@ -9,7 +9,9 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
 } from "node:fs/promises";
+import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
@@ -175,6 +177,32 @@ function publishedIssue(
 }
 
 describe("read-only publication history", () => {
+  test("keeps inspection temporaries outside the completed scan", async () => {
+    const fixture = await publicationFixture();
+    const scan = fixture.publication.scanDirectory;
+    const nested = join(scan, "temporary");
+    const alias = join(dirname(fixture.stateDirectory), "temporary-link");
+    await mkdir(nested);
+    await symlink(
+      nested,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const temporary = spyOn(os, "tmpdir");
+    try {
+      for (const root of [scan, nested, alias]) {
+        temporary.mockReturnValue(root);
+        await expect(
+          inspectPublicationStore(fixture.publication, fixture.environment),
+        ).rejects.toThrow(/temporary directory must be outside/u);
+        expect(await readdir(scan)).toEqual(["temporary"]);
+        expect(await readdir(nested)).toEqual([]);
+      }
+    } finally {
+      temporary.mockRestore();
+    }
+  });
+
   test("forwards cancellation to Python discovery and the workbench and cleans up its input", async () => {
     const fixture = await publicationFixture();
     const controller = new AbortController();

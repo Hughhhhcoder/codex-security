@@ -1,7 +1,10 @@
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { CodexSecurityError } from "./errors.js";
+import { isAbsolute, join, relative, sep } from "node:path";
+import {
+  CodexSecurityError,
+  OutputInsideProtectedRootError,
+} from "./errors.js";
 import type { PreparedScanPublication } from "./publication.js";
 import type { PublishedScanIssue } from "./publish.js";
 import {
@@ -149,12 +152,23 @@ async function runPublicationWorkbench(
     findingId,
     occurrenceId,
   }));
-  const directory = await mkdtemp(
-    join(
-      command === "inspect-linear-publication" ? tmpdir() : stateDirectory,
-      "publication-",
-    ),
-  );
+  let temporaryRoot = stateDirectory;
+  if (command === "inspect-linear-publication") {
+    temporaryRoot = await realpath(tmpdir());
+    const scanRoot = await realpath(publication.scanDirectory);
+    const path = relative(scanRoot, temporaryRoot);
+    if (
+      path === "" ||
+      (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path))
+    ) {
+      throw new OutputInsideProtectedRootError(
+        temporaryRoot,
+        scanRoot,
+        "temporary",
+      );
+    }
+  }
+  const directory = await mkdtemp(join(temporaryRoot, "publication-"));
   try {
     const input = join(directory, "publication.json");
     await writeFile(
