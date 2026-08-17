@@ -167,6 +167,7 @@ const distFiles = new Set(
     "config",
     "contract",
     "cost",
+    "cost-model",
     "errors",
     "index",
     "knowledge-base",
