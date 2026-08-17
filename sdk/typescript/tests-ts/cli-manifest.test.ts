@@ -55,6 +55,7 @@ function documentationDependencies() {
   deps.currentDirectory = unexpected;
   deps.runCodex = unexpected;
   deps.runWorkbench = unexpected;
+  deps.linearClient = unexpected;
   deps.matchFindings = unexpected;
   deps.exportFindings = unexpected;
   deps.publishScan = unexpected;
@@ -113,8 +114,14 @@ describe("full CLI manifest", () => {
       for (const [name, field] of Object.entries(
         command.schema?.args?.properties ?? {},
       )) {
-        expect(section).toContain(`| \`${name}\` |`);
-        expect(section).toContain(field.description!);
+        const row = section
+          .split("\n")
+          .find((line) => line.startsWith(`| \`${name}\` |`));
+        expect(row).toBeDefined();
+        expect(row).toContain(field.description!);
+        const required =
+          command.schema?.args?.required?.includes(name) === true;
+        expect(row!.split("|")[3]?.trim()).toBe(required ? "yes" : "no");
       }
       for (const [name, field] of Object.entries(
         command.schema?.options?.properties ?? {},
@@ -124,6 +131,9 @@ describe("full CLI manifest", () => {
           .find((line) => line.startsWith(`| \`${flag(name)}\` |`));
         expect(row).toBeDefined();
         expect(row).toContain(field.description!);
+        expect(row!.includes("**Deprecated.**")).toBe(
+          field.deprecated === true,
+        );
         const details = row!.slice(
           row!.indexOf(field.description!) + field.description!.length,
         );

@@ -171,6 +171,7 @@ const distFiles = new Set(
     "errors",
     "index",
     "knowledge-base",
+    "linear",
     "models",
     "multiscan",
     "publication",
