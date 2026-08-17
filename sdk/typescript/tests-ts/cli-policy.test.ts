@@ -694,15 +694,15 @@ describe("policy CLI", () => {
       [["--format", "md", "--filter-output", "status"], "draft"],
     ] as const) {
       const stdout = capture(true);
+      const stderr = capture(true);
       expect(
-        await main(
-          ["policy", ...args],
-          stdout.stream,
-          capture(true).stream,
-          deps,
-        ),
+        await main(["policy", ...args], stdout.stream, stderr.stream, deps),
       ).toBe(0);
       expect(stdout.text()).toContain(marker);
+      expect(stderr.text()).not.toContain(
+        draft.content.split("\n").filter(Boolean).at(-1)!,
+      );
+      expect(stderr.text()).not.toContain(draft.reviewNotes[0]!);
     }
     const stdout = capture();
     expect(
@@ -735,14 +735,19 @@ describe("policy CLI", () => {
         ["--token-offset", "1", "--token-limit", "4"],
       ]) {
         const stdout = capture();
+        const stderr = capture();
         expect(
           await main(
             ["policy", ...format, ...transform],
             stdout.stream,
-            capture().stream,
+            stderr.stream,
             deps,
           ),
         ).toBe(0);
+        expect(stderr.text()).not.toContain(
+          draft.content.split("\n").filter(Boolean).at(-1)!,
+        );
+        expect(stderr.text()).not.toContain(draft.reviewNotes[0]!);
         if (transform[0] === "--token-count") {
           expect(stdout.text().trim()).toMatch(/^\d+$/u);
           expect(Number(stdout.text())).toBeGreaterThan(0);
@@ -764,6 +769,62 @@ describe("policy CLI", () => {
     expect(stdout.text()).toContain("## data");
     expect(stdout.text()).toContain(POLICY.trim());
     expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("renders TOON metadata safely while preserving JSON and Markdown", async () => {
+    const f = await fixture();
+    const scope = "component\u202ename";
+    const note = "Review\u202ethis\u001b[2J";
+    const content = `${POLICY}\n${note}\n`;
+    await mkdir(join(f.repository, scope));
+    const draft = await f.generate({
+      path: scope,
+      run: async (stage) => ({
+        ...stageResult(stage),
+        ...(stage === "policy"
+          ? { markdown: content, reviewNotes: [note] }
+          : {}),
+      }),
+    });
+    const deps = policyDependencies(f, { draft });
+    const create = deps.createPolicySecurity;
+    deps.createPolicySecurity = (config) => {
+      const security = create(config);
+      return {
+        ...security,
+        preflightPolicy: async (repository, options) => ({
+          ...(await security.preflightPolicy(repository, options)),
+          scope,
+          targetPath: draft.targetPath,
+        }),
+      };
+    };
+    for (const args of [["--dry-run"], ["--format", "toon"]]) {
+      const stdout = capture(true);
+      expect(
+        await main(["policy", ...args], stdout.stream, capture().stream, deps),
+      ).toBe(0);
+      expect(stdout.text()).not.toMatch(/[\u001b\p{Bidi_Control}]/u);
+      expect(stdout.text()).toContain("\\u202e");
+    }
+    const json = capture();
+    expect(
+      await main(["policy", "--json"], json.stream, capture().stream, deps),
+    ).toBe(0);
+    expect(JSON.parse(json.text())).toMatchObject({
+      scope,
+      reviewNotes: expect.arrayContaining([note]),
+    });
+    const markdown = capture();
+    expect(
+      await main(
+        ["policy", "--format", "md"],
+        markdown.stream,
+        capture().stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(markdown.text()).toBe(content);
   });
 
   test("marks failed generation and cancellation envelopes as errors", async () => {
