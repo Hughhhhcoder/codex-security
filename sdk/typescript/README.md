@@ -220,6 +220,10 @@ takes precedence when guidance conflicts. Linked worktrees and initialized
 submodules use their own roots. Git metadata and paths outside the selected
 checkout cannot be policy targets.
 
+Before starting Codex, the command checks the policy files it may read. It
+rejects links outside the checkout or into Git metadata, and ancestor links
+that would spread a component policy to a wider scope.
+
 Generation has three stages: describe the system, build a detailed threat model,
 and draft the policy. In a terminal, the command asks about important facts the
 source cannot establish, then shows the exact diff and decisions that need
@@ -236,7 +240,7 @@ severity decisions. Later scans read the approved policy.
 Use `--headless` or an explicit output format to skip questions. Unanswered
 questions remain in the review notes. Drafts default to the Codex Security state
 directory; `--output-dir` selects an empty directory outside every enclosing
-Git checkout.
+Git checkout and its Git metadata.
 
 ```bash
 npx @openai/codex-security policy . --path services/api \

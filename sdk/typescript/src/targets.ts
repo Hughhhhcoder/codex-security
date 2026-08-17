@@ -207,6 +207,21 @@ export async function enclosingGitWorktreeRoots(
   }
 }
 
+export async function gitMetadataDirectories(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const directories = await Promise.all([
+    gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
+    gitOutput(repository, ["rev-parse", "--git-common-dir"], signal),
+  ]);
+  return await Promise.all(
+    directories.map((directory) =>
+      abortable(() => realpath(resolve(repository, directory)), signal),
+    ),
+  );
+}
+
 export function validatedGitEnvironment(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): void {

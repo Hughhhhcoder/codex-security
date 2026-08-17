@@ -1305,6 +1305,15 @@ export function requireOutputOutsideRepository(
   }
 }
 
+export function requireOutputOutsideRepositories(
+  repositories: readonly string[],
+  outputDirectory: string,
+  pathKind: ProtectedScanPathKind = "output",
+): void {
+  for (const repository of repositories)
+    requireOutputOutsideRepository(repository, outputDirectory, pathKind);
+}
+
 export async function preparePersistentOutputRoot(
   stateDirectory: string,
   category: "scans" | "policies",

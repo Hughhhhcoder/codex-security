@@ -91,12 +91,14 @@ import {
 import type { SeverityLevel } from "./models.js";
 import {
   formatSecurityPolicyText,
+  inspectSecurityPolicyPaths,
   readSecurityPolicySnapshot,
   requireUnchangedSecurityPolicy,
   resolveSecurityPolicyGuidance,
   resolveSecurityPolicyTarget,
   runSecurityPolicyStages,
   securityPolicyDiff,
+  securityPolicyProtectedRoots,
   securityPolicyStageSchema,
   type SecurityPolicyDraft,
   type SecurityPolicyOptions,
@@ -136,6 +138,7 @@ import {
   prepareOutputDir,
   preparePersistentOutputRoot,
   requireModelSafeOutputDir,
+  requireOutputOutsideRepositories,
   requireOutputOutsideRepository,
   resolveCodexCommand,
   resolvePluginPath,
@@ -327,6 +330,7 @@ export interface ScanPreflight extends DeepScanOptions {
 interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
+  protectedRoots: readonly string[];
   stateDirectory: string;
 }
 
@@ -437,8 +441,8 @@ export class CodexSecurity {
     inputs: LocalScanInputs,
     options: ScanOptions,
   ): Promise<ScanPreflight> {
-    requireOutputOutsideRepository(
-      inputs.protectedRoot,
+    requireOutputOutsideRepositories(
+      inputs.protectedRoots,
       await realpath(tmpdir()),
       "temporary",
     );
@@ -580,8 +584,8 @@ export class CodexSecurity {
       const snapshot = await readSecurityPolicySnapshot(target, signal);
       const inputs = await this.#validatePolicyInputs(target, options, signal);
       const temporaryRoot = await realpath(tmpdir());
-      requireOutputOutsideRepository(
-        inputs.protectedRoot,
+      requireOutputOutsideRepositories(
+        inputs.protectedRoots,
         temporaryRoot,
         "temporary",
       );
@@ -634,9 +638,9 @@ export class CodexSecurity {
         inputs.outputDir ?? undefined,
         `${basename(target.repository)}-policy`,
         root,
-        (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
+        (path) => requireOutputOutsideRepositories(inputs.protectedRoots, path),
       );
-      requireOutputOutsideRepository(inputs.protectedRoot, outputDir);
+      requireOutputOutsideRepositories(inputs.protectedRoots, outputDir);
       requireModelSafeOutputDir(outputDir);
       notifyObserver(
         "onOutputDirReady",
@@ -786,6 +790,7 @@ export class CodexSecurity {
       return await runSecurityPolicyStages({
         target,
         snapshot,
+        policyPaths: inputs.policyPaths,
         outputDir,
         guidance,
         pluginRoot: runtime.plugin.pluginRoot,
@@ -1983,8 +1988,13 @@ export class CodexSecurity {
   async #prepareSession(
     {
       protectedRoot,
+      protectedRoots = [protectedRoot],
       stateDirectory,
-    }: { protectedRoot: string; stateDirectory: string },
+    }: {
+      protectedRoot: string;
+      protectedRoots?: readonly string[];
+      stateDirectory: string;
+    },
     options: Pick<
       ScanOptions,
       | "auth"
@@ -2031,7 +2041,7 @@ export class CodexSecurity {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
           (path) =>
-            requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+            requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         );
         releaseCredentialHome = await acquireCodexSecurityCredentialHomeLock(
           credentialHome,
@@ -2043,7 +2053,7 @@ export class CodexSecurity {
         signal,
         temporaryRoot,
         (path) =>
-          requireOutputOutsideRepository(protectedRoot, path, "runtime"),
+          requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         options.auth,
         requestedConfig,
       );
@@ -2065,7 +2075,7 @@ export class CodexSecurity {
         await writeCodexConfig(runtime.configPath, preflightConfig);
       }
       const runtimeHome = await realpath(runtime.codexHome);
-      requireOutputOutsideRepository(protectedRoot, runtimeHome, "runtime");
+      requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
       const sessionConfig = scanRuntimeCodexConfig(
         effectiveConfig,
         stateDirectory,
@@ -2259,10 +2269,13 @@ export class CodexSecurity {
     target: SecurityPolicyTarget,
     options: SecurityPolicyOptions,
     signal?: AbortSignal,
-  ): Promise<LocalScanInputs> {
+  ): Promise<LocalScanInputs & { policyPaths: string[] }> {
     requirePolicyConfigKeys(this.config.codexOverrides);
-    const roots = await enclosingGitWorktreeRoots(target.repository, signal);
-    return await this.#validateLocalInputs(
+    const protectedRoots = await securityPolicyProtectedRoots(
+      target.repository,
+      signal,
+    );
+    const inputs = await this.#validateLocalInputs(
       target.repository,
       {
         auth: options.auth,
@@ -2272,15 +2285,19 @@ export class CodexSecurity {
         maxCostUsd: options.maxCostUsd,
       },
       signal,
-      roots.at(-1) ?? target.repository,
+      protectedRoots,
     );
+    return {
+      ...inputs,
+      policyPaths: await inspectSecurityPolicyPaths(target, signal),
+    };
   }
 
   async #validateLocalInputs(
     repository: string,
     options: ScanOptions,
     signal?: AbortSignal,
-    protectedRoot?: string,
+    protectedRoots?: readonly string[],
   ): Promise<LocalScanInputs> {
     deepScanOptions(options);
     if (
@@ -2302,13 +2319,17 @@ export class CodexSecurity {
     validateMode(normalized, mode);
     await validateCommittedDiffCheckout(repo, normalized, signal);
     throwIfAborted(signal);
-    protectedRoot ??= (await enclosingGitWorktreeRoot(repo, signal)) ?? repo;
+    const protectedRoot =
+      protectedRoots?.[0] ??
+      (await enclosingGitWorktreeRoot(repo, signal)) ??
+      repo;
+    protectedRoots ??= [protectedRoot];
     const requestedOutput = await validateOutputDir(
       options.outputDir,
       options.archiveExisting,
     );
     if (requestedOutput !== null) {
-      requireOutputOutsideRepository(protectedRoot, requestedOutput);
+      requireOutputOutsideRepositories(protectedRoots, requestedOutput);
     }
     const stateDirectory = codexSecurityStateDirectory(
       this.#dependencies.environment,
@@ -2328,13 +2349,14 @@ export class CodexSecurity {
         canonicalStateDirectory = parent;
       }
     }
-    requireOutputOutsideRepository(protectedRoot, canonicalStateDirectory);
+    requireOutputOutsideRepositories(protectedRoots, canonicalStateDirectory);
     return {
       repository: repo,
       target: normalized,
       mode,
       outputDir: requestedOutput,
       protectedRoot,
+      protectedRoots,
       stateDirectory,
     };
   }

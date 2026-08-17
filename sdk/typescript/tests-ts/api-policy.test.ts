@@ -361,6 +361,145 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
+  test("keeps policy output and state out of external Git metadata", async () => {
+    for (const kind of ["separate", "linked"]) {
+      let prepared = false;
+      const f = await setup({ onPrepare: () => (prepared = true) });
+      let repository = f.repository;
+      let common: string;
+      if (kind === "separate") {
+        common = join(f.root, "git-data");
+        policyGit(repository, "init", "--quiet", "--separate-git-dir", common);
+      } else {
+        policyGit(repository, "init", "--quiet");
+        policyGit(
+          repository,
+          "commit",
+          "--allow-empty",
+          "--quiet",
+          "-m",
+          "initial",
+        );
+        common = join(repository, ".git");
+        const linked = join(f.root, "linked-worktree");
+        policyGit(repository, "worktree", "add", "--quiet", "--detach", linked);
+        repository = linked;
+      }
+      const gitDirectory = execFileSync(
+        "git",
+        ["-C", repository, "rev-parse", "--absolute-git-dir"],
+        { encoding: "utf8" },
+      ).trim();
+      for (const metadata of new Set([common, gitDirectory])) {
+        const outputDir = join(metadata, "policy-artifacts");
+        for (const operation of [
+          () => f.security.preflightPolicy(repository, { outputDir }),
+          () => f.security.generatePolicy(repository, { outputDir }),
+        ])
+          await expect(operation()).rejects.toThrow(
+            "outside the protected scan root",
+          );
+        const state = new InternalSecurity(
+          {},
+          { environment: { CODEX_SECURITY_STATE_DIR: outputDir } },
+        );
+        await expect(state.preflightPolicy(repository)).rejects.toThrow(
+          "outside the protected scan root",
+        );
+        await expect(state.generatePolicy(repository)).rejects.toThrow(
+          "outside the protected scan root",
+        );
+        await state.close();
+        await expect(readdir(outputDir)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+      expect(prepared).toBe(false);
+      expect(f.threads).toHaveLength(0);
+      await f.security.close();
+    }
+  });
+
+  test("checks descendant policy links before starting Codex", async () => {
+    for (const kind of [
+      "root",
+      "component",
+      "git_metadata",
+      "reporting_directory",
+    ]) {
+      let prepared = false;
+      const f = await setup({ onPrepare: () => (prepared = true) });
+      policyGit(f.repository, "init", "--quiet");
+      const scope = kind === "component" ? "component" : ".";
+      const child = join(f.repository, scope, "child");
+      await mkdir(child, { recursive: true });
+      const outside = join(f.root, "outside-policy.md");
+      await writeFile(outside, "# Private synthetic policy\n");
+      if (kind === "reporting_directory") {
+        const directory = join(f.root, "reporting");
+        await mkdir(directory);
+        await writeFile(join(directory, "SECURITY.md"), "# Reporting policy\n");
+        await symlink(
+          directory,
+          join(f.repository, ".github"),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      } else {
+        await symlink(
+          kind === "git_metadata"
+            ? join(f.repository, ".git", "config")
+            : outside,
+          join(child, "SECURITY.md"),
+          "file",
+        );
+      }
+      const options = { path: scope, outputDir: f.outputDir };
+      const message =
+        kind === "git_metadata" ? "Git metadata" : "outside the repository";
+      await expect(
+        f.security.preflightPolicy(f.repository, options),
+      ).rejects.toThrow(message);
+      await expect(
+        f.security.generatePolicy(f.repository, options),
+      ).rejects.toThrow(message);
+      expect(prepared).toBe(false);
+      expect(f.threads).toHaveLength(0);
+      expect(await readdir(f.outputDir)).toEqual([]);
+      await f.security.close();
+    }
+  });
+
+  test("gives Codex only the checked policy inventory", async () => {
+    const f = await setup();
+    policyGit(f.repository, "init", "--quiet");
+    const component = join(f.repository, "component");
+    await mkdir(join(component, "child"), { recursive: true });
+    policyGit(join(component, "child"), "init", "--quiet");
+    const ownerPolicy = join(component, "owner-policy.md");
+    await writeFile(ownerPolicy, "# Owner policy\n");
+    await symlink(ownerPolicy, join(component, "child", "SECURITY.md"), "file");
+    const outside = join(f.root, "outside");
+    await mkdir(outside);
+    await writeFile(
+      join(outside, "SECURITY.md"),
+      "# Unlisted synthetic policy\n",
+    );
+    await symlink(
+      outside,
+      join(component, "linked-directory"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await f.security.generatePolicy(f.repository, {
+      path: "component",
+      outputDir: f.outputDir,
+    });
+    expect(f.prompts[0]).toContain('["component/child/SECURITY.md"]');
+    expect(f.prompts[0]).toContain("resolve_security_md.py helper");
+    expect(f.prompts[0]).not.toContain("linked-directory/SECURITY.md");
+    expect(f.prompts[0]).not.toContain("Unlisted synthetic policy");
+    await f.security.close();
+  });
+
   test("keeps literal component names intact through generation and preview", async () => {
     for (const scope of ["-component", "~component", "~", "~/child"]) {
       let prepared = false;
