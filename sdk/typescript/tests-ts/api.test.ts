@@ -16,7 +16,7 @@ import {
 import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -38,6 +38,7 @@ import {
 } from "../src/index.js";
 import {
   classifyConnectionFailure,
+  environmentValue,
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
@@ -50,6 +51,7 @@ import {
   resolveCodexCommand,
   runWorkbench,
   setCodexSecurityCredentialLogout,
+  type WorkbenchCommandOptions,
 } from "../src/runtime.js";
 import { normalizeTarget } from "../src/targets.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
@@ -170,10 +172,26 @@ class TestClient extends TestClientBase {
     config: Record<string, unknown>,
     dependencies: Record<string, unknown>,
   ) {
+    const environment = (dependencies["environment"] ?? {}) as Record<
+      string,
+      string | undefined
+    >;
+    if (
+      !["CODEX_SECURITY_STATE_DIR", "CODEX_HOME", "HOME", "USERPROFILE"].some(
+        (name) => environmentValue(environment, name) !== undefined,
+      )
+    ) {
+      const stateDirectory = realpathSync(
+        mkdtempSync(join(tmpdir(), "codex-security-api-state-")),
+      );
+      temporaryDirectories.push(stateDirectory);
+      environment["CODEX_SECURITY_STATE_DIR"] = stateDirectory;
+    }
     super(config, {
       runWorkbench: async (_options: unknown, args: readonly string[]) =>
         mockWorkbench(args),
       ...dependencies,
+      environment,
     });
   }
 }
@@ -1680,7 +1698,7 @@ describe("CodexSecurity orchestration", () => {
     const client = new TestClient(
       {},
       {
-        environment: {},
+        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
         prepareRuntime: async () => {
           runtimeStarted = true;
           throw new Error("runtime should not initialize");
@@ -4652,11 +4670,23 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
+          runWorkbench: async (
+            options: WorkbenchCommandOptions,
+            args: readonly string[],
+          ) => {
+            expect(options.environment["CODEX_SECURITY_STATE_DIR"]).toBe(
+              stateDirectory,
+            );
+            return mockWorkbench(args);
+          },
           createCodex: (options: CodexOptions) => ({
             startThread: () => ({
               id: null,
               async runStreamed() {
                 expect(options.env?.["CODEX_HOME"]).toBe(codexHome);
+                expect(options.env?.["CODEX_SECURITY_STATE_DIR"]).toBe(
+                  stateDirectory,
+                );
                 expect(options.apiKey).toBe(
                   provider === undefined
                     ? "synthetic-transient-key"
@@ -4700,6 +4730,13 @@ describe("CodexSecurity orchestration", () => {
       expect(persistentConfigText).not.toContain("synthetic-transient-key");
       const persistentConfig = parseToml(persistentConfigText);
       expect(persistentConfig["model"]).toBeUndefined();
+      expect(persistentConfig).toMatchObject({
+        permissions: {
+          codex_security_scan: {
+            filesystem: { [stateDirectory]: "write" },
+          },
+        },
+      });
       if (provider !== undefined) {
         expect(persistentConfig).toMatchObject({
           model_provider: provider,
