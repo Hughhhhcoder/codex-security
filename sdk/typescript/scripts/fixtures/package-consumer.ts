@@ -30,4 +30,4 @@ export const cost: ScanCost | null = estimateScanCost("gpt-5.6-sol", {
 });
 
 // @ts-expect-error Dependency injection is internal, not a public constructor overload.
-new CodexSecurity({}, {}, { surface: "sdk" });
+new CodexSecurity({}, undefined as never, { surface: "sdk" });
