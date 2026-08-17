@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -6,6 +7,7 @@ import {
   open,
   readFile,
   readdir,
+  readlink,
   rename,
   rm,
   stat,
@@ -13,7 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import {
@@ -1113,6 +1115,20 @@ describe("security policy review and application", () => {
     await writeFile(ownerPolicy, "# Owner policy\n");
     await symlink(ownerPolicy, inherited, "file");
     const draft = await f.generate({ path: "component" });
+    const hash = (text: string) =>
+      createHash("sha256").update(text).digest("hex");
+    const links = {
+      links: [["SECURITY.md", await readlink(inherited)]],
+      destination: "owner-policy.md",
+    };
+    expect(draft.inheritedPolicySha256).toBe(
+      hash(
+        JSON.stringify([
+          ["SECURITY.md", `link:${hash(JSON.stringify(links))}`],
+          ["SECURITY.md", hash("# Owner policy\n")],
+        ]),
+      ),
+    );
     await applySecurityPolicy(draft);
     expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
     expect(await readFile(inherited, "utf8")).toBe("# Owner policy\n");
@@ -1193,6 +1209,143 @@ describe("security policy review and application", () => {
       await applySecurityPolicy(draft);
       expect(await readFile(descendant, "utf8")).toBe(POLICY);
       expect((await lstat(descendant)).isSymbolicLink()).toBe(true);
+    }
+  });
+
+  test("preserves separate reporting policies when applying a root draft", async () => {
+    const f = await fixture();
+    for (const directory of [".github", "docs"]) {
+      await mkdir(join(f.repository, directory));
+      await writeFile(
+        join(f.repository, directory, "SECURITY.md"),
+        "# Reporting a vulnerability\n",
+      );
+    }
+    const draft = await f.generate();
+    await applySecurityPolicy(draft);
+    for (const directory of [".github", "docs"])
+      expect(
+        await readFile(join(f.repository, directory, "SECURITY.md"), "utf8"),
+      ).toBe("# Reporting a vulnerability\n");
+  });
+
+  test("rejects root drafts that would change a linked reporting policy", async () => {
+    for (const directory of [".github", "docs"]) {
+      for (const [existing, chained] of [
+        [false, false],
+        [true, false],
+        [false, true],
+        [true, true],
+      ]) {
+        const f = await fixture();
+        const target = join(f.repository, "SECURITY.md");
+        const reporting = join(f.repository, directory, "SECURITY.md");
+        await mkdir(dirname(reporting));
+        if (existing) await writeFile(target, "# Original policy\n");
+        const draft = await f.generate();
+        const destination = chained
+          ? join(f.repository, "policy-link.md")
+          : target;
+        if (chained) await symlink(target, destination, "file");
+        await symlink(destination, reporting, "file");
+        await expect(f.generate()).rejects.toThrow(
+          "separate vulnerability-reporting policy",
+        );
+        await expect(
+          securityPolicyDiff(draft, "missing-python"),
+        ).rejects.toThrow("separate vulnerability-reporting policy");
+        await expect(
+          applySecurityPolicy(draft, { pythonPath: "missing-python" }),
+        ).rejects.toThrow("separate vulnerability-reporting policy");
+        expect(await readSecurityPolicy(target)).toBe(
+          existing ? "# Original policy\n" : null,
+        );
+      }
+    }
+  });
+
+  test("rejects reporting-policy aliases through directory links", async () => {
+    for (const directory of [".github", "docs"]) {
+      const f = await fixture();
+      await symlink(
+        f.repository,
+        join(f.repository, directory),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await expect(f.generate()).rejects.toThrow(
+        "separate vulnerability-reporting policy",
+      );
+      expect(await readdir(f.outputDir)).toEqual([]);
+    }
+  });
+
+  test("stops policy-link walks before inspecting another target", async () => {
+    const name = "stops policy-link walks before inspecting another target";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const originalLstat = fsPromises.lstat;
+    const originalReadlink = fsPromises.readlink;
+    const originalRealpath = fsPromises.realpath;
+    const inspected: string[] = [];
+    let outside = "";
+    const record = (path: unknown) => {
+      const value = String(path);
+      if (value === outside || value.startsWith(`${outside}${sep}`))
+        inspected.push(value);
+    };
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      lstat: (...args: Parameters<typeof originalLstat>) => {
+        record(args[0]);
+        return originalLstat(...args);
+      },
+      readlink: (...args: Parameters<typeof originalReadlink>) => {
+        record(args[0]);
+        return originalReadlink(...args);
+      },
+      realpath: (...args: Parameters<typeof originalRealpath>) => {
+        record(args[0]);
+        return originalRealpath(...args);
+      },
+    }));
+    try {
+      for (const viaDirectory of [false, true]) {
+        for (const existing of [false, true]) {
+          const f = await fixture();
+          outside = join(f.root, "outside");
+          const target = join(f.repository, "component", "SECURITY.md");
+          const alias = join(f.repository, "sibling", "SECURITY.md");
+          await mkdir(dirname(target));
+          await mkdir(dirname(alias));
+          await mkdir(outside);
+          if (existing) await writeFile(target, "# Original policy\n");
+          const externalLink = join(outside, "policy-link.md");
+          await symlink(target, externalLink, "file");
+          let destination = externalLink;
+          if (viaDirectory) {
+            const directoryLink = join(f.repository, "outside-link");
+            await symlink(
+              outside,
+              directoryLink,
+              process.platform === "win32" ? "junction" : "dir",
+            );
+            destination = join(directoryLink, "policy-link.md");
+          }
+          await symlink(destination, alias, "file");
+          inspected.length = 0;
+          await expect(f.generate({ path: "component" })).rejects.toThrow(
+            "outside the repository",
+          );
+          expect(inspected).toEqual([]);
+          expect(await readdir(f.outputDir)).toEqual([]);
+        }
+      }
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: originalLstat,
+        readlink: originalReadlink,
+        realpath: originalRealpath,
+      }));
     }
   });
 

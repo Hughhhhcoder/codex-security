@@ -114,6 +114,8 @@ writers have closed it and any edits are reconciled.
 If a parent or sibling `SECURITY.md` links to the selected component's policy,
 fix that link first. Otherwise, changing the component policy would also change
 guidance outside the scope you reviewed.
+Root policies also leave the reporting policies in `.github/SECURITY.md` and
+`docs/SECURITY.md` unchanged.
 
 The private artifact directory also contains `project-spec.md` and
 `THREAT_MODEL.md`. Review these detailed documents before sharing them; only the

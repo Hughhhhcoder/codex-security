@@ -222,6 +222,9 @@ If a `SECURITY.md` outside the selected component links to its policy, fix that
 link first. This includes a broken link that would become active when the policy
 is created. The command rejects these links to keep approval limited to the
 selected scope.
+Policy links must stay inside the repository. When drafting a root policy, the
+command also protects separate reporting policies at `.github/SECURITY.md` and
+`docs/SECURITY.md`.
 
 Generation has three stages: a code-backed architecture specification, a detailed
 threat model, and a concise policy draft. In an interactive terminal, the command

@@ -42,6 +42,7 @@ import { parse } from "smol-toml";
 import {
   CodexSecurityError,
   OutputDirectoryError,
+  OutputDirectoryNotEmptyError,
   OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
@@ -1457,9 +1458,7 @@ export async function validateOutputDir(
         );
       }
       if (!archiveExisting && (await readdir(path)).length !== 0) {
-        throw new OutputDirectoryError(
-          `Scan output directory is not empty: ${path}. To keep the existing results and start a new scan, add --archive-existing.`,
-        );
+        throw new OutputDirectoryNotEmptyError(path);
       }
       requirePrivateOutputDirectory(metadata, path);
       await requireSecureOutputAncestry(path);

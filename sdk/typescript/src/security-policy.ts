@@ -236,7 +236,16 @@ export async function readSecurityPolicySnapshot(
       throw error;
     });
     if (metadata?.isSymbolicLink()) {
-      const links = await policyLinkSnapshot(path, target.repository, signal);
+      const { status, ...links } = await policyLinkSnapshot(
+        path,
+        target.repository,
+        signal,
+      );
+      if (status === "cycle") {
+        throw new CodexSecurityError(
+          `Inherited security-policy link contains a cycle: ${path}`,
+        );
+      }
       inherited.push([policyPath, `link:${digest(JSON.stringify(links))}`]);
       metadata = await stat(path).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return null;
@@ -267,7 +276,7 @@ async function rejectPolicyAliases(
   target: SecurityPolicyTarget,
   signal?: AbortSignal,
 ): Promise<void> {
-  if (target.scope === ".") return;
+  const rootPolicy = target.scope === ".";
   const component = dirname(target.targetPath);
   const canonicalTarget = await realpath(target.targetPath).catch(
     (error: NodeJS.ErrnoException) => {
@@ -275,25 +284,36 @@ async function rejectPolicyAliases(
       throw error;
     },
   );
-  const directories = [target.repository];
+  const directories = rootPolicy
+    ? [join(target.repository, ".github"), join(target.repository, "docs")]
+    : [target.repository];
   while (directories.length > 0) {
     signal?.throwIfAborted();
     const directory = directories.pop()!;
-    if (relative(component, directory) === "") continue;
+    if (!rootPolicy && relative(component, directory) === "") continue;
     const path = join(directory, "SECURITY.md");
-    const metadata = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    if (metadata?.isSymbolicLink()) {
-      const alias = await resolvePolicyAlias(path, target.repository, signal);
-      const destination = alias.destination;
+    const metadata = rootPolicy
+      ? null
+      : await lstat(path).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+    if (rootPolicy || metadata?.isSymbolicLink()) {
+      const alias = await policyLinkSnapshot(path, target.repository, signal);
+      let destination =
+        alias.destination === null
+          ? null
+          : join(target.repository, alias.destination);
+      if (destination !== null && alias.status === "resolved")
+        destination = await realpath(destination);
+      if (destination !== null)
+        policyRelativePath(target.repository, destination);
       if (
         destination !== null &&
         (relative(canonicalTarget ?? target.targetPath, destination) === "" ||
           // A missing leaf can become live with different casing on macOS.
           (canonicalTarget === null &&
-            alias.dangling &&
+            alias.status === "missing" &&
             process.platform === "darwin" &&
             relative(component, dirname(destination)) === "" &&
             basename(destination).toLowerCase() === "security.md"))
@@ -302,10 +322,11 @@ async function rejectPolicyAliases(
           .split(sep)
           .join("/");
         throw new CodexSecurityError(
-          `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change guidance outside the selected component. Fix the link before generating or applying a component policy.`,
+          `SECURITY.md ${JSON.stringify(policyPath)} points to the selected policy and would change ${rootPolicy ? "a separate vulnerability-reporting policy" : "guidance outside the selected component"}. Fix the link before generating or applying a policy.`,
         );
       }
     }
+    if (rootPolicy) continue;
     // Match the policy resolver's inventory without following directory links.
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.name !== ".git" && entry.isDirectory()) {
@@ -315,58 +336,48 @@ async function rejectPolicyAliases(
   }
 }
 
-async function resolvePolicyAlias(
-  path: string,
-  repository: string,
-  signal?: AbortSignal,
-): Promise<{ destination: string | null; dangling: boolean }> {
-  try {
-    return { destination: await realpath(path), dangling: false };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ELOOP" || code === "ENOTDIR")
-      return { destination: null, dangling: false };
-    if (code !== "ENOENT") throw error;
-    const { destination } = await policyLinkSnapshot(path, repository, signal);
-    return {
-      destination: destination === null ? null : join(repository, destination),
-      dangling: true,
-    };
-  }
-}
-
 async function policyLinkSnapshot(
   path: string,
   repository: string,
   signal?: AbortSignal,
-): Promise<{ links: [string, string][]; destination: string | null }> {
+): Promise<{
+  links: [string, string][];
+  destination: string | null;
+  status: "resolved" | "missing" | "cycle";
+}> {
   const links: [string, string][] = [];
   const seen = new Set<string>();
   let current = path;
   for (;;) {
     signal?.throwIfAborted();
-    const parent = await realpath(dirname(current)).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return null;
-        throw error;
-      },
-    );
-    if (parent === null) return { links, destination: null };
+    policyRelativePath(repository, current);
+    let parent: string;
+    try {
+      parent = await realpath(dirname(current));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR")
+        return { links, destination: null, status: "missing" };
+      if (code === "ELOOP")
+        return { links, destination: null, status: "cycle" };
+      throw error;
+    }
     const canonical = join(parent, basename(current));
+    const relativePath = policyRelativePath(repository, canonical);
     const metadata = await lstat(canonical).catch(
       (error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return null;
         throw error;
       },
     );
-    const relativePath = relative(repository, canonical).split(sep).join("/");
     if (!metadata?.isSymbolicLink())
-      return { links, destination: relativePath };
-    if (seen.has(canonical)) {
-      throw new CodexSecurityError(
-        `Inherited security-policy link contains a cycle: ${path}`,
-      );
-    }
+      return {
+        links,
+        destination: relativePath,
+        status: metadata === null ? "missing" : "resolved",
+      };
+    if (seen.has(canonical))
+      return { links, destination: null, status: "cycle" };
     seen.add(canonical);
     const destination = await readlink(canonical);
     links.push([relativePath, destination]);
@@ -374,6 +385,16 @@ async function policyLinkSnapshot(
       ? destination
       : `${parent}${sep}${destination}`;
   }
+}
+
+function policyRelativePath(repository: string, path: string): string {
+  const result = relative(repository, path);
+  if (result === ".." || result.startsWith(`..${sep}`) || isAbsolute(result)) {
+    throw new InvalidTargetError(
+      `Security-policy link is outside the repository: ${path}`,
+    );
+  }
+  return result.split(sep).join("/");
 }
 
 export async function requireUnchangedSecurityPolicy(

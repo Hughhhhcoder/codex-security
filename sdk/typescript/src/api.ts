@@ -62,6 +62,7 @@ import {
   CodexSecurityError,
   IncompleteScanError,
   OutputDirectoryError,
+  OutputDirectoryNotEmptyError,
   errorMessage,
   safeErrorMessage,
   ScanCostLimitExceededError,
@@ -476,7 +477,7 @@ export class CodexSecurity {
       outputDir: options.outputDir,
       maxCostUsd: options.maxCostUsd,
       signal: options.signal,
-    });
+    }).catch(rethrowPolicyOutputError);
     return {
       ...target,
       outputDir: preflight.outputDir,
@@ -495,7 +496,7 @@ export class CodexSecurity {
   ): Promise<SecurityPolicyDraft> {
     return await this.#trackOperation(() =>
       this.#generatePolicy(repository, options),
-    );
+    ).catch(rethrowPolicyOutputError);
   }
 
   async #generatePolicy(
@@ -3389,6 +3390,12 @@ export function scanRuntimeCodexConfig(
       },
     },
   };
+}
+
+function rethrowPolicyOutputError(error: unknown): never {
+  if (error instanceof OutputDirectoryNotEmptyError)
+    throw new OutputDirectoryNotEmptyError(error.directory, "policy");
+  throw error;
 }
 
 function policyCodexOverrides(config: JsonObject): JsonObject {

@@ -12,6 +12,7 @@ import {
   applySecurityPolicy,
   CodexSecurity,
   loadSecurityPolicyDraft,
+  OutputDirectoryNotEmptyError,
   securityPolicyDiff,
   type SecurityPolicyStage,
 } from "../src/index.js";
@@ -157,6 +158,30 @@ describe("CodexSecurity policy API", () => {
     expect(preflight.model).toBe("gpt-5.6-sol");
     expect(prepared).toBe(false);
     expect(await readdir(f.outputDir)).toEqual([]);
+    await f.security.close();
+  });
+
+  test("gives a usable remedy for a nonempty policy output directory", async () => {
+    let prepared = false;
+    const f = await setup({
+      onPrepare: () => {
+        prepared = true;
+      },
+    });
+    const previous = join(f.outputDir, "previous.md");
+    await writeFile(previous, "Keep this draft.\n");
+    for (const operation of [
+      () =>
+        f.security.preflightPolicy(f.repository, { outputDir: f.outputDir }),
+      () => f.security.generatePolicy(f.repository, { outputDir: f.outputDir }),
+    ]) {
+      const error = await operation().catch((value: unknown) => value);
+      expect(error).toBeInstanceOf(OutputDirectoryNotEmptyError);
+      expect(String(error)).toContain("Choose a new or empty directory");
+      expect(String(error)).not.toContain("--archive-existing");
+    }
+    expect(prepared).toBe(false);
+    expect(await readFile(previous, "utf8")).toBe("Keep this draft.\n");
     await f.security.close();
   });
 
