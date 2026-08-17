@@ -599,11 +599,17 @@ export async function loadSecurityPolicyDraft(
     options.path,
     options.signal,
   );
-  const directory = await realpath(outputDir);
+  const manifestPath = await requireScanFile(
+    outputDir,
+    MANIFEST_NAME,
+    MANIFEST_NAME,
+    options.signal,
+  );
+  const directory = dirname(manifestPath);
   const file = (name: string) =>
     requireScanFile(directory, name, name, options.signal);
   const manifest = manifestSchema.parse(
-    JSON.parse(await readFile(await file(MANIFEST_NAME), "utf8")),
+    JSON.parse(await readFile(manifestPath, "utf8")),
   );
   if (
     manifest.repository !== target.repository ||
@@ -828,6 +834,7 @@ export async function applySecurityPolicy(
     signal?: AbortSignal;
   } = {},
 ): Promise<SecurityPolicyApplication> {
+  draft = { ...draft };
   validatePolicyContent(draft.content);
   const target = await resolveDraftTarget(draft, options.signal);
   if (draft.previousContent !== draft.content)
@@ -942,7 +949,8 @@ export async function applySecurityPolicy(
           await rm(temporary, { force: true }).catch(() => undefined);
         }
       }
-      // Once committed, finish verification even if cancellation arrives.
+      // SDK cancellation must not skip post-write checks. Process interruption
+      // can still leave a written policy that needs verification on retry.
       if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
         throw new CodexSecurityError(
           "The written policy contents do not match the reviewed draft.",

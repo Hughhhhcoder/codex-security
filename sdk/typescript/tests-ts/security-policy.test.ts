@@ -628,6 +628,38 @@ describe("security policy review and application", () => {
       expect((await stat(draft.targetPath)).mode & 0o777).toBe(0o640);
   });
 
+  test("rejects a linked saved-draft directory before reading it", async () => {
+    const f = await fixture();
+    await f.generate();
+    const alias = join(f.root, "linked-policy");
+    await symlink(
+      f.outputDir,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await expect(loadSecurityPolicyDraft(f.repository, alias)).rejects.toThrow(
+      "non-symlink directory",
+    );
+    expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("applies the SDK draft snapshot that was validated", async () => {
+    const f = await fixture();
+    const draft = await f.generate();
+    const target = draft.targetPath;
+    const other = join(f.repository, "unreviewed.md");
+    const application = applySecurityPolicy(draft);
+    draft.content = "";
+    draft.previousContent = POLICY;
+    draft.targetPath = other;
+    expect(await application).toMatchObject({
+      status: "written",
+      targetPath: target,
+    });
+    expect(await readFile(target, "utf8")).toBe(POLICY);
+    await expect(lstat(other)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("rejects malformed UTF-8 in existing policies and saved drafts", async () => {
     const f = await fixture();
     const malformed = Buffer.concat([
@@ -746,24 +778,29 @@ describe("security policy review and application", () => {
     expect(await readdir(f.repository)).toEqual([]);
   });
 
-  test("reports a committed policy when post-write verification fails", async () => {
-    const f = await fixture();
-    const pluginPath = await policyPlugin(
-      f.root,
-      [
-        "import pathlib, sys",
-        "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
-        "if (root / 'SECURITY.md').exists(): raise SystemExit('synthetic verification failure')",
-        "print('preflight passed')",
-      ].join("\n"),
-    );
-    const draft = await f.generate({ pluginPath });
-    const error = await applySecurityPolicy(draft).catch(
-      (value: unknown) => value,
-    );
-    expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
-    expect(error).toMatchObject({ targetPath: draft.targetPath });
-    expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+  test("reports a committed policy when verification fails or is interrupted", async () => {
+    for (const failure of [
+      "raise SystemExit('synthetic verification failure')",
+      "signal.raise_signal(signal.SIGINT)",
+    ]) {
+      const f = await fixture();
+      const pluginPath = await policyPlugin(
+        f.root,
+        [
+          "import pathlib, signal, sys",
+          "root = pathlib.Path(sys.argv[sys.argv.index('--repo') + 1])",
+          `if (root / 'SECURITY.md').exists(): ${failure}`,
+          "print('preflight passed')",
+        ].join("\n"),
+      );
+      const draft = await f.generate({ pluginPath });
+      const error = await applySecurityPolicy(draft).catch(
+        (value: unknown) => value,
+      );
+      expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
+      expect(error).toMatchObject({ targetPath: draft.targetPath });
+      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+    }
   });
 
   test("retries verification without replacing an already-installed draft", async () => {

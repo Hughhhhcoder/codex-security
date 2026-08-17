@@ -267,8 +267,9 @@ the path and returns `recoveryPath` in JSON. Keep that file until other writers
 have closed it and any edits are reconciled. A `recovery_required` result means
 the replacement needs manual reconciliation. A `written_unverified` result means
 the new policy was written but verification failed. Inspect the reported paths
-before retrying. Once a write commits, verification continues after cancellation;
-a later Ctrl-C or SIGTERM can force it to stop.
+before retrying. Once a write commits, SDK cancellation does not skip the
+remaining checks. A terminal interrupt or process failure can still leave a
+`written_unverified` result. A later Ctrl-C or SIGTERM forces the CLI to stop.
 
 Save edited drafts as UTF-8. If generation used a custom `--plugin-path`, select
 it again when applying a saved draft. Saved metadata cannot choose executable
