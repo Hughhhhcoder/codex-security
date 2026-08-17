@@ -314,8 +314,6 @@ const DEEP_SCAN_SETTINGS = [
   ["maxDiscoveryRuns", "max_discovery_runs", 1],
   ["maxTimeHours", "max_time_hours", 0],
 ] as const;
-const WORKBENCH_INLINE_RECIPE_CHARACTERS = 16 * 1024;
-
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
@@ -812,7 +810,6 @@ export class CodexSecurity {
         deepScanOptions(options),
       );
       const serializedRecipe = JSON.stringify(recipe);
-      const recipeTransport = workbenchRecipeTransport(serializedRecipe);
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
@@ -835,7 +832,7 @@ export class CodexSecurity {
           repo,
           "--scan-dir",
           scanDir,
-          ...recipeTransport.args,
+          "--recipe-json-stdin",
           ...(options.archiveExisting === true ? ["--archive-existing"] : []),
           ...(archivedScanDir === null
             ? []
@@ -844,7 +841,7 @@ export class CodexSecurity {
             ? []
             : ["--parent-scan-id", options.parentScanId]),
         ],
-        recipeTransport.input,
+        serializedRecipe,
       );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
@@ -1287,8 +1284,8 @@ export class CodexSecurity {
         }
       }
       try {
-        const runWorkbench = (args: readonly string[]) =>
-          workbench(workbenchOptions, args);
+        const runWorkbench = (args: readonly string[], input?: string) =>
+          workbench(workbenchOptions, args, input);
         const previousFindings = await listRepositoryFindings(
           runWorkbench,
           targetId,
@@ -2539,15 +2536,6 @@ function scanRecipe(
       ? {}
       : { deepScan: { ...deepScan } }),
   };
-}
-
-export function workbenchRecipeTransport(serializedRecipe: string): {
-  args: readonly string[];
-  input?: string;
-} {
-  return serializedRecipe.length < WORKBENCH_INLINE_RECIPE_CHARACTERS
-    ? { args: ["--recipe-json", serializedRecipe] }
-    : { args: ["--recipe-json-stdin"], input: serializedRecipe };
 }
 
 function validateScanCostLimit(
