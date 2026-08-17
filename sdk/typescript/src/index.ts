@@ -46,6 +46,19 @@ export type { CodexSecurityConfig, JsonObject, JsonValue } from "./config.js";
 export { loadContract, requireScanFile } from "./contract.js";
 export type { LoadedContract, ScanExpectation } from "./contract.js";
 export type * from "./models.js";
+export {
+  applySecurityPolicy,
+  loadSecurityPolicyDraft,
+  resolveSecurityPolicyTarget,
+  securityPolicyDiff,
+} from "./security-policy.js";
+export type {
+  SecurityPolicyDraft,
+  SecurityPolicyOptions,
+  SecurityPolicyPreflight,
+  SecurityPolicyStage,
+  SecurityPolicyTarget,
+} from "./security-policy.js";
 export { publishScan } from "./publish.js";
 export type {
   PublishScanOptions,

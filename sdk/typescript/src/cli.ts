@@ -113,6 +113,11 @@ import {
   type HistoryCommand,
 } from "./scan-history-renderer.js";
 import { ScanDashboard } from "./scan-dashboard.js";
+import {
+  runPolicyCommand,
+  type PolicyPrompt,
+  type PolicySecurity,
+} from "./security-policy-cli.js";
 import type {
   ScanPhase,
   ScanProgress,
@@ -191,6 +196,7 @@ const VALUE_OPTIONS = new Set([
   "--auth",
   "--path",
   "--knowledge-base",
+  "--apply",
   "--scan-prompt-file",
   "--post-scan-prompt-file",
   "--diff",
@@ -689,6 +695,9 @@ interface CliDependencies {
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
+  createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
+  policyPrompt?: PolicyPrompt;
+  resolvePolicyPython?: typeof resolvePluginPython;
   environment: NodeJS.ProcessEnv;
   prepareAuthenticationHome?: (
     environment: NodeJS.ProcessEnv,
@@ -722,6 +731,8 @@ interface CliDependencies {
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
   createSecurity: (config) =>
+    createSecurityInternal(config, { surface: "cli" }),
+  createPolicySecurity: (config) =>
     createSecurityInternal(config, { surface: "cli" }),
   environment: process.env,
   prepareAuthenticationHome: prepareCodexSecurityCredentialHome,
@@ -1082,6 +1093,7 @@ export async function main(
   let frameworkOutput = "";
   let renderedHistory: string | undefined;
   let renderedPublication: string | undefined;
+  let renderedPolicy: string | undefined;
   const history = async (
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
@@ -1851,8 +1863,7 @@ export async function main(
     },
   });
   const cli = Cli.create("codex-security", {
-    description:
-      "Run, validate, patch, export, and publish Codex Security findings.",
+    description: "Generate security policies, scan code, and manage findings.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -1860,6 +1871,197 @@ export async function main(
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
     },
   })
+    .command("policy", {
+      description: "Generate or review a source-backed SECURITY.md policy.",
+      destructive: true,
+      mcp: false,
+      args: z.object({
+        repository: z
+          .string()
+          .optional()
+          .describe(
+            "Repository or component directory (default: current directory).",
+          ),
+      }),
+      options: z
+        .object({
+          path: optionValue("--path")
+            .optional()
+            .describe(
+              "Generate SECURITY.md for this repository-relative component directory.",
+            ),
+          knowledgeBase: z
+            .array(optionValue("--knowledge-base"))
+            .default([])
+            .describe(
+              "Add architecture or security-context files; repeat for multiple paths.",
+            ),
+          outputDir: optionValue("--output-dir")
+            .optional()
+            .describe(
+              "Private artifact directory outside the repository (default: Codex Security state).",
+            ),
+          apply: optionValue("--apply")
+            .optional()
+            .describe(
+              "Review a saved policy artifact directory without calling the model.",
+            ),
+          write: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Apply the reviewed --apply draft without an interactive confirmation.",
+            ),
+          headless: z
+            .boolean()
+            .default(false)
+            .describe("Do not ask questions or offer to write the policy."),
+          dryRun: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Validate local generation inputs without starting Codex.",
+            ),
+          auth: z
+            .enum(["auto", "chatgpt", "api-key"])
+            .default("auto")
+            .describe("Select ChatGPT, API-key, or automatic authentication."),
+          model: optionValue("--model")
+            .optional()
+            .describe(
+              `Model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            ),
+          effort: effortOption(),
+          provider: PROVIDER_OPTION.describe(
+            "Inference provider for policy generation.",
+          ),
+          maxCost: z
+            .number()
+            .positive()
+            .optional()
+            .describe("Stop if estimated USD cost exceeds AMOUNT."),
+          pluginPath: optionValue("--plugin-path")
+            .optional()
+            .describe(PLUGIN_PATH_DESCRIPTION),
+          python: optionValue("--python")
+            .optional()
+            .describe(PYTHON_PATH_DESCRIPTION),
+          codex: z
+            .array(optionValue("--codex"))
+            .default([])
+            .describe(CODEX_OVERRIDE_DESCRIPTION),
+        })
+        .refine((options) => !options.write || options.apply !== undefined, {
+          message:
+            "--write requires --apply. Generate and review a draft first.",
+        })
+        .refine(
+          (options) =>
+            options.apply === undefined ||
+            (!options.dryRun &&
+              options.outputDir === undefined &&
+              options.knowledgeBase.length === 0 &&
+              options.auth === "auto" &&
+              options.model === undefined &&
+              options.effort === undefined &&
+              options.provider === "openai" &&
+              options.maxCost === undefined &&
+              options.pluginPath === undefined &&
+              options.codex.length === 0),
+          {
+            message: "--apply cannot be combined with generation options.",
+          },
+        ),
+      examples: [
+        { args: { repository: "." } },
+        { args: { repository: "." }, options: { path: "services/api" } },
+        {
+          args: { repository: "." },
+          options: { apply: "/path/outside/repository/policy" },
+        },
+      ],
+      hint:
+        "Noninteractive review:\n" +
+        "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json\n" +
+        "  codex-security policy . --apply /path/outside/repository/policy --write",
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, options, format }) {
+        try {
+          const directory = dependencies.currentDirectory();
+          const outcome = await withTerminalErrorsHandled(errorOutput, () =>
+            runPolicyCommand(
+              {
+                repository: resolve(
+                  directory,
+                  expandHome(args.repository ?? "."),
+                ),
+                config: {
+                  pluginPath: options.pluginPath,
+                  pythonPath: options.python,
+                  codexOverrides: parseCodexOverrides(
+                    options.codex,
+                    options.model,
+                    options.effort,
+                    options.provider,
+                  ),
+                },
+                generation: {
+                  auth: options.auth,
+                  path: options.path,
+                  knowledgeBasePaths: options.knowledgeBase.map((path) =>
+                    resolve(directory, expandHome(path)),
+                  ),
+                  outputDir:
+                    options.outputDir === undefined
+                      ? undefined
+                      : resolve(directory, expandHome(options.outputDir)),
+                  maxCostUsd: options.maxCost,
+                },
+                apply:
+                  options.apply === undefined
+                    ? undefined
+                    : resolve(directory, expandHome(options.apply)),
+                write: options.write,
+                headless: options.headless,
+                dryRun: options.dryRun,
+                format,
+              },
+              {
+                createSecurity:
+                  dependencies.createPolicySecurity ??
+                  ((config) =>
+                    createSecurityInternal(config, { surface: "cli" })),
+                prompt:
+                  dependencies.policyPrompt ??
+                  createBulkScanDiscoveryDependencies({
+                    output: errorOutput,
+                    now: dependencies.now,
+                    currentDirectory: dependencies.currentDirectory,
+                  }).prompt,
+                environment: dependencies.environment,
+                errorOutput,
+                writePreview: (value) => writeCliOutput(errorOutput, value),
+                now: dependencies.now,
+                addSignalListener: dependencies.addSignalListener,
+                removeSignalListener: dependencies.removeSignalListener,
+                resolvePython: dependencies.resolvePolicyPython,
+              },
+            ),
+          );
+          exitCode = outcome.exitCode;
+          if (format === "md" && outcome.markdown !== undefined) {
+            renderedPolicy = outcome.markdown;
+          }
+          return format === "toon" && !options.dryRun
+            ? undefined
+            : outcome.data;
+        } catch (error) {
+          exitCode = 2;
+          errorOutput.write(`codex-security: ${safeErrorMessage(error)}\n`);
+          return undefined;
+        }
+      },
+    })
     .command("scan", {
       description: "Run a Codex Security scan.",
       destructive: true,
@@ -2676,7 +2878,10 @@ export async function main(
   try {
     await writeCliOutput(
       output,
-      renderedPublication ?? renderedHistory ?? frameworkOutput,
+      renderedPolicy ??
+        renderedPublication ??
+        renderedHistory ??
+        frameworkOutput,
     );
     return exitCode;
   } catch (error) {
@@ -2859,6 +3064,7 @@ function validateCliArguments(
   const commandIndex = argv.findIndex((value) =>
     [
       "scan",
+      "policy",
       "install-hook",
       "bulk-scan",
       "scans",
@@ -3431,6 +3637,15 @@ async function runScan(
   dependencies: CliDependencies,
   interactive = true,
 ): Promise<ScanOutcome> {
+  return await withTerminalErrorsHandled(errorOutput, () =>
+    executeScan(arguments_, errorOutput, dependencies, interactive),
+  );
+}
+
+async function withTerminalErrorsHandled<T>(
+  errorOutput: Writable,
+  operation: () => Promise<T>,
+): Promise<T> {
   const observeTerminalErrors =
     typeof errorOutput.on === "function" &&
     typeof errorOutput.off === "function";
@@ -3439,12 +3654,7 @@ async function runScan(
     errorOutput.on?.("error", ignoreTerminalError);
   }
   try {
-    return await executeScan(
-      arguments_,
-      errorOutput,
-      dependencies,
-      interactive,
-    );
+    return await operation();
   } finally {
     if (observeTerminalErrors) {
       try {

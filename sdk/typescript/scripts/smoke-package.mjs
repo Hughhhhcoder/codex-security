@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   readdir,
   rm,
   stat,
@@ -346,7 +347,7 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.publishScan !== "function") throw new Error("The installed package does not export publishScan.");`,
+      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.publishScan !== "function") throw new Error("The installed package does not export publishScan."); if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function" || typeof sdk.applySecurityPolicy !== "function" || typeof sdk.loadSecurityPolicyDraft !== "function") throw new Error("The installed package does not export the security-policy API.");`,
     ],
     { cwd: consumer },
   );
@@ -401,6 +402,97 @@ try {
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
+  assert.match(help, /\bpolicy\b/u);
+  const policyHelp = run(process.execPath, [launcher, "policy", "--help"], {
+    cwd: consumer,
+    capture: true,
+  });
+  assert.match(policyHelp, /SECURITY\.md/u);
+  const policyTarget = join(consumer, "policy-target");
+  await mkdir(policyTarget);
+  const policyPreflight = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "policy",
+        policyTarget,
+        "--auth",
+        "chatgpt",
+        "--dry-run",
+        "--json",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
+        },
+      },
+    ),
+  );
+  assert.equal(
+    policyPreflight.targetPath,
+    join(await realpath(policyTarget), "SECURITY.md"),
+  );
+  assert.equal(policyPreflight.dryRun, true);
+
+  const policyArtifacts = join(consumer, "policy-draft");
+  const policyMarkdown =
+    "# Security Policy\n\n## Security invariants\n\nCallers must authorize access to another account's records.\n";
+  await mkdir(policyArtifacts, { mode: 0o700 });
+  for (const [name, contents] of Object.entries({
+    "SECURITY.md": policyMarkdown,
+    "previous-SECURITY.md": "",
+    "project-spec.md": "# Synthetic architecture\n",
+    "THREAT_MODEL.md": "# Synthetic threat model\n",
+    "policy-draft.json": JSON.stringify({
+      documentType: "codex-security.policy-draft",
+      schemaVersion: "1.0",
+      repository: policyPreflight.repository,
+      scope: ".",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      revision: null,
+      previousPolicySha256: null,
+      model: "synthetic-model",
+      reasoningEffort: "high",
+      pluginVersion: packageManifest.version,
+      reviewNotes: [],
+    }),
+  })) {
+    await writeFile(join(policyArtifacts, name), contents, { mode: 0o600 });
+  }
+  const appliedPolicy = JSON.parse(
+    run(
+      process.execPath,
+      [
+        launcher,
+        "policy",
+        policyTarget,
+        "--apply",
+        policyArtifacts,
+        "--write",
+        "--json",
+      ],
+      {
+        cwd: consumer,
+        capture: true,
+        env: {
+          ...process.env,
+          CODEX_CLI_PATH: join(consumer, "codex-must-not-run"),
+          OPENAI_API_KEY: "",
+          CODEX_API_KEY: "",
+          CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
+        },
+      },
+    ),
+  );
+  assert.equal(appliedPolicy.status, "written");
+  assert.equal(
+    await readFile(policyPreflight.targetPath, "utf8"),
+    policyMarkdown,
+  );
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(

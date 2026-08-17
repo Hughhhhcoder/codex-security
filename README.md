@@ -1,6 +1,6 @@
 # Codex Security
 
-`@openai/codex-security` is a CLI and TypeScript SDK for finding, validating, and fixing security vulnerabilities in your code.
+`@openai/codex-security` is a CLI and TypeScript SDK for defining security policy and finding, validating, and fixing security vulnerabilities in your code.
 
 **See the [Codex Security documentation](https://learn.chatgpt.com/docs/security/cli)** for more details.
 
@@ -16,6 +16,7 @@ Node.js 26.x; Python 3.10 or later; and access to Codex Security.
 ```bash
 npm install @openai/codex-security
 npx @openai/codex-security login
+npx @openai/codex-security policy .
 npx @openai/codex-security scan .
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
@@ -78,6 +79,40 @@ and identifies findings not confirmed in its latest scan.
 root cause, reuses saved matches, and identifies new, persisting, reopened,
 resolved, or unknown findings. Missing findings remain unknown when coverage is
 incomplete or their original location was not reviewed.
+
+## Generate SECURITY.md
+
+Generate a source-backed security policy for a repository or one component:
+
+```bash
+npx @openai/codex-security policy .
+npx @openai/codex-security policy . --path services/api --knowledge-base architecture.md
+```
+
+The command first maps the system, builds a detailed threat model, and then
+drafts a concise `SECURITY.md`. In a terminal, it asks about material unknowns,
+shows the proposed diff, and asks before writing. Existing reporting instructions
+and owner-confirmed policy decisions are preserved. Scans automatically read the
+resulting root and nested `SECURITY.md` files.
+
+For a noninteractive review, save a draft outside the repository:
+
+```bash
+npx @openai/codex-security policy . --headless --output-dir /path/outside/repository/policy --json
+# Review and, if needed, edit the saved SECURITY.md draft.
+npx @openai/codex-security policy . --apply /path/outside/repository/policy --write
+```
+
+Use the same repository and `--path` when applying a component draft. Applying
+does not call the model, and it refuses to overwrite a policy changed since
+generation. `--write` requires a previously generated `--apply` draft.
+
+The private artifact directory also contains `project-spec.md` and
+`THREAT_MODEL.md`. Review these detailed documents before sharing them; only the
+approved policy is copied into the repository. Generated policy is not owner
+sign-off, and threat scenarios are not confirmed vulnerabilities. See the
+[package README](sdk/typescript/README.md#generate-a-security-policy) for SDK use,
+output formats, and generation options.
 
 ## Publish scan findings
 

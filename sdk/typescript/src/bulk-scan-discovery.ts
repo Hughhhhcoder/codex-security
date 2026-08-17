@@ -54,8 +54,16 @@ interface GitHubRepositoriesResponse {
 export interface BulkScanPrompt {
   isInteractive(): boolean;
   write(value: string): void;
-  confirm(question: string, defaultValue?: boolean): Promise<boolean>;
-  input(question: string, defaultValue?: string): Promise<string>;
+  confirm(
+    question: string,
+    defaultValue?: boolean,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  input(
+    question: string,
+    defaultValue?: string,
+    signal?: AbortSignal,
+  ): Promise<string>;
   select<Value extends string>(
     question: string,
     options: readonly { label: string; value: Value; short?: string }[],
@@ -326,7 +334,7 @@ async function validateWizardOutput(outputDir: string): Promise<void> {
 }
 
 function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
-  const context = () => {
+  const context = (signal?: AbortSignal) => {
     const stream = new Writable({
       write(chunk: Buffer, _encoding, callback) {
         output.write(chunk.toString("utf8"));
@@ -337,7 +345,7 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
       configurable: true,
       get: () => output.columns,
     });
-    return { input: stdin, output: stream };
+    return { input: stdin, output: stream, signal };
   };
 
   return {
@@ -345,10 +353,10 @@ function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
     write: (value) => {
       output.write(value);
     },
-    confirm: (message, defaultValue = false) =>
-      confirm({ message, default: defaultValue }, context()),
-    input: (message, defaultValue) =>
-      input({ message, default: defaultValue }, context()),
+    confirm: (message, defaultValue = false, signal) =>
+      confirm({ message, default: defaultValue }, context(signal)),
+    input: (message, defaultValue, signal) =>
+      input({ message, default: defaultValue }, context(signal)),
     select: (message, options, presentation) =>
       search(
         {
