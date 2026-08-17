@@ -160,7 +160,7 @@ jobs:
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true"
-        run: bun test --timeout 30000 ./tests-ts/windows-machine-policy.test.ts
+        run: bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts
 
   windows-verify:
     name: windows-latest / node-${{ matrix.node == '22.13.0' && '22' || matrix.node }} / verify

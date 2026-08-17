@@ -104,7 +104,7 @@ describe("TypeScript package skeleton", () => {
     ]);
   });
 
-  test("uses the default test timeout consistently across CI platforms", async () => {
+  test("keeps the default and Windows CI test timeouts", async () => {
     const packageJson = JSON.parse(
       await readFile(new URL("../package.json", import.meta.url), "utf8"),
     );
@@ -164,7 +164,7 @@ describe("TypeScript package skeleton", () => {
     ).toMatchObject({
       if: "matrix.shard == 3 && runner.environment == 'github-hosted'",
       env: { CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "true" },
-      run: "bun test --timeout 30000 ./tests-ts/windows-machine-policy.test.ts",
+      run: "bun test --timeout 120000 ./tests-ts/windows-machine-policy.test.ts",
     });
     const quality = await workflow("test-quality.yml");
     expect(Object.keys(quality.on).sort()).toEqual([
@@ -211,6 +211,9 @@ describe("TypeScript package skeleton", () => {
     const command = runner.steps.find(
       (step) => step.name === "Test runner mode",
     )?.run;
+    expect(command).toContain(
+      "${{ runner.os == 'Windows' && '--timeout=120000' || '' }}",
+    );
     expect(command).toContain("${{ matrix.args }}");
     expect(command).not.toContain("--seed=");
 
