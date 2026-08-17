@@ -2290,6 +2290,97 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  test("rechecks a replaced Windows credential lock after a read retry", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "rechecks a replaced Windows credential lock after a read retry",
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = join(root, "credential-home");
+    const lock = join(home, ".codex-security-scan.lock");
+    const ownerPath = join(lock, "owner.json");
+    await mkdir(home, { mode: 0o700 });
+    const securityOptions = {
+      platform: "win32" as const,
+      secureWindowsHome: async () => {},
+    };
+    const releaseFirst = await acquireCodexSecurityCredentialHomeLock(
+      home,
+      undefined,
+      securityOptions,
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fsPromises.utimes(lock, old, old);
+    const originalReadFile = fsPromises.readFile;
+    const originalLstat = fsPromises.lstat;
+    let replaceOnRead = true;
+    let replacementCreated = false;
+    let checkedReplacement!: () => void;
+    const rechecked = new Promise<void>((resolve) => {
+      checkedReplacement = resolve;
+    });
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      lstat: async (...args: Parameters<typeof originalLstat>) => {
+        const metadata = await originalLstat(...args);
+        if (replacementCreated && String(args[0]) === lock) {
+          checkedReplacement();
+        }
+        return metadata;
+      },
+      readFile: async (...args: Parameters<typeof originalReadFile>) => {
+        if (replaceOnRead && String(args[0]) === ownerPath) {
+          replaceOnRead = false;
+          await releaseFirst();
+          await mkdir(lock, { mode: 0o700 });
+          replacementCreated = true;
+          throw Object.assign(new Error("owner removed during read"), {
+            code: "EPERM",
+          });
+        }
+        return originalReadFile(...args);
+      },
+    }));
+    const controller = new AbortController();
+    const waiting = acquireCodexSecurityCredentialHomeLock(
+      home,
+      controller.signal,
+      securityOptions,
+    );
+    void waiting.catch(() => undefined);
+    try {
+      await Promise.race([
+        rechecked,
+        waiting.then(() => {
+          throw new Error(
+            "The replacement lock was acquired before its owner was ready.",
+          );
+        }),
+      ]);
+      controller.abort();
+      await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+      expect(existsSync(lock)).toBe(true);
+      expect(existsSync(ownerPath)).toBe(false);
+    } finally {
+      controller.abort();
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        lstat: originalLstat,
+        readFile: originalReadFile,
+      }));
+      await waiting.then(
+        (release) => release(),
+        () => undefined,
+      );
+      await releaseFirst();
+      await rm(lock, { recursive: true, force: true });
+    }
+  });
+
   test("cancels unreadable Windows credential-lock retries", async () => {
     if (
       runMockInSubprocess(
