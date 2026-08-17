@@ -3805,6 +3805,7 @@ describe("CodexSecurity orchestration", () => {
     ["unavailable", "live"],
     ["partial", "completed"],
     ["partial", "reset"],
+    ["partial", "cleanup-error"],
     ["partial", "flushed"],
   ] as const)(
     "recovers exhausted deep-scan budget when completion is %s using %s usage",
@@ -3910,6 +3911,10 @@ describe("CodexSecurity orchestration", () => {
                     input_tokens: 1_250,
                     cached_input_tokens: 200,
                     output_tokens: 30,
+                    reasoning_output_tokens:
+                      costSource === "reset" || costSource === "cleanup-error"
+                        ? 12
+                        : 0,
                   });
                   await new Promise<void>((resolve) => {
                     if (options.signal.aborted) resolve();
@@ -3934,7 +3939,9 @@ describe("CodexSecurity orchestration", () => {
       const keepAlive = setTimeout(() => {}, 10_000);
       const originalStop = ScanCostTracker.prototype.stop;
       const stop =
-        costSource === "reset" || costSource === "flushed"
+        costSource === "reset" ||
+        costSource === "cleanup-error" ||
+        costSource === "flushed"
           ? spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
               async function (
                 this: ScanCostTracker,
@@ -3942,6 +3949,9 @@ describe("CodexSecurity orchestration", () => {
               ) {
                 try {
                   const snapshot = await originalStop.apply(this, args);
+                  if (costSource === "cleanup-error" && args.length === 0) {
+                    throw new Error("Synthetic cleanup accounting failure");
+                  }
                   return costSource === "reset" && args.length === 0
                     ? {
                         usage: RESET_BUDGET_USAGE,
@@ -4012,6 +4022,10 @@ describe("CodexSecurity orchestration", () => {
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(expectedCostUsd);
+          expect(recovered.turnResult.usage).toMatchObject({
+            reasoning_output_tokens:
+              costSource === "reset" || costSource === "cleanup-error" ? 12 : 0,
+          });
           expect(warnings).toEqual([
             `Scan stopped: estimated cost $${expectedCostUsd} exceeded the $0.005 limit; partial output remains at ${scanDir}.`,
           ]);

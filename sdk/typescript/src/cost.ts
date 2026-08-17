@@ -82,7 +82,7 @@ interface ScanCostTrackerOptions {
   scanDirectory?: string;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
-  onCost?: (cost: Readonly<ScanCost>) => void;
+  onCost?: (cost: Readonly<ScanCost>, usage: unknown) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
@@ -261,7 +261,7 @@ export class ScanCostTracker {
       ((rootUsage === null && workerUsage === null) ||
         (this.#snapshot.cost !== null &&
           (cost === null ||
-            this.#snapshot.cost.estimatedUsd >= cost.estimatedUsd)))
+            this.#snapshot.cost.estimatedUsd > cost.estimatedUsd)))
         ? this.#snapshot
         : { usage: completedUsage ?? null, cost };
     this.#snapshot = snapshot;
@@ -445,11 +445,11 @@ export class ScanCostTracker {
     const hasUnverifiedWorkerAttribution = [...ambiguousWorkers].some(
       (threadId) => !included.has(threadId),
     );
-    let readFailure: {
+    const readFailures: Array<{
       session: SessionUsage;
       error: unknown;
       rootOnlyRecoverable: boolean;
-    } | null = null;
+    }> = [];
     if (this.#options.maxCostUsd !== undefined) {
       for (const [path, session] of this.#sessions) {
         if (
@@ -457,19 +457,19 @@ export class ScanCostTracker {
           included.has(session.threadId) &&
           !presentSessions.has(path)
         ) {
-          readFailure ??= {
+          readFailures.push({
             session,
             error: new Error(
               "A tracked scan session disappeared before its cost could be verified.",
             ),
             rootOnlyRecoverable: false,
-          };
+          });
         }
       }
     }
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) {
-        readFailure ??= { session, error, rootOnlyRecoverable: true };
+        readFailures.push({ session, error, rootOnlyRecoverable: true });
       } else if (isSessionAccessDenied(error)) {
         quarantineSession(session, error);
       }
@@ -490,11 +490,11 @@ export class ScanCostTracker {
           this.#options.maxCostUsd !== undefined &&
           session.accountingError !== null
         ) {
-          readFailure ??= {
+          readFailures.push({
             session,
             error: session.accountingError,
             rootOnlyRecoverable: true,
-          };
+          });
         }
         if (session.pendingLineBytes > 0) observed.unverified = true;
         const usage = session.accounting?.usage ?? null;
@@ -530,12 +530,14 @@ export class ScanCostTracker {
       }
       this.#reportCost(this.#snapshot.cost);
     }
-    if (readFailure !== null) {
+    const readFailure = readFailures[0];
+    if (readFailure !== undefined) {
       this.#rootOnlyReadError =
-        readFailure.rootOnlyRecoverable &&
-        readFailure.session.threadId === this.#threadId &&
-        included.size === 1 &&
-        !hasUnverifiedWorkerAttribution;
+        readFailures.every(
+          (failure) =>
+            failure.rootOnlyRecoverable &&
+            failure.session.threadId === rootThreadId,
+        ) && !hasUnverifiedWorkerAttribution;
       throw readFailure.error;
     }
   }
@@ -634,7 +636,7 @@ export class ScanCostTracker {
   #reportCost(cost: ScanCost | null): void {
     if (cost === null || cost.estimatedUsd === this.#lastCost) return;
     this.#lastCost = cost.estimatedUsd;
-    this.#options.onCost?.(cost);
+    this.#options.onCost?.(cost, this.#snapshot.usage);
   }
 }
 
@@ -1194,7 +1196,7 @@ function higherCostUsage(
   }
   return previousCost !== null &&
     nextCost !== null &&
-    previousCost.estimatedUsd >= nextCost.estimatedUsd
+    previousCost.estimatedUsd > nextCost.estimatedUsd
     ? previous
     : next;
 }

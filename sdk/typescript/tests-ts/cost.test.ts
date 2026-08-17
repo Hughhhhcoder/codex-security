@@ -2370,6 +2370,143 @@ describe("live scan cost tracking", () => {
     }
   });
 
+  test("prefers completed root usage on mocked equal-price ties", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "prefers completed root usage on mocked equal-price ties",
+      )
+    ) {
+      return;
+    }
+    const model = "gpt-5.6-terra";
+    const observed = {
+      input_tokens: 100,
+      output_tokens: 1,
+      reasoning_output_tokens: 1,
+    };
+    const completed = {
+      input_tokens: 101,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 20,
+      output_tokens: 0,
+      reasoning_output_tokens: 0,
+    };
+    expect(estimateScanCost(model, observed)?.estimatedUsd).toBe(
+      estimateScanCost(model, completed)?.estimatedUsd,
+    );
+    for (const withWorker of [false, true]) {
+      const sessions: Record<string, MockAccountingEvent[]> = {
+        "scan-thread": accountingSession("scan-thread", [
+          accountingEvent(observed),
+        ]),
+      };
+      if (withWorker) {
+        sessions["worker-thread"] = accountingSession(
+          "worker-thread",
+          [
+            accountingEvent({
+              input_tokens: 20,
+              output_tokens: 2,
+              reasoning_output_tokens: 1,
+            }),
+          ],
+          "scan-thread",
+        );
+      }
+      const expected = {
+        ...completed,
+        input_tokens: withWorker ? 121 : 101,
+        output_tokens: withWorker ? 2 : 0,
+        reasoning_output_tokens: withWorker ? 1 : 0,
+      };
+      await withMockAccountingSessions(
+        sessions,
+        { model, maxCostUsd: 1 },
+        async (tracker) => {
+          const final = await tracker.stop(completed);
+          expect(final.usage).toMatchObject(expected);
+          expect(final.cost).toEqual(estimateScanCost(model, expected));
+          expect(await tracker.stop()).toBe(final);
+        },
+      );
+    }
+  });
+
+  test("recovers mocked root read failures only with verified workers", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "recovers mocked root read failures only with verified workers",
+      )
+    ) {
+      return;
+    }
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const workerUsage = { input_tokens: 250, output_tokens: 20 };
+    const completedRoot = { input_tokens: 1_000, output_tokens: 100 };
+    for (const workerState of [
+      "complete",
+      "unreadable",
+      "accounting-error",
+      "missing",
+      "unfinished",
+      "missing-usage",
+    ] as const) {
+      let failReads = false;
+      await withMockAccountingSessions(
+        {
+          "scan-thread": accountingSession("scan-thread", [
+            accountingEvent(rootUsage),
+          ]),
+          "worker-thread": accountingSession(
+            "worker-thread",
+            workerState === "missing-usage"
+              ? []
+              : [accountingEvent(workerUsage)],
+            "scan-thread",
+          ),
+        },
+        { model: "gpt-5.6-terra", maxCostUsd: 1 },
+        async (tracker, append, omit) => {
+          await tracker.refresh();
+          if (workerState === "accounting-error") {
+            append("worker-thread", [
+              new Error("Synthetic worker accounting error"),
+              { type: "event_msg", payload: { type: "task_complete" } },
+            ]);
+          } else if (workerState === "missing") {
+            omit("worker-thread");
+          } else if (workerState === "unfinished") {
+            append("worker-thread", [
+              { type: "event_msg", payload: { type: "task_started" } },
+            ]);
+          }
+          failReads = true;
+          const final = tracker.stop(completedRoot);
+          if (workerState === "complete") {
+            await expect(final).resolves.toMatchObject({
+              usage: { input_tokens: 1_250, output_tokens: 120 },
+              cost: { inputTokens: 1_250, outputTokens: 120 },
+            });
+          } else {
+            await expect(final).rejects.toThrow();
+          }
+        },
+        (path) => {
+          if (
+            failReads &&
+            (path.endsWith("rollout-scan-thread.jsonl") ||
+              (workerState === "unreadable" &&
+                path.endsWith("rollout-worker-thread.jsonl")))
+          ) {
+            throw new Error("Synthetic session read failure");
+          }
+        },
+      );
+    }
+  });
+
   test("accumulates mocked owned reset epochs without double counting", async () => {
     if (
       runMockInSubprocess(
@@ -2514,7 +2651,8 @@ describe("live scan cost tracking", () => {
       rejects,
     ] of [
       ["worker-thread", true, 1, true, true],
-      ["scan-thread", true, 1, true, true],
+      ["scan-thread", true, 1, true, false],
+      ["scan-thread", true, 1, false, true],
       ["unrelated-thread", true, 1, true, false],
       ["worker-thread", true, undefined, true, false],
       ["scan-thread", false, undefined, false, false],
@@ -3447,7 +3585,7 @@ describe("live scan cost tracking", () => {
   );
 
   testPosix(
-    "rejects root-only budget fallback when the scan also has delegated workers",
+    "combines verified workers with completed usage after a root read failure",
     async () => {
       const { root, tracker } = await workerScan({
         workerUsage: { input_tokens: 250, output_tokens: 20 },
@@ -3459,7 +3597,10 @@ describe("live scan cost tracking", () => {
       try {
         await expect(
           tracker.stop({ input_tokens: 1_000, output_tokens: 100 }),
-        ).rejects.toThrow();
+        ).resolves.toMatchObject({
+          usage: { input_tokens: 1_250, output_tokens: 120 },
+          cost: { inputTokens: 1_250, outputTokens: 120 },
+        });
       } finally {
         await chmod(root, 0o600);
       }

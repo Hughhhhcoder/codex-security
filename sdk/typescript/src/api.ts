@@ -436,6 +436,7 @@ export class CodexSecurity {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let completionCost: ScanCost | null = null;
+    let signaledCostUsage: unknown;
     let budgetRecovery: {
       expectation: ScanExpectation;
       pluginRoot: string;
@@ -792,7 +793,7 @@ export class CodexSecurity {
         onCost:
           options.onCost === undefined && options.maxCostUsd === undefined
             ? undefined
-            : (cost) => {
+            : (cost, usage) => {
                 notifyObserver(
                   "onCost",
                   options.onCost,
@@ -801,8 +802,10 @@ export class CodexSecurity {
                 );
                 if (
                   options.maxCostUsd !== undefined &&
-                  cost.estimatedUsd > options.maxCostUsd
+                  cost.estimatedUsd > options.maxCostUsd &&
+                  !costAbortController.signal.aborted
                 ) {
+                  signaledCostUsage = usage;
                   costAbortController.abort(
                     new ScanCostLimitExceededError(
                       options.maxCostUsd,
@@ -1369,12 +1372,13 @@ export class CodexSecurity {
           signaledOverage.cost.estimatedUsd > trackedCost.estimatedUsd)
           ? {
               cost: signaledOverage.cost,
-              usage: {
+              usage: signaledCostUsage ?? {
                 input_tokens: signaledOverage.cost.inputTokens,
                 cached_input_tokens: signaledOverage.cost.cachedInputTokens,
                 cache_write_input_tokens:
                   signaledOverage.cost.cacheWriteInputTokens,
                 output_tokens: signaledOverage.cost.outputTokens,
+                reasoning_output_tokens: 0,
               },
             }
           : trackedSnapshot;
