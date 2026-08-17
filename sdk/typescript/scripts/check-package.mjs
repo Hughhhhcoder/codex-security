@@ -174,6 +174,7 @@ const distFiles = new Set(
     "models",
     "multiscan",
     "publication",
+    "publication-enrichment",
     "publication-events",
     "publication-store",
     "publish",

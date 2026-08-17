@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createLinearClient,
   importLinearIssues,
+  loadLinearPublicationContext,
   resolveLinearApiKey,
   type LinearClientFactory,
 } from "../src/linear.js";
@@ -172,5 +173,96 @@ describe("Linear issue intake", () => {
         }),
       ).rejects.toThrow(message);
     }
+  });
+});
+
+describe("Linear publication context", () => {
+  test("validates the destination and returns every active non-group team label", async () => {
+    const labels = {
+      nodes: [
+        {
+          id: "label-zeta",
+          name: "Zeta",
+          isGroup: false,
+          archivedAt: undefined as Date | undefined,
+        },
+        {
+          id: "label-group",
+          name: "Group",
+          isGroup: true,
+          archivedAt: undefined as Date | undefined,
+        },
+      ],
+      pageInfo: { hasNextPage: true },
+      async fetchNext() {
+        this.nodes.push({
+          id: "label-alpha",
+          name: "Alpha",
+          isGroup: false,
+          archivedAt: undefined,
+        });
+        this.nodes.push({
+          id: "label-archived",
+          name: "Archived",
+          isGroup: false,
+          archivedAt: new Date(),
+        });
+        this.pageInfo.hasNextPage = false;
+      },
+    };
+    const projectTeams = {
+      nodes: [{ id: "another-team" }],
+      pageInfo: { hasNextPage: true },
+      async fetchNext() {
+        this.nodes.push({ id: "team-example" });
+        this.pageInfo.hasNextPage = false;
+      },
+    };
+    const context = await loadLinearPublicationContext(
+      {
+        team: async (id: string) => ({
+          id,
+          labels: async () => labels,
+        }),
+        project: async (id: string) => ({
+          id,
+          teams: async () => projectTeams,
+        }),
+      } as never,
+      "team-example",
+      "project-example",
+    );
+
+    expect(context).toEqual({
+      labels: [
+        { id: "label-alpha", name: "Alpha" },
+        { id: "label-zeta", name: "Zeta" },
+      ],
+    });
+  });
+
+  test("rejects a project outside the selected team", async () => {
+    await expect(
+      loadLinearPublicationContext(
+        {
+          team: async () => ({
+            id: "team-example",
+            labels: async () => ({
+              nodes: [],
+              pageInfo: { hasNextPage: false },
+            }),
+          }),
+          project: async () => ({
+            id: "project-example",
+            teams: async () => ({
+              nodes: [{ id: "another-team" }],
+              pageInfo: { hasNextPage: false },
+            }),
+          }),
+        } as never,
+        "team-example",
+        "project-example",
+      ),
+    ).rejects.toThrow("does not belong to the selected team");
   });
 });

@@ -6,6 +6,7 @@ import {
 } from "@linear/sdk";
 import type { JsonObject } from "./config.js";
 import { CodexSecurityError, safeErrorMessage } from "./errors.js";
+import type { LinearPublicationLabel } from "./publication.js";
 
 export type LinearClientFactory<
   Method extends keyof LinearClient = "issue" | "projects",
@@ -30,6 +31,53 @@ export function createLinearClient<Method extends keyof LinearClient>(
 ): Pick<LinearClient, Method> {
   const configuration = { ...options, redirect: "error" as const };
   return factory ? factory(configuration) : new LinearClient(configuration);
+}
+
+export interface LinearPublicationContext {
+  labels: LinearPublicationLabel[];
+}
+
+export async function loadLinearPublicationContext(
+  client: Pick<LinearClient, "team" | "project">,
+  teamId: string,
+  projectId?: string,
+): Promise<LinearPublicationContext> {
+  const team = await client.team(teamId);
+  if (team === undefined || team.id !== teamId) {
+    throw new CodexSecurityError(
+      "The selected Linear team was not found or is not accessible.",
+    );
+  }
+
+  if (projectId !== undefined) {
+    const project = await client.project(projectId);
+    if (project === undefined || project.id !== projectId) {
+      throw new CodexSecurityError(
+        "The selected Linear project was not found or is not accessible.",
+      );
+    }
+    const teams = await project.teams({ first: 50 });
+    while (teams.pageInfo.hasNextPage) await teams.fetchNext();
+    if (!teams.nodes.some(({ id }) => id === teamId)) {
+      throw new CodexSecurityError(
+        "The selected Linear project does not belong to the selected team.",
+      );
+    }
+  }
+
+  const page = await team.labels({ first: 50 });
+  while (page.pageInfo.hasNextPage) await page.fetchNext();
+  const labels = new Map<string, LinearPublicationLabel>();
+  for (const label of page.nodes) {
+    if (label.isGroup || label.archivedAt !== undefined) continue;
+    labels.set(label.id, { id: label.id, name: label.name });
+  }
+  return {
+    labels: [...labels.values()].sort(
+      (left, right) =>
+        left.name.localeCompare(right.name) || left.id.localeCompare(right.id),
+    ),
+  };
 }
 
 export interface ImportedIssue {

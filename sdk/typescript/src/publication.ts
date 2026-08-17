@@ -5,7 +5,6 @@ import type {
   FindingCodeEvidence,
   FindingLocation,
   ScanTargetRecord,
-  SeverityLevel,
 } from "./models.js";
 import { bundledPluginRoot } from "./runtime.js";
 
@@ -28,6 +27,18 @@ export interface PreparedPublicationIssue {
   title: string;
   description: string;
   priority?: 1 | 2 | 3 | 4;
+  labels?: LinearPublicationLabel[];
+}
+
+export interface LinearPublicationLabel {
+  id: string;
+  name: string;
+}
+
+export interface AppliedPublicationMetadata {
+  findingId: string;
+  priority?: 1 | 2 | 3 | 4;
+  labels: LinearPublicationLabel[];
 }
 
 export interface PreparedScanPublication {
@@ -37,14 +48,6 @@ export interface PreparedScanPublication {
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
 }
-
-const LINEAR_PRIORITIES = {
-  critical: 1,
-  high: 2,
-  medium: 3,
-  low: 4,
-  informational: undefined,
-} as const satisfies Record<SeverityLevel, 1 | 2 | 3 | 4 | undefined>;
 
 export async function prepareScanPublication(
   scanDirectory: string,
@@ -67,17 +70,39 @@ export async function prepareScanPublication(
         ? {}
         : { projectId: options.projectId }),
     },
-    issues: contract.findings.findings.map((finding) => {
-      const priority = LINEAR_PRIORITIES[finding.severity.level];
-      return {
-        findingId: finding.findingId,
-        occurrenceId: finding.occurrenceId,
-        title: `[Codex Security][${finding.severity.level.toUpperCase()}] ${finding.title}`,
-        description: renderFindingDescription(contract, finding, uploadedAt),
-        ...(priority === undefined ? {} : { priority }),
-      };
-    }),
+    issues: contract.findings.findings.map((finding) => ({
+      findingId: finding.findingId,
+      occurrenceId: finding.occurrenceId,
+      title: `[Codex Security][${finding.severity.level.toUpperCase()}] ${finding.title}`,
+      description: renderFindingDescription(contract, finding, uploadedAt),
+    })),
   };
+}
+
+export function publicationIssueFields(issue: PreparedPublicationIssue): {
+  title: string;
+  description: string;
+  priority?: 1 | 2 | 3 | 4;
+  labelIds?: string[];
+} {
+  return {
+    title: issue.title,
+    description: issue.description,
+    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+    ...(issue.labels === undefined || issue.labels.length === 0
+      ? {}
+      : { labelIds: issue.labels.map(({ id }) => id) }),
+  };
+}
+
+export function appliedPublicationMetadata(
+  issues: readonly PreparedPublicationIssue[],
+): AppliedPublicationMetadata[] {
+  return issues.map((issue) => ({
+    findingId: issue.findingId,
+    ...(issue.priority === undefined ? {} : { priority: issue.priority }),
+    labels: issue.labels?.map((label) => ({ ...label })) ?? [],
+  }));
 }
 
 function renderFindingDescription(

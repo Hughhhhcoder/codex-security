@@ -423,6 +423,17 @@ class PublicationProgressPresenter {
   }
 
   public observe(event: PublishScanProgress): void {
+    if (event.type === "enrichment_started") {
+      if (this.#dashboard !== null) {
+        this.#dashboard.setStage("Applying publication knowledge base");
+      } else {
+        this.#write("Applying publication knowledge base.");
+      }
+      return;
+    }
+
+    if (event.type === "enrichment_completed") return;
+
     if (event.type === "started") {
       if (this.#dashboard !== null) {
         this.#dashboard.setPublicationProgress(0, event.total);
@@ -1595,6 +1606,12 @@ export async function main(
         .describe(
           "Linear assignee email or user ID; omit to leave issues unassigned.",
         ),
+      knowledgeBase: z
+        .array(optionValue("--knowledge-base"))
+        .default([])
+        .describe(
+          "Apply publication policy files; repeat for multiple paths (requires a Linear API key).",
+        ),
       dryRun: z
         .boolean()
         .default(false)
@@ -1611,11 +1628,13 @@ export async function main(
       const onInterrupt = (): void => cancel("SIGINT");
       const onTerminate = (): void => cancel("SIGTERM");
       let observingSignals = false;
+      let publicationLinearApiKey: string | undefined;
       try {
         const linearApiKey = resolveLinearApiKey(
           dependencies.environment,
           options.linearApiKey,
         );
+        publicationLinearApiKey = linearApiKey;
         const assigneeId = options.linearAssignee?.trim();
         if (options.linearAssignee !== undefined && !assigneeId) {
           throw new CodexSecurityError("--linear-assignee must not be empty.");
@@ -1623,6 +1642,11 @@ export async function main(
         if (assigneeId !== undefined && linearApiKey === undefined) {
           throw new CodexSecurityError(
             "--linear-assignee requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY.",
+          );
+        }
+        if (options.knowledgeBase.length > 0 && linearApiKey === undefined) {
+          throw new CodexSecurityError(
+            "--knowledge-base requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY for publication.",
           );
         }
         const teamId =
@@ -1820,7 +1844,9 @@ export async function main(
           publicationRepository,
         );
         presentation = progress;
-        if (!options.dryRun) {
+        const observesProgress =
+          !options.dryRun || options.knowledgeBase.length > 0;
+        if (observesProgress) {
           dependencies.addSignalListener("SIGINT", onInterrupt);
           dependencies.addSignalListener("SIGTERM", onTerminate);
           observingSignals = true;
@@ -1837,7 +1863,10 @@ export async function main(
               dryRun: options.dryRun,
               ...(linearApiKey === undefined ? {} : { linearApiKey }),
               ...(assigneeId === undefined ? {} : { assigneeId }),
-              ...(options.dryRun
+              ...(options.knowledgeBase.length === 0
+                ? {}
+                : { knowledgeBasePaths: options.knowledgeBase }),
+              ...(!observesProgress
                 ? {}
                 : {
                     signal: controller.signal,
@@ -1883,11 +1912,19 @@ export async function main(
           const recovery =
             error === signal
               ? ""
-              : ` ${diagnosticValue(safeErrorMessage(error))}`;
+              : ` ${redactPublicationCredential(
+                  diagnosticValue(safeErrorMessage(error)),
+                  publicationLinearApiKey,
+                )}`;
           errorOutput.write(`codex-security: ${reason}${recovery}\n`);
           exitCode = signal === "SIGINT" ? 130 : 143;
         } else {
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(
+            `codex-security: ${redactPublicationCredential(
+              errorMessage(error),
+              publicationLinearApiKey,
+            )}\n`,
+          );
           exitCode = 2;
         }
         return undefined;
@@ -2789,6 +2826,15 @@ export async function main(
     errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
     return 2;
   }
+}
+
+function redactPublicationCredential(
+  message: string,
+  credential: string | undefined,
+): string {
+  return credential === undefined || !message.includes(credential)
+    ? message
+    : message.replaceAll(credential, "[redacted]");
 }
 
 function defaultListCommand(argv: readonly string[]): readonly string[] {

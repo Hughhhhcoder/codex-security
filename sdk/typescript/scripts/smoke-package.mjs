@@ -401,6 +401,12 @@ try {
   const help = runInstalledCli("--help");
   assert.match(help, /Usage: codex-security\b/u);
   assert.match(help, /\bpublish\b/u);
+  const publicationHelp = run(
+    process.execPath,
+    [launcher, "publish", "scan", "--help"],
+    { cwd: consumer, capture: true },
+  );
+  assert.match(publicationHelp, /--knowledge-base\b/u);
 
   const publicationScan = join(consumer, "publication-scan");
   await cp(
@@ -445,6 +451,11 @@ try {
   assert.equal(publication.counts.findings, 1);
   assert.equal(publication.counts.created, 0);
   assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
+  assert.equal(
+    Object.hasOwn(publication.issues[0], "priority"),
+    false,
+    "Publication must not infer Linear priority without a knowledge base.",
+  );
 
   const networkGuard = join(consumer, "reject-publication-network.cjs");
   await writeFile(
