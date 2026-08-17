@@ -301,11 +301,7 @@ documents. Fix the reported problem and use a new output directory to retry.
 ### Generate a policy from TypeScript
 
 ```ts
-import {
-  CodexSecurity,
-  applySecurityPolicy,
-  securityPolicyDiff,
-} from "@openai/codex-security";
+import { CodexSecurity, applySecurityPolicy } from "@openai/codex-security";
 
 const security = new CodexSecurity();
 try {
@@ -315,15 +311,19 @@ try {
     onStage: (stage) => console.error(stage),
   });
 
-  console.log(await securityPolicyDiff(draft));
+  console.log(await security.previewPolicy(draft));
+  // Open draft.draftPath in an editor to review the saved policy.
   // Obtain approval for this exact draft before calling:
-  // await applySecurityPolicy(draft);
+  // await applySecurityPolicy(draft, { pythonPath: security.config.pythonPath });
 } finally {
   await security.close();
 }
 ```
 
 `preflightPolicy()` checks local inputs without starting Codex.
+`previewPolicy()` uses the client's Python setting and makes terminal control
+characters visible. The standalone `securityPolicyDiff()` returns a raw diff
+for files or other non-terminal uses; pass an interpreter explicitly if needed.
 `generatePolicy()` never edits the repository. It accepts `auth`, `path`,
 `knowledgeBasePaths`, `outputDir`, `maxCostUsd`, `signal`, and progress and cost
 callbacks. An optional
@@ -331,7 +331,8 @@ callbacks. An optional
 and a cancellation signal. Without it, the questions remain unresolved.
 
 Use `loadSecurityPolicyDraft(repository, artifactDirectory, { path })` to load
-an edited draft. `applySecurityPolicy()` returns `{ targetPath, recoveryPath }`;
+an edited draft. `applySecurityPolicy()` returns `{ status, targetPath, recoveryPath }`;
+`status` is `written` or `unchanged`.
 `recoveryPath` is `null` when no existing file was replaced. Pass `{ pluginPath }`
 when applying a saved custom-plugin draft. `SecurityPolicyVerificationError` and
 `SecurityPolicyRecoveryError` identify files that need inspection or

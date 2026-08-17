@@ -642,6 +642,7 @@ export async function loadSecurityPolicyDraft(
   };
 }
 
+/** Raw unified diff. Use CodexSecurity.previewPolicy() for terminal output. */
 export async function securityPolicyDiff(
   draft: SecurityPolicyDraft,
   python?: string,
@@ -1059,6 +1060,19 @@ async function retainPolicyRecovery(
   }
 }
 
+export function formatSecurityPolicyText(
+  value: string,
+  multiline = false,
+): string {
+  return value.replaceAll(
+    multiline
+      ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu
+      : /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu,
+    (character) =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 async function resolveDraftTarget(
   draft: SecurityPolicyDraft,
   signal?: AbortSignal,
@@ -1118,11 +1132,7 @@ function diffLabel(path: string): string {
     !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Bidi_Control}"\\]/u.test(path)
   )
     return path;
-  return JSON.stringify(path).replaceAll(
-    /[\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu,
-    (character) =>
-      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
-  );
+  return formatSecurityPolicyText(JSON.stringify(path));
 }
 
 function digest(value: string): string {

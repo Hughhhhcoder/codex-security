@@ -1319,6 +1319,26 @@ describe("security policy review and application", () => {
     }
   });
 
+  test("rejects preview and application after a component changes Git roots", async () => {
+    for (const change of ["add", "remove"] as const) {
+      const f = await fixture();
+      policyGit(f.repository, "init", "--quiet");
+      const component = join(f.repository, "component");
+      await mkdir(component);
+      if (change === "remove") policyGit(component, "init", "--quiet");
+      const draft = await f.generate({ path: "component" });
+      if (change === "add") policyGit(component, "init", "--quiet");
+      else await rename(join(component, ".git"), join(f.root, "previous-git"));
+      await expect(securityPolicyDiff(draft, PYTHON)).rejects.toThrow(
+        "destination changed",
+      );
+      await expect(applySecurityPolicy(draft)).rejects.toThrow(
+        "destination changed",
+      );
+      expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
+    }
+  });
+
   test("shows missing final newlines in the exact diff", async () => {
     const f = await fixture();
     await writeFile(join(f.repository, "SECURITY.md"), "# Old policy");
@@ -2014,23 +2034,6 @@ describe("security policy review and application", () => {
     expect(await readFile(draft.targetPath, "utf8")).toBe(
       "# Someone else's new policy\n",
     );
-  });
-
-  test("rejects application after a component changes Git roots", async () => {
-    for (const change of ["add", "remove"] as const) {
-      const f = await fixture();
-      policyGit(f.repository, "init", "--quiet");
-      const component = join(f.repository, "component");
-      await mkdir(component);
-      if (change === "remove") policyGit(component, "init", "--quiet");
-      const draft = await f.generate({ path: "component" });
-      if (change === "add") policyGit(component, "init", "--quiet");
-      else await rename(join(component, ".git"), join(f.root, "previous-git"));
-      await expect(applySecurityPolicy(draft)).rejects.toThrow(
-        "destination changed",
-      );
-      expect(await readSecurityPolicy(draft.targetPath)).toBe(null);
-    }
   });
 
   test("binds saved drafts to the explicitly selected repository and component", async () => {

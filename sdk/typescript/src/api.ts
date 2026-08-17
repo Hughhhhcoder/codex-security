@@ -84,11 +84,13 @@ import {
 } from "./result.js";
 import type { SeverityLevel } from "./models.js";
 import {
+  formatSecurityPolicyText,
   readSecurityPolicySnapshot,
   requireUnchangedSecurityPolicy,
   resolveSecurityPolicyGuidance,
   resolveSecurityPolicyTarget,
   runSecurityPolicyStages,
+  securityPolicyDiff,
   securityPolicyStageSchema,
   type SecurityPolicyDraft,
   type SecurityPolicyOptions,
@@ -509,6 +511,36 @@ export class CodexSecurity {
     return await this.#trackOperation(() =>
       this.#generatePolicy(repository, options),
     ).catch(rethrowPolicyOutputError);
+  }
+
+  public async previewPolicy(
+    draft: SecurityPolicyDraft,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string> {
+    return await this.#trackOperation(async () => {
+      const signal = AbortSignal.any([
+        this.#abortController.signal,
+        ...(options.signal === undefined ? [] : [options.signal]),
+      ]);
+      const python =
+        draft.previousContent === draft.content
+          ? undefined
+          : await (
+              this.#dependencies.resolvePluginPython ?? resolvePluginPython
+            )({
+              configuredPath: this.config.pythonPath,
+              environment: this.#dependencies.environment,
+              protectedRoot:
+                (await enclosingGitWorktreeRoots(draft.repository, signal)).at(
+                  -1,
+                ) ?? draft.repository,
+              signal,
+            });
+      return formatSecurityPolicyText(
+        await securityPolicyDiff(draft, python, signal),
+        true,
+      );
+    });
   }
 
   async #generatePolicy(
