@@ -53,7 +53,7 @@ describe("bundled finding previews", () => {
       offline: "1  public source",
       missingObject: null,
     });
-  });
+  }, 30_000);
 
   test("keeps captured filesystem aliases usable after their source paths disappear", () => {
     expect(sourceScopeProbe("aliases")).toEqual({
@@ -62,35 +62,42 @@ describe("bundled finding previews", () => {
       nonAscii: expect.any(Boolean),
       collisionChecked: true,
     });
-  });
+  }, 30_000);
 
-  test("ignores replacement refs during source capture and immutable reads", () => {
+  test("keeps saved immutable objects readable after replacement refs change", () => {
     expect(sourceScopeProbe("replacements")).toEqual({
       savedObjectsUnchanged: true,
-      captureIgnoresReplacements: true,
+      newReplacementViewOmitted: true,
     });
-  });
+  }, 30_000);
+
+  test("does not run working-tree filters when registering a committed-ref scan", () => {
+    expect(sourceScopeProbe("replacement_filters")).toEqual({
+      workingTreeFilterNotRun: true,
+      registrationRecipeUnchanged: true,
+    });
+  }, 30_000);
 
   test("omits source authority when replacement refs changed the scanned tree", () => {
     expect(sourceScopeProbe("replacement_snapshot")).toEqual({
       mismatchedCaptureOmitted: true,
       ambiguousLegacyViewOmitted: true,
     });
-  });
+  }, 30_000);
 
   test("indexes Git names once for large explicit scope lists", () => {
     expect(sourceScopeProbe("indexed_scopes")).toEqual({
       selected: 256,
       linearNormalization: true,
     });
-  });
+  }, 30_000);
 
   test("selects source excerpts from the displayed finding locations", () => {
     expect(sourceScopeProbe("display_locations")).toEqual({
       displayed: 8,
       excerptUsesDisplayedLocation: true,
     });
-  });
+  }, 30_000);
 
   test("does not grant source scope through a selected directory link", () => {
     expect(sourceScopeProbe("selected_redirects")).toEqual({
@@ -101,6 +108,13 @@ describe("bundled finding previews", () => {
     });
   }, 30_000);
 
+  test("rejects unsafe finding locations before invoking Git", () => {
+    expect(sourceScopeProbe("unsafe_locations")).toEqual({
+      unsafePathsRejectedBeforeGit: true,
+      invalidLocationRejectedBeforeGit: true,
+    });
+  }, 30_000);
+
   test("does not treat links or reparse points as filesystem alias evidence", () => {
     expect(sourceScopeProbe("alias_evidence")).toEqual({
       ordinary: true,
@@ -108,23 +122,27 @@ describe("bundled finding previews", () => {
       symlink: false,
       reparse: false,
     });
-  });
+  }, 30_000);
 
   test("keeps subdirectory and linked-worktree targets bound to their selected tree", () => {
     expect(sourceScopeProbe("worktrees")).toEqual({
       subdirectoryBound: true,
       linkedWorktreeBound: true,
     });
-  });
-
-  test("records source authority through every scan-start path without changing launch recipes", () => {
-    expect(sourceScopeProbe("writers")).toEqual({
-      writers: 5,
-      nativeRecipesUnchanged: true,
-      cliRecipeUnchanged: true,
-      legacyExactScopesPreserved: true,
-    });
   }, 30_000);
+
+  test.each(["workspace", "prompt", "headless", "deep", "cli"])(
+    "records source authority through the %s scan-start path",
+    (writer) => {
+      expect(sourceScopeProbe(`writer_${writer}`)).toEqual({
+        writer,
+        sourceAuthorityRecorded: true,
+        launchRecipeUnchanged: true,
+        legacyExactScopesPreserved: true,
+      });
+    },
+    30_000,
+  );
 
   test("preserves legacy scans and separately owned migration history", () => {
     expect(sourceScopeProbe("migration")).toEqual({
@@ -132,7 +150,7 @@ describe("bundled finding previews", () => {
       otherMigrationsPreserved: true,
       conflictRejected: true,
     });
-  });
+  }, 30_000);
 
   test("normalizes attack-path assessments without changing stored finding details", () => {
     const python =

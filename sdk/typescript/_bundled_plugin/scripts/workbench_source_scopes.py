@@ -207,27 +207,9 @@ def capture_source_scopes(
     ):
         return result
     try:
-        repository, prefix = git_worktree_context(target)
-        replacements = offline_git_bytes(repository, "replace", "--list")
-        if replacements is None:
-            return result
-        if (
-            replacements
-            and offline_git_bytes(
-                repository,
-                "diff",
-                "--quiet",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--ignore-submodules=none",
-                revision,
-                "--",
-                prefix,
-            )
-            is None
-        ):
-            # The scan's normal Git snapshot may have used a replacement tree.
-            # Only grant immutable-source authority when that view agrees.
+        repository, _ = git_worktree_context(target)
+        if offline_git_bytes(repository, "replace", "--list") != b"":
+            # A revision alone does not identify the replacement view scanned.
             return result
         context = target_tree(target, revision)
         if context is None:

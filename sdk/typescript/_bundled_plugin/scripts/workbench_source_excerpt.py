@@ -35,6 +35,15 @@ def finding_source_excerpt(
     snapshot = scan["target_snapshot_digest"]
     if snapshot is not None and snapshot != clean_worktree_content_digest():
         return None
+    locations = [
+        location
+        for location in locations
+        if isinstance(path := location.get("path"), str)
+        and isinstance(location.get("startLine"), int)
+        and safe_source_path(target, path) is not None
+    ]
+    if not locations:
+        return None
     try:
         context = load_source_scopes(scan, target, scopes)
     except (OSError, RuntimeError, SystemExit, UnicodeError, ValueError):

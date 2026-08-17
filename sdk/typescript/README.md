@@ -64,9 +64,10 @@ limit access to authorized reviewers.
 
 Saved-history source excerpts use the Git objects selected when the scan began.
 They do not fetch missing objects. An excerpt can be omitted when the original
-source is unavailable, a Git replacement view does not match the immutable
-snapshot, or an older scan did not record enough information to establish its
-scope. The finding itself remains available.
+source is unavailable, replacement refs were present when the scan began, or an
+older scan did not record enough information to establish its scope. Later
+replacement-ref changes do not alter saved source objects. The finding itself
+remains available.
 Exact, unambiguous historical scopes remain readable for older scans.
 
 ### SDK configuration and scan options

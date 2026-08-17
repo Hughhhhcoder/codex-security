@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -84,6 +85,62 @@ def excerpt(
     )
 
 
+def register_recipe(
+    repository: Path, recipe: dict, environment: dict[str, str] | None = None
+) -> tuple[dict, dict]:
+    state = repository.parent / "state"
+    scan_dir = Path(tempfile.mkdtemp(prefix="cli-scan-", dir=repository.parent))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            str(Path(sys.argv[1]) / "workbench_db.py"),
+            "register-cli-scan",
+            "--repository",
+            str(repository),
+            "--scan-dir",
+            str(scan_dir),
+            "--recipe-json",
+            json.dumps(recipe),
+        ],
+        env={
+            **os.environ,
+            **(environment or {}),
+            "CODEX_SECURITY_STATE_DIR": str(state),
+        },
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    registered = json.loads(result.stdout)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        record = dict(
+            connection.execute(
+                "SELECT * FROM scans WHERE id = ?", (registered["scanId"],)
+            ).fetchone()
+        )
+    return registered, record
+
+
+def directory_link(target: Path, link: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            [
+                "node",
+                "-e",
+                "require('node:fs').symlinkSync(process.argv[1], process.argv[2], 'junction')",
+                str(target),
+                str(link),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
 def replacements(repository: Path) -> dict:
     write(repository, "selected.py", "selected source\n")
     write(repository, "private.py", "private source\n")
@@ -109,15 +166,56 @@ def replacements(repository: Path) -> dict:
     )
     scopes.tree_entries.cache_clear()
     captured = scan(repository, revision, ["selected.py", "selected"])
-    assert (
-        excerpt(captured, repository, "selected.py", ["selected.py", "selected"])
-        == "1  selected source"
+    assert json.loads(captured["source_scopes_json"])["scopes"] == []
+    return {"savedObjectsUnchanged": True, "newReplacementViewOmitted": True}
+
+
+def replacement_filters(repository: Path) -> dict:
+    write(repository, "tracked.py", "synthetic source\n")
+    write(repository, ".gitattributes", "tracked.py filter=scope_probe\n")
+    revision = commit(repository)
+    first = git(repository, "hash-object", "-w", "--stdin", input_data=b"first\n")
+    second = git(repository, "hash-object", "-w", "--stdin", input_data=b"second\n")
+    git(repository, "replace", first, second)
+    marker = repository.parent / "filter-executed"
+    helper = repository.parent / "filter.py"
+    helper.write_text(
+        "import os,sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['SYNTHETIC_FILTER_MARKER']).write_text(os.environ.get('GIT_CONFIG_VALUE_0',''))\n"
+        "sys.stdout.buffer.write(sys.stdin.buffer.read())\n"
     )
-    assert (
-        excerpt(captured, repository, "selected/public.py", ["selected.py", "selected"])
-        == "1  selected directory"
+    git(
+        repository,
+        "config",
+        "filter.scope_probe.clean",
+        " ".join(
+            shlex.quote(Path(path).as_posix()) for path in (sys.executable, helper)
+        ),
     )
-    return {"savedObjectsUnchanged": True, "captureIgnoresReplacements": True}
+    os.utime(repository / "tracked.py", (0, 0))
+    recipe = {
+        "config": {},
+        "mode": "standard",
+        "repository": str(repository),
+        "target": {"kind": "refs", "paths": [], "base": revision, "head": revision},
+    }
+    _, record = register_recipe(
+        repository,
+        recipe,
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": "SYNTHETIC_GIT_CREDENTIAL",
+            "SYNTHETIC_FILTER_MARKER": str(marker),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        },
+    )
+    assert not marker.exists(), "source capture executed a working-tree filter"
+    assert json.loads(record["source_scopes_json"])["scopes"] == []
+    assert json.loads(record["recipe_json"]) == recipe
+    return {"workingTreeFilterNotRun": True, "registrationRecipeUnchanged": True}
 
 
 def replacement_snapshot(repository: Path) -> dict:
@@ -250,62 +348,22 @@ def selected_redirects(repository: Path) -> dict:
     write(repository, "selected/public.py", "selected source\n")
     write(repository, "private/secret.py", "private source\n")
     revision = commit(repository)
-    link = repository / "selected/link"
-    if os.name == "nt":
-        subprocess.run(
-            [
-                "node",
-                "-e",
-                "require('node:fs').symlinkSync(process.argv[1], process.argv[2], 'junction')",
-                str(repository / "private"),
-                str(link),
-            ],
-            check=True,
-            capture_output=True,
-        )
-    else:
-        link.symlink_to("../private", target_is_directory=True)
+    directory_link(repository / "private", repository / "selected/link")
     assert git(repository, "status", "--porcelain") == ""
 
     requested = ["selected/link"]
-    state = repository.parent / "state"
-    scan_dir = Path(tempfile.mkdtemp(prefix="cli-scan-", dir=repository.parent))
     recipe = {
         "config": {},
         "mode": "standard",
         "repository": str(repository),
         "target": {"kind": "paths", "paths": requested},
     }
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            "-B",
-            str(Path(sys.argv[1]) / "workbench_db.py"),
-            "register-cli-scan",
-            "--repository",
-            str(repository),
-            "--scan-dir",
-            str(scan_dir),
-            "--recipe-json",
-            json.dumps(recipe),
-        ],
-        env=dict(os.environ, CODEX_SECURITY_STATE_DIR=str(state)),
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    registered = json.loads(result.stdout)
+    registered, record = register_recipe(repository, recipe)
     assert registered["contract"]["scope"]["requiredIncludePaths"] == requested
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.row_factory = sqlite3.Row
-        record = connection.execute(
-            "SELECT * FROM scans WHERE id = ?", (registered["scanId"],)
-        ).fetchone()
-        assert record["target_snapshot_digest"] == clean_worktree_content_digest()
-        assert excerpt(record, repository, "private/secret.py", requested) is None
-        assert json.loads(record["source_scopes_json"])["scopes"] == []
-        assert json.loads(record["recipe_json"]) == recipe
+    assert record["target_snapshot_digest"] == clean_worktree_content_digest()
+    assert excerpt(record, repository, "private/secret.py", requested) is None
+    assert json.loads(record["source_scopes_json"])["scopes"] == []
+    assert json.loads(record["recipe_json"]) == recipe
 
     descendant = ["selected/link/secret.py"]
     record = scan(repository, revision, descendant)
@@ -321,6 +379,37 @@ def selected_redirects(repository: Path) -> dict:
         "linkedAncestorOmitted": True,
         "registrationRecipeUnchanged": True,
         "directSelectionPreserved": True,
+    }
+
+
+def unsafe_locations(repository: Path) -> dict:
+    write(repository, "source.py", "selected source\n")
+    record = scan(repository, commit(repository), ["."])
+    outside = repository.parent / "outside"
+    outside.mkdir()
+    write(outside, "source.py", "outside source\n")
+    directory_link(outside, repository / "escaped")
+    with patch.object(
+        scopes, "git_worktree_context", side_effect=AssertionError("Git was invoked")
+    ):
+        for path in (
+            "../outside/source.py",
+            str(outside / "source.py"),
+            "escaped/source.py",
+        ):
+            assert excerpt(record, repository, path, ["."]) is None
+        assert (
+            excerpts.finding_source_excerpt(
+                record,
+                repository,
+                [{"path": "source.py", "startLine": "invalid"}],
+                ["."],
+            )
+            is None
+        )
+    return {
+        "unsafePathsRejectedBeforeGit": True,
+        "invalidLocationRejectedBeforeGit": True,
     }
 
 
@@ -607,7 +696,7 @@ def worktrees(repository: Path) -> dict:
     return {"subdirectoryBound": True, "linkedWorktreeBound": True}
 
 
-def writers(repository: Path) -> dict:
+def writer(repository: Path, kind: str) -> dict:
     write(repository, "src/public.py", "public source\n")
     write(repository, "selected.py", "selected file\n")
     revision = commit(repository)
@@ -629,110 +718,104 @@ def writers(repository: Path) -> dict:
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)
 
-    workspace = str(uuid.uuid4())
-    command(
-        "create-workspace",
-        "--workspace-id",
-        workspace,
-        "--thread-id",
-        "synthetic-workspace",
-    )
-    command(
-        "save-workspace",
-        "--workspace-id",
-        workspace,
-        "--target-path",
-        str(repository),
-        "--scope",
-        "src",
-        "--mode",
-        "standard",
-    )
-    command("start-scan", "--workspace-id", workspace, "--scan-root", str(scan_root))
-    command(
-        "start-prompt-only-scan",
-        "--thread-id",
-        "synthetic-prompt",
-        "--target-path",
-        str(repository),
-        "--scope",
-        "src",
-        "--mode",
-        "standard",
-        "--scan-root",
-        str(scan_root),
-    )
-    command(
-        "start-headless-standard-scan",
-        "--thread-id",
-        "synthetic-headless",
-        "--target-path",
-        str(repository),
-        "--scope",
-        "src",
-        "--scan-root",
-        str(scan_root),
-    )
-    direct_deep = command(
-        "begin-deep-scan",
-        "--thread-id",
-        "synthetic-direct-deep",
-        "--target-path",
-        str(repository),
-        "--scan-root",
-        str(scan_root),
-    )["deepScan"]["scanId"]
-    cli_directory = Path(tempfile.mkdtemp(prefix="cli-scan-", dir=repository.parent))
     recipe = {
         "config": {},
         "mode": "standard",
         "repository": str(repository),
         "target": {"kind": "paths", "paths": ["src", "selected.py"]},
     }
-    registered = command(
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(cli_directory),
-        "--recipe-json",
-        json.dumps({**recipe, "_codexSecurityFileScopes": ["other.py"]}),
-    )
-    assert (
-        command("get-scan-recipe", "--scan-id", registered["scanId"])["recipe"]
-        == recipe
-    )
+    if kind == "workspace":
+        workspace = str(uuid.uuid4())
+        command(
+            "create-workspace",
+            "--workspace-id",
+            workspace,
+            "--thread-id",
+            "synthetic-workspace",
+        )
+        command(
+            "save-workspace",
+            "--workspace-id",
+            workspace,
+            "--target-path",
+            str(repository),
+            "--scope",
+            "src",
+            "--mode",
+            "standard",
+        )
+        command(
+            "start-scan", "--workspace-id", workspace, "--scan-root", str(scan_root)
+        )
+    elif kind in {"prompt", "headless"}:
+        arguments = [
+            "start-prompt-only-scan"
+            if kind == "prompt"
+            else "start-headless-standard-scan",
+            "--thread-id",
+            "synthetic-" + kind,
+            "--target-path",
+            str(repository),
+            "--scope",
+            "src",
+            "--scan-root",
+            str(scan_root),
+        ]
+        if kind == "prompt":
+            arguments.extend(("--mode", "standard"))
+        command(*arguments)
+    elif kind == "deep":
+        command(
+            "begin-deep-scan",
+            "--thread-id",
+            "synthetic-direct-deep",
+            "--target-path",
+            str(repository),
+            "--scan-root",
+            str(scan_root),
+        )
+    elif kind == "cli":
+        registered, _ = register_recipe(
+            repository, {**recipe, "_codexSecurityFileScopes": ["other.py"]}
+        )
+        assert (
+            command("get-scan-recipe", "--scan-id", registered["scanId"])["recipe"]
+            == recipe
+        )
+    else:
+        raise AssertionError("Unknown scan writer: " + kind)
+
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute("SELECT * FROM scans").fetchall()
-        assert len(rows) == 5
-        for row in rows:
-            metadata = json.loads(row["source_scopes_json"])
-            assert metadata["revision"] == revision
-            expected = (
-                {"src", "selected.py"}
-                if row["id"] == registered["scanId"]
-                else {"."}
-                if row["id"] == direct_deep
-                else {"src"}
-            )
-            assert {scope["path"] for scope in metadata["scopes"]} == expected
-            historical = {**dict(row), "source_scopes_json": None}
-            assert (
-                excerpt(historical, repository, "src/public.py", list(expected))
-                == "1  public source"
-            )
-            if row["id"] == registered["scanId"]:
-                assert (
-                    excerpt(historical, repository, "selected.py", list(expected))
-                    == "1  selected file"
-                )
-            if row["id"] != registered["scanId"]:
-                assert row["recipe_json"] is None
-                assert "does not have a saved launch recipe" in command(
-                    "get-scan-recipe", "--scan-id", row["id"], succeeds=False
-                )
-        deep_record = next(row for row in rows if row["id"] == direct_deep)
+        assert len(rows) == 1
+        row = dict(rows[0])
+    metadata = json.loads(row["source_scopes_json"])
+    assert metadata["revision"] == revision
+    expected = (
+        {"src", "selected.py"}
+        if kind == "cli"
+        else {"."}
+        if kind == "deep"
+        else {"src"}
+    )
+    assert {scope["path"] for scope in metadata["scopes"]} == expected
+    historical = {**row, "source_scopes_json": None}
+    assert (
+        excerpt(historical, repository, "src/public.py", list(expected))
+        == "1  public source"
+    )
+    if kind == "cli":
+        assert (
+            excerpt(historical, repository, "selected.py", list(expected))
+            == "1  selected file"
+        )
+    else:
+        assert row["recipe_json"] is None
+        assert "does not have a saved launch recipe" in command(
+            "get-scan-recipe", "--scan-id", row["id"], succeeds=False
+        )
+    if kind == "deep":
         git(
             repository,
             "commit",
@@ -749,13 +832,11 @@ def writers(repository: Path) -> dict:
             pass
         else:
             raise AssertionError("Original commit was not pruned")
-        assert (
-            excerpt(deep_record, repository, "selected.py", ["."]) == "1  selected file"
-        )
+        assert excerpt(row, repository, "selected.py", ["."]) == "1  selected file"
     return {
-        "writers": 5,
-        "nativeRecipesUnchanged": True,
-        "cliRecipeUnchanged": True,
+        "writer": kind,
+        "sourceAuthorityRecorded": True,
+        "launchRecipeUnchanged": True,
         "legacyExactScopesPreserved": True,
     }
 
@@ -857,20 +938,23 @@ with tempfile.TemporaryDirectory(prefix="codex-security-source-scopes-") as temp
     repository = Path(temporary).resolve() / "repository"
     repository.mkdir()
     git(repository, "init", "--quiet")
-    print(
-        json.dumps(
-            {
-                "boundaries": boundaries,
-                "replacements": replacements,
-                "replacement_snapshot": replacement_snapshot,
-                "indexed_scopes": indexed_scopes,
-                "display_locations": display_locations,
-                "selected_redirects": selected_redirects,
-                "aliases": aliases,
-                "alias_evidence": alias_evidence,
-                "worktrees": worktrees,
-                "writers": writers,
-                "migration": migration,
-            }[sys.argv[2]](repository)
-        )
+    scenario = sys.argv[2]
+    result = (
+        writer(repository, scenario.removeprefix("writer_"))
+        if scenario.startswith("writer_")
+        else {
+            "boundaries": boundaries,
+            "replacements": replacements,
+            "replacement_filters": replacement_filters,
+            "replacement_snapshot": replacement_snapshot,
+            "indexed_scopes": indexed_scopes,
+            "display_locations": display_locations,
+            "selected_redirects": selected_redirects,
+            "unsafe_locations": unsafe_locations,
+            "aliases": aliases,
+            "alias_evidence": alias_evidence,
+            "worktrees": worktrees,
+            "migration": migration,
+        }[scenario](repository)
     )
+    print(json.dumps(result))
