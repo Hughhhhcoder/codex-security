@@ -22,6 +22,7 @@ import { requireScanFile } from "./contract.js";
 import {
   CodexSecurityError,
   InvalidTargetError,
+  SecurityPolicyRecoveryError,
   SecurityPolicyVerificationError,
 } from "./errors.js";
 import {
@@ -360,7 +361,14 @@ export async function runSecurityPolicyStages(options: {
   );
   validatePolicyContent(policy.markdown);
   const reviewNotes = [
-    ...new Set([...policy.reviewNotes, ...policy.questions]),
+    ...new Set([
+      ...policy.reviewNotes,
+      ...policy.questions,
+      ...architecture.reviewNotes,
+      ...architecture.questions,
+      ...threatModel.reviewNotes,
+      ...threatModel.questions,
+    ]),
   ];
   const manifest: PolicyManifest = {
     documentType: "codex-security.policy-draft",
@@ -551,10 +559,6 @@ export async function applySecurityPolicy(
       options.signal,
     );
     options.signal?.throwIfAborted();
-    const mode =
-      draft.previousContent === null
-        ? 0o644
-        : (await stat(target.targetPath)).mode & 0o777;
     const temporary = join(
       dirname(target.targetPath),
       `.SECURITY.md.${randomUUID()}.tmp`,
@@ -564,10 +568,9 @@ export async function applySecurityPolicy(
       try {
         await writeFile(temporary, draft.content, {
           flag: "wx",
-          mode,
+          mode: draft.previousContent === null ? 0o644 : 0o600,
           signal: options.signal,
         });
-        if (draft.previousContent !== null) await chmod(temporary, mode);
         if (
           (await realpath(dirname(target.targetPath))) !==
             dirname(target.targetPath) ||
@@ -581,10 +584,17 @@ export async function applySecurityPolicy(
         options.signal?.throwIfAborted();
         if (draft.previousContent === null)
           await installFileNoClobber(temporary, target.targetPath);
-        else await rename(temporary, target.targetPath);
+        else
+          await replaceExistingPolicy(
+            temporary,
+            target.targetPath,
+            draft.previousContent,
+            options.signal,
+          );
         written = true;
       } finally {
-        await rm(temporary, { force: true });
+        // Preserve the write or recovery outcome if temporary cleanup fails.
+        await rm(temporary, { force: true }).catch(() => undefined);
       }
       // Once committed, finish verification even if cancellation arrives.
       if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
@@ -609,6 +619,64 @@ export async function applySecurityPolicy(
   } finally {
     if (pluginWorkspace !== undefined)
       await cleanupSdkDirectory(pluginWorkspace).catch(() => undefined);
+  }
+}
+
+async function replaceExistingPolicy(
+  temporary: string,
+  targetPath: string,
+  previousContent: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const recoveryPath = `${temporary}.previous`;
+  await writeFile(recoveryPath, "", { flag: "wx", mode: 0o600 });
+  try {
+    signal?.throwIfAborted();
+    // Check the displaced file, then install without replacing a newer save.
+    await rename(targetPath, recoveryPath);
+  } catch (error) {
+    await rm(recoveryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  try {
+    if ((await readSecurityPolicy(recoveryPath)) !== previousContent) {
+      throw new CodexSecurityError(
+        "SECURITY.md changed while the policy was being applied. Review a new draft before writing.",
+      );
+    }
+    await chmod(temporary, (await stat(recoveryPath)).mode & 0o777);
+    signal?.throwIfAborted();
+    await installFileNoClobber(temporary, targetPath);
+  } catch (error) {
+    try {
+      const metadata = await lstat(recoveryPath);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new CodexSecurityError(
+          "The recovery path is not a regular file.",
+        );
+      }
+      await installFileNoClobber(recoveryPath, targetPath);
+      await rm(recoveryPath);
+    } catch (restoreError) {
+      throw new SecurityPolicyRecoveryError(targetPath, recoveryPath, {
+        cause: new AggregateError([error, restoreError]),
+      });
+    }
+    throw error;
+  }
+  try {
+    // Another writer may still hold the displaced file open.
+    if ((await readSecurityPolicy(recoveryPath)) !== previousContent) {
+      throw new CodexSecurityError(
+        "The previous SECURITY.md changed while the replacement was being installed.",
+      );
+    }
+    await rm(recoveryPath);
+  } catch (error) {
+    throw new SecurityPolicyVerificationError(targetPath, {
+      cause: error,
+      recoveryPath,
+    });
   }
 }
 

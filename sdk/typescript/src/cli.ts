@@ -2043,6 +2043,7 @@ export async function main(
                 now: dependencies.now,
                 addSignalListener: dependencies.addSignalListener,
                 removeSignalListener: dependencies.removeSignalListener,
+                forceExit: dependencies.forceExit,
                 resolvePython: dependencies.resolvePolicyPython,
               },
             ),

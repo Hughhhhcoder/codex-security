@@ -2,7 +2,11 @@ import type { CodexSecurity } from "./api.js";
 import type { BulkScanPrompt } from "./bulk-scan-discovery.js";
 import type { CodexSecurityConfig } from "./config.js";
 import { formatUsd } from "./cost.js";
-import { SecurityPolicyVerificationError, safeErrorMessage } from "./errors.js";
+import {
+  SecurityPolicyRecoveryError,
+  SecurityPolicyVerificationError,
+  safeErrorMessage,
+} from "./errors.js";
 import {
   applySecurityPolicy,
   loadSecurityPolicyDraft,
@@ -44,6 +48,7 @@ export interface PolicyCommandDependencies {
   now(): number;
   addSignalListener(signal: SignalName, listener: () => void): void;
   removeSignalListener(signal: SignalName, listener: () => void): void;
+  forceExit(signal: SignalName): void;
   resolvePython?: typeof resolvePluginPython;
 }
 
@@ -63,10 +68,6 @@ export async function runPolicyCommand(
 }> {
   const { errorOutput, prompt } = dependencies;
   const controller = new AbortController();
-  const interrupt = () => controller.abort("SIGINT");
-  const terminate = () => controller.abort("SIGTERM");
-  dependencies.addSignalListener("SIGINT", interrupt);
-  dependencies.addSignalListener("SIGTERM", terminate);
   const interactive =
     !options.headless &&
     options.format === "toon" &&
@@ -75,11 +76,40 @@ export async function runPolicyCommand(
   const started = dependencies.now();
   let security: PolicySecurity | undefined;
   let outputDir: string | undefined;
+  let applyingTarget: string | undefined;
   const write = (message: string): void => {
     try {
       errorOutput.write(`${message}\n`);
     } catch {}
   };
+  let firstSignalAt = 0;
+  const signalListener = (signal: SignalName) => () => {
+    if (controller.signal.aborted) {
+      // Match scan's handling of duplicate initial signals from launchers.
+      if (
+        controller.signal.reason === signal &&
+        dependencies.now() - firstSignalAt < 500
+      )
+        return;
+      if (applyingTarget !== undefined)
+        write(
+          `Policy application is being stopped. Check ${display(applyingTarget)} and any .SECURITY.md.*.previous recovery files before retrying.`,
+        );
+      removeSignalListeners();
+      dependencies.forceExit(signal);
+      return;
+    }
+    firstSignalAt = dependencies.now();
+    controller.abort(signal);
+  };
+  const interrupt = signalListener("SIGINT");
+  const terminate = signalListener("SIGTERM");
+  const removeSignalListeners = () => {
+    dependencies.removeSignalListener("SIGINT", interrupt);
+    dependencies.removeSignalListener("SIGTERM", terminate);
+  };
+  dependencies.addSignalListener("SIGINT", interrupt);
+  dependencies.addSignalListener("SIGTERM", terminate);
   try {
     let draft: SecurityPolicyDraft;
     if (options.apply !== undefined) {
@@ -91,13 +121,15 @@ export async function runPolicyCommand(
     } else {
       security = dependencies.createSecurity(options.config);
       if (options.dryRun) {
+        const preflight = await security.preflightPolicy(options.repository, {
+          ...options.generation,
+          signal: controller.signal,
+        });
+        controller.signal.throwIfAborted();
         return {
           exitCode: 0,
           data: {
-            ...(await security.preflightPolicy(
-              options.repository,
-              options.generation,
-            )),
+            ...preflight,
             dryRun: true,
           },
         };
@@ -181,6 +213,7 @@ export async function runPolicyCommand(
       ? "draft"
       : "unchanged";
     if (approved) {
+      applyingTarget = draft.targetPath;
       await applySecurityPolicy(draft, {
         pythonPath: python,
         pluginPath: options.config.pluginPath,
@@ -222,8 +255,9 @@ export async function runPolicyCommand(
     };
   } catch (error) {
     const written = error instanceof SecurityPolicyVerificationError;
+    const recovery = error instanceof SecurityPolicyRecoveryError;
     const signal =
-      (written ? undefined : controller.signal.reason) ??
+      (written || recovery ? undefined : controller.signal.reason) ??
       (error instanceof Error && error.name === "ExitPromptError"
         ? "SIGINT"
         : undefined);
@@ -235,19 +269,21 @@ export async function runPolicyCommand(
       write(`Saved artifacts: ${display(outputDir)}`);
     return {
       exitCode,
-      ...(written
+      ...(written || recovery
         ? {
             data: {
-              status: "written_unverified",
+              status: written ? "written_unverified" : "recovery_required",
               targetPath: error.targetPath,
+              ...(error.recoveryPath === undefined
+                ? {}
+                : { recoveryPath: error.recoveryPath }),
               ...(outputDir === undefined ? {} : { outputDir }),
             },
           }
         : {}),
     };
   } finally {
-    dependencies.removeSignalListener("SIGINT", interrupt);
-    dependencies.removeSignalListener("SIGTERM", terminate);
+    removeSignalListeners();
     try {
       await security?.close();
     } catch (error) {

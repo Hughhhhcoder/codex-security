@@ -228,9 +228,10 @@ owner review. Nothing is written into the repository without confirmation.
 ### Review and apply a saved draft
 
 Use `--headless` or structured output to generate without questions or a write
-prompt. Unanswered questions remain explicit in the draft. The default artifact
-directory is under the Codex Security state directory; `--output-dir` selects an
-empty directory outside the enclosing Git worktree.
+prompt. Saved review notes retain material questions and decisions from every
+stage, even if the final draft omits them. The default artifact directory is
+under the Codex Security state directory; `--output-dir` selects an empty
+directory outside the enclosing Git worktree.
 
 ```bash
 npx @openai/codex-security policy . --path services/api \
@@ -248,12 +249,20 @@ component must match the draft, and the original `SECURITY.md` must be unchanged
 The command writes the reviewed bytes and verifies that the policy resolver can
 read them. It does not stage, commit, or publish anything.
 
+Avoid editing the target while application is in progress. If the command
+detects a concurrent save, it preserves the competing files instead of
+overwriting them. A `recovery_required` result includes the recovery file's
+path. Inspect it and `targetPath` before retrying; do not delete the recovery
+file until the changes are reconciled.
+
 Save edited drafts as UTF-8. If generation used a custom `--plugin-path`, pass
 that option again when applying a saved draft; the saved metadata never selects
 executable code. Plugin directories and ZIP files are both supported. Once a
 write commits, the command finishes verification even if cancellation arrives.
 If verification fails, it exits with an error and reports `written_unverified`
-in JSON output. Review the written file before retrying.
+in JSON output. Review the written file and any reported `recoveryPath` before
+retrying. A later repeated Ctrl-C or SIGTERM can force the command to stop if
+verification does not finish.
 
 The artifact directory contains:
 
@@ -314,7 +323,9 @@ Without one, questions remain unresolved. Use
 edited saved draft before reviewing and applying it. For a saved custom-plugin
 draft, pass `{ pluginPath }` to `applySecurityPolicy()`. A
 `SecurityPolicyVerificationError` means the file was written but verification
-failed; its `targetPath` identifies the file to inspect.
+failed; its `targetPath` identifies the file to inspect. A
+`SecurityPolicyRecoveryError` means replacement needs manual reconciliation.
+Both errors can identify a `recoveryPath` to preserve.
 
 ## CLI
 

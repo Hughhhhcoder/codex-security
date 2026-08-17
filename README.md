@@ -104,8 +104,8 @@ npx @openai/codex-security policy . --apply /path/outside/repository/policy --wr
 ```
 
 Use the same repository and `--path` when applying a component draft. Applying
-does not call the model, and it refuses to overwrite a policy changed since
-generation. `--write` requires a previously generated `--apply` draft. If you
+does not call the model, and it checks for changes since generation before
+writing. `--write` requires a previously generated `--apply` draft. If you
 generated with a custom `--plugin-path`, select that plugin again when applying
 a saved draft.
 

@@ -3,6 +3,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -15,7 +16,10 @@ import * as fsPromises from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
-import { SecurityPolicyVerificationError } from "../src/errors.js";
+import {
+  SecurityPolicyRecoveryError,
+  SecurityPolicyVerificationError,
+} from "../src/errors.js";
 import {
   applySecurityPolicy,
   loadSecurityPolicyDraft,
@@ -170,7 +174,7 @@ describe("security policy generation", () => {
       "Which data needs retention limits?",
     ];
     const batches: string[][] = [];
-    await f.generate({
+    const draft = await f.generate({
       answerQuestions: async (batch) => {
         batches.push([...batch]);
         return `Owner answer ${batches.length}`;
@@ -189,6 +193,8 @@ describe("security policy generation", () => {
       questions.slice(3, 6),
       questions.slice(6),
     ]);
+    for (const question of questions)
+      expect(draft.reviewNotes).toContain(question);
   });
 
   test("carries unanswered questions and review decisions into the final policy", async () => {
@@ -226,6 +232,10 @@ describe("security policy generation", () => {
     expect(draft.reviewNotes).toEqual([
       "Review deployment scope.",
       "Confirm backup isolation.",
+      "Confirm the operator trust boundary.",
+      "Who can deploy the service?",
+      "Review backup access.",
+      "Are backups isolated by tenant?",
     ]);
     expect(
       (await loadSecurityPolicyDraft(f.repository, f.outputDir)).reviewNotes,
@@ -509,6 +519,15 @@ describe("security policy review and application", () => {
       const draft = await f.generate();
       await applySecurityPolicy(draft);
       expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+      const existing = await fixture();
+      await writeFile(
+        join(existing.repository, "SECURITY.md"),
+        "# Existing policy\n",
+      );
+      const replacement = await existing.generate();
+      await applySecurityPolicy(replacement);
+      expect(await readFile(replacement.targetPath, "utf8")).toBe(POLICY);
+      expect(await readdir(existing.repository)).toEqual(["SECURITY.md"]);
       const other = await fixture();
       const racing = await other.generate();
       collision = true;
@@ -522,6 +541,190 @@ describe("security policy review and application", () => {
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
         link: originalLink,
+      }));
+    }
+  });
+
+  test("restores a concurrent save captured immediately before replacement", async () => {
+    const name =
+      "restores a concurrent save captured immediately before replacement";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    await writeFile(join(f.repository, "SECURITY.md"), "# Original policy\n");
+    const draft = await f.generate();
+    const concurrent = "# Concurrent save\n";
+    const originalRename = fsPromises.rename;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      rename: async (source: string, destination: string) => {
+        if (source === draft.targetPath) await writeFile(source, concurrent);
+        await originalRename(source, destination);
+      },
+    }));
+    try {
+      await expect(applySecurityPolicy(draft)).rejects.toThrow(
+        "changed while the policy was being applied",
+      );
+      expect(await readFile(draft.targetPath, "utf8")).toBe(concurrent);
+      expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        rename: originalRename,
+      }));
+    }
+  });
+
+  test("keeps both files when a concurrent writer claims the destination", async () => {
+    const name =
+      "keeps both files when a concurrent writer claims the destination";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const original = "# Original policy\n";
+    const concurrent = "# Concurrent save\n";
+    await writeFile(join(f.repository, "SECURITY.md"), original);
+    const draft = await f.generate();
+    const originalLink = fsPromises.link;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      link: async (source: string, destination: string) => {
+        if (destination === draft.targetPath && source.endsWith(".tmp"))
+          await writeFile(destination, concurrent);
+        await originalLink(source, destination);
+      },
+    }));
+    try {
+      const error = await applySecurityPolicy(draft).catch(
+        (value: unknown) => value,
+      );
+      expect(error).toBeInstanceOf(SecurityPolicyRecoveryError);
+      const recovery = error as SecurityPolicyRecoveryError;
+      expect(recovery.targetPath).toBe(draft.targetPath);
+      expect(await readFile(recovery.recoveryPath, "utf8")).toBe(original);
+      expect(await readFile(draft.targetPath, "utf8")).toBe(concurrent);
+      expect(await readdir(f.repository)).toHaveLength(2);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+      }));
+    }
+  });
+
+  test("keeps a recovery copy changed through an already-open file", async () => {
+    const name = "keeps a recovery copy changed through an already-open file";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    await writeFile(join(f.repository, "SECURITY.md"), "# Original policy\n");
+    const draft = await f.generate();
+    const concurrent = "# Concurrent in-place save\n";
+    const writer = await open(draft.targetPath, "r+");
+    const originalLink = fsPromises.link;
+    const originalRename = fsPromises.rename;
+    let recoveryPath = "";
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      rename: async (source: string, destination: string) => {
+        await originalRename(source, destination);
+        if (source === draft.targetPath) recoveryPath = destination;
+      },
+      link: async (source: string, destination: string) => {
+        await originalLink(source, destination);
+        if (destination === draft.targetPath && source.endsWith(".tmp")) {
+          await writer.truncate(0);
+          await writer.writeFile(concurrent);
+        }
+      },
+    }));
+    try {
+      const error = await applySecurityPolicy(draft).catch(
+        (value: unknown) => value,
+      );
+      expect(error).toBeInstanceOf(SecurityPolicyVerificationError);
+      expect(error).toMatchObject({
+        targetPath: draft.targetPath,
+        recoveryPath,
+      });
+      expect(await readFile(recoveryPath, "utf8")).toBe(concurrent);
+      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+    } finally {
+      await writer.close();
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+        rename: originalRename,
+      }));
+    }
+  });
+
+  test("restores the original policy when canceled after moving it", async () => {
+    const name = "restores the original policy when canceled after moving it";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const original = "# Original policy\n";
+    await writeFile(join(f.repository, "SECURITY.md"), original);
+    const draft = await f.generate();
+    const controller = new AbortController();
+    const originalRename = fsPromises.rename;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      rename: async (source: string, destination: string) => {
+        await originalRename(source, destination);
+        if (source === draft.targetPath)
+          controller.abort(new Error("cancel before install"));
+      },
+    }));
+    try {
+      await expect(
+        applySecurityPolicy(draft, { signal: controller.signal }),
+      ).rejects.toThrow("cancel before install");
+      expect(await readFile(draft.targetPath, "utf8")).toBe(original);
+      expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        rename: originalRename,
+      }));
+    }
+  });
+
+  test("does not follow a symlink that races with an existing policy", async () => {
+    const name = "does not follow a symlink that races with an existing policy";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    await writeFile(join(f.repository, "SECURITY.md"), "# Original policy\n");
+    const draft = await f.generate();
+    const outside = join(f.root, "outside-policy.md");
+    await writeFile(outside, "# Outside policy\n");
+    const originalRename = fsPromises.rename;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      rename: async (source: string, destination: string) => {
+        if (source === draft.targetPath) {
+          await rm(source);
+          await symlink(outside, source, "file");
+        }
+        await originalRename(source, destination);
+      },
+    }));
+    try {
+      const error = await applySecurityPolicy(draft).catch(
+        (value: unknown) => value,
+      );
+      expect(error).toBeInstanceOf(SecurityPolicyRecoveryError);
+      expect(
+        (
+          await lstat((error as SecurityPolicyRecoveryError).recoveryPath)
+        ).isSymbolicLink(),
+      ).toBe(true);
+      expect(await readFile(outside, "utf8")).toBe("# Outside policy\n");
+      await expect(lstat(draft.targetPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        rename: originalRename,
       }));
     }
   });

@@ -347,7 +347,13 @@ try {
     [
       "--input-type=module",
       "--eval",
-      `const sdk = await import(${JSON.stringify(packageManifest.name)}); if (typeof sdk.CodexSecurity !== "function") throw new Error("The installed package does not export CodexSecurity."); if (typeof sdk.publishScan !== "function") throw new Error("The installed package does not export publishScan."); if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function" || typeof sdk.applySecurityPolicy !== "function" || typeof sdk.loadSecurityPolicyDraft !== "function") throw new Error("The installed package does not export the security-policy API.");`,
+      [
+        `const sdk = await import(${JSON.stringify(packageManifest.name)});`,
+        `for (const name of ${JSON.stringify(["CodexSecurity", "publishScan", "applySecurityPolicy", "loadSecurityPolicyDraft", "securityPolicyDiff", "SecurityPolicyRecoveryError", "SecurityPolicyVerificationError"])}) {`,
+        '  if (typeof sdk[name] !== "function") throw new Error(`The installed package does not export ${name}.`);',
+        "}",
+        'if (typeof sdk.CodexSecurity.prototype.generatePolicy !== "function") throw new Error("The installed package does not export generatePolicy.");',
+      ].join("\n"),
     ],
     { cwd: consumer },
   );

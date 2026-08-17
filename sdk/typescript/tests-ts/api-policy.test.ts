@@ -200,6 +200,7 @@ describe("CodexSecurity policy API", () => {
     expect(f.configuration()?.env?.["CODEX_SECURITY_SCAN_ID"]).toBeUndefined();
     expect(result.cost?.inputTokens).toBe(300);
     expect(result.cost?.outputTokens).toBe(30);
+    expect(costs).toHaveLength(3);
     expect(costs.at(-1)).toBe(result.cost?.estimatedUsd);
     expect(await readFile(result.draftPath, "utf8")).toBe(POLICY);
     expect(await readFile(result.targetPath, "utf8")).toContain(

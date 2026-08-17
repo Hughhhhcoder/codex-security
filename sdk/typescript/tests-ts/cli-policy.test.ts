@@ -51,6 +51,10 @@ function policyDependencies(
       repository: string,
       options: SecurityPolicyOptions,
     ) => void | Promise<void>;
+    onPreflight?: (
+      repository: string,
+      options: SecurityPolicyOptions,
+    ) => void | Promise<void>;
     onClose?: () => void;
     onConfig?: (config: unknown) => void;
     signals?: FakeSignals;
@@ -83,18 +87,24 @@ function policyDependencies(
             }))
           );
         },
-        preflightPolicy: async () => ({
-          repository: f.repository,
-          scope: ".",
-          targetPath: join(f.repository, "SECURITY.md"),
-          outputDir: null,
-          authentication: {
-            method: "stored_credentials" as const,
-            verified: false as const,
-          },
-          model: "gpt-5.6-sol",
-          reasoningEffort: "xhigh",
-        }),
+        preflightPolicy: async (
+          repository: string,
+          generation: SecurityPolicyOptions,
+        ) => {
+          await options.onPreflight?.(repository, generation);
+          return {
+            repository: f.repository,
+            scope: ".",
+            targetPath: join(f.repository, "SECURITY.md"),
+            outputDir: null,
+            authentication: {
+              method: "stored_credentials" as const,
+              verified: false as const,
+            },
+            model: "gpt-5.6-sol",
+            reasoningEffort: "xhigh",
+          };
+        },
         close: async () => {
           options.onClose?.();
         },
@@ -571,6 +581,42 @@ describe("policy CLI", () => {
     expect(await readdir(f.outputDir)).toEqual([]);
   });
 
+  test("propagates dry-run cancellation and never returns false success", async () => {
+    for (const [signal, exitCode] of [
+      ["SIGINT", 130],
+      ["SIGTERM", 143],
+    ] as const) {
+      for (const cooperative of [false, true]) {
+        const f = await fixture();
+        const signals = new FakeSignals();
+        const stdout = capture();
+        let closed = false;
+        expect(
+          await main(
+            ["policy", "--dry-run", "--json"],
+            stdout.stream,
+            capture().stream,
+            policyDependencies(f, {
+              signals,
+              onPreflight: (_repository, options) => {
+                signals.emit(signal);
+                expect(options.signal?.aborted).toBe(true);
+                if (cooperative) options.signal!.throwIfAborted();
+              },
+              onClose: () => {
+                closed = true;
+              },
+            }),
+          ),
+        ).toBe(exitCode);
+        expect(stdout.text()).toBe("");
+        expect(closed).toBe(true);
+        expect(signals.listeners.get(signal)?.size).toBe(0);
+        expect(await readdir(f.outputDir)).toEqual([]);
+      }
+    }
+  });
+
   test("returns only policy Markdown on stdout in Markdown mode", async () => {
     const f = await fixture();
     const markdown = `${POLICY.trimEnd()}  `;
@@ -694,6 +740,101 @@ describe("policy CLI", () => {
       ),
     ).toBe(true);
     expect(await readdir(f.repository)).toEqual([]);
+  });
+
+  test("lets a later interrupt escape post-write verification", async () => {
+    const name = "lets a later interrupt escape post-write verification";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const draft = await f.generate();
+    const signals = new FakeSignals();
+    const forced: string[] = [];
+    let now = 0;
+    const deps = policyDependencies(f, { signals });
+    deps.now = () => now;
+    deps.forceExit = (signal) => {
+      expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+      expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+      forced.push(signal);
+    };
+    const originalLink = fsPromises.link;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      link: async (source: string, destination: string) => {
+        await originalLink(source, destination);
+        if (destination !== draft.targetPath) return;
+        signals.emit("SIGINT");
+        signals.emit("SIGINT");
+        expect(forced).toEqual([]);
+        now = 1_000;
+        signals.emit("SIGINT");
+      },
+    }));
+    try {
+      const stderr = capture();
+      expect(
+        await main(
+          ["policy", "--apply", f.outputDir, "--write", "--json"],
+          capture().stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(forced).toEqual(["SIGINT"]);
+      expect(stderr.text()).toContain("recovery files before retrying");
+      expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+      }));
+    }
+  });
+
+  test("reports recovery paths even when a conflict also receives cancellation", async () => {
+    const name =
+      "reports recovery paths even when a conflict also receives cancellation";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+    const f = await fixture();
+    const original = "# Original policy\n";
+    const concurrent = "# Concurrent save\n";
+    await writeFile(join(f.repository, "SECURITY.md"), original);
+    const draft = await f.generate();
+    const signals = new FakeSignals();
+    const originalLink = fsPromises.link;
+    mock.module("node:fs/promises", () => ({
+      ...fsPromises,
+      link: async (source: string, destination: string) => {
+        if (destination === draft.targetPath && source.endsWith(".tmp")) {
+          await writeFile(destination, concurrent);
+          signals.emit("SIGINT");
+        }
+        await originalLink(source, destination);
+      },
+    }));
+    try {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["policy", "--apply", f.outputDir, "--write", "--json"],
+          stdout.stream,
+          stderr.stream,
+          policyDependencies(f, { signals }),
+        ),
+      ).toBe(2);
+      const result = JSON.parse(stdout.text());
+      expect(result.status).toBe("recovery_required");
+      expect(result.targetPath).toBe(draft.targetPath);
+      expect(stderr.text()).toContain(result.recoveryPath);
+      expect(await readFile(result.recoveryPath, "utf8")).toBe(original);
+      expect(await readFile(draft.targetPath, "utf8")).toBe(concurrent);
+    } finally {
+      mock.module("node:fs/promises", () => ({
+        ...fsPromises,
+        link: originalLink,
+      }));
+    }
   });
 
   test("cancels a pending review prompt on SIGTERM", async () => {

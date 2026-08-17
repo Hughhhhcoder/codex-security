@@ -80,12 +80,28 @@ export class ScanCostLimitExceededError extends ScanInterruptedError {
 }
 
 export class SecurityPolicyVerificationError extends CodexSecurityError {
+  public readonly recoveryPath?: string;
+
   public constructor(
     public readonly targetPath: string,
+    options?: ErrorOptions & { recoveryPath?: string },
+  ) {
+    super(
+      `SECURITY.md was written to ${targetPath}, but verification failed.${options?.recoveryPath === undefined ? "" : ` Recovery file: ${options.recoveryPath}.`} Review the file before retrying.`,
+      options,
+    );
+    this.recoveryPath = options?.recoveryPath;
+  }
+}
+
+export class SecurityPolicyRecoveryError extends CodexSecurityError {
+  public constructor(
+    public readonly targetPath: string,
+    public readonly recoveryPath: string,
     options?: ErrorOptions,
   ) {
     super(
-      `SECURITY.md was written to ${targetPath}, but verification failed. Review the file before retrying.`,
+      `Could not safely finish replacing ${targetPath}. The previous file is preserved at ${recoveryPath}. Review both paths before retrying.`,
       options,
     );
   }

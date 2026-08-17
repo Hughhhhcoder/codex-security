@@ -35,6 +35,7 @@ export {
   PluginPythonUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
+  SecurityPolicyRecoveryError,
   SecurityPolicyVerificationError,
 } from "./errors.js";
 export type { ProtectedScanPathKind } from "./errors.js";

@@ -700,7 +700,9 @@ export class CodexSecurity {
             warn(
               `Could not track policy-generation cost: ${safeErrorMessage(error)}`,
             );
-            return { usage, cost: estimateScanCost(model.model, usage) };
+            const cost = estimateScanCost(model.model, usage);
+            if (cost !== null) reportCost(cost);
+            return { usage, cost };
           });
           stopped = true;
           if (snapshot.cost === null) {
@@ -710,7 +712,6 @@ export class CodexSecurity {
                 "Could not verify the requested policy-generation cost limit.",
               );
           } else {
-            reportCost(snapshot.cost);
             accumulatedCost = addScanCosts(accumulatedCost, snapshot.cost);
           }
           signal.throwIfAborted();
