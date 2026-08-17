@@ -12,7 +12,7 @@ const DESTINATION_OPTIONS = [
   "linear",
   "--linear-team",
   "team-from-flags",
-  "--project",
+  "--linear-project",
   "project-from-flags",
 ] as const;
 const temporaryDirectories: string[] = [];
@@ -216,6 +216,57 @@ describe("publish scan", () => {
         expect(stdout.text()).toContain("1 previously recorded issue skipped");
       }
     }
+  });
+
+  test("accepts the Linear project flag and its published alias", async () => {
+    for (const flag of ["--linear-project", "--project"]) {
+      let projectId: string | undefined;
+      const deps = dependencies();
+      deps.publishScan = async (_directory, options) => {
+        projectId = options.projectId;
+        return publicationResult();
+      };
+      expect(
+        await main(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            "--to",
+            "linear",
+            "--linear-team",
+            "team-id",
+            flag,
+            "selected-project",
+            "--json",
+          ],
+          capture().stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(0);
+      expect(projectId).toBe("selected-project");
+    }
+
+    const stderr = capture();
+    expect(
+      await main(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          ...DESTINATION_OPTIONS,
+          "--project",
+          "different-project",
+        ],
+        capture().stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--linear-project and --project must select the same project.",
+    );
   });
 
   test("publishes an explicit scan directory without inspecting scan history", async () => {
