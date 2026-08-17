@@ -34,6 +34,10 @@ describe("worker progress events", () => {
       'CODEX_SECURITY_SCAN_PROGRESS {"phase":"reporting","filesCompleted":1,"filesTotal":1}';
     const dispatch =
       'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":1,"started":1}';
+    const preflight = JSON.stringify({
+      profile: "security_scan",
+      results: [{ capability: "delegated_workers", status: "pass" }],
+    });
     for (const event of [
       {},
       { type: "item.completed", item: null },
@@ -44,7 +48,27 @@ describe("worker progress events", () => {
         type: "item.completed",
         item: { type: "reasoning", text: `${progress}\n${dispatch}` },
       },
+      {
+        type: "item.completed",
+        item: { type: "reasoning", aggregated_output: progress },
+      },
       { type: "item.completed", item: { type: "agent_message", text: null } },
+      {
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          command: ["config_preflight.py"],
+          aggregated_output: preflight,
+        },
+      },
+      {
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          command: "config_preflight.py",
+          aggregated_output: [preflight],
+        },
+      },
       {
         type: "item.completed",
         item: {
@@ -288,19 +312,33 @@ describe("worker progress events", () => {
   });
 
   test("does not mistake documented examples for real scan progress", () => {
+    const progress = {
+      phase: "discovery" as const,
+      filesCompleted: 3,
+      filesTotal: 8,
+    };
+    const marker = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify(progress)}`;
+    for (const indent of ["", " ", "  ", "   "]) {
+      expect(
+        scanProgressUpdatesFromEvent(
+          commandEvent(
+            "read the scan workflow",
+            [
+              "Example progress:",
+              `${indent}\`\`\`text`,
+              marker,
+              `${indent}\`\`\``,
+              marker,
+            ].join("\n"),
+          ),
+        ),
+      ).toEqual([progress]);
+    }
     expect(
       scanProgressUpdatesFromEvent(
-        commandEvent(
-          "read the scan workflow",
-          [
-            "Example progress:",
-            "```text",
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
-            "```",
-          ].join("\n"),
-        ),
+        messageEvent(`Inline \`\`\` is not a fence.\n${marker}`),
       ),
-    ).toEqual([]);
+    ).toEqual([progress]);
   });
 
   test("rejects malformed or overstated file progress", () => {
