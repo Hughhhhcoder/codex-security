@@ -32,7 +32,7 @@ import extractZip from "extract-zip";
 import { parse } from "smol-toml";
 import {
   CodexSecurityError,
-  ConfigurationError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
@@ -1814,12 +1814,7 @@ export async function extractPluginZip(
   } catch (error) {
     await rm(staging, { recursive: true, force: true }).catch(() => undefined);
     throwIfSignalAborted(signal);
-    if (
-      error instanceof PluginBootstrapError ||
-      error instanceof ConfigurationError
-    ) {
-      throw error;
-    }
+    if (error instanceof PluginBootstrapError) throw error;
     throw new PluginBootstrapError(`Invalid plugin ZIP: ${archivePath}`, {
       cause: error,
     });
@@ -1921,8 +1916,10 @@ export async function resolvePluginPath(
   try {
     return await resolveLocalPluginPath(pluginPath, workspace, signal);
   } catch (error) {
-    if (signal?.aborted || error instanceof ConfigurationError) throw error;
-    throw new ConfigurationError(errorMessage(error), { cause: error });
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError) {
+      throw error;
+    }
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
 }
 
@@ -1961,8 +1958,10 @@ export async function createMarketplace(
   try {
     return await stageMarketplace(codexHome, pluginRoot, signal);
   } catch (error) {
-    if (signal?.aborted || error instanceof ConfigurationError) throw error;
-    throw new ConfigurationError(errorMessage(error), { cause: error });
+    if (signal?.aborted || error instanceof LocalPluginBootstrapError) {
+      throw error;
+    }
+    throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
   }
 }
 
@@ -2081,7 +2080,7 @@ export async function bootstrapPlugin(
     throw error;
   });
   if (existing !== null && !existing.isDirectory()) {
-    throw new ConfigurationError(
+    throw new LocalPluginBootstrapError(
       `Codex Security plugin marketplace path must be a directory: ${marketplace}`,
     );
   }
@@ -2167,18 +2166,19 @@ export async function pluginMetadata(
     }
     manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
-    throw new ConfigurationError(`Invalid Codex plugin directory: ${root}`, {
-      cause: error,
-    });
+    throw new LocalPluginBootstrapError(
+      `Invalid Codex plugin directory: ${root}`,
+      { cause: error },
+    );
   }
   if (!isRecord(manifest) || manifest["name"] !== PLUGIN_NAME) {
-    throw new ConfigurationError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have name 'codex-security'.",
     );
   }
   const version = manifest["version"];
   if (typeof version !== "string" || version.trim().length === 0) {
-    throw new ConfigurationError(
+    throw new LocalPluginBootstrapError(
       "Plugin manifest must have a non-empty version.",
     );
   }

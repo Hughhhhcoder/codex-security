@@ -36,11 +36,11 @@ import {
   BUNDLED_PLUGIN_VERSION,
   bootstrapPlugin,
   bundledPluginRoot,
-  ConfigurationError,
   createIsolatedHome,
   createMarketplace,
   extractPluginZip,
   importAmbientAuth,
+  LocalPluginBootstrapError,
   pluginExecutionEnvironment,
   pluginMetadata,
   PluginBootstrapError,
@@ -836,7 +836,7 @@ describe("plugin runtime preparation", () => {
     await mkdir(workspace);
     await expect(
       resolvePluginPath(join(root, "network-plugin"), workspace),
-    ).rejects.toBeInstanceOf(ConfigurationError);
+    ).rejects.toBeInstanceOf(LocalPluginBootstrapError);
 
     const cause = new Error("Synthetic manifest read failure.");
     const manifestRead = spyOn(fsPromises, "readFile").mockRejectedValue(cause);
@@ -846,7 +846,7 @@ describe("plugin runtime preparation", () => {
         () => resolvePluginPath(source, workspace),
       ]) {
         const result = operation();
-        await expect(result).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(result).rejects.toBeInstanceOf(LocalPluginBootstrapError);
         await expect(result).rejects.toMatchObject({
           message: `Invalid Codex plugin directory: ${source}`,
           cause,
@@ -919,7 +919,7 @@ describe("plugin runtime preparation", () => {
     await writeFile(marketplace, "local fixture");
     await expect(
       bootstrapPlugin(home, selected, options),
-    ).rejects.toBeInstanceOf(ConfigurationError);
+    ).rejects.toBeInstanceOf(LocalPluginBootstrapError);
     await rm(marketplace);
 
     const cause = new PluginBootstrapError(
@@ -928,7 +928,7 @@ describe("plugin runtime preparation", () => {
     const copy = spyOn(fsPromises, "cp").mockRejectedValue(cause);
     try {
       const result = bootstrapPlugin(home, selected, options);
-      await expect(result).rejects.toBeInstanceOf(ConfigurationError);
+      await expect(result).rejects.toBeInstanceOf(LocalPluginBootstrapError);
       await expect(result).rejects.toMatchObject({
         message: cause.message,
         cause,
@@ -1048,7 +1048,7 @@ describe("plugin runtime preparation", () => {
 
       await expect(
         createMarketplace(join(root, "home"), selected),
-      ).rejects.toThrow(ConfigurationError);
+      ).rejects.toThrow(PluginBootstrapError);
       expect(existsSync(destination)).toBe(false);
       expect(await readFile(outside, "utf8")).toBe("OUTSIDE_SECRET");
     },
@@ -1082,7 +1082,7 @@ describe("plugin runtime preparation", () => {
 
       await expect(
         createMarketplace(join(root, "home"), selected),
-      ).rejects.toThrow(ConfigurationError);
+      ).rejects.toThrow(PluginBootstrapError);
       expect(existsSync(destination)).toBe(false);
       expect(await readFile(outside, "utf8")).toBe("OUTSIDE_SECRET");
     },
@@ -1130,7 +1130,7 @@ describe("plugin runtime preparation", () => {
       try {
         await expect(
           createMarketplace(join(root, "home"), selected),
-        ).rejects.toThrow(ConfigurationError);
+        ).rejects.toThrow(PluginBootstrapError);
         expect(swapped).toBe(true);
         expect(existsSync(destination)).toBe(false);
         expect(await readFile(join(outsideScripts, "helper.py"), "utf8")).toBe(
@@ -1167,7 +1167,7 @@ describe("plugin runtime preparation", () => {
         }
 
         await expect(resolvePluginPath(source, workspace)).rejects.toThrow(
-          ConfigurationError,
+          PluginBootstrapError,
         );
       }
     },
@@ -1248,7 +1248,7 @@ describe("plugin runtime preparation", () => {
         () => resolvePluginPath(archive, join(root, "bootstrap")),
       ]) {
         const result = operation();
-        await expect(result).rejects.toBeInstanceOf(ConfigurationError);
+        await expect(result).rejects.toBeInstanceOf(LocalPluginBootstrapError);
         await expect(result).rejects.toMatchObject({
           message: expect.stringContaining("Invalid Codex plugin directory:"),
           cause,

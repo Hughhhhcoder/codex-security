@@ -30,6 +30,7 @@ import {
   ContractValidationError,
   DiffTarget,
   InvalidTargetError,
+  LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
   PluginBootstrapError,
@@ -3981,7 +3982,7 @@ describe("CLI", () => {
       ],
       [
         "local plugin validation failure",
-        new ConfigurationError(
+        new LocalPluginBootstrapError(
           "Invalid Codex plugin directory: /plugins/network-security",
         ),
       ],
@@ -4059,6 +4060,60 @@ describe("CLI", () => {
           message,
         });
         expect(stderr.text()).toContain(`${failure.message}\n`);
+      }
+    }
+  });
+
+  test("distinguishes constructed local and installer plugin failures", async () => {
+    const cause = new Error("Plugin preparation detail.");
+    const localFailure = new LocalPluginBootstrapError(
+      "Plugin preparation failed.",
+      { cause },
+    );
+    const installerFailure = new PluginBootstrapError(
+      "Plugin connection failed.",
+    );
+    expect(localFailure).toBeInstanceOf(PluginBootstrapError);
+    expect(localFailure.cause).toBe(cause);
+    expect(installerFailure).not.toBeInstanceOf(LocalPluginBootstrapError);
+
+    for (const [failure, message, classification] of [
+      [
+        localFailure,
+        "The scan could not complete because a local input or filesystem operation failed.",
+        "local",
+      ],
+      [
+        installerFailure,
+        "The scan encountered a network or connection failure.",
+        "network_error",
+      ],
+    ] as const) {
+      for (const format of ["json", "jsonl"] as const) {
+        const stdout = capture();
+        const stderr = capture();
+        const deps = dependencies({
+          onRun: () => {
+            throw failure;
+          },
+        });
+
+        expect(
+          await main(
+            ["scan", ".", "--verbose", "--format", format],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(JSON.parse(stdout.text())).toEqual({
+          code: "SCAN_FAILED",
+          message,
+        });
+        expect(stderr.text()).toContain(`${failure.message}\n`);
+        expect(stderr.text()).toContain(
+          `scan.failed classification="${classification}"`,
+        );
       }
     }
   });
