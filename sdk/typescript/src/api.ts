@@ -46,6 +46,7 @@ import {
 import {
   AuthenticationRequiredError,
   CodexSecurityError,
+  ConfigurationError,
   IncompleteScanError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
@@ -647,6 +648,20 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
       );
+      const toolBindingKeys = (
+        setting: "CODEX_SECURITY_GIT" | "CODEX_SECURITY_RG",
+      ): string[] =>
+        process.platform === "win32"
+          ? Object.keys(pluginEnvironment)
+              .filter((name) => name.toUpperCase() === setting)
+              .sort()
+          : [setting];
+      const gitKeys = toolBindingKeys("CODEX_SECURITY_GIT");
+      const ripgrepKeys = toolBindingKeys("CODEX_SECURITY_RG");
+      const configuredGit =
+        pluginEnvironment[gitKeys[0] ?? "CODEX_SECURITY_GIT"];
+      const configuredRipgrep =
+        pluginEnvironment[ripgrepKeys[0] ?? "CODEX_SECURITY_RG"];
       const protectedGitRoot = await outermostGitMarkerRoot(repo, signal);
       const git = await inspectTrustedExecutable(
         "git",
@@ -658,22 +673,30 @@ export class CodexSecurity {
         git.environment,
         protectedGitRoot,
       );
-      const toolBindingKeys = (
-        setting: "CODEX_SECURITY_GIT" | "CODEX_SECURITY_RG",
-      ): string[] =>
-        process.platform === "win32"
-          ? Object.keys(pluginEnvironment)
-              .filter((name) => name.toUpperCase() === setting)
-              .sort()
-          : [setting];
-      const gitKeys = toolBindingKeys("CODEX_SECURITY_GIT");
-      const ripgrepKeys = toolBindingKeys("CODEX_SECURITY_RG");
-      const gitDisabled =
-        pluginEnvironment[gitKeys[0] ?? "CODEX_SECURITY_GIT"] === "";
-      const ripgrepDisabled =
-        pluginEnvironment[ripgrepKeys[0] ?? "CODEX_SECURITY_RG"] === "";
+      for (const [setting, configured] of [
+        ["CODEX_SECURITY_GIT", configuredGit],
+        ["CODEX_SECURITY_RG", configuredRipgrep],
+      ] as const) {
+        if (configured === undefined || configured === "") continue;
+        if (!isAbsolute(configured)) {
+          throw new ConfigurationError(
+            `${setting} must name an absolute trusted executable.`,
+          );
+        }
+        const inspected = await inspectTrustedExecutable(
+          configured,
+          ripgrep.environment,
+          protectedGitRoot,
+        );
+        if (inspected.executable === null) {
+          throw new ConfigurationError(
+            `${setting} does not name an available executable.`,
+          );
+        }
+        ripgrep.environment = inspected.environment;
+      }
       if (
-        !ripgrepDisabled &&
+        configuredRipgrep === undefined &&
         ripgrep.executable === null &&
         runtime.bootstrapWorkspace !== undefined
       ) {
@@ -699,13 +722,11 @@ export class CodexSecurity {
       for (const name of [...gitKeys, ...ripgrepKeys]) {
         delete trustedPluginEnvironment[name];
       }
-      trustedPluginEnvironment["CODEX_SECURITY_GIT"] = gitDisabled
-        ? ""
-        : git.executable ?? "";
+      trustedPluginEnvironment["CODEX_SECURITY_GIT"] =
+        configuredGit ?? git.executable ?? "";
       // The Codex runtime can add its bundled tools to PATH after this point.
-      trustedPluginEnvironment["CODEX_SECURITY_RG"] = ripgrepDisabled
-        ? ""
-        : ripgrep.executable ?? undefined;
+      trustedPluginEnvironment["CODEX_SECURITY_RG"] =
+        configuredRipgrep ?? ripgrep.executable ?? undefined;
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&

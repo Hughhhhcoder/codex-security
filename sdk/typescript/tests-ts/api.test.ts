@@ -5522,6 +5522,7 @@ describe("CodexSecurity orchestration", () => {
       platform?: NodeJS.Platform;
       host: boolean;
       gitAvailable?: boolean;
+      configuredTool?: "git" | "rg";
       bindings?: Record<string, string>;
       expected: "host" | "staged" | "disabled" | "missing";
       expectedGit?: "host" | "disabled";
@@ -5555,7 +5556,8 @@ describe("CodexSecurity orchestration", () => {
         scenario: "Windows effective binding",
         platform: "win32",
         host: true,
-        bindings: { CODEX_SECURITY_RG: "previous", Codex_Security_Rg: "" },
+        configuredTool: "rg",
+        bindings: { Codex_Security_Rg: "" },
         expected: "host",
       },
       {
@@ -5569,7 +5571,7 @@ describe("CodexSecurity orchestration", () => {
         scenario: "Git binding nonempty",
         host: true,
         gitAvailable: true,
-        bindings: { CODEX_SECURITY_GIT: "previous" },
+        configuredTool: "git",
         expected: "host",
         expectedGit: "host",
       },
@@ -5605,7 +5607,8 @@ describe("CodexSecurity orchestration", () => {
         platform: "win32",
         host: true,
         gitAvailable: true,
-        bindings: { CODEX_SECURITY_GIT: "previous", Codex_Security_Git: "" },
+        configuredTool: "git",
+        bindings: { Codex_Security_Git: "" },
         expected: "host",
         expectedGit: "host",
       },
@@ -5670,6 +5673,12 @@ describe("CodexSecurity orchestration", () => {
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
           OPENAI_API_KEY: "synthetic-key",
           ...entry.bindings,
+          ...(entry.configuredTool === "git"
+            ? { CODEX_SECURITY_GIT: gitHost! }
+            : {}),
+          ...(entry.configuredTool === "rg"
+            ? { CODEX_SECURITY_RG: host! }
+            : {}),
         };
         const runtime = {
           ...preparedRuntime(codexHome),
