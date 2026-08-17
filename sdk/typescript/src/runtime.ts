@@ -1194,6 +1194,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
   );
   const expectedDevice = homeMetadata.dev;
   const expectedInode = homeMetadata.ino;
+  const platform = securityOptions.platform ?? process.platform;
   const lock = join(codexHome, CREDENTIAL_LOCK_NAME);
   const ownerPath = join(lock, "owner.json");
   const token = randomUUID();
@@ -1211,7 +1212,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
       throw error;
     });
     if (existingLock !== null) {
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, platform)) continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
@@ -1224,7 +1225,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
       await mkdir(lock, { mode: 0o700 });
     } catch (error) {
       if (nodeErrorCode(error) !== "EEXIST") throw error;
-      if (await recoverStaleCredentialHomeLock(lock)) continue;
+      if (await recoverStaleCredentialHomeLock(lock, platform)) continue;
       await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
       continue;
     }
@@ -1262,7 +1263,10 @@ export async function acquireCodexSecurityCredentialHomeLock(
   }
 }
 
-async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
+async function recoverStaleCredentialHomeLock(
+  lock: string,
+  platform: NodeJS.Platform,
+): Promise<boolean> {
   const metadata = await lstat(lock).catch((error: unknown) => {
     if (nodeErrorCode(error) === "ENOENT") return null;
     throw error;
@@ -1278,7 +1282,10 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
   try {
     owner = JSON.parse(await readFile(join(lock, "owner.json"), "utf8"));
   } catch (error) {
-    if (nodeErrorCode(error) !== "ENOENT" && !(error instanceof SyntaxError)) {
+    const code = nodeErrorCode(error);
+    // Windows can deny this read while the owner file is being written or removed.
+    if (platform === "win32" && code === "EPERM") return false;
+    if (code !== "ENOENT" && !(error instanceof SyntaxError)) {
       throw error;
     }
     if (
