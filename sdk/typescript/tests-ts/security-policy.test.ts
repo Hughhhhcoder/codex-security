@@ -663,6 +663,36 @@ describe("security policy preview", () => {
     }
   });
 
+  test("rejects reporting-policy aliases to the draft target", async () => {
+    for (const [name, scope, existing, directoryAlias] of [
+      [".github", ".", false, false],
+      ["docs", "component", true, false],
+      [".github", ".", true, true],
+      ["docs", "component", false, true],
+    ] as const) {
+      const f = await fixture();
+      const component = join(f.repository, scope);
+      await mkdir(component, { recursive: true });
+      const target = join(component, "SECURITY.md");
+      if (existing) await writeFile(target, "# Original policy\n");
+      const reportingDirectory = join(f.repository, name);
+      if (directoryAlias)
+        await symlink(
+          component,
+          reportingDirectory,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      else {
+        await mkdir(reportingDirectory);
+        await symlink(target, join(reportingDirectory, "SECURITY.md"), "file");
+      }
+      await expect(f.generate({ path: scope })).rejects.toThrow(
+        "a separate vulnerability-reporting policy",
+      );
+      expect(await readdir(f.outputDir)).toEqual([]);
+    }
+  });
+
   test("tracks safe inherited policy links and rejects outside links", async () => {
     const f = await fixture();
     const linkedPolicy = join(f.repository, "owner-policy.md");
