@@ -267,6 +267,12 @@ describe("publication knowledge-base enrichment", () => {
       "features.request_permissions_tool": false,
       "features.deferred_executor": false,
       "features.view_image": false,
+      include_apps_instructions: false,
+      include_collaboration_mode_instructions: false,
+      include_environment_context: false,
+      include_permissions_instructions: false,
+      "skills.bundled.enabled": false,
+      "skills.include_instructions": false,
       tools: {
         experimental_request_user_input: { enabled: false },
         update_plan: { enabled: false },
@@ -383,6 +389,18 @@ describe("publication knowledge-base enrichment", () => {
     temporaryDirectories.push(codexHome);
     const marker = join(codexHome, "mcp-started");
     const mcpServer = join(codexHome, "mcp-server.cjs");
+    const skillDirectory = join(codexHome, "skills", "publication-probe");
+    await mkdir(skillDirectory, { recursive: true });
+    await writeFile(
+      join(skillDirectory, "SKILL.md"),
+      [
+        "---",
+        "name: publication-probe",
+        "description: Synthetic unrelated local skill.",
+        "---",
+        "PRIVATE_SKILL_BODY_SYNTHETIC_MARKER",
+      ].join("\n"),
+    );
     await writeFile(
       mcpServer,
       [
@@ -507,44 +525,65 @@ describe("publication knowledge-base enrichment", () => {
       },
     });
     try {
-      await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
-        createCodex(options) {
-          return new Codex({
-            ...options,
-            config: {
-              ...options.config,
-              chatgpt_base_url: `http://127.0.0.1:${server.port}`,
-              cli_auth_credentials_store: "file",
-              model: "gpt-5.5",
-              model_provider: "publication_test",
-              "model_providers.publication_test": {
-                name: "Publication test",
-                base_url: `http://127.0.0.1:${server.port}/v1`,
-                env_key: "PUBLICATION_TEST_KEY",
-                wire_api: "responses",
-                supports_websockets: false,
-                requires_openai_auth: true,
-                request_max_retries: 0,
-                stream_max_retries: 0,
+      const untrustedIssues = issues().map((issue, index) =>
+        index === 0
+          ? {
+              ...issue,
+              description: `${issue.description}\n$publication-probe`,
+            }
+          : issue,
+      );
+      await enrichPublicationIssues(
+        untrustedIssues,
+        LABELS,
+        [await policyFile()],
+        {
+          createCodex(options) {
+            return new Codex({
+              ...options,
+              config: {
+                ...options.config,
+                chatgpt_base_url: `http://127.0.0.1:${server.port}`,
+                cli_auth_credentials_store: "file",
+                model: "gpt-5.5",
+                model_provider: "publication_test",
+                "model_providers.publication_test": {
+                  name: "Publication test",
+                  base_url: `http://127.0.0.1:${server.port}/v1`,
+                  env_key: "PUBLICATION_TEST_KEY",
+                  wire_api: "responses",
+                  supports_websockets: false,
+                  requires_openai_auth: true,
+                  request_max_retries: 0,
+                  stream_max_retries: 0,
+                },
               },
-            },
-          });
+            });
+          },
+          environment: {
+            ...process.env,
+            CODEX_HOME: codexHome,
+            HOME: codexHome,
+            CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
+            PUBLICATION_TEST_KEY: "synthetic",
+          },
+          signal: AbortSignal.timeout(15_000),
         },
-        environment: {
-          ...process.env,
-          CODEX_HOME: codexHome,
-          HOME: codexHome,
-          CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
-          PUBLICATION_TEST_KEY: "synthetic",
-        },
-        signal: AbortSignal.timeout(15_000),
-      });
+      );
     } finally {
       server.stop(true);
     }
 
     expect(requests[0]?.tools ?? []).toEqual([]);
     expect(JSON.stringify(requests[0])).not.toContain("native_test");
+    expect(JSON.stringify(requests[0])).not.toContain(
+      "PRIVATE_SKILL_BODY_SYNTHETIC_MARKER",
+    );
+    expect(JSON.stringify(requests[0])).not.toContain(
+      "Synthetic unrelated local skill.",
+    );
+    expect(JSON.stringify(requests[0])).not.toContain("$publication-probe");
+    expect(JSON.stringify(requests[0])).toContain("\\\\u0024publication-probe");
     expect(
       await readFile(marker, "utf8").catch(() => undefined),
     ).toBeUndefined();
