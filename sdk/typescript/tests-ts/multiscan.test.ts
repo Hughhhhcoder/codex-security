@@ -134,27 +134,113 @@ async function results(path: string): Promise<Record<string, unknown>[]> {
 }
 
 describe("multiscan", () => {
-  test("rejects selected Git from an outer local inventory repository", async () => {
-    const name =
-      "rejects selected Git from an outer local inventory repository";
+  for (const location of [
+    "pending inventory",
+    "completed inventory",
+    "managed checkout",
+  ] as const) {
+    const name = `rejects selected Git from ${location} campaign roots`;
+    test(name, async () => {
+      if (runMockInSubprocess(import.meta.path, name)) return;
+
+      const paths = await fixture();
+      const outer = await repository(paths.root, "outer");
+      const source = await repository(outer.path, "source");
+      const other = await repository(paths.root, "other");
+      const selectedDirectory =
+        location === "managed checkout"
+          ? join(paths.output, "checkouts", "retained")
+          : outer.path;
+      await mkdir(selectedDirectory, { recursive: true, mode: 0o700 });
+      const selected = join(
+        selectedDirectory,
+        process.platform === "win32" ? "selected-git.exe" : "selected-git",
+      );
+      await writeFile(selected, "", { mode: 0o700 });
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nother,${other.path},${other.revision}\nsource,${source.path},${source.revision}\n`,
+      );
+      const previousGit = process.env["CODEX_SECURITY_GIT"];
+      let previousReceipts = 0;
+      let scans = 0;
+      try {
+        if (location === "completed inventory") {
+          delete process.env["CODEX_SECURITY_GIT"];
+          const initial = await runMultiscan(
+            options(
+              paths,
+              client(async (_checkout, scanOptions = {}) =>
+                completedScan(scanOptions.outputDir!),
+              ),
+              { maxAttempts: 1 },
+            ),
+          );
+          expect(initial).toMatchObject({ completed: 2, failed: 0 });
+          const receipts = await results(initial.resultsPath);
+          previousReceipts = receipts.length;
+          const otherReceipt = receipts.find(
+            (receipt) => receipt["id"] === "other",
+          )!;
+          await rm(join(otherReceipt["outputDir"] as string, "report.md"));
+        }
+
+        process.env["CODEX_SECURITY_GIT"] = selected;
+        const summary = await runMultiscan(
+          options(
+            paths,
+            client(async (_checkout, scanOptions = {}) => {
+              scans += 1;
+              return await completedScan(scanOptions.outputDir!);
+            }),
+            { maxAttempts: 1 },
+          ),
+        );
+        const resumed = location === "completed inventory";
+        expect(summary).toMatchObject({
+          completed: resumed ? 1 : 0,
+          failed: resumed ? 1 : 2,
+          skipped: resumed ? 1 : 0,
+        });
+        expect(scans).toBe(0);
+        const receipts = (await results(summary.resultsPath)).slice(
+          previousReceipts,
+        );
+        expect(receipts).toHaveLength(resumed ? 1 : 2);
+        for (const receipt of receipts) {
+          expect(receipt["error"]).toContain(
+            "CODEX_SECURITY_GIT does not name an available executable.",
+          );
+        }
+      } finally {
+        if (previousGit === undefined) delete process.env["CODEX_SECURITY_GIT"];
+        else process.env["CODEX_SECURITY_GIT"] = previousGit;
+      }
+    });
+  }
+
+  test("keeps missing local sources as per-task failures", async () => {
+    const name = "keeps missing local sources as per-task failures";
     if (runMockInSubprocess(import.meta.path, name)) return;
 
     const paths = await fixture();
-    const outer = await repository(paths.root, "outer");
-    const source = await repository(outer.path, "source");
-    const selected = join(
-      outer.path,
-      process.platform === "win32" ? "selected-git.exe" : "selected-git",
+    const source = await repository(paths.root, "source");
+    const trusted = await resolveTrustedExecutable(
+      "git",
+      process.env,
+      process.cwd(),
     );
-    await writeFile(selected, "", { mode: 0o700 });
+    if (trusted === null) throw new Error("Git is required by this fixture.");
     await writeFile(
       paths.input,
-      `id,repository,revision\nsource,${source.path},${source.revision}\n`,
+      `id,repository,revision\nmissing,${join(paths.root, "missing")},${source.revision}\nsource,${source.path},${source.revision}\n`,
     );
+    const previousPath = process.env["PATH"];
     const previousGit = process.env["CODEX_SECURITY_GIT"];
     let scans = 0;
     try {
-      process.env["CODEX_SECURITY_GIT"] = selected;
+      process.env["PATH"] = "";
+      process.env["CODEX_SECURITY_GIT"] = trusted.executable;
       const summary = await runMultiscan(
         options(
           paths,
@@ -165,12 +251,15 @@ describe("multiscan", () => {
           { maxAttempts: 1 },
         ),
       );
-      expect(summary).toMatchObject({ completed: 0, failed: 1 });
-      expect(scans).toBe(0);
-      expect((await results(summary.resultsPath))[0]?.["error"]).toContain(
-        "CODEX_SECURITY_GIT does not name an available executable.",
-      );
+      expect(summary).toMatchObject({ completed: 1, failed: 1 });
+      expect(scans).toBe(1);
+      expect(await results(summary.resultsPath)).toMatchObject([
+        { id: "missing", status: "failed" },
+        { id: "source", status: "completed" },
+      ]);
     } finally {
+      if (previousPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = previousPath;
       if (previousGit === undefined) delete process.env["CODEX_SECURITY_GIT"];
       else process.env["CODEX_SECURITY_GIT"] = previousGit;
     }

@@ -131,7 +131,7 @@ async function runCampaign(
   output: string,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
-  await ensureOutputDirectory(join(output, "checkouts"));
+  const checkoutRoot = await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   await ensureManifest(join(output, "manifest.json"), tasks, options);
   const receipts = await readReceipts(ledger);
@@ -197,6 +197,30 @@ async function runCampaign(
     };
   }
 
+  const protectedRoots = new Set([
+    await outermostGitMarkerRoot(await realpath(process.cwd()), options.signal),
+    checkoutRoot,
+  ]);
+  for (const task of tasks) {
+    if (!isAbsolute(task.repository)) continue;
+    const canonical = await realpath(task.repository).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR")
+          return undefined;
+        throw error;
+      },
+    );
+    const root = await outermostGitMarkerRoot(
+      canonical ?? task.repository,
+      options.signal,
+    );
+    // Missing sources remain per-task failures; keep any enclosing Git root.
+    if (canonical !== undefined || root !== task.repository) {
+      protectedRoots.add(await realpath(root));
+    }
+  }
+  const gitRoots = [...protectedRoots];
+
   let next = 0;
   let failed = 0;
   const worker = async (
@@ -210,7 +234,7 @@ async function runCampaign(
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
         attempt += 1;
-        const checkout = join(output, "checkouts", task.id);
+        const checkout = join(checkoutRoot, task.id);
         const scanDir = join(
           output,
           "artifacts",
@@ -231,6 +255,7 @@ async function runCampaign(
           await checkoutRevision(
             task,
             checkout,
+            gitRoots,
             options.signal,
             options.githubHost,
           );
@@ -791,6 +816,7 @@ function normalizeRepository(repository: string, directory: string): string {
 async function checkoutRevision(
   task: MultiscanTask,
   path: string,
+  protectedRoots: readonly string[],
   signal?: AbortSignal,
   githubHost?: string,
 ): Promise<void> {
@@ -807,14 +833,6 @@ async function checkoutRevision(
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
-  const protectedRoots = [
-    await outermostGitMarkerRoot(await realpath(process.cwd()), signal),
-  ];
-  if (isAbsolute(task.repository)) {
-    protectedRoots.push(
-      await outermostGitMarkerRoot(await realpath(task.repository), signal),
-    );
-  }
   const { executable, environment: gitEnvironment } = await resolveGitCommand(
     environment,
     protectedRoots,
