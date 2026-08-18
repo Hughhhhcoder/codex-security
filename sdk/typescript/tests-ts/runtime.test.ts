@@ -63,7 +63,7 @@ import {
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   prepareCodexSecurityStateDirectory,
-  preparePersistentScanRoot,
+  preparePersistentOutputRoot,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -3909,15 +3909,18 @@ describe("runtime directories and plugin Python boundary", () => {
         CODEX_SECURITY_STATE_DIR: join(root, "explicit-state"),
       }),
     ).toBe(join(root, "explicit-state"));
-    const scanRoot = await preparePersistentScanRoot(
-      join(root, "state"),
-      "repository with spaces",
-    );
-    expect(scanRoot).toBe(
-      join(root, "state", "scans", "repository-with-spaces"),
-    );
-    if (process.platform !== "win32") {
-      expect((await stat(scanRoot)).mode & 0o777).toBe(0o700);
+    for (const category of ["scans", "policies"] as const) {
+      const outputRoot = await preparePersistentOutputRoot(
+        join(root, "state"),
+        category,
+        "repository with spaces",
+      );
+      expect(outputRoot).toBe(
+        join(root, "state", category, "repository-with-spaces"),
+      );
+      if (process.platform !== "win32") {
+        expect((await stat(outputRoot)).mode & 0o777).toBe(0o700);
+      }
     }
 
     const linkedState = join(root, "linked-state");
@@ -3927,7 +3930,11 @@ describe("runtime directories and plugin Python boundary", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
     expect(
-      await preparePersistentScanRoot(linkedState, "linked repository"),
+      await preparePersistentOutputRoot(
+        linkedState,
+        "scans",
+        "linked repository",
+      ),
     ).toBe(join(root, "state", "scans", "linked-repository"));
   });
 
@@ -4095,7 +4102,7 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   testPosix(
-    "rejects non-private state before preparing credentials or scan roots",
+    "rejects non-private state before preparing credentials or output roots",
     async () => {
       const root = await temporaryDirectory();
       const state = join(root, "state");
@@ -4105,9 +4112,11 @@ describe("runtime directories and plugin Python boundary", () => {
       await expect(
         prepareCodexSecurityCredentialHome({ CODEX_SECURITY_STATE_DIR: state }),
       ).rejects.toBeInstanceOf(OutputDirectoryError);
-      await expect(
-        preparePersistentScanRoot(state, "repository"),
-      ).rejects.toBeInstanceOf(OutputDirectoryError);
+      for (const category of ["scans", "policies"] as const) {
+        await expect(
+          preparePersistentOutputRoot(state, category, "repository"),
+        ).rejects.toBeInstanceOf(OutputDirectoryError);
+      }
       expect((await stat(state)).mode & 0o7777).toBe(0o755);
       expect(await readdir(state)).toEqual([]);
     },
@@ -4255,7 +4264,7 @@ describe("runtime directories and plugin Python boundary", () => {
       );
 
       await expect(
-        preparePersistentScanRoot(state, "repository"),
+        preparePersistentOutputRoot(state, "scans", "repository"),
       ).rejects.toThrow("Persistent scan output must use real directories");
       expect(await readdir(external)).toEqual([]);
     }
@@ -5521,6 +5530,77 @@ describe("runtime directories and plugin Python boundary", () => {
       }),
     ).rejects.toThrow(PluginPythonUnavailableError);
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "uses a configured Windows Python path without the executable suffix",
+    async () => {
+      const discovered = Bun.which("python3") ?? Bun.which("python");
+      expect(discovered).not.toBeNull();
+      if (discovered === null) return;
+      const python = await realpath(discovered);
+      const extensionless = python.replace(/\.exe$/iu, "");
+      expect(extensionless).not.toBe(python);
+
+      await expect(
+        resolvePluginPython({
+          configuredPath: extensionless,
+          environment: {
+            PATH: "",
+            ...(process.env["SystemRoot"] === undefined
+              ? {}
+              : { SystemRoot: process.env["SystemRoot"] }),
+          },
+        }),
+      ).resolves.toBe(python);
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "discovers Python through the standard Windows py launcher",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const installedPython = process.env["PYTHON"] ?? Bun.which("python");
+      expect(installedPython).not.toBeNull();
+      if (installedPython === null) return;
+      await mkdir(repository);
+      const launcher = join(root, "py.exe");
+      await copyFile(installedPython, launcher);
+      const installation = dirname(installedPython);
+      for (const entry of await readdir(installation, {
+        withFileTypes: true,
+      })) {
+        if (entry.isFile() && entry.name.toLowerCase().endsWith(".dll")) {
+          await copyFile(
+            join(installation, entry.name),
+            join(root, entry.name),
+          );
+        }
+      }
+      await writeFile(
+        join(root, "pyvenv.cfg"),
+        `home = ${installation}\ninclude-system-site-packages = false\n`,
+      );
+
+      await expect(
+        resolvePluginPython({
+          environment: {
+            PATH: root,
+            PATHEXT: ".EXE",
+            ...(process.env["SystemRoot"] === undefined
+              ? {}
+              : { SystemRoot: process.env["SystemRoot"] }),
+            ...(process.env["WINDIR"] === undefined
+              ? {}
+              : { WINDIR: process.env["WINDIR"] }),
+          },
+          homeDirectory: root,
+          managedRuntimeRoots: [],
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(await realpath(launcher));
+    },
+  );
 
   testPosix(
     "does not load repository-controlled Python startup code",

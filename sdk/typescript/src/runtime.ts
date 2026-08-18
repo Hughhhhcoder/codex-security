@@ -43,8 +43,11 @@ import { parse } from "smol-toml";
 import {
   CodexSecurityError,
   OutputDirectoryError,
+  OutputDirectoryNotEmptyError,
+  OutputInsideProtectedRootError,
   PluginBootstrapError,
   PluginPythonUnavailableError,
+  type ProtectedScanPathKind,
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -1484,17 +1487,52 @@ export async function preserveCodexSecurityPluginRegistration(
   };
 }
 
-export async function preparePersistentScanRoot(
+export function requireOutputOutsideRepository(
+  repository: string,
+  outputDirectory: string,
+  pathKind: ProtectedScanPathKind = "output",
+): void {
+  const outputRelative = relative(repository, outputDirectory);
+  const repositoryRelative = relative(outputDirectory, repository);
+  if (
+    outputRelative === "" ||
+    (outputRelative !== ".." &&
+      !outputRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(outputRelative)) ||
+    (pathKind === "output" &&
+      repositoryRelative !== ".." &&
+      !repositoryRelative.startsWith(`..${sep}`) &&
+      !isAbsolute(repositoryRelative))
+  ) {
+    throw new OutputInsideProtectedRootError(
+      outputDirectory,
+      repository,
+      pathKind,
+    );
+  }
+}
+
+export function requireOutputOutsideRepositories(
+  repositories: readonly string[],
+  outputDirectory: string,
+  pathKind: ProtectedScanPathKind = "output",
+): void {
+  for (const repository of repositories)
+    requireOutputOutsideRepository(repository, outputDirectory, pathKind);
+}
+
+export async function preparePersistentOutputRoot(
   stateDirectory: string,
+  category: "scans" | "policies",
   repositoryName: string,
 ): Promise<string> {
   let root = await prepareCodexSecurityStateDirectory(stateDirectory);
-  for (const directory of ["scans", safePrefix(repositoryName)]) {
+  for (const directory of [category, safePrefix(repositoryName)]) {
     root = join(root, directory);
     await mkdir(root, { recursive: true, mode: 0o700 });
     if (!(await lstat(root)).isDirectory()) {
       throw new OutputDirectoryError(
-        `Persistent scan output must use real directories: ${root}`,
+        `Persistent ${category === "scans" ? "scan" : "policy"} output must use real directories: ${root}`,
       );
     }
   }
@@ -1626,9 +1664,7 @@ export async function validateOutputDir(
         );
       }
       if (!archiveExisting && (await readdir(path)).length !== 0) {
-        throw new OutputDirectoryError(
-          `Scan output directory is not empty: ${path}. To keep the existing results and start a new scan, add --archive-existing.`,
-        );
+        throw new OutputDirectoryNotEmptyError(path);
       }
       requirePrivateOutputDirectory(metadata, path);
       await requireSecureOutputAncestry(path);
@@ -2444,7 +2480,7 @@ export async function resolvePluginPython(
   }
 
   for (const candidate of process.platform === "win32"
-    ? ["python", "python3"]
+    ? ["python", "python3", "py"]
     : ["python3", "python"]) {
     const resolved = await usablePython(
       candidate,
@@ -2456,7 +2492,7 @@ export async function resolvePluginPython(
   }
   throw new PluginPythonUnavailableError(
     "The bundled Codex Security plugin requires Python 3.10 or later (Python 3.10 also requires tomli), but no usable interpreter was found. " +
-      "Set pythonPath, --python, or PYTHON, install the Codex managed runtime, or add python3/python to PATH.",
+      "Set pythonPath, --python, or PYTHON, install the Codex managed runtime, or add python3/python (py on Windows) to PATH.",
   );
 }
 
