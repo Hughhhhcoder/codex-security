@@ -140,8 +140,12 @@ describe("multiscan", () => {
     "knowledge base",
     "linked missing source",
     "dangling linked source",
+    "campaign artifacts",
   ] as const) {
-    const name = `rejects selected Git from the ${location} repository`;
+    const name =
+      location === "campaign artifacts"
+        ? "rejects selected Git from existing campaign artifacts"
+        : `rejects selected Git from the ${location} repository`;
     test(name, async () => {
       if (runMockInSubprocess(import.meta.path, name)) return;
 
@@ -149,8 +153,13 @@ describe("multiscan", () => {
       const source = await repository(paths.root, "source");
       const inputRepository = await repository(paths.root, "inputs");
       const document = join(inputRepository.path, "guide.md");
+      const selectedDirectory =
+        location === "campaign artifacts"
+          ? join(paths.output, "artifacts", "prior", "attempt-1")
+          : inputRepository.path;
+      await mkdir(selectedDirectory, { recursive: true, mode: 0o700 });
       const selected = join(
-        inputRepository.path,
+        selectedDirectory,
         process.platform === "win32" ? "selected-git.exe" : "selected-git",
       );
       await writeFile(document, "# Synthetic guidance\n");
@@ -322,51 +331,64 @@ describe("multiscan", () => {
     });
   }
 
-  test("keeps missing local sources as per-task failures", async () => {
-    const name = "keeps missing local sources as per-task failures";
-    if (runMockInSubprocess(import.meta.path, name)) return;
+  for (const kind of ["missing", "cyclic"] as const) {
+    const name = `keeps ${kind} local sources as per-task failures`;
+    test(name, async () => {
+      if (runMockInSubprocess(import.meta.path, name)) return;
 
-    const paths = await fixture();
-    const source = await repository(paths.root, "source");
-    const trusted = await resolveTrustedExecutable(
-      "git",
-      process.env,
-      process.cwd(),
-    );
-    if (trusted === null) throw new Error("Git is required by this fixture.");
-    await writeFile(
-      paths.input,
-      `id,repository,revision\nmissing,${join(paths.root, "missing")},${source.revision}\nsource,${source.path},${source.revision}\n`,
-    );
-    const previousPath = process.env["PATH"];
-    const previousGit = process.env["CODEX_SECURITY_GIT"];
-    let scans = 0;
-    try {
-      process.env["PATH"] = "";
-      process.env["CODEX_SECURITY_GIT"] = trusted.executable;
-      const summary = await runMultiscan(
-        options(
-          paths,
-          client(async (_checkout, scanOptions = {}) => {
-            scans += 1;
-            return await completedScan(scanOptions.outputDir!);
-          }),
-          { maxAttempts: 1 },
-        ),
+      const paths = await fixture();
+      const source = await repository(paths.root, "source");
+      let unavailable = join(paths.root, "missing");
+      if (kind === "cyclic") {
+        const target = join(paths.root, "cycle-target");
+        const link = join(paths.root, "cycle-link");
+        const type = process.platform === "win32" ? "junction" : "dir";
+        await mkdir(target);
+        await symlink(target, link, type);
+        await rm(target, { recursive: true });
+        await symlink(link, target, type);
+        unavailable = join(link, "missing");
+      }
+      const trusted = await resolveTrustedExecutable(
+        "git",
+        process.env,
+        process.cwd(),
       );
-      expect(summary).toMatchObject({ completed: 1, failed: 1 });
-      expect(scans).toBe(1);
-      expect(await results(summary.resultsPath)).toMatchObject([
-        { id: "missing", status: "failed" },
-        { id: "source", status: "completed" },
-      ]);
-    } finally {
-      if (previousPath === undefined) delete process.env["PATH"];
-      else process.env["PATH"] = previousPath;
-      if (previousGit === undefined) delete process.env["CODEX_SECURITY_GIT"];
-      else process.env["CODEX_SECURITY_GIT"] = previousGit;
-    }
-  });
+      if (trusted === null) throw new Error("Git is required by this fixture.");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\n${kind},${unavailable},${source.revision}\nsource,${source.path},${source.revision}\n`,
+      );
+      const previousPath = process.env["PATH"];
+      const previousGit = process.env["CODEX_SECURITY_GIT"];
+      let scans = 0;
+      try {
+        process.env["PATH"] = "";
+        process.env["CODEX_SECURITY_GIT"] = trusted.executable;
+        const summary = await runMultiscan(
+          options(
+            paths,
+            client(async (_checkout, scanOptions = {}) => {
+              scans += 1;
+              return await completedScan(scanOptions.outputDir!);
+            }),
+            { maxAttempts: 1 },
+          ),
+        );
+        expect(summary).toMatchObject({ completed: 1, failed: 1 });
+        expect(scans).toBe(1);
+        expect(await results(summary.resultsPath)).toMatchObject([
+          { id: kind, status: "failed" },
+          { id: "source", status: "completed" },
+        ]);
+      } finally {
+        if (previousPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previousPath;
+        if (previousGit === undefined) delete process.env["CODEX_SECURITY_GIT"];
+        else process.env["CODEX_SECURITY_GIT"] = previousGit;
+      }
+    });
+  }
 
   for (const setting of ["selected", "disabled", "invalid"] as const) {
     const name = `honors ${setting} Git settings before bulk checkout`;

@@ -611,55 +611,71 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("rejects selected Git from a knowledge-base repository before preflight", async () => {
+  for (const input of ["knowledge base", "existing output"] as const) {
     const name =
-      "rejects selected Git from a knowledge-base repository before preflight";
-    if (runMockInSubprocess(import.meta.path, name)) return;
+      input === "knowledge base"
+        ? "rejects selected Git from a knowledge-base repository before preflight"
+        : "rejects selected Git from existing scan output before preflight";
+    test(name, async () => {
+      if (runMockInSubprocess(import.meta.path, name)) return;
 
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const knowledgeRepository = join(root, "knowledge");
-    const document = join(knowledgeRepository, "docs", "guide.md");
-    const selected = join(
-      knowledgeRepository,
-      process.platform === "win32" ? "selected-git.exe" : "selected-git",
-    );
-    await mkdir(repository);
-    await mkdir(join(knowledgeRepository, ".git"), { recursive: true });
-    await mkdir(join(knowledgeRepository, "docs"));
-    await writeFile(document, "# Synthetic guidance\n");
-    await writeFile(selected, "", { mode: 0o700 });
-    const originalTargets = { ...targetsModule };
-    let gitCalls = 0;
-    mock.module("../src/targets.js", () => ({
-      ...originalTargets,
-      enclosingGitWorktreeRoot: async () => {
-        gitCalls += 1;
-        return null;
-      },
-    }));
-    const client = new TestClient(
-      {},
-      {
-        environment: {
-          PATH: "",
-          CODEX_SECURITY_GIT: selected,
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-        },
-      },
-    );
-    try {
-      await expect(
-        client.preflight(repository, { knowledgeBasePaths: [document] }),
-      ).rejects.toThrow(
-        "CODEX_SECURITY_GIT does not name an available executable.",
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const inputDirectory = join(
+        root,
+        input === "knowledge base" ? "knowledge" : "scan",
       );
-      expect(gitCalls).toBe(0);
-    } finally {
-      await client.close();
-      mock.module("../src/targets.js", () => originalTargets);
-    }
-  });
+      const document = join(inputDirectory, "docs", "guide.md");
+      const selected = join(
+        inputDirectory,
+        process.platform === "win32" ? "selected-git.exe" : "selected-git",
+      );
+      await mkdir(repository);
+      if (input === "knowledge base") {
+        await mkdir(join(inputDirectory, ".git"), { recursive: true });
+        await mkdir(join(inputDirectory, "docs"));
+        await writeFile(document, "# Synthetic guidance\n");
+      } else {
+        await mkdir(inputDirectory, { mode: 0o700 });
+      }
+      await writeFile(selected, "", { mode: 0o700 });
+      const originalTargets = { ...targetsModule };
+      let gitCalls = 0;
+      mock.module("../src/targets.js", () => ({
+        ...originalTargets,
+        enclosingGitWorktreeRoot: async () => {
+          gitCalls += 1;
+          return null;
+        },
+      }));
+      const client = new TestClient(
+        {},
+        {
+          environment: {
+            PATH: "",
+            CODEX_SECURITY_GIT: selected,
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          },
+        },
+      );
+      try {
+        await expect(
+          client.preflight(
+            repository,
+            input === "knowledge base"
+              ? { knowledgeBasePaths: [document] }
+              : { outputDir: inputDirectory, archiveExisting: true },
+          ),
+        ).rejects.toThrow(
+          "CODEX_SECURITY_GIT does not name an available executable.",
+        );
+        expect(gitCalls).toBe(0);
+      } finally {
+        await client.close();
+        mock.module("../src/targets.js", () => originalTargets);
+      }
+    });
+  }
 
   test("keeps knowledge-base repositories outside runtime tool selection", async () => {
     const root = await temporaryDirectory();

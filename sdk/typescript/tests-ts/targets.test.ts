@@ -138,6 +138,36 @@ test("finds input repositories behind dangling directory links", async () => {
   ]);
 });
 
+test("protects both repositories in a cyclic input link", async () => {
+  const lexical = await repository();
+  const resolved = await repository();
+  const left = join(lexical, "loop");
+  const right = join(resolved, "loop");
+  const type = process.platform === "win32" ? "junction" : "dir";
+  await mkdir(right);
+  await symlink(right, left, type);
+  await rm(right, { recursive: true });
+  await symlink(left, right, type);
+
+  expect(await protectedGitInputRoots([join(left, "missing")])).toEqual([
+    lexical,
+    resolved,
+  ]);
+});
+
+(process.platform === "win32" ? test.skip : test)(
+  "does not revisit a relative cyclic input link",
+  async () => {
+    const repo = await repository();
+    const link = join(repo, "loop");
+    await symlink("./loop/nested", link, "dir");
+
+    expect(await protectedGitInputRoots([join(link, "missing")])).toEqual([
+      repo,
+    ]);
+  },
+);
+
 (process.platform === "win32" ? test.skip : test)(
   "preserves relative dangling-link target traversal",
   async () => {

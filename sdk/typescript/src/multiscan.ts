@@ -208,7 +208,7 @@ async function runCampaign(
     ],
     options.signal,
   );
-  gitRoots.push(checkoutRoot);
+  gitRoots.push(output);
 
   let next = 0;
   let failed = 0;

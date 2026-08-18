@@ -532,7 +532,7 @@ export async function outermostGitMarkerRoot(
       await lstat(join(current, ".git"));
       root = current;
     } catch (error) {
-      if (!isMissingPathError(error)) throw error;
+      if (!isUnavailablePathError(error)) throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;
@@ -546,31 +546,43 @@ export async function protectedGitInputRoots(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const roots = new Set<string>();
-  const pending = [...new Set(paths.map(resolveRepositoryPath))];
-  const queued = new Set(pending);
+  const queued = new Set(paths.map(resolveRepositoryPath));
+  const pending = [...queued].map((path) => ({
+    path,
+    links: new Set<string>(),
+  }));
   for (let index = 0; index < pending.length; index += 1) {
-    const requested = pending[index]!;
+    const { path: requested, links } = pending[index]!;
     let current = requested;
     while (true) {
       throwIfAborted(signal);
       const parent = dirname(current);
-      const metadata = await lstat(current).catch((error: unknown) => {
-        if (isMissingPathError(error)) return null;
-        throw error;
-      });
+      const metadata = await lstat(current, { bigint: true }).catch(
+        (error: unknown) => {
+          if (isUnavailablePathError(error)) return null;
+          throw error;
+        },
+      );
       if (metadata?.isSymbolicLink()) {
-        const target = await readlink(current);
-        // Preserve link-target dot segments until the filesystem resolves them.
-        const linked = isAbsolute(target)
-          ? target
-          : `${parent}${parent.endsWith(sep) ? "" : sep}${target}`;
-        const suffix = relative(current, requested);
-        const redirected = suffix
-          ? `${linked}${linked.endsWith(sep) ? "" : sep}${suffix}`
-          : linked;
-        if (!queued.has(redirected)) {
-          queued.add(redirected);
-          pending.push(redirected);
+        // A relative cycle can produce a new path spelling on every visit.
+        const identity = `${metadata.dev}:${metadata.ino}`;
+        if (!links.has(identity)) {
+          const target = await readlink(current);
+          // Preserve link-target dot segments until the filesystem resolves them.
+          const linked = isAbsolute(target)
+            ? target
+            : `${parent}${parent.endsWith(sep) ? "" : sep}${target}`;
+          const suffix = relative(current, requested);
+          const redirected = suffix
+            ? `${linked}${linked.endsWith(sep) ? "" : sep}${suffix}`
+            : linked;
+          if (!queued.has(redirected)) {
+            queued.add(redirected);
+            pending.push({
+              path: redirected,
+              links: new Set([...links, identity]),
+            });
+          }
         }
       }
       if (parent === current) break;
@@ -587,7 +599,7 @@ export async function protectedGitInputRoots(
         );
         break;
       } catch (error) {
-        if (!isMissingPathError(error)) throw error;
+        if (!isUnavailablePathError(error)) throw error;
         const parent = dirname(existing);
         if (parent === existing) throw error;
         existing = parent;
@@ -600,16 +612,16 @@ export async function protectedGitInputRoots(
         roots.add(await realpath(root));
       } catch (error) {
         // A missing standalone input remains the caller's per-input error.
-        if (!isMissingPathError(error)) throw error;
+        if (!isUnavailablePathError(error)) throw error;
       }
     }
   }
   return [...roots];
 }
 
-function isMissingPathError(error: unknown): boolean {
+function isUnavailablePathError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
-  return code === "ENOENT" || code === "ENOTDIR";
+  return code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP";
 }
 
 function isolatedGitEnvironment(
