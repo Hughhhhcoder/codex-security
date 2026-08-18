@@ -289,14 +289,18 @@ describe("security policy generation", () => {
     const draft = await f.generate({
       answerQuestions: async (batch) => {
         batches.push([...batch]);
-        return `Owner answer ${batches.length}`;
+        return ["yes", undefined, "no"][batches.length - 1];
       },
       run: async (stage, prompt) => {
         if (stage === "architecture")
           return { ...stageResult(stage), questions };
         for (const question of questions) expect(prompt).toContain(question);
-        for (let index = 1; index <= 3; index++)
-          expect(prompt).toContain(`Owner answer ${index}`);
+        expect(prompt).toContain(
+          JSON.stringify([
+            { questions: questions.slice(0, 3), answer: "yes" },
+            { questions: questions.slice(6), answer: "no" },
+          ]),
+        );
         return stageResult(stage);
       },
     });

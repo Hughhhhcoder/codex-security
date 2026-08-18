@@ -1,5 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdir,
+  readFile,
+  readdir,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type {
   CodexOptions,
@@ -469,6 +476,34 @@ describe("CodexSecurity policy API", () => {
     }
   });
 
+  test("rejects hard-linked policy evidence before starting Codex", async () => {
+    for (const [scope, policyPath] of [
+      [".", "SECURITY.md"],
+      ["component", "SECURITY.md"],
+      [".", "child/SECURITY.md"],
+      [".", ".github/SECURITY.md"],
+    ] as const) {
+      let prepared = false;
+      const f = await setup({ onPrepare: () => (prepared = true) });
+      policyGit(f.repository, "init", "--quiet");
+      const target = join(f.repository, policyPath);
+      await mkdir(join(f.repository, scope), { recursive: true });
+      await mkdir(dirname(target), { recursive: true });
+      await link(join(f.repository, ".git", "config"), target);
+      const options = { path: scope, outputDir: f.outputDir };
+      await expect(
+        f.security.preflightPolicy(f.repository, options),
+      ).rejects.toThrow("hard-linked");
+      await expect(
+        f.security.generatePolicy(f.repository, options),
+      ).rejects.toThrow("hard-linked");
+      expect(prepared).toBe(false);
+      expect(f.threads).toHaveLength(0);
+      expect(await readdir(f.outputDir)).toEqual([]);
+      await f.security.close();
+    }
+  });
+
   test("validates descendant policy contents before starting Codex", async () => {
     for (const [content, message] of [
       [Buffer.alloc(1024 * 1024 + 1, "x"), "1 MiB"],
@@ -668,6 +703,7 @@ describe("CodexSecurity policy API", () => {
     expect(f.turns.every((turn) => turn.outputSchema !== undefined)).toBe(true);
     const outputSchema = f.turns[0]!.outputSchema as AnySchema;
     expect(JSON.stringify(outputSchema)).not.toContain('"nullable"');
+    expect(JSON.stringify(outputSchema)).not.toContain('"minLength"');
     const validate = new Ajv().compile(outputSchema);
     expect(validate(stageResult("architecture"))).toBe(true);
     expect(
@@ -1014,9 +1050,17 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("rejects incomplete and invalid model responses", async () => {
-    for (const response of ["incomplete", "invalid"] as const) {
+    for (const [response, message] of [
+      ["incomplete", "before the turn completed"],
+      ["invalid", "invalid document"],
+      ["empty", "returned an empty document"],
+    ] as const) {
       const f = await setup({
-        stream: async function* () {
+        stream: async function* (stage) {
+          if (response === "empty") {
+            yield* events(stage, { ...stageResult(stage), markdown: " \n" });
+            return;
+          }
           yield { type: "thread.started", thread_id: "policy-failed" };
           if (response === "invalid") {
             yield {
@@ -1038,11 +1082,7 @@ describe("CodexSecurity policy API", () => {
       });
       await expect(
         f.security.generatePolicy(f.repository, { outputDir: f.outputDir }),
-      ).rejects.toThrow(
-        response === "invalid"
-          ? "invalid document"
-          : "before the turn completed",
-      );
+      ).rejects.toThrow(message);
       expect(await readdir(f.repository)).toEqual([]);
       await f.security.close();
     }
