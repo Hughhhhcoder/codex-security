@@ -78,6 +78,7 @@ function policyDependencies(
     ...dependencies({
       currentDirectory: f.repository,
       signals: options.signals,
+      environment: { PYTHON },
     }),
     policyPrompt: options.prompt ?? prompt(),
     resolvePolicyPython: async () => PYTHON,
