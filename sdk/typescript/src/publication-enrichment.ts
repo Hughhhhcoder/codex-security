@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import {
   Codex,
@@ -315,15 +315,9 @@ async function runCodexConfigurationCommand(
 ): Promise<string> {
   signal?.throwIfAborted();
   return await new Promise<string>((resolve, reject) => {
-    const codexHome = Object.entries(environment).find(
-      ([name]) => name.toUpperCase() === "CODEX_HOME",
-    )?.[1];
     const child = spawn(command, [...arguments_], {
       cwd: workingDirectory,
-      env: {
-        ...environment,
-        ...(codexHome === undefined ? {} : { CODEX_HOME: codexHome }),
-      },
+      env: environment,
       signal,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -368,6 +362,15 @@ export async function publicationEnrichmentEnvironment(
   );
   for (const key of Object.keys(environment)) {
     if (LINEAR_CREDENTIALS.has(key.toUpperCase())) delete environment[key];
+  }
+  const codexHome = Object.entries(environment).find(
+    ([key]) => key.toUpperCase() === "CODEX_HOME",
+  )?.[1];
+  if (codexHome !== undefined) {
+    for (const key of Object.keys(environment)) {
+      if (key.toUpperCase() === "CODEX_HOME") delete environment[key];
+    }
+    environment["CODEX_HOME"] = resolve(codexHome);
   }
   return environment;
 }

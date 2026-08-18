@@ -73,7 +73,13 @@ export async function loadLinearPublicationContext(
   while (page.pageInfo.hasNextPage) await page.fetchNext();
   const labels = new Map<string, LinearPublicationCatalogLabel>();
   for (const label of page.nodes) {
-    if (label.isGroup || label.archivedAt !== undefined) continue;
+    if (
+      label.isGroup ||
+      label.archivedAt !== undefined ||
+      label.retiredById !== undefined
+    ) {
+      continue;
+    }
     labels.set(label.id, {
       id: label.id,
       name: label.name,

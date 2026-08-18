@@ -7,7 +7,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -203,6 +203,7 @@ describe("publication knowledge-base enrichment", () => {
   test("disables ambient MCP servers without changing the authenticated home", async () => {
     let config: unknown;
     let receivedCodexHome: string | undefined;
+    let receivedLowercaseCodexHome: string | undefined;
     const ambientCodexHome = await mkdtemp(
       join(tmpdir(), "codex-security-publication-ambient-home-test-"),
     );
@@ -220,7 +221,8 @@ describe("publication knowledge-base enrichment", () => {
     await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
       createCodex(options) {
         config = options.config;
-        receivedCodexHome = options.env?.["codex_home"];
+        receivedCodexHome = options.env?.["CODEX_HOME"];
+        receivedLowercaseCodexHome = options.env?.["codex_home"];
         return fakeCodex(
           response(
             issues().map(({ findingId }) => ({
@@ -232,7 +234,7 @@ describe("publication knowledge-base enrichment", () => {
         );
       },
       environment: {
-        codex_home: ambientCodexHome,
+        codex_home: relative(process.cwd(), ambientCodexHome),
         CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
       },
     });
@@ -248,6 +250,7 @@ describe("publication knowledge-base enrichment", () => {
       },
     });
     expect(receivedCodexHome).toBe(ambientCodexHome);
+    expect(receivedLowercaseCodexHome).toBeUndefined();
     expect(JSON.stringify(config)).not.toContain("synthetic-secret");
     expect(JSON.stringify(config)).not.toContain("synthetic-write-tool");
     expect((await stat(ambientCodexHome)).isDirectory()).toBe(true);

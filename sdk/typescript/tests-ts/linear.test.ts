@@ -186,12 +186,14 @@ describe("Linear publication context", () => {
           parentId: "label-group",
           isGroup: false,
           archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
         },
         {
           id: "label-group",
           name: "Group",
           isGroup: true,
           archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
         },
       ],
       pageInfo: { hasNextPage: true },
@@ -201,12 +203,21 @@ describe("Linear publication context", () => {
           name: "Alpha",
           isGroup: false,
           archivedAt: undefined,
+          retiredById: undefined,
         });
         this.nodes.push({
           id: "label-archived",
           name: "Archived",
           isGroup: false,
           archivedAt: new Date(),
+          retiredById: undefined,
+        });
+        this.nodes.push({
+          id: "label-retired",
+          name: "Retired",
+          isGroup: false,
+          archivedAt: undefined,
+          retiredById: "user-example",
         });
         this.pageInfo.hasNextPage = false;
       },
