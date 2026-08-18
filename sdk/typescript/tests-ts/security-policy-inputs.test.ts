@@ -227,6 +227,11 @@ describe("shared security-policy inputs", () => {
     await writeFile(source, "export const value = 1;\n");
     expect(run(repository, "--inspect", "--scope", source).status).toBe(2);
     expect(run(repository, "--inspect", "--scope", root).status).toBe(2);
+    const loop = join(root, "git-loop");
+    await symlink(loop, loop, "file");
+    const invalidMetadata = run(repository, "--list", "--git-dir", loop);
+    expect(invalidMetadata.status).toBe(2);
+    expect(invalidMetadata.stderr).not.toContain("Traceback");
     expect(inspect(repository)).toEqual({
       previousContent: null,
       guidance: "",

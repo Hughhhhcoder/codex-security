@@ -258,7 +258,7 @@ def main() -> int:
         else:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(guidance, encoding="utf-8")
-    except (OSError, ResolutionError) as exc:
+    except (OSError, RuntimeError, ResolutionError) as exc:
         print(f"resolve_security_md.py: error: {exc}", file=sys.stderr)
         return 2
     return 0
