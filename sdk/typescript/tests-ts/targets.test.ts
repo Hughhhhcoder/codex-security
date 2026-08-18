@@ -103,7 +103,59 @@ test("protects lexical and resolved input repositories without claiming missing 
   expect(await protectedGitInputRoots([standalone, standalone])).toEqual([
     standalone,
   ]);
+
+  const outside = join(dirname(resolved), "outside");
+  const outsideFile = join(outside, "source.bundle");
+  const outsideLink = join(dirname(lexical), "outside-link");
+  await mkdir(outside);
+  await writeFile(outsideFile, "synthetic bundle fixture\n");
+  await symlink(
+    outside,
+    outsideLink,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  expect(
+    await protectedGitInputRoots([join(outsideLink, "source.bundle")]),
+  ).toEqual([outsideFile]);
 });
+
+test("finds input repositories behind dangling directory links", async () => {
+  const lexical = await repository();
+  const resolved = await repository();
+  const target = join(resolved, "removed-directory");
+  const link = join(lexical, "linked-input");
+  await mkdir(target);
+  await symlink(
+    target,
+    link,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await rm(target, { recursive: true });
+
+  expect(await protectedGitInputRoots([join(link, "missing")])).toEqual([
+    lexical,
+    resolved,
+  ]);
+});
+
+(process.platform === "win32" ? test.skip : test)(
+  "preserves relative dangling-link target traversal",
+  async () => {
+    const lexical = await repository();
+    const resolved = await repository();
+    const target = join(resolved, "removed-directory");
+    const link = join(lexical, "linked-input");
+    await mkdir(target);
+    await symlink(join(resolved, "src"), join(lexical, "bridge"), "dir");
+    await symlink("bridge/../removed-directory", link, "dir");
+    await rm(target, { recursive: true });
+
+    expect(await protectedGitInputRoots([join(link, "missing")])).toEqual([
+      lexical,
+      resolved,
+    ]);
+  },
+);
 
 async function createRepositoryGitShim(
   directory: string,

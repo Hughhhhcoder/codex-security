@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { existsSync } from "node:fs";
-import { lstat, realpath, stat } from "node:fs/promises";
+import { lstat, readlink, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -546,7 +546,36 @@ export async function protectedGitInputRoots(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const roots = new Set<string>();
-  for (const requested of new Set(paths.map(resolveRepositoryPath))) {
+  const pending = [...new Set(paths.map(resolveRepositoryPath))];
+  const queued = new Set(pending);
+  for (let index = 0; index < pending.length; index += 1) {
+    const requested = pending[index]!;
+    let current = requested;
+    while (true) {
+      throwIfAborted(signal);
+      const parent = dirname(current);
+      const metadata = await lstat(current).catch((error: unknown) => {
+        if (isMissingPathError(error)) return null;
+        throw error;
+      });
+      if (metadata?.isSymbolicLink()) {
+        const target = await readlink(current);
+        // Preserve link-target dot segments until the filesystem resolves them.
+        const linked = isAbsolute(target)
+          ? target
+          : `${parent}${parent.endsWith(sep) ? "" : sep}${target}`;
+        const suffix = relative(current, requested);
+        const redirected = suffix
+          ? `${linked}${linked.endsWith(sep) ? "" : sep}${suffix}`
+          : linked;
+        if (!queued.has(redirected)) {
+          queued.add(redirected);
+          pending.push(redirected);
+        }
+      }
+      if (parent === current) break;
+      current = parent;
+    }
     let existing = requested;
     let canonical: string;
     while (true) {

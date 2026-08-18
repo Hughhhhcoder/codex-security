@@ -139,6 +139,7 @@ describe("multiscan", () => {
     "inventory file",
     "knowledge base",
     "linked missing source",
+    "dangling linked source",
   ] as const) {
     const name = `rejects selected Git from the ${location} repository`;
     test(name, async () => {
@@ -159,13 +160,24 @@ describe("multiscan", () => {
           ? join(inputRepository.path, "repositories.csv")
           : paths.input;
       let inventory = `id,repository,revision\nsource,${source.path},${source.revision}\n`;
-      if (location === "linked missing source") {
+      const missingSource =
+        location === "linked missing source" ||
+        location === "dangling linked source";
+      if (missingSource) {
         const link = join(paths.root, "input-link");
+        const target =
+          location === "dangling linked source"
+            ? join(inputRepository.path, "removed-directory")
+            : join(inputRepository.path, "src");
+        if (location === "dangling linked source") await mkdir(target);
         await symlink(
-          join(inputRepository.path, "src"),
+          target,
           link,
           process.platform === "win32" ? "junction" : "dir",
         );
+        if (location === "dangling linked source") {
+          await rm(target, { recursive: true });
+        }
         inventory += `missing,${join(link, "missing")},${source.revision}\n`;
       }
       await writeFile(input, inventory);
@@ -208,7 +220,7 @@ describe("multiscan", () => {
         );
         expect(summary).toMatchObject({
           completed: 0,
-          failed: location === "linked missing source" ? 2 : 1,
+          failed: missingSource ? 2 : 1,
         });
         expect(selectedAccepted).toBe(false);
         expect(scans).toBe(0);
