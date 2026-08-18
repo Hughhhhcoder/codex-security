@@ -109,6 +109,7 @@ import {
   prepareOutputDir,
   preparePersistentOutputRoot,
   requireModelSafeOutputDir,
+  requireOutputOutsideRepositories,
   requireOutputOutsideRepository,
   resolveCodexCommand,
   resolvePluginPath,
@@ -309,7 +310,6 @@ export interface ScanPreflight extends DeepScanOptions {
 interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
-  protectedGitRoot: string;
   protectedGitRoots: readonly string[];
   gitCommand: InspectedExecutable;
   stateDirectory: string;
@@ -509,7 +509,6 @@ export class CodexSecurity {
         mode,
         outputDir: requestedOutput,
         protectedRoot,
-        protectedGitRoot,
         protectedGitRoots,
         gitCommand,
         stateDirectory,
@@ -616,7 +615,11 @@ export class CodexSecurity {
         runtime.bootstrapWorkspace !== undefined
       ) {
         const workspace = await realpath(runtime.bootstrapWorkspace);
-        requireOutputOutsideRepository(protectedGitRoot, workspace, "runtime");
+        requireOutputOutsideRepositories(
+          protectedGitRoots,
+          workspace,
+          "runtime",
+        );
         if (runtime.bundledRipgrep === undefined) {
           const bundled = await (
             this.#dependencies.stageBundledRipgrep ?? stageBundledRipgrep
@@ -2049,7 +2052,6 @@ export class CodexSecurity {
       mode,
       outputDir: requestedOutput,
       protectedRoot,
-      protectedGitRoot,
       protectedGitRoots,
       gitCommand,
       stateDirectory,

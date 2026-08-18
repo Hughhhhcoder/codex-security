@@ -199,7 +199,6 @@ async function runCampaign(
 
   const gitRoots = await protectedGitInputRoots(
     [
-      process.cwd(),
       options.inputPath,
       ...tasks
         .filter((task) => isAbsolute(task.repository))

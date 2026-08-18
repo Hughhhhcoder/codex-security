@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   access,
   appendFile,
@@ -141,12 +141,49 @@ describe("multiscan", () => {
     "linked missing source",
     "dangling linked source",
     "campaign artifacts",
+    "launch directory",
   ] as const) {
+    const acceptsSelected =
+      location === "campaign artifacts" || location === "launch directory";
     const name =
       location === "campaign artifacts"
         ? "accepts selected Git from existing campaign artifacts"
-        : `rejects selected Git from the ${location} repository`;
+        : location === "launch directory"
+          ? "accepts selected Git from an unrelated launch directory"
+          : `rejects selected Git from the ${location} repository`;
     test(name, async () => {
+      if (location === "launch directory") {
+        const launchDirectory = process.env["CODEX_SECURITY_TEST_LAUNCH_CWD"];
+        if (launchDirectory === undefined) {
+          const launchFixture = await fixture();
+          const launch = await repository(launchFixture.root, "launch");
+          const execution = spawnSync(
+            process.execPath,
+            [
+              "--no-env-file",
+              "test",
+              "--timeout",
+              "30000",
+              "--test-name-pattern",
+              name,
+              import.meta.path,
+            ],
+            {
+              cwd: launch.path,
+              encoding: "utf8",
+              env: {
+                ...process.env,
+                CODEX_SECURITY_ISOLATED_MOCK: "1",
+                CODEX_SECURITY_TEST_LAUNCH_CWD: launch.path,
+              },
+              windowsHide: true,
+            },
+          );
+          expect(execution.status, execution.stderr).toBe(0);
+          return;
+        }
+        expect(await realpath(process.cwd())).toBe(launchDirectory);
+      }
       if (runMockInSubprocess(import.meta.path, name)) return;
 
       const paths = await fixture();
@@ -156,7 +193,9 @@ describe("multiscan", () => {
       const selectedDirectory =
         location === "campaign artifacts"
           ? join(paths.output, "artifacts", "prior", "attempt-1")
-          : inputRepository.path;
+          : location === "launch directory"
+            ? join(process.cwd(), "tools")
+            : inputRepository.path;
       await mkdir(selectedDirectory, { recursive: true, mode: 0o700 });
       const selected = join(
         selectedDirectory,
@@ -221,7 +260,8 @@ describe("multiscan", () => {
             }),
             {
               maxAttempts: 1,
-              ...(location === "knowledge base"
+              ...(location === "knowledge base" ||
+              location === "launch directory"
                 ? { knowledgeBasePaths: [document] }
                 : {}),
             },
@@ -231,11 +271,11 @@ describe("multiscan", () => {
           completed: 0,
           failed: missingSource ? 2 : 1,
         });
-        expect(selectedAccepted).toBe(location === "campaign artifacts");
+        expect(selectedAccepted).toBe(acceptsSelected);
         expect(scans).toBe(0);
         for (const receipt of await results(summary.resultsPath)) {
           expect(receipt["error"]).toContain(
-            location === "campaign artifacts"
+            acceptsSelected
               ? "Inert selected Git reached the execution boundary."
               : "CODEX_SECURITY_GIT does not name an available executable.",
           );
@@ -1869,7 +1909,7 @@ describe("multiscan", () => {
       paths.input,
       `id,repository,revision\nprivate,${source.path},${source.revision}\n`,
     );
-    const shimDirectory = join(paths.root, "node_modules", ".bin");
+    const shimDirectory = join(source.path, "node_modules", ".bin");
     const leakedCredential = join(paths.root, "leaked-credential");
     await mkdir(shimDirectory, { recursive: true });
     await writeFile(
@@ -1877,7 +1917,6 @@ describe("multiscan", () => {
       `#!/bin/sh\nprintf '%s' "$GIT_CONFIG_VALUE_0" > "${leakedCredential}"\nexit 1\n`,
       { mode: 0o700 },
     );
-    const previousDirectory = process.cwd();
     const environment = new Map(
       [
         "PATH",
@@ -1888,7 +1927,6 @@ describe("multiscan", () => {
     );
 
     try {
-      process.chdir(paths.root);
       process.env["PATH"] =
         `${shimDirectory}${process.platform === "win32" ? ";" : ":"}${environment.get("PATH") ?? ""}`;
       process.env["GIT_CONFIG_COUNT"] = "1";
@@ -1925,7 +1963,6 @@ describe("multiscan", () => {
       expect(summary).toMatchObject({ completed: 1, failed: 0 });
       await expect(access(leakedCredential)).rejects.toThrow();
     } finally {
-      process.chdir(previousDirectory);
       for (const [name, value] of environment) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;

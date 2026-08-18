@@ -5741,6 +5741,11 @@ describe("CodexSecurity orchestration", () => {
       { scenario: "rejected-copy", host: false, expected: "missing" },
       { scenario: "overlapping-workspace", host: false, expected: "missing" },
       {
+        scenario: "overlapping-knowledge-base",
+        host: false,
+        expected: "missing",
+      },
+      {
         scenario: "case-distinct POSIX binding",
         platform: "linux",
         host: true,
@@ -5836,10 +5841,26 @@ describe("CodexSecurity orchestration", () => {
         const nextRepository = join(root, "next-repository");
         const codexHome = join(root, "codex-home");
         const scanDir = join(root, "scan");
+        const knowledgeBaseDirectory = join(root, "knowledge-base");
+        const knowledgeBasePaths =
+          scenario === "overlapping-knowledge-base"
+            ? [join(knowledgeBaseDirectory, "guide.md")]
+            : undefined;
+        if (knowledgeBasePaths !== undefined) {
+          await mkdir(join(knowledgeBaseDirectory, ".git"), {
+            recursive: true,
+            mode: 0o700,
+          });
+          await writeFile(knowledgeBasePaths[0]!, "# Synthetic guidance\n");
+        }
+        const scanOptions =
+          knowledgeBasePaths === undefined ? {} : { knowledgeBasePaths };
         const workspace =
           scenario === "overlapping-workspace"
             ? repository
-            : join(root, "bootstrap-workspace");
+            : scenario === "overlapping-knowledge-base"
+              ? join(knowledgeBaseDirectory, "bootstrap-workspace")
+              : join(root, "bootstrap-workspace");
         for (const path of new Set([
           repository,
           nextRepository,
@@ -5917,19 +5938,30 @@ describe("CodexSecurity orchestration", () => {
           },
         );
         try {
-          await client.preflight(repository);
+          await client.preflight(repository, scanOptions);
           expect(gitSelections).toEqual([
             entry.expectedGit === "host" ? gitHost : null,
           ]);
-          if (scenario === "overlapping-workspace") {
-            await expect(client.run(repository)).rejects.toBeInstanceOf(
+          if (
+            scenario === "overlapping-workspace" ||
+            scenario === "overlapping-knowledge-base"
+          ) {
+            const failure = client.run(repository, scanOptions);
+            await expect(failure).rejects.toBeInstanceOf(
               OutputInsideProtectedRootError,
             );
+            await expect(failure).rejects.toMatchObject({
+              protectedRoot:
+                scenario === "overlapping-workspace"
+                  ? repository
+                  : knowledgeBaseDirectory,
+              pathKind: "runtime",
+            });
             expect(stageCalls).toEqual([]);
             expect(codexEnvironments).toEqual([]);
             continue;
           }
-          await expect(client.run(repository)).rejects.toThrow(
+          await expect(client.run(repository, scanOptions)).rejects.toThrow(
             "captured tool environment",
           );
           if (scenario === "bundled") {
