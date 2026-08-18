@@ -22,6 +22,7 @@ import {
   loadSecurityPolicyDraft,
   OutputDirectoryNotEmptyError,
   securityPolicyDiff,
+  writeCodexConfig,
   type SecurityPolicyStage,
 } from "../src/index.js";
 import { preparedRuntime } from "./support/api-events.js";
@@ -682,6 +683,68 @@ describe("CodexSecurity policy API", () => {
       f.security.preflightPolicy(join(f.root, "missing-repository")),
     ).rejects.toThrow("CodexSecurity is closed");
     expect(f.threads).toHaveLength(0);
+  });
+
+  test("does not load instructions from the artifact checkout", async () => {
+    const f = await setup({
+      config: {
+        codexOverrides: {
+          project_doc_max_bytes: 8192,
+          project_root_markers: [".git"],
+        },
+      },
+    });
+    const unrelated = join(f.root, "unrelated");
+    const outputDir = join(unrelated, "artifacts");
+    const codexHome = join(f.root, "prompt-home");
+    await mkdir(outputDir, { recursive: true, mode: 0o700 });
+    await mkdir(codexHome);
+    policyGit(unrelated, "init", "--quiet");
+    await writeFile(join(unrelated, "AGENTS.md"), "SYNTHETIC_PROJECT_MARKER\n");
+    await writeFile(join(codexHome, "AGENTS.md"), "SYNTHETIC_USER_MARKER\n");
+    await writeCodexConfig(join(codexHome, "config.toml"), {
+      model: "gpt-5.6-sol",
+      features: { plugins: false, apps: false },
+    });
+    await f.security.generatePolicy(f.repository, { outputDir });
+    const config = f.configuration()!.config!;
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      CODEX_HOME: codexHome,
+    };
+    delete environment["OPENAI_API_KEY"];
+    delete environment["CODEX_API_KEY"];
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("The pinned Codex CLI requires Node.js.");
+    const result = Bun.spawnSync(
+      [
+        node,
+        join(
+          import.meta.dir,
+          "..",
+          "node_modules",
+          "@openai",
+          "codex",
+          "bin",
+          "codex.js",
+        ),
+        "debug",
+        "prompt-input",
+        "-c",
+        `project_doc_max_bytes=${JSON.stringify(config["project_doc_max_bytes"])}`,
+        "-c",
+        `project_root_markers=${JSON.stringify(config["project_root_markers"])}`,
+        "Synthetic policy request",
+      ],
+      { cwd: outputDir, env: environment, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+    const visible = new TextDecoder().decode(result.stdout);
+    expect(visible.includes("SYNTHETIC_PROJECT_MARKER")).toBe(false);
+    expect(visible.includes("SYNTHETIC_USER_MARKER")).toBe(true);
+    expect(config["project_root_markers"]).toEqual([]);
+    await f.security.close();
   });
 
   test("uses the shared runtime for three fresh, scoped, structured turns", async () => {
