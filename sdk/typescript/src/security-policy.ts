@@ -1108,7 +1108,7 @@ export async function applySecurityPolicy(
         options.signal?.throwIfAborted();
         if (draft.previousContent === null) {
           try {
-            await installFileNoClobber(temporary, target.targetPath);
+            await installPolicyFile(temporary, target.targetPath);
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
               // A failed copy fallback can leave a partial destination.
@@ -1190,6 +1190,17 @@ export async function applySecurityPolicy(
   }
 }
 
+async function installPolicyFile(
+  temporary: string,
+  targetPath: string,
+): Promise<void> {
+  // Windows may make a read-only file writable before removing it. Keep the
+  // temporary inode separate so cleanup cannot change the installed mode.
+  if (((await stat(temporary)).mode & 0o200) === 0)
+    await copyFile(temporary, targetPath, constants.COPYFILE_EXCL);
+  else await installFileNoClobber(temporary, targetPath);
+}
+
 async function replaceExistingPolicy(
   temporary: string,
   targetPath: string,
@@ -1216,11 +1227,7 @@ async function replaceExistingPolicy(
     const mode = (await stat(recoveryPath)).mode & 0o777;
     await chmod(temporary, mode);
     signal?.throwIfAborted();
-    // Windows may chmod a read-only file before removing it. Keep its
-    // temporary inode separate so cleanup cannot change the installed mode.
-    if ((mode & 0o200) === 0)
-      await copyFile(temporary, targetPath, constants.COPYFILE_EXCL);
-    else await installFileNoClobber(temporary, targetPath);
+    await installPolicyFile(temporary, targetPath);
   } catch (error) {
     let cause = error;
     try {

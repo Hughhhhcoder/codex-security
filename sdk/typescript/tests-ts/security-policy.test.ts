@@ -1367,30 +1367,42 @@ describe("security policy review and application", () => {
     const name =
       "preserves read-only mode when temporary cleanup changes permissions";
     if (runMockInSubprocess(import.meta.path, name)) return;
-    const f = await fixture();
-    const target = join(f.repository, "SECURITY.md");
-    await writeFile(target, "# Existing policy\n");
-    await chmod(target, 0o444);
-    const draft = await f.generate();
     const originalRm = fsPromises.rm;
-    mock.module("node:fs/promises", () => ({
-      ...fsPromises,
-      rm: async (path: string, options: Parameters<typeof originalRm>[1]) => {
-        if (path.endsWith(".tmp")) await chmod(path, 0o666);
-        return await originalRm(path, options);
-      },
-    }));
-    try {
-      await applySecurityPolicy(draft);
-      expect(await readFile(target, "utf8")).toBe(POLICY);
-      expect((await stat(target)).mode & 0o200).toBe(0);
-      expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
-    } finally {
+    const originalWriteFile = fsPromises.writeFile;
+    for (const existing of [false, true]) {
+      const f = await fixture();
+      const target = join(f.repository, "SECURITY.md");
+      if (existing) {
+        await writeFile(target, "# Existing policy\n");
+        await chmod(target, 0o444);
+      }
+      const draft = await f.generate();
       mock.module("node:fs/promises", () => ({
         ...fsPromises,
-        rm: originalRm,
+        writeFile: async (...args: Parameters<typeof originalWriteFile>) => {
+          await originalWriteFile(...args);
+          const path = args[0];
+          if (!existing && typeof path === "string" && path.endsWith(".tmp"))
+            await chmod(path, 0o444);
+        },
+        rm: async (path: string, options: Parameters<typeof originalRm>[1]) => {
+          if (path.endsWith(".tmp")) await chmod(path, 0o666);
+          return await originalRm(path, options);
+        },
       }));
-      await chmod(target, 0o644);
+      try {
+        await applySecurityPolicy(draft);
+        expect(await readFile(target, "utf8")).toBe(POLICY);
+        expect((await stat(target)).mode & 0o200).toBe(0);
+        expect(await readdir(f.repository)).toEqual(["SECURITY.md"]);
+      } finally {
+        mock.module("node:fs/promises", () => ({
+          ...fsPromises,
+          rm: originalRm,
+          writeFile: originalWriteFile,
+        }));
+        await chmod(target, 0o644).catch(() => undefined);
+      }
     }
   });
 
