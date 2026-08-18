@@ -611,6 +611,114 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("rejects selected Git from a knowledge-base repository before preflight", async () => {
+    const name =
+      "rejects selected Git from a knowledge-base repository before preflight";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const knowledgeRepository = join(root, "knowledge");
+    const document = join(knowledgeRepository, "docs", "guide.md");
+    const selected = join(
+      knowledgeRepository,
+      process.platform === "win32" ? "selected-git.exe" : "selected-git",
+    );
+    await mkdir(repository);
+    await mkdir(join(knowledgeRepository, ".git"), { recursive: true });
+    await mkdir(join(knowledgeRepository, "docs"));
+    await writeFile(document, "# Synthetic guidance\n");
+    await writeFile(selected, "", { mode: 0o700 });
+    const originalTargets = { ...targetsModule };
+    let gitCalls = 0;
+    mock.module("../src/targets.js", () => ({
+      ...originalTargets,
+      enclosingGitWorktreeRoot: async () => {
+        gitCalls += 1;
+        return null;
+      },
+    }));
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          PATH: "",
+          CODEX_SECURITY_GIT: selected,
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
+      },
+    );
+    try {
+      await expect(
+        client.preflight(repository, { knowledgeBasePaths: [document] }),
+      ).rejects.toThrow(
+        "CODEX_SECURITY_GIT does not name an available executable.",
+      );
+      expect(gitCalls).toBe(0);
+    } finally {
+      await client.close();
+      mock.module("../src/targets.js", () => originalTargets);
+    }
+  });
+
+  test("keeps knowledge-base repositories outside runtime tool selection", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const knowledgeRepository = join(root, "knowledge");
+    const document = join(knowledgeRepository, "guide.md");
+    const selected = join(
+      knowledgeRepository,
+      process.platform === "win32" ? "selected-rg.exe" : "selected-rg",
+    );
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(join(knowledgeRepository, ".git"), { recursive: true });
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(document, "# Synthetic guidance\n");
+    await writeFile(selected, "", { mode: 0o700 });
+    const environment = {
+      PATH: "",
+      CODEX_CLI_PATH: process.execPath,
+      CODEX_SECURITY_GIT: "",
+      CODEX_SECURITY_RG: selected,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-key",
+    };
+    let modelStarted = false;
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment,
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => null,
+        createCodex: () => {
+          modelStarted = true;
+          throw new Error("Model must not start.");
+        },
+      },
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          outputDir: scanDir,
+          knowledgeBasePaths: [document],
+        }),
+      ).rejects.toThrow(
+        "CODEX_SECURITY_RG does not name an available executable.",
+      );
+      expect(modelStarted).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("validates knowledge-base documents before initializing the runtime", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -5490,7 +5598,7 @@ describe("CodexSecurity orchestration", () => {
       process,
       "platform",
     )!;
-    const inspected: [string, string][] = [];
+    const inspected: [string, string | readonly string[]][] = [];
     const gitSelections: (string | null | undefined)[] = [];
     let gitHost: string | null = null;
     let host: string | null = null;
@@ -5502,7 +5610,7 @@ describe("CodexSecurity orchestration", () => {
       inspectTrustedExecutable: async (
         candidate: string,
         environment: Record<string, string | undefined>,
-        protectedRoot: string,
+        protectedRoot: string | readonly string[],
       ) => {
         inspected.push([candidate, protectedRoot]);
         const sanitizedEnvironment = { ...environment, PATH: "" };
@@ -5766,8 +5874,8 @@ describe("CodexSecurity orchestration", () => {
             expect(
               inspected.filter(([candidate]) => candidate === staged),
             ).toEqual([
-              [staged, repository],
-              [staged, nextRepository],
+              [staged, [repository]],
+              [staged, [nextRepository]],
             ]);
           }
           const expected =
@@ -5861,7 +5969,7 @@ describe("CodexSecurity orchestration", () => {
       inspectTrustedExecutable: async (
         candidate: string,
         current: Record<string, string | undefined>,
-        _protectedRoot: string,
+        _protectedRoot: string | readonly string[],
         options?: { preserveInvocation?: boolean },
       ) => {
         if (candidate !== "git" && candidate !== "rg") {

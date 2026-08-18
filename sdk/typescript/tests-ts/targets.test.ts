@@ -23,7 +23,10 @@ import {
   repositoryRevision,
   type ScanTarget,
 } from "../src/index.js";
-import { outermostGitMarkerRoot } from "../src/targets.js";
+import {
+  outermostGitMarkerRoot,
+  protectedGitInputRoots,
+} from "../src/targets.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -76,6 +79,30 @@ test("finds outer Git roots without rejecting local source files", async () => {
 
   expect(await outermostGitMarkerRoot(inside)).toBe(repo);
   expect(await outermostGitMarkerRoot(outside)).toBe(outside);
+});
+
+test("protects lexical and resolved input repositories without claiming missing standalone paths", async () => {
+  const lexical = await repository();
+  const resolved = await repository();
+  const link = join(lexical, "linked-input");
+  const standalone = join(dirname(lexical), "standalone.bundle");
+  await symlink(
+    join(resolved, "src"),
+    link,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await writeFile(standalone, "synthetic bundle fixture\n");
+
+  expect(await protectedGitInputRoots([join(link, "missing")])).toEqual([
+    lexical,
+    resolved,
+  ]);
+  expect(
+    await protectedGitInputRoots([join(dirname(lexical), "missing")]),
+  ).toEqual([]);
+  expect(await protectedGitInputRoots([standalone, standalone])).toEqual([
+    standalone,
+  ]);
 });
 
 async function createRepositoryGitShim(

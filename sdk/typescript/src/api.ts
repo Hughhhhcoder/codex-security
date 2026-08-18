@@ -127,6 +127,7 @@ import {
   normalizeRepository,
   normalizeTarget,
   outermostGitMarkerRoot,
+  protectedGitInputRoots,
   repositoryRevision,
   resolveGitCommand,
   resolveRepositoryPath,
@@ -308,6 +309,7 @@ interface LocalScanInputs
   extends Omit<ScanPreflight, "model" | "reasoningEffort" | "authentication"> {
   protectedRoot: string;
   protectedGitRoot: string;
+  protectedGitRoots: readonly string[];
   gitCommand: InspectedExecutable;
   stateDirectory: string;
 }
@@ -507,6 +509,7 @@ export class CodexSecurity {
         outputDir: requestedOutput,
         protectedRoot,
         protectedGitRoot,
+        protectedGitRoots,
         gitCommand,
         stateDirectory,
       } = await this.#validateLocalInputs(repository, options, signal);
@@ -580,12 +583,12 @@ export class CodexSecurity {
       const git = await inspectTrustedExecutable(
         "git",
         pluginEnvironment,
-        protectedGitRoot,
+        protectedGitRoots,
       );
       let ripgrep = await inspectTrustedExecutable(
         "rg",
         git.environment,
-        protectedGitRoot,
+        protectedGitRoots,
       );
       if (configuredRipgrep !== undefined && configuredRipgrep !== "") {
         if (!isAbsolute(configuredRipgrep)) {
@@ -596,7 +599,7 @@ export class CodexSecurity {
         const inspected = await inspectTrustedExecutable(
           configuredRipgrep,
           ripgrep.environment,
-          protectedGitRoot,
+          protectedGitRoots,
           { preserveInvocation: true },
         );
         if (inspected.executable === null) {
@@ -623,7 +626,7 @@ export class CodexSecurity {
           ripgrep = await inspectTrustedExecutable(
             runtime.bundledRipgrep,
             ripgrep.environment,
-            protectedGitRoot,
+            protectedGitRoots,
           );
         }
       }
@@ -1984,9 +1987,13 @@ export class CodexSecurity {
     const requestedTarget = options.target ?? "repository";
     validatedGitEnvironment(this.#dependencies.environment);
     const protectedGitRoot = await outermostGitMarkerRoot(repo, signal);
+    const protectedGitRoots = await protectedGitInputRoots(
+      [repositoryPath, ...(options.knowledgeBasePaths ?? [])],
+      signal,
+    );
     const gitCommand = await resolveGitCommand(
       this.#dependencies.environment,
-      protectedGitRoot,
+      protectedGitRoots,
     );
     const normalized = await normalizeTarget(
       repo,
@@ -2042,6 +2049,7 @@ export class CodexSecurity {
       outputDir: requestedOutput,
       protectedRoot,
       protectedGitRoot,
+      protectedGitRoots,
       gitCommand,
       stateDirectory,
     };

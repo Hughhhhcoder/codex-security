@@ -532,13 +532,55 @@ export async function outermostGitMarkerRoot(
       await lstat(join(current, ".git"));
       root = current;
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      if (!isMissingPathError(error)) throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;
     current = parent;
   }
+}
+
+/** @internal */
+export async function protectedGitInputRoots(
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const roots = new Set<string>();
+  for (const requested of new Set(paths.map(resolveRepositoryPath))) {
+    let existing = requested;
+    let canonical: string;
+    while (true) {
+      throwIfAborted(signal);
+      try {
+        canonical = join(
+          await realpath(existing),
+          relative(existing, requested),
+        );
+        break;
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error;
+        const parent = dirname(existing);
+        if (parent === existing) throw error;
+        existing = parent;
+      }
+    }
+    // Both the link's repository and its resolved target can supply input data.
+    for (const path of new Set([requested, canonical])) {
+      const root = await outermostGitMarkerRoot(path, signal);
+      try {
+        roots.add(await realpath(root));
+      } catch (error) {
+        // A missing standalone input remains the caller's per-input error.
+        if (!isMissingPathError(error)) throw error;
+      }
+    }
+  }
+  return [...roots];
+}
+
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 function isolatedGitEnvironment(

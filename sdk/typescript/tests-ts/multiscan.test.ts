@@ -18,11 +18,12 @@ import {
 import * as filesystem from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
 import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
+import * as targetsModule from "../src/targets.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { runMockInSubprocess } from "./support/isolated-mock.js";
@@ -134,6 +135,96 @@ async function results(path: string): Promise<Record<string, unknown>[]> {
 }
 
 describe("multiscan", () => {
+  for (const location of [
+    "inventory file",
+    "knowledge base",
+    "linked missing source",
+  ] as const) {
+    const name = `rejects selected Git from the ${location} repository`;
+    test(name, async () => {
+      if (runMockInSubprocess(import.meta.path, name)) return;
+
+      const paths = await fixture();
+      const source = await repository(paths.root, "source");
+      const inputRepository = await repository(paths.root, "inputs");
+      const document = join(inputRepository.path, "guide.md");
+      const selected = join(
+        inputRepository.path,
+        process.platform === "win32" ? "selected-git.exe" : "selected-git",
+      );
+      await writeFile(document, "# Synthetic guidance\n");
+      await writeFile(selected, "", { mode: 0o700 });
+      const input =
+        location === "inventory file"
+          ? join(inputRepository.path, "repositories.csv")
+          : paths.input;
+      let inventory = `id,repository,revision\nsource,${source.path},${source.revision}\n`;
+      if (location === "linked missing source") {
+        const link = join(paths.root, "input-link");
+        await symlink(
+          join(inputRepository.path, "src"),
+          link,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        inventory += `missing,${join(link, "missing")},${source.revision}\n`;
+      }
+      await writeFile(input, inventory);
+
+      const originalTargets = { ...targetsModule };
+      const previousGit = process.env["CODEX_SECURITY_GIT"];
+      let selectedAccepted = false;
+      let scans = 0;
+      mock.module("../src/targets.js", () => ({
+        ...originalTargets,
+        resolveGitCommand: async (
+          ...args: Parameters<typeof targetsModule.resolveGitCommand>
+        ) => {
+          const command = await originalTargets.resolveGitCommand(...args);
+          if (command.executable === selected) {
+            selectedAccepted = true;
+            throw new Error(
+              "Inert selected Git reached the execution boundary.",
+            );
+          }
+          return command;
+        },
+      }));
+      try {
+        process.env["CODEX_SECURITY_GIT"] = selected;
+        const summary = await runMultiscan(
+          options(
+            { ...paths, input },
+            client(async (_checkout, scanOptions = {}) => {
+              scans += 1;
+              return await completedScan(scanOptions.outputDir!);
+            }),
+            {
+              maxAttempts: 1,
+              ...(location === "knowledge base"
+                ? { knowledgeBasePaths: [document] }
+                : {}),
+            },
+          ),
+        );
+        expect(summary).toMatchObject({
+          completed: 0,
+          failed: location === "linked missing source" ? 2 : 1,
+        });
+        expect(selectedAccepted).toBe(false);
+        expect(scans).toBe(0);
+        for (const receipt of await results(summary.resultsPath)) {
+          expect(receipt["error"]).toContain(
+            "CODEX_SECURITY_GIT does not name an available executable.",
+          );
+        }
+      } finally {
+        if (previousGit === undefined) delete process.env["CODEX_SECURITY_GIT"];
+        else process.env["CODEX_SECURITY_GIT"] = previousGit;
+        mock.module("../src/targets.js", () => originalTargets);
+      }
+    });
+  }
+
   for (const location of [
     "pending inventory",
     "completed inventory",

@@ -24,7 +24,7 @@ import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import { requireSecureOutputAncestry } from "./runtime.js";
 import {
-  outermostGitMarkerRoot,
+  protectedGitInputRoots,
   resolveGitCommand,
   type ScanMode,
 } from "./targets.js";
@@ -197,29 +197,18 @@ async function runCampaign(
     };
   }
 
-  const protectedRoots = new Set([
-    await outermostGitMarkerRoot(await realpath(process.cwd()), options.signal),
-    checkoutRoot,
-  ]);
-  for (const task of tasks) {
-    if (!isAbsolute(task.repository)) continue;
-    const canonical = await realpath(task.repository).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ENOTDIR")
-          return undefined;
-        throw error;
-      },
-    );
-    const root = await outermostGitMarkerRoot(
-      canonical ?? task.repository,
-      options.signal,
-    );
-    // Missing sources remain per-task failures; keep any enclosing Git root.
-    if (canonical !== undefined || root !== task.repository) {
-      protectedRoots.add(await realpath(root));
-    }
-  }
-  const gitRoots = [...protectedRoots];
+  const gitRoots = await protectedGitInputRoots(
+    [
+      process.cwd(),
+      options.inputPath,
+      ...tasks
+        .filter((task) => isAbsolute(task.repository))
+        .map((task) => task.repository),
+      ...(options.knowledgeBasePaths ?? []),
+    ],
+    options.signal,
+  );
+  gitRoots.push(checkoutRoot);
 
   let next = 0;
   let failed = 0;
