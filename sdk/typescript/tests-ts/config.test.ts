@@ -11,11 +11,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
-import { scanModelConfiguration, scanModelProvider } from "../src/config.js";
+import {
+  resolveCodexProfile,
+  scanModelConfiguration,
+  scanModelProvider,
+} from "../src/config.js";
 import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
-  type JsonObject,
   mergedCodexConfig,
   writeCodexConfig,
 } from "../src/index.js";
@@ -463,31 +466,14 @@ describe("Codex configuration", () => {
         },
       },
     });
-    const nativeConfig = structuredClone(config);
-    delete nativeConfig["profile"];
-    delete nativeConfig["profiles"];
-    const profileConfig = (config["profiles"] as JsonObject)[
-      "elevated"
-    ] as JsonObject;
-    const profilePath = join(root, "elevated.config.toml");
-    await writeCodexConfig(path, nativeConfig);
-    await writeCodexConfig(profilePath, profileConfig);
+    await writeCodexConfig(path, resolveCodexProfile(config));
 
     expect(parse(await readFile(path, "utf8"))).toMatchObject({
-      windows: { sandbox: "unelevated" },
-    });
-    expect(parse(await readFile(profilePath, "utf8"))).toMatchObject({
       features: { elevated_windows_sandbox: true },
       windows: { sandbox: "elevated" },
     });
 
-    const result = runPinnedCodex(root, [
-      "--profile",
-      "elevated",
-      "mcp",
-      "list",
-      "--json",
-    ]);
+    const result = runPinnedCodex(root, ["mcp", "list", "--json"]);
     if (result.exitCode !== 0) {
       throw new Error(
         `The pinned Codex CLI rejected the selected Windows sandbox profile: ${new TextDecoder().decode(result.stderr)}`,

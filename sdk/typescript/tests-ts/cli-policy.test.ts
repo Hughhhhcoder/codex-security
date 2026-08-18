@@ -465,6 +465,52 @@ describe("policy CLI", () => {
     expect(await readdir(f.repository)).toEqual([]);
   });
 
+  test("honors cancellation while the interactive preview is backpressured", async () => {
+    for (const [signal, exitCode] of [
+      ["SIGINT", 130],
+      ["SIGTERM", 143],
+    ] as const) {
+      const f = await fixture();
+      const draft = await f.generate();
+      const signals = new FakeSignals();
+      let interrupted = false;
+      let closed = false;
+      const stderr = Object.assign(
+        new Writable({
+          write(chunk, _encoding, callback) {
+            if (!interrupted && String(chunk).includes("\nPolicy target:")) {
+              interrupted = true;
+              queueMicrotask(() => {
+                signals.emit(signal);
+                queueMicrotask(callback);
+              });
+            } else callback();
+          },
+        }),
+        { isTTY: true },
+      );
+      expect(
+        await main(
+          ["policy"],
+          capture(true).stream,
+          stderr,
+          policyDependencies(f, {
+            draft,
+            signals,
+            prompt: prompt({ isInteractive: () => true }),
+            onClose: () => {
+              closed = true;
+            },
+          }),
+        ),
+      ).toBe(exitCode);
+      expect(interrupted).toBe(true);
+      expect(closed).toBe(true);
+      expect(signals.listeners.get(signal)?.size).toBe(0);
+      expect(await readdir(f.repository)).toEqual([]);
+    }
+  });
+
   test("offers source-backed questions and shows the exact diff before approval", async () => {
     const f = await fixture();
     const stderr = capture(true);
