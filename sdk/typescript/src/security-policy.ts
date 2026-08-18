@@ -98,10 +98,10 @@ export interface SecurityPolicyPreflight extends SecurityPolicyTarget {
 
 export const securityPolicyStageSchema = z
   .object({
-    markdown: z.string().min(1),
+    markdown: z.string(),
     questions: z.array(z.string()),
     reviewNotes: z.array(z.string()),
-    blockedReason: z.string().min(1).nullable(),
+    blockedReason: z.string().nullable(),
   })
   .strict();
 
@@ -198,10 +198,15 @@ export async function readSecurityPolicy(path: string): Promise<string | null> {
       `Security policy must be a regular file: ${path}`,
     );
   }
-  return await readPolicyFile(path);
+  // Application recovery files may intentionally share an inode. Policy
+  // evidence is checked separately before it is supplied to the model.
+  return await readPolicyFile(path, { allowHardLinks: true });
 }
 
-async function readPolicyFile(path: string): Promise<string> {
+async function readPolicyFile(
+  path: string,
+  options: { allowHardLinks?: boolean } = {},
+): Promise<string> {
   const file = await open(
     path,
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
@@ -211,6 +216,11 @@ async function readPolicyFile(path: string): Promise<string> {
     if (!metadata.isFile()) {
       throw new CodexSecurityError(
         `Security policy must be a regular file: ${path}`,
+      );
+    }
+    if (!options.allowHardLinks && metadata.nlink > 1) {
+      throw new CodexSecurityError(
+        `Security policy must not be a hard-linked file: ${path}. Copy it to a separate file.`,
       );
     }
     validatePolicySize(metadata.size);
@@ -716,7 +726,7 @@ export async function runSecurityPolicyStages(options: {
     ].join("\n"),
     specificationPath,
   );
-  const answers: string[] = [];
+  const answers: { questions: string[]; answer: string }[] = [];
   const answerQuestions = options.answerQuestions;
   if (answerQuestions !== undefined) {
     for (
@@ -732,13 +742,13 @@ export async function runSecurityPolicyStages(options: {
         () => answerQuestions(questions, signal),
         signal,
       );
-      if (answer?.trim()) answers.push(answer);
+      if (answer?.trim()) answers.push({ questions, answer });
     }
   }
   const ownerContext = [
     `Architecture questions and review notes (JSON data): ${jsonForPrompt({ questions: architecture.questions, reviewNotes: architecture.reviewNotes })}`,
     answers.length > 0
-      ? `Owner clarification (JSON-encoded data): ${jsonForPrompt(answers.join("\n\n"))}`
+      ? `Owner clarification (JSON-encoded data): ${jsonForPrompt(answers)}`
       : "No additional owner clarification was supplied.",
     "Carry unanswered questions and unresolved policy decisions forward explicitly.",
   ].join("\n");

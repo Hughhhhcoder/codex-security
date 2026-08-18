@@ -237,10 +237,14 @@ Review the saved `SECURITY.md` before applying it. Preserve existing reporting
 instructions and obtain owner approval for exclusions, accepted risks, and
 severity decisions. Later scans read the approved policy.
 
+Preview checks that the selected policy and its parent policies have not
+changed. Other source files are not frozen; generate a new draft if relevant
+source or neighboring policy files change.
+
 Use `--headless` or an explicit output format to skip questions and write
 prompts. Unanswered questions remain in the review notes. Drafts default to the
-Codex Security state directory; `--output-dir` selects an empty directory outside every enclosing
-Git checkout and its Git metadata.
+Codex Security state directory; `--output-dir` selects an empty directory
+outside every enclosing Git checkout and its Git metadata.
 
 ```bash
 npx @openai/codex-security policy . --path services/api \

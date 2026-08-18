@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -303,14 +304,18 @@ describe("security policy generation", () => {
     const draft = await f.generate({
       answerQuestions: async (batch) => {
         batches.push([...batch]);
-        return `Owner answer ${batches.length}`;
+        return ["yes", undefined, "no"][batches.length - 1];
       },
       run: async (stage, prompt) => {
         if (stage === "architecture")
           return { ...stageResult(stage), questions };
         for (const question of questions) expect(prompt).toContain(question);
-        for (let index = 1; index <= 3; index++)
-          expect(prompt).toContain(`Owner answer ${index}`);
+        expect(prompt).toContain(
+          JSON.stringify([
+            { questions: questions.slice(0, 3), answer: "yes" },
+            { questions: questions.slice(6), answer: "no" },
+          ]),
+        );
         return stageResult(stage);
       },
     });
@@ -622,17 +627,20 @@ describe("security policy review and application", () => {
     if (process.platform !== "win32")
       await chmod(join(f.repository, "SECURITY.md"), 0o640);
     await f.generate();
+    const originalAlias = join(f.root, "original-policy.md");
+    await link(join(f.repository, "SECURITY.md"), originalAlias);
     const edited = `${POLICY}\nOwner-confirmed scope.\n`;
     await writeFile(join(f.outputDir, "SECURITY.md"), edited);
     const draft = await loadSecurityPolicyDraft(f.repository, f.outputDir);
     await writeFile(draft.draftPath, "# Later unreviewed edit\n");
     await applySecurityPolicy(draft);
     expect(await readFile(draft.targetPath, "utf8")).toBe(edited);
+    expect(await readFile(originalAlias, "utf8")).toBe(original);
     if (process.platform !== "win32")
       expect((await stat(draft.targetPath)).mode & 0o777).toBe(0o640);
   });
 
-  test("rejects a linked saved-draft directory before reading it", async () => {
+  test("rejects linked saved-draft inputs before reading them", async () => {
     const f = await fixture();
     await f.generate();
     const alias = join(f.root, "linked-policy");
@@ -644,6 +652,17 @@ describe("security policy review and application", () => {
     await expect(loadSecurityPolicyDraft(f.repository, alias)).rejects.toThrow(
       "non-symlink directory",
     );
+    for (const name of ["SECURITY.md", "previous-SECURITY.md"]) {
+      const path = join(f.outputDir, name);
+      const outside = join(f.root, `outside-${name}`);
+      await rename(path, outside);
+      await link(outside, path);
+      await expect(
+        loadSecurityPolicyDraft(f.repository, f.outputDir),
+      ).rejects.toThrow("hard-linked");
+      await rm(path);
+      await rename(outside, path);
+    }
     expect(await readdir(f.repository)).toEqual([]);
   });
 
