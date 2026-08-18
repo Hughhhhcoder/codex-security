@@ -126,6 +126,30 @@ function accountingEvent(
   };
 }
 
+const accountingFork = {
+  // The inherited turn, child, and owned turn start within the same second.
+  inheritedTurnId: "019f9e4d-b324-7000-8000-000000000001",
+  threadId: "019f9e4d-b3ba-7000-8000-000000000002",
+  ownedTurnId: "019f9e4d-b3ec-7000-8000-000000000003",
+  pendingTurnId: "019f9e4d-b450-4000-8000-000000000004",
+  timestamp: "2026-07-26T12:02:00.250Z",
+  startedAt: 1_785_067_320,
+};
+
+function accountingTaskStart(
+  turnId: string,
+  startedAt: number,
+): MockAccountingEvent {
+  return {
+    type: "event_msg",
+    payload: {
+      type: "task_started",
+      turn_id: turnId,
+      started_at: startedAt,
+    },
+  };
+}
+
 function accountingSession(
   threadId: string,
   events: readonly MockAccountingEvent[],
@@ -2303,25 +2327,46 @@ describe("live scan cost tracking", () => {
       "import workbench_scan_usage as usage",
       "case = json.loads(sys.argv[2])",
       "inherited = case.get('inherited')",
-      "thread = 'scan-thread' if inherited is None else 'worker-thread'",
+      "fork = case['fork']",
+      "thread = 'scan-thread' if inherited is None else fork['threadId']",
       "parent = None if inherited is None else 'scan-thread'",
       "stamp = '2026-07-26T12:02:00Z'",
       "def token_event(sample):",
       "    snapshot = {**sample, 'total_tokens': sample['input_tokens'] + sample['output_tokens']}",
       "    return {'type': 'event_msg', 'timestamp': stamp, 'payload': {'type': 'token_count', 'info': {'total_token_usage': snapshot}}}",
-      "events = [{'type': 'session_meta', 'payload': {'id': thread, 'parent_thread_id': parent}}]",
+      "def task_event(turn_id):",
+      "    return {'type': 'event_msg', 'timestamp': stamp, 'payload': {'type': 'task_started', 'turn_id': turn_id, 'started_at': fork['startedAt']}}",
+      "metadata = {'id': thread, 'parent_thread_id': parent}",
+      "if inherited is not None and not case.get('copiedHistory'):",
+      "    metadata['forked_from_id'] = parent",
+      "events = [{'type': 'session_meta', 'payload': metadata}]",
       "if inherited is not None:",
-      "    events.extend([token_event(inherited), {'type': 'event_msg', 'timestamp': stamp, 'payload': {'type': 'task_started', 'turn_id': 'fixture-turn'}}])",
-      "events.extend(token_event(sample) for sample in case['samples'])",
+      "    if case.get('copiedHistory'):",
+      "        events.append({'type': 'session_meta', 'payload': {'id': parent}})",
+      "    events.extend([task_event(fork['inheritedTurnId']), token_event(inherited), task_event(fork['pendingTurnId']), token_event(inherited), task_event(fork['ownedTurnId'])])",
+      "for index, sample in enumerate(case['samples']):",
+      "    if inherited is not None and index == 1:",
+      "        events.append(task_event(fork['pendingTurnId']))",
+      "    events.append(token_event(sample))",
       "session = usage.RolloutSession(thread, parent, Path('fixture-rollout'))",
       "with patch.object(Path, 'open', return_value=io.BytesIO(b'{}\\n' * len(events))), patch.object(usage.json, 'loads', side_effect=events):",
       "    measured, warnings = usage._read_rollout_usage(session, started_at=datetime(2026, 7, 26, 12, tzinfo=timezone.utc), completed_at=None)",
       "print(json.dumps({'usage': measured, 'warnings': sorted(warnings)}))",
     ].join("\n");
+    const inheritedReset = {
+      inherited: { input_tokens: 1_000, output_tokens: 1_000 },
+      samples: [
+        { input_tokens: 1_500, output_tokens: 100 },
+        { input_tokens: 1_600, output_tokens: 150 },
+        { input_tokens: 1_600, output_tokens: 150 },
+      ],
+      expected: { input_tokens: 1_600, output_tokens: 150 },
+    };
     const cases: Array<{
       samples: Usage[];
       expected: Usage;
       inherited?: Usage;
+      copiedHistory?: boolean;
       limit?: number;
     }> = [
       {
@@ -2391,14 +2436,8 @@ describe("live scan cost tracking", () => {
         ],
         expected: { input_tokens: 2_500, output_tokens: 1_100 },
       },
-      {
-        inherited: { input_tokens: 1_000, output_tokens: 1_000 },
-        samples: [
-          { input_tokens: 1_500, output_tokens: 100 },
-          { input_tokens: 1_600, output_tokens: 150 },
-        ],
-        expected: { input_tokens: 1_600, output_tokens: 150 },
-      },
+      inheritedReset,
+      { ...inheritedReset, copiedHistory: true },
       {
         samples: [
           { input_tokens: 100, output_tokens: 100 },
@@ -2408,7 +2447,13 @@ describe("live scan cost tracking", () => {
         expected: { input_tokens: 110, output_tokens: 110 },
       },
     ];
-    for (const { samples, inherited, expected: counters, limit } of cases) {
+    for (const {
+      samples,
+      inherited,
+      copiedHistory,
+      expected: counters,
+      limit,
+    } of cases) {
       const expected = {
         cached_input_tokens: 0,
         cache_write_input_tokens: 0,
@@ -2424,7 +2469,12 @@ describe("live scan cost tracking", () => {
           "-c",
           probe,
           join(PLUGIN_ROOT, "scripts"),
-          JSON.stringify({ samples, inherited }),
+          JSON.stringify({
+            samples,
+            inherited,
+            copiedHistory,
+            fork: accountingFork,
+          }),
         ],
         { encoding: "utf8" },
       );
@@ -2440,20 +2490,31 @@ describe("live scan cost tracking", () => {
         },
         warnings: [],
       });
-      const events: MockAccountingEvent[] = [
-        ...(inherited === undefined
-          ? []
-          : [
-              { type: "session_meta", payload: { id: "scan-thread" } },
-              accountingEvent(inherited),
-              {
-                type: "event_msg",
-                payload: { type: "task_started", started_at: 1_785_067_320 },
-              },
-            ]),
-        ...samples.map(accountingEvent),
-      ];
-      const metadata = { timestamp: "2026-07-26T12:02:00Z" };
+      const taskStart = (turnId: string) =>
+        accountingTaskStart(turnId, accountingFork.startedAt);
+      const events: MockAccountingEvent[] = [];
+      if (inherited !== undefined) {
+        if (copiedHistory) {
+          events.push({
+            type: "session_meta",
+            payload: { id: "scan-thread" },
+          });
+        }
+        events.push(
+          taskStart(accountingFork.inheritedTurnId),
+          accountingEvent(inherited),
+          taskStart(accountingFork.pendingTurnId),
+          accountingEvent(inherited),
+          taskStart(accountingFork.ownedTurnId),
+        );
+      }
+      for (const [index, sample] of samples.entries()) {
+        if (inherited !== undefined && index === 1) {
+          events.push(taskStart(accountingFork.pendingTurnId));
+        }
+        events.push(accountingEvent(sample));
+      }
+      const metadata = { timestamp: accountingFork.timestamp };
       const sessions: Record<string, MockAccountingEvent[]> =
         inherited === undefined
           ? {
@@ -2468,11 +2529,14 @@ describe("live scan cost tracking", () => {
               "scan-thread": accountingSession("scan-thread", [
                 accountingEvent({ input_tokens: 0, output_tokens: 0 }),
               ]),
-              "worker-thread": accountingSession(
-                "worker-thread",
+              [accountingFork.threadId]: accountingSession(
+                accountingFork.threadId,
                 events,
                 "scan-thread",
-                metadata,
+                {
+                  ...metadata,
+                  ...(copiedHistory ? {} : { forked_from_id: "scan-thread" }),
+                },
               ),
             };
       const costs: number[] = [];
@@ -2497,6 +2561,99 @@ describe("live scan cost tracking", () => {
         },
       );
     }
+  });
+
+  test("keeps unstarted fork usage out of budget totals", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "keeps unstarted fork usage out of budget totals",
+      )
+    ) {
+      return;
+    }
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    const inherited = { input_tokens: 1_000, output_tokens: 1_000 };
+    for (const maxCostUsd of [undefined, 0.01]) {
+      const costs: number[] = [];
+      await withMockAccountingSessions(
+        {
+          "scan-thread": accountingSession("scan-thread", [
+            accountingEvent(rootUsage),
+          ]),
+          [accountingFork.threadId]: accountingSession(
+            accountingFork.threadId,
+            [
+              accountingTaskStart(
+                accountingFork.inheritedTurnId,
+                accountingFork.startedAt,
+              ),
+              accountingEvent(inherited),
+              accountingTaskStart(
+                accountingFork.pendingTurnId,
+                accountingFork.startedAt,
+              ),
+              accountingEvent(inherited),
+            ],
+            "scan-thread",
+            {
+              timestamp: accountingFork.timestamp,
+              forked_from_id: "scan-thread",
+            },
+          ),
+        },
+        {
+          model: "gpt-5.6-terra",
+          maxCostUsd,
+          onCost: (cost) => costs.push(cost.estimatedUsd),
+        },
+        async (tracker) => {
+          expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+          const final = tracker.stop(rootUsage);
+          if (maxCostUsd === undefined) {
+            await expect(final).resolves.toMatchObject({
+              cost: { inputTokens: 100, outputTokens: 10 },
+            });
+          } else {
+            await expect(final).rejects.toThrow(
+              "The scan cost limit could not be verified",
+            );
+          }
+          expect(costs.every((cost) => cost < 0.01)).toBe(true);
+        },
+      );
+    }
+  });
+
+  test("counts ordinary UUID7 workers without a fork boundary", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "counts ordinary UUID7 workers without a fork boundary",
+      )
+    ) {
+      return;
+    }
+    const rootUsage = { input_tokens: 100, output_tokens: 10 };
+    await withMockAccountingSessions(
+      {
+        "scan-thread": accountingSession("scan-thread", [
+          accountingEvent(rootUsage),
+        ]),
+        [accountingFork.threadId]: accountingSession(
+          accountingFork.threadId,
+          [accountingEvent({ input_tokens: 250, output_tokens: 25 })],
+          "scan-thread",
+          { timestamp: accountingFork.timestamp },
+        ),
+      },
+      { model: "gpt-5.6-terra", maxCostUsd: 1 },
+      async (tracker) => {
+        await expect(tracker.stop(rootUsage)).resolves.toMatchObject({
+          cost: { inputTokens: 350, outputTokens: 35 },
+        });
+      },
+    );
   });
 
   test("keeps mocked session-detail replay separate from accounting", async () => {

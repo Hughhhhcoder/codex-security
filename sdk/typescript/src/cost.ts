@@ -752,6 +752,18 @@ function readSessionChunk(
   }
 }
 
+function uuid7Timestamp(value: unknown): number | null {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      value,
+    )
+  ) {
+    return null;
+  }
+  return Number.parseInt(value.slice(0, 8) + value.slice(9, 13), 16);
+}
+
 function readSessionEvent(
   line: string,
   session: SessionUsage,
@@ -798,6 +810,8 @@ function readSessionEvent(
       payload["parent_thread_id"] ??
       (isRecord(spawn) ? spawn["parent_thread_id"] : undefined);
     if (typeof parent === "string") session.parentThreadId = parent;
+    const forkedFrom = payload["forked_from_id"];
+    session.replaying = typeof forkedFrom === "string" && forkedFrom.length > 0;
     session.events?.push(event);
     return;
   }
@@ -810,15 +824,20 @@ function readSessionEvent(
         session.previousRawUsage = usage;
       }
     }
-    if (
-      payload["type"] === "task_started" &&
-      typeof payload["started_at"] === "number" &&
-      session.startedAt !== null &&
-      payload["started_at"] >= session.startedAt
-    ) {
-      session.replaying = false;
-      session.taskCompleted = false;
-      session.events?.push(event);
+    if (payload["type"] === "task_started") {
+      const threadStartedAt = uuid7Timestamp(session.threadId);
+      const turnStartedAt = uuid7Timestamp(payload["turn_id"]);
+      const owned =
+        threadStartedAt === null
+          ? typeof payload["started_at"] === "number" &&
+            session.startedAt !== null &&
+            payload["started_at"] >= session.startedAt
+          : turnStartedAt !== null && turnStartedAt >= threadStartedAt;
+      if (owned) {
+        session.replaying = false;
+        session.taskCompleted = false;
+        session.events?.push(event);
+      }
     }
     return;
   }
