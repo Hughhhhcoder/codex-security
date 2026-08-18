@@ -38,6 +38,10 @@ const LINEAR_CREDENTIALS = new Set([
 ]);
 const DISABLED_CODEX_FEATURES = [
   "apps",
+  "auth_elicitation",
+  "browser_use",
+  "browser_use_external",
+  "browser_use_full_cdp_access",
   "code_mode",
   "code_mode_only",
   "deferred_executor",
@@ -57,18 +61,30 @@ const DISABLED_CODEX_FEATURES = [
   "shell_tool",
   "skill_mcp_dependency_install",
   "skill_search",
+  "standalone_web_search",
+  "tool_call_mcp_elicitation",
+  "tool_search",
+  "tool_suggest",
   "unified_exec",
   "view_image",
+  "web_search_cached",
+  "web_search_request",
   "workspace_dependencies",
 ] as const;
-const DISABLED_CODEX_SETTINGS = [
-  "include_apps_instructions",
-  "include_collaboration_mode_instructions",
-  "include_environment_context",
-  "include_permissions_instructions",
-  "skills.bundled.enabled",
-  "skills.include_instructions",
-] as const;
+const CODEX_ISOLATION_SETTINGS = {
+  "analytics.enabled": false,
+  check_for_update_on_startup: false,
+  include_apps_instructions: false,
+  include_collaboration_mode_instructions: false,
+  include_environment_context: false,
+  include_permissions_instructions: false,
+  "otel.exporter": "none",
+  "otel.log_user_prompt": false,
+  "otel.metrics_exporter": "none",
+  "otel.trace_exporter": "none",
+  "skills.bundled.enabled": false,
+  "skills.include_instructions": false,
+} as const;
 const PUBLICATION_MODEL = "gpt-5.5";
 const PUBLICATION_MODEL_CATALOG = ".codex-security-publication-models.json";
 
@@ -182,9 +198,7 @@ export async function enrichPublicationIssues(
           ...Object.fromEntries(
             DISABLED_CODEX_FEATURES.map((name) => [`features.${name}`, false]),
           ),
-          ...Object.fromEntries(
-            DISABLED_CODEX_SETTINGS.map((name) => [name, false]),
-          ),
+          ...Object.fromEntries(Object.entries(CODEX_ISOLATION_SETTINGS)),
           model: PUBLICATION_MODEL,
           model_catalog_json: modelCatalogPath!,
           tools: {
@@ -239,27 +253,22 @@ async function loadConfiguredMcpServers(
 ): Promise<ConfiguredMcpServer[]> {
   try {
     signal?.throwIfAborted();
-    const output = await runCodexConfigurationCommand(
+    const config = await readEffectiveCodexConfiguration(
       codexCommand,
-      ["-C", workingDirectory, "mcp", "list", "--json"],
       environment,
       workingDirectory,
       signal,
     );
-    const parsed = JSON.parse(output) as unknown;
-    if (!Array.isArray(parsed)) throw new Error("Unexpected MCP listing.");
-    return parsed.flatMap((entry): ConfiguredMcpServer[] => {
-      if (!isRecord(entry) || entry["enabled"] !== true) return [];
-      const name = entry["name"];
-      if (typeof name !== "string") {
-        throw new Error("Unexpected MCP server name.");
-      }
+    const configured = config["mcp_servers"];
+    if (configured === null || configured === undefined) return [];
+    if (!isRecord(configured)) throw new Error("Unexpected MCP configuration.");
+    return Object.keys(configured).map((name): ConfiguredMcpServer => {
       if (!/^[A-Za-z0-9_-]+$/u.test(name)) {
         throw new CodexSecurityError(
           "Publication enrichment cannot safely disable an ambient Codex MCP server whose name contains punctuation. Disable that server before publishing with a knowledge base.",
         );
       }
-      return [{ name }];
+      return { name };
     });
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -366,8 +375,125 @@ function isolationConfigurationArguments(
     `model_catalog_json=${JSON.stringify(modelCatalogPath)}`,
     ...servers.map(({ name }) => `mcp_servers.${name}.enabled=false`),
     ...DISABLED_CODEX_FEATURES.map((name) => `features.${name}=false`),
-    ...DISABLED_CODEX_SETTINGS.map((name) => `${name}=false`),
+    ...Object.entries(CODEX_ISOLATION_SETTINGS).map(
+      ([name, value]) => `${name}=${JSON.stringify(value)}`,
+    ),
   ].flatMap((override) => ["-c", override]);
+}
+
+async function readEffectiveCodexConfiguration(
+  command: string,
+  environment: Record<string, string>,
+  workingDirectory: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  signal?.throwIfAborted();
+  const inspectionEnvironment = Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) => !/(?:credential|key|password|secret|token)/iu.test(name),
+    ),
+  );
+  return await new Promise<Record<string, unknown>>((resolve, reject) => {
+    const baseOverrides = [
+      ...DISABLED_CODEX_FEATURES.map((name) => `features.${name}=false`),
+      ...Object.entries(CODEX_ISOLATION_SETTINGS).map(
+        ([name, value]) => `${name}=${JSON.stringify(value)}`,
+      ),
+    ].flatMap((override) => ["-c", override]);
+    const child = spawn(
+      command,
+      [
+        "-C",
+        workingDirectory,
+        ...baseOverrides,
+        "app-server",
+        "--listen",
+        "stdio://",
+      ],
+      {
+        cwd: workingDirectory,
+        env: inspectionEnvironment,
+        signal,
+        stdio: ["pipe", "pipe", "ignore"],
+        windowsHide: true,
+      },
+    );
+    child.stdout.setEncoding("utf8");
+    let partialLine = "";
+    let configuration: Record<string, unknown> | undefined;
+    let settled = false;
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(error);
+    };
+    const send = (message: unknown): void => {
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    };
+    child.stdin.once("error", (error) => {
+      if (configuration === undefined) fail(error);
+    });
+    child.stdout.on("data", (chunk: string) => {
+      partialLine += chunk;
+      let end: number;
+      while ((end = partialLine.indexOf("\n")) !== -1) {
+        const line = partialLine.slice(0, end).trim();
+        partialLine = partialLine.slice(end + 1);
+        if (line.length === 0) continue;
+        let message: unknown;
+        try {
+          message = JSON.parse(line) as unknown;
+        } catch (error) {
+          fail(error);
+          return;
+        }
+        if (!isRecord(message)) continue;
+        if (message["id"] === 0) {
+          if (!isRecord(message["result"])) {
+            fail(new Error("Codex app-server initialization failed."));
+            return;
+          }
+          send({ method: "initialized", params: {} });
+          send({
+            method: "config/read",
+            id: 1,
+            params: { cwd: workingDirectory },
+          });
+          continue;
+        }
+        if (message["id"] !== 1) continue;
+        const result = message["result"];
+        const config = isRecord(result) ? result["config"] : undefined;
+        if (!isRecord(config)) {
+          fail(new Error("Codex returned an invalid effective configuration."));
+          return;
+        }
+        configuration = config;
+        child.stdin.end();
+      }
+    });
+    child.once("error", fail);
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      if (code === 0 && configuration !== undefined) resolve(configuration);
+      else
+        reject(new Error("Codex effective configuration inspection failed."));
+    });
+    send({
+      method: "initialize",
+      id: 0,
+      params: {
+        clientInfo: {
+          name: "codex_security",
+          title: "Codex Security",
+          version: "0.1.0",
+        },
+        capabilities: null,
+      },
+    });
+  });
 }
 
 async function prepareToolFreeModelCatalog(
