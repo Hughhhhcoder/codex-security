@@ -47,6 +47,7 @@ export interface PreparedScanPublication {
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
+  policyFindings?: Finding[];
 }
 
 export async function prepareScanPublication(
@@ -70,6 +71,7 @@ export async function prepareScanPublication(
         ? {}
         : { projectId: options.projectId }),
     },
+    policyFindings: contract.findings.findings,
     issues: contract.findings.findings.map((finding) => ({
       findingId: finding.findingId,
       occurrenceId: finding.occurrenceId,

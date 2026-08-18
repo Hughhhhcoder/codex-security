@@ -2005,52 +2005,33 @@ describe("connected Linear publication", () => {
     ]);
   });
 
-  test("rejects durable handoffs whose issue arguments drift from the prepared payload", async () => {
-    const publication = preparedPublication(3);
-    const result = await publishScanInternal(
-      publication.scanDirectory,
-      OPTIONS,
-      dependencies(
-        publication,
-        {},
-        {
-          runCodex: async (_command, _args, input) => {
-            await writeHandoff(
-              input,
-              publication.issues.map((issue, index) => {
-                const record = handoffRecord(publication, issue);
-                if (index === 0) {
-                  record["arguments"] = { title: "Normalized issue title" };
-                } else if (index === 1) {
-                  delete record["arguments"];
-                } else {
-                  record["connectorRequestId"] = "request-example";
-                }
-                return record;
-              }),
-            );
-            return { exitCode: 0, stdout: "", stderr: "" };
+  test("retains durable handoffs when a created issue has argument drift", async () => {
+    const publication = preparedPublication();
+    let handoffFile: string | undefined;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              const record = handoffRecord(publication, publication.issues[0]!);
+              record["arguments"] = { title: "Normalized issue title" };
+              await writeHandoff(input, [record]);
+              return { exitCode: 0, stdout: "", stderr: "" };
+            },
           },
-        },
+        ),
       ),
+    ).rejects.toThrow(
+      /SEC-1 may have been created.*unexpected arguments.*indeterminate.*publication handoff remains at.*recover the issue.*avoid creating a duplicate issue/u,
     );
 
-    expect(result.counts).toEqual({ findings: 3, created: 1, failed: 2 });
-    expect(result.created.map((issue) => issue.findingId)).toEqual([
-      "finding-3",
-    ]);
-    expect(result.failed).toEqual([
-      {
-        findingId: "finding-1",
-        error:
-          "Codex wrote a Linear publication with unexpected issue arguments.",
-      },
-      {
-        findingId: "finding-2",
-        error:
-          "Codex wrote a Linear publication with unexpected issue arguments.",
-      },
-    ]);
+    expect(await readFile(handoffFile!, "utf8")).toContain("SEC-1");
   });
 
   test("rejects handoffs contradicted by observed trusted Linear mutations", async () => {

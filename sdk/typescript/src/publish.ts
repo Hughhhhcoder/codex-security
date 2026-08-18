@@ -213,6 +213,9 @@ export async function publishScanInternal(
         dependencies.enrichPublicationIssues ?? enrichPublicationIssues
       )(prepared.issues, context.labels, knowledgeBasePaths, {
         environment,
+        ...(prepared.policyFindings === undefined
+          ? {}
+          : { findings: prepared.policyFindings }),
         signal: options.signal,
       });
       prepared = { ...prepared, issues };
@@ -711,6 +714,7 @@ async function collectPublicationHandoff(
   const observed = new Set<string>();
   const explicitFailures = new Set<string>();
   const candidateIdentifiers = new Map<string, string>();
+  const argumentDriftIdentifiers = new Map<string, string>();
   const unexpected: string[] = [];
   const expectedIssues = new Map(
     publication.issues.map((issue) => [issue.findingId, issue]),
@@ -780,6 +784,10 @@ async function collectPublicationHandoff(
         publicationHandoffArguments(publication, issue),
       )
     ) {
+      const candidateIdentifier = candidateIdentifiers.get(issue.findingId);
+      if (candidateIdentifier !== undefined) {
+        argumentDriftIdentifiers.set(issue.findingId, candidateIdentifier);
+      }
       failed.set(
         issue.findingId,
         "Codex wrote a Linear publication with unexpected issue arguments.",
@@ -878,6 +886,13 @@ async function collectPublicationHandoff(
     if (saved === undefined && !failed.has(issue.findingId)) {
       failed.set(issue.findingId, eventFailure ?? failureMessage);
     }
+  }
+
+  for (const [findingId, identifier] of argumentDriftIdentifiers) {
+    if (created.has(findingId)) continue;
+    throw new CodexSecurityError(
+      `Linear issue ${identifier} may have been created for finding ${findingId} with unexpected arguments. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover the issue before retrying to avoid creating a duplicate issue.`,
+    );
   }
 
   return {

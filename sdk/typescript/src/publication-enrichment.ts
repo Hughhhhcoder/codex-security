@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   Codex,
   type CodexOptions,
@@ -13,7 +13,8 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
-import { parse } from "smol-toml";
+import { parse as parseToml } from "smol-toml";
+import type { Finding } from "./models.js";
 import type { PreparedPublicationIssue } from "./publication.js";
 import type { LinearPublicationCatalogLabel } from "./linear.js";
 import { resolveCodexCommand } from "./runtime.js";
@@ -53,9 +54,7 @@ const enrichmentSchema = z
 const enrichmentOutputSchema = z.toJSONSchema(enrichmentSchema);
 
 type EnrichmentResponse = z.infer<typeof enrichmentSchema>;
-type ConfiguredMcpServer =
-  | { name: string; transport: { type: "stdio"; command: string } }
-  | { name: string; transport: { type: string; url: string } };
+type ConfiguredMcpServer = { name: string };
 
 export interface PublicationEnrichmentCodex {
   startThread(options: ThreadOptions): {
@@ -70,6 +69,7 @@ export interface PublicationEnrichmentOptions {
   codex?: PublicationEnrichmentCodex;
   createCodex?: (options: CodexOptions) => PublicationEnrichmentCodex;
   environment?: NodeJS.ProcessEnv;
+  findings?: readonly Finding[];
   loadConfiguredMcpServers?: typeof loadConfiguredMcpServers;
   prepareKnowledgeBase?: typeof prepareKnowledgeBase;
   signal?: AbortSignal;
@@ -103,6 +103,7 @@ export async function enrichPublicationIssues(
       options.codex === undefined
         ? await (options.loadConfiguredMcpServers ?? loadConfiguredMcpServers)(
             environment,
+            knowledgeBase.path,
             options.signal,
           )
         : [];
@@ -113,15 +114,14 @@ export async function enrichPublicationIssues(
         env: environment,
         config: {
           allow_login_shell: false,
-          mcp_servers: {},
           ...Object.fromEntries(
-            configuredMcpServers.flatMap(({ name, transport }) => [
-              [
-                `mcp_servers.${name}.${"command" in transport ? "command" : "url"}`,
-                "command" in transport ? transport.command : transport.url,
-              ],
-              [`mcp_servers.${name}.enabled`, false],
-            ]),
+            configuredMcpServers.flatMap(({ name }) => {
+              const key = `mcp_servers.${JSON.stringify(name)}`;
+              return [
+                [`${key}.command`, "codex-security-disabled-mcp"],
+                [`${key}.enabled`, false],
+              ];
+            }),
           ),
           responses_api_metadata: {
             codex_security_surface: "sdk",
@@ -138,7 +138,11 @@ export async function enrichPublicationIssues(
           "features.plugins": false,
           "features.shell_tool": false,
           "features.unified_exec": false,
-          "tools.view_image": false,
+          "features.view_image": false,
+          tools: {
+            experimental_request_user_input: { enabled: false },
+            update_plan: { enabled: false },
+          },
           shell_environment_policy: {
             inherit: "core",
             ignore_default_excludes: false,
@@ -155,10 +159,13 @@ export async function enrichPublicationIssues(
       workingDirectory: knowledgeBase.path,
       skipGitRepoCheck: true,
     });
-    const turn = await thread.run(enrichmentPrompt(issues, labels, documents), {
-      outputSchema: enrichmentOutputSchema,
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
+    const turn = await thread.run(
+      enrichmentPrompt(issues, labels, documents, options.findings),
+      {
+        outputSchema: enrichmentOutputSchema,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
+    );
     options.signal?.throwIfAborted();
 
     let response: unknown;
@@ -178,11 +185,12 @@ export async function enrichPublicationIssues(
 
 async function loadConfiguredMcpServers(
   environment: Record<string, string>,
+  workingDirectory: string,
   signal?: AbortSignal,
 ): Promise<ConfiguredMcpServer[]> {
   try {
     signal?.throwIfAborted();
-    const configuredHome = environment["CODEX_HOME"]?.trim();
+    const configuredHome = environmentValue(environment, "CODEX_HOME")?.trim();
     const codexHome =
       configuredHome === undefined || configuredHome.length === 0
         ? join(homedir(), ".codex")
@@ -191,29 +199,15 @@ async function loadConfiguredMcpServers(
           : configuredHome.startsWith("~/")
             ? join(homedir(), configuredHome.slice(2))
             : configuredHome;
-    const configPaths = [
+    const baseConfigPaths = [
       ...(process.platform === "win32" ? [] : ["/etc/codex/config.toml"]),
       join(codexHome, "config.toml"),
-      ...(process.platform === "win32"
-        ? []
-        : ["/etc/codex/managed_config.toml"]),
-      join(codexHome, "managed_config.toml"),
     ];
     const configured = new Map<string, Record<string, unknown>>();
     let selectedProfile: string | undefined;
-    for (const configPath of configPaths) {
-      signal?.throwIfAborted();
-      let contents: string;
-      try {
-        contents = await readFile(configPath, { encoding: "utf8", signal });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw error;
-      }
-      const document = parse(contents) as unknown;
-      if (typeof document !== "object" || document === null) {
-        throw new Error("Unexpected Codex configuration.");
-      }
+    for (const configPath of baseConfigPaths) {
+      const document = await readCodexConfig(configPath, signal);
+      if (document === undefined) continue;
       const profile = (document as { profile?: unknown }).profile;
       if (typeof profile === "string" && profile.length > 0) {
         selectedProfile = profile;
@@ -225,40 +219,86 @@ async function loadConfiguredMcpServers(
         throw new Error("Unexpected Codex profile name.");
       }
       const profilePath = join(codexHome, `${selectedProfile}.config.toml`);
-      try {
-        const contents = await readFile(profilePath, {
-          encoding: "utf8",
-          signal,
-        });
-        mergeMcpServers(configured, parse(contents) as unknown);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
+      const profile = await readCodexConfig(profilePath, signal);
+      if (profile !== undefined) mergeMcpServers(configured, profile);
+    }
+    for (const configPath of projectCodexConfigPaths(workingDirectory)) {
+      const project = await readCodexConfig(configPath, signal);
+      if (project !== undefined) mergeMcpServers(configured, project);
+    }
+    const managedConfigPaths = [
+      ...(process.platform === "win32"
+        ? []
+        : ["/etc/codex/managed_config.toml"]),
+      join(codexHome, "managed_config.toml"),
+    ];
+    for (const configPath of managedConfigPaths) {
+      const managed = await readCodexConfig(configPath, signal);
+      if (managed !== undefined) mergeMcpServers(configured, managed);
     }
     const servers = [...configured].flatMap(
       ([name, server]): ConfiguredMcpServer[] => {
         if (server["enabled"] === false) return [];
         if (!/^[A-Za-z0-9_-]+$/u.test(name)) {
-          throw new Error("Unexpected MCP server name.");
+          throw new CodexSecurityError(
+            "Publication enrichment cannot safely disable an ambient Codex MCP server whose name contains punctuation. Disable that server before publishing with a knowledge base.",
+          );
         }
-        const command = server["command"];
-        if (typeof command === "string" && command.length > 0) {
-          return [{ name, transport: { type: "stdio", command } }];
-        }
-        const url = server["url"];
-        if (typeof url === "string" && url.length > 0) {
-          return [{ name, transport: { type: "streamable_http", url } }];
-        }
-        throw new Error("Unexpected MCP server transport.");
+        return [{ name }];
       },
     );
     return servers;
   } catch (error) {
     if (signal?.aborted) throw error;
+    if (error instanceof CodexSecurityError) throw error;
     throw new CodexSecurityError(
       "Could not inspect Codex MCP configuration for publication enrichment.",
     );
   }
+}
+
+async function readCodexConfig(
+  configPath: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown> | undefined> {
+  signal?.throwIfAborted();
+  let contents: string;
+  try {
+    contents = await readFile(configPath, { encoding: "utf8", signal });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  const document = parseToml(contents) as unknown;
+  if (typeof document !== "object" || document === null) {
+    throw new Error("Unexpected Codex configuration.");
+  }
+  return document as Record<string, unknown>;
+}
+
+function projectCodexConfigPaths(workingDirectory: string): string[] {
+  const directories: string[] = [];
+  let current = resolve(workingDirectory);
+  while (true) {
+    directories.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return directories
+    .reverse()
+    .map((directory) => join(directory, ".codex", "config.toml"));
+}
+
+function environmentValue(
+  environment: Record<string, string>,
+  name: string,
+): string | undefined {
+  if (environment[name] !== undefined) return environment[name];
+  const normalized = name.toUpperCase();
+  return Object.entries(environment).find(
+    ([key]) => key.toUpperCase() === normalized,
+  )?.[1];
 }
 
 function mergeMcpServers(
@@ -332,7 +372,11 @@ function enrichmentPrompt(
   issues: readonly PreparedPublicationIssue[],
   labels: readonly LinearPublicationCatalogLabel[],
   documents: readonly { name: string; text: string }[],
+  findings: readonly Finding[] = [],
 ): string {
+  const canonicalFindings = new Map(
+    findings.map((finding) => [finding.findingId, finding]),
+  );
   return [
     "Apply the supplied publication policy documents to every supplied Codex Security finding.",
     "Use only explicit rules in the policy documents. Do not infer organization-specific policy from general security knowledge.",
@@ -350,6 +394,7 @@ function enrichmentPrompt(
         findingId,
         title,
         description,
+        canonicalFinding: canonicalFindings.get(findingId),
       })),
     }),
   ].join("\n");

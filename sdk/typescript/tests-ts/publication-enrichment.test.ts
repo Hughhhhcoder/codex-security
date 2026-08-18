@@ -1,6 +1,7 @@
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   enrichPublicationIssues,
@@ -8,6 +9,7 @@ import {
   type PublicationEnrichmentCodex,
 } from "../src/publication-enrichment.js";
 import type { LinearPublicationCatalogLabel } from "../src/linear.js";
+import type { Finding } from "../src/models.js";
 import type { PreparedPublicationIssue } from "../src/publication.js";
 
 const temporaryDirectories: string[] = [];
@@ -205,13 +207,13 @@ describe("publication knowledge-base enrichment", () => {
         'command = "synthetic-write-tool"',
         "",
         "[mcp_servers.remote_server]",
-        'url = "https://mcp.invalid"',
+        'url = "https://user:synthetic-secret@mcp.invalid"',
       ].join("\n"),
     );
     await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
       createCodex(options) {
         config = options.config;
-        receivedCodexHome = options.env?.["CODEX_HOME"];
+        receivedCodexHome = options.env?.["codex_home"];
         return fakeCodex(
           response(
             issues().map(({ findingId }) => ({
@@ -223,21 +225,249 @@ describe("publication knowledge-base enrichment", () => {
         );
       },
       environment: {
-        CODEX_HOME: ambientCodexHome,
+        codex_home: ambientCodexHome,
         CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
       },
     });
 
     expect(config).toMatchObject({
-      mcp_servers: {},
-      "mcp_servers.synthetic.command": "synthetic-write-tool",
-      "mcp_servers.synthetic.enabled": false,
-      "mcp_servers.remote_server.url": "https://mcp.invalid",
-      "mcp_servers.remote_server.enabled": false,
-      "tools.view_image": false,
+      'mcp_servers."synthetic".command': "codex-security-disabled-mcp",
+      'mcp_servers."synthetic".enabled': false,
+      'mcp_servers."remote_server".command': "codex-security-disabled-mcp",
+      'mcp_servers."remote_server".enabled': false,
+      "features.view_image": false,
+      tools: {
+        experimental_request_user_input: { enabled: false },
+        update_plan: { enabled: false },
+      },
     });
     expect(receivedCodexHome).toBe(ambientCodexHome);
+    expect(JSON.stringify(config)).not.toContain("synthetic-secret");
+    expect(JSON.stringify(config)).not.toContain("synthetic-write-tool");
     expect((await stat(ambientCodexHome)).isDirectory()).toBe(true);
+  });
+
+  test("fails closed for ambient MCP names the SDK cannot safely override", async () => {
+    const codexHome = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-dotted-mcp-test-"),
+    );
+    temporaryDirectories.push(codexHome);
+    await writeFile(
+      join(codexHome, "config.toml"),
+      '[mcp_servers."company.tools"]\ncommand = "company-tool"\n',
+    );
+
+    await expect(
+      enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
+        createCodex() {
+          throw new Error("Codex must not start.");
+        },
+        environment: {
+          CODEX_HOME: codexHome,
+          CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
+        },
+      }),
+    ).rejects.toThrow(
+      /cannot safely disable an ambient Codex MCP server.*Disable that server/u,
+    );
+  });
+
+  test("disables MCP servers inherited from the enrichment working directory", async () => {
+    let config: unknown;
+    const project = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-project-config-test-"),
+    );
+    temporaryDirectories.push(project);
+    const workingDirectory = join(project, "tmp", "knowledge-base");
+    await mkdir(join(project, ".codex"), { recursive: true });
+    await mkdir(workingDirectory, { recursive: true });
+    await writeFile(
+      join(project, ".codex", "config.toml"),
+      '[mcp_servers.project_tool]\ncommand = "project-tool"\n',
+    );
+    await writeFile(join(workingDirectory, "policy.md"), "No metadata.");
+
+    await enrichPublicationIssues(issues(), LABELS, ["unused"], {
+      createCodex(options) {
+        config = options.config;
+        return fakeCodex(
+          response(
+            issues().map(({ findingId }) => ({
+              findingId,
+              priority: "none",
+              labelIds: [],
+            })),
+          ),
+        );
+      },
+      environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
+      prepareKnowledgeBase: async () => ({
+        path: workingDirectory,
+        sources: [],
+        cleanup: async () => undefined,
+      }),
+    });
+
+    expect(config).toMatchObject({
+      'mcp_servers."project_tool".command': "codex-security-disabled-mcp",
+      'mcp_servers."project_tool".enabled': false,
+    });
+  });
+
+  test("removes configurable data access from the native enrichment turn", async () => {
+    const codexHome = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-native-home-test-"),
+    );
+    temporaryDirectories.push(codexHome);
+    await writeFile(
+      join(codexHome, "config.toml"),
+      '[mcp_servers.native_test]\ncommand = "native-test-tool"\n',
+    );
+    const requests: Array<{ tools?: Array<{ name?: string }> }> = [];
+    const finalResponse = response(
+      issues().map(({ findingId }) => ({
+        findingId,
+        priority: "none",
+        labelIds: [],
+      })),
+    );
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        requests.push(
+          (await request.json()) as {
+            tools?: Array<{ name?: string }>;
+          },
+        );
+        const item = {
+          type: "message",
+          role: "assistant",
+          id: "msg_synthetic",
+          status: "completed",
+          content: [
+            { type: "output_text", text: finalResponse, annotations: [] },
+          ],
+        };
+        const completed = {
+          id: "resp_synthetic",
+          status: "completed",
+          output: [item],
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+            input_tokens_details: { cached_tokens: 0 },
+          },
+        };
+        const events = [
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { ...item, status: "in_progress", content: [] },
+          },
+          {
+            type: "response.output_text.delta",
+            item_id: item.id,
+            output_index: 0,
+            content_index: 0,
+            delta: finalResponse,
+          },
+          { type: "response.output_item.done", output_index: 0, item },
+          { type: "response.completed", response: completed },
+        ];
+        return new Response(
+          events
+            .map(
+              (event) =>
+                `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+            )
+            .join(""),
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      },
+    });
+    try {
+      await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
+        createCodex(options) {
+          return new Codex({
+            ...options,
+            config: {
+              ...options.config,
+              model: "gpt-5.5",
+              model_provider: "publication_test",
+              "model_providers.publication_test": {
+                name: "Publication test",
+                base_url: `http://127.0.0.1:${server.port}/v1`,
+                env_key: "PUBLICATION_TEST_KEY",
+                wire_api: "responses",
+                supports_websockets: false,
+                requires_openai_auth: false,
+                request_max_retries: 0,
+                stream_max_retries: 0,
+              },
+            },
+          });
+        },
+        environment: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          HOME: codexHome,
+          CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
+          PUBLICATION_TEST_KEY: "synthetic",
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+    } finally {
+      server.stop(true);
+    }
+
+    const toolNames = requests[0]?.tools?.flatMap(({ name }) =>
+      name === undefined ? [] : [name],
+    );
+    expect(toolNames).not.toContain("view_image");
+    expect(toolNames).not.toContain("update_plan");
+    expect(toolNames).not.toContain("request_user_input");
+    expect(JSON.stringify(requests[0])).not.toContain("native_test");
+  });
+
+  test("supplies the canonical sealed finding to publication policy", async () => {
+    const capture: { prompt?: string } = {};
+    const canonicalFinding = {
+      findingId: "finding-one",
+      severity: {
+        level: "critical",
+        score: 9.8,
+        vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      },
+      validation: { status: "validated" },
+      attackPath: { source: "internet", sink: "command execution" },
+    } as unknown as Finding;
+
+    await enrichPublicationIssues(
+      issues().slice(0, 1),
+      LABELS,
+      [await policyFile()],
+      {
+        codex: fakeCodex(
+          response([
+            {
+              findingId: "finding-one",
+              priority: "urgent",
+              labelIds: [],
+            },
+          ]),
+          capture,
+        ),
+        environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
+        findings: [canonicalFinding],
+      },
+    );
+
+    const input = JSON.parse(capture.prompt!.split("\n").at(-1)!) as {
+      findings: Array<{ canonicalFinding: Finding }>;
+    };
+    expect(input.findings[0]!.canonicalFinding).toEqual(canonicalFinding);
   });
 
   test.each([
