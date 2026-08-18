@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -23,6 +23,7 @@ import {
   repositoryRevision,
   type ScanTarget,
 } from "../src/index.js";
+import { outermostGitMarkerRoot } from "../src/targets.js";
 
 // @ts-expect-error DiffTarget is intentionally nominal; use its constructor helpers.
 const structurallyInvalidTarget: ScanTarget = {
@@ -61,6 +62,21 @@ async function repository(): Promise<string> {
 function git(repo: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 }
+
+test("finds outer Git roots without rejecting local source files", async () => {
+  const repo = await repository();
+  const nested = join(repo, "nested");
+  await mkdir(join(nested, ".git"), { recursive: true });
+  const inside = join(nested, "source.bundle");
+  const outside = join(dirname(repo), "standalone.bundle");
+  await Promise.all([
+    writeFile(inside, "synthetic bundle fixture\n"),
+    writeFile(outside, "synthetic bundle fixture\n"),
+  ]);
+
+  expect(await outermostGitMarkerRoot(inside)).toBe(repo);
+  expect(await outermostGitMarkerRoot(outside)).toBe(outside);
+});
 
 async function createRepositoryGitShim(
   directory: string,

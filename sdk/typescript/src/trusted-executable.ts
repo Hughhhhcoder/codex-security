@@ -37,12 +37,12 @@ export function executableBinding(
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
+  protectedRoots: string | readonly string[],
 ): Promise<TrustedExecutable | null> {
   const inspected = await inspectTrustedExecutable(
     candidate,
     environment,
-    protectedRoot,
+    protectedRoots,
   );
   return inspected.executable === null
     ? null
@@ -52,11 +52,14 @@ export async function resolveTrustedExecutable(
 export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
+  protectedRoots: string | readonly string[],
   { preserveInvocation = false }: { preserveInvocation?: boolean } = {},
 ): Promise<InspectedExecutable> {
-  const root = await realpath(protectedRoot).catch(() =>
-    resolve(protectedRoot),
+  const roots = await Promise.all(
+    (typeof protectedRoots === "string"
+      ? [protectedRoots]
+      : protectedRoots
+    ).map(async (root) => await realpath(root).catch(() => resolve(root))),
   );
   const pathKeys =
     process.platform === "win32"
@@ -81,7 +84,9 @@ export async function inspectTrustedExecutable(
     }
     if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
-    if (canonical === null || isWithin(root, canonical)) continue;
+    if (canonical === null || roots.some((root) => isWithin(root, canonical))) {
+      continue;
+    }
     if (!entries.includes(canonical)) entries.push(canonical);
   }
 
@@ -125,7 +130,7 @@ export async function inspectTrustedExecutable(
   for (const current of candidates) {
     const canonical = await realpath(current.path).catch(() => null);
     if (canonical === null) continue;
-    if (isWithin(root, canonical)) {
+    if (roots.some((root) => isWithin(root, canonical))) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
@@ -137,7 +142,7 @@ export async function inspectTrustedExecutable(
       if (
         preserveInvocation &&
         (!isAbsolute(candidate) ||
-          (await hasProtectedAncestor(root, current.path, canonical)))
+          (await hasProtectedAncestor(roots, current.path, canonical)))
       ) {
         continue;
       }
@@ -164,17 +169,23 @@ export async function inspectTrustedExecutable(
 }
 
 async function hasProtectedAncestor(
-  root: string,
+  roots: readonly string[],
   ...paths: string[]
 ): Promise<boolean> {
   // Identities cover case aliases and junctions in the original invocation.
-  const protectedIdentity = await stat(root, { bigint: true });
+  const protectedIdentities = await Promise.all(
+    roots.map((root) => stat(root, { bigint: true })),
+  );
   for (const path of paths) {
-    for (let directory = dirname(path); ; ) {
+    // A local Git fetch source can itself be a file.
+    for (let directory = path; ; ) {
       const identity = await stat(directory, { bigint: true });
       if (
-        identity.dev === protectedIdentity.dev &&
-        identity.ino === protectedIdentity.ino
+        protectedIdentities.some(
+          (protectedIdentity) =>
+            identity.dev === protectedIdentity.dev &&
+            identity.ino === protectedIdentity.ino,
+        )
       ) {
         return true;
       }

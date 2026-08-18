@@ -484,13 +484,13 @@ async function gitOutput(
 /** @internal */
 export async function resolveGitCommand(
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
+  protectedRoots: string | readonly string[],
 ): Promise<InspectedExecutable> {
   const binding = executableBinding(environment, "CODEX_SECURITY_GIT");
   let inspected = await inspectTrustedExecutable(
     "git",
     environment,
-    protectedRoot,
+    protectedRoots,
   );
   let executable = inspected.executable;
   if (binding.value === "") {
@@ -504,7 +504,7 @@ export async function resolveGitCommand(
     inspected = await inspectTrustedExecutable(
       binding.value,
       inspected.environment,
-      protectedRoot,
+      protectedRoots,
       { preserveInvocation: true },
     );
     if (inspected.executable === null) {
@@ -532,7 +532,8 @@ export async function outermostGitMarkerRoot(
       await lstat(join(current, ".git"));
       root = current;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;

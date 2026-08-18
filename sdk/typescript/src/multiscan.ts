@@ -23,7 +23,11 @@ import type { ScanCost } from "./cost.js";
 import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import { requireSecureOutputAncestry } from "./runtime.js";
-import { resolveGitCommand, type ScanMode } from "./targets.js";
+import {
+  outermostGitMarkerRoot,
+  resolveGitCommand,
+  type ScanMode,
+} from "./targets.js";
 
 const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = [
@@ -803,9 +807,17 @@ async function checkoutRevision(
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  const protectedRoots = [
+    await outermostGitMarkerRoot(await realpath(process.cwd()), signal),
+  ];
+  if (isAbsolute(task.repository)) {
+    protectedRoots.push(
+      await outermostGitMarkerRoot(await realpath(task.repository), signal),
+    );
+  }
   const { executable, environment: gitEnvironment } = await resolveGitCommand(
     environment,
-    resolve(process.cwd()),
+    protectedRoots,
   );
   if (executable === null) {
     throw new Error("Git is not available on a trusted PATH.");

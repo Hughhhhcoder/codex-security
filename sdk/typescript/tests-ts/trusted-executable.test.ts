@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   realpath,
@@ -83,6 +84,69 @@ async function resolveWindowsExecutable(
 }
 
 describe("trusted executable resolution", () => {
+  test("excludes every protected root before selecting an executable", async () => {
+    const root = await temporaryDirectory();
+    const repositories = [join(root, "working"), join(root, "source")];
+    const unsafe = repositories.map((repository) => join(repository, "bin"));
+    const trusted = join(root, "trusted");
+    const name = process.platform === "win32" ? "git.exe" : "git";
+    for (const directory of [...unsafe, trusted]) {
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, name), "synthetic executable\n", {
+        mode: 0o700,
+      });
+    }
+    const linked = join(repositories[1]!, "host-tools");
+    await symlink(
+      trusted,
+      linked,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    expect(
+      await resolveTrustedExecutable(
+        "git",
+        { PATH: [...unsafe, trusted].join(delimiter), KEEP: "ok" },
+        repositories,
+      ),
+    ).toEqual({
+      executable: join(trusted, name),
+      environment: { PATH: trusted, KEEP: "ok" },
+    });
+    for (const path of [...unsafe, linked]) {
+      const inspected = await inspectTrustedExecutable(
+        join(path, name),
+        { PATH: trusted },
+        repositories,
+        { preserveInvocation: true },
+      );
+      expect(inspected.executable).toBeNull();
+    }
+    expect(
+      (
+        await inspectTrustedExecutable(
+          join(trusted, name),
+          { PATH: trusted },
+          repositories,
+          { preserveInvocation: true },
+        )
+      ).executable,
+    ).toBe(join(trusted, name));
+
+    const sourceFile = join(root, "source-file");
+    await link(join(trusted, name), sourceFile);
+    expect(
+      (
+        await inspectTrustedExecutable(
+          join(trusted, name),
+          { PATH: "" },
+          [repositories[0]!, sourceFile],
+          { preserveInvocation: true },
+        )
+      ).executable,
+    ).toBeNull();
+  });
+
   test("accepts safe relative PATH entries without trusting repository links", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
