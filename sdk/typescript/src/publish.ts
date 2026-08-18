@@ -9,6 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import type { LinearClient } from "@linear/sdk";
 import {
   CodexSecurityError,
@@ -896,7 +897,10 @@ async function collectPublicationHandoff(
 
   for (const [findingId, identifier] of argumentDriftIdentifiers) {
     if (created.get(findingId)?.issueIdentifier === identifier) continue;
-    indeterminateError ??= `Linear issue ${identifier} may have been created for finding ${findingId} with unexpected arguments. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover the issue before retrying to avoid creating a duplicate issue.`;
+    const safeIdentifier = stripVTControlCharacters(
+      safeErrorMessage(identifier),
+    );
+    indeterminateError ??= `Linear issue ${safeIdentifier} may have been created for finding ${findingId} with unexpected arguments. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover the issue before retrying to avoid creating a duplicate issue.`;
   }
 
   return {

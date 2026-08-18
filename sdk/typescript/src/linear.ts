@@ -10,6 +10,7 @@ import type { LinearPublicationLabel } from "./publication.js";
 
 export interface LinearPublicationCatalogLabel extends LinearPublicationLabel {
   groupId?: string;
+  groupName?: string;
 }
 
 export type LinearClientFactory<
@@ -72,6 +73,16 @@ export async function loadLinearPublicationContext(
   const page = await team.labels({ first: 50 });
   while (page.pageInfo.hasNextPage) await page.fetchNext();
   const labels = new Map<string, LinearPublicationCatalogLabel>();
+  const groupNames = new Map(
+    page.nodes
+      .filter(
+        (label) =>
+          label.isGroup &&
+          label.archivedAt === undefined &&
+          label.retiredById === undefined,
+      )
+      .map((label) => [label.id, label.name]),
+  );
   for (const label of page.nodes) {
     if (
       label.isGroup ||
@@ -84,6 +95,10 @@ export async function loadLinearPublicationContext(
       id: label.id,
       name: label.name,
       ...(label.parentId === undefined ? {} : { groupId: label.parentId }),
+      ...(label.parentId === undefined ||
+      groupNames.get(label.parentId) === undefined
+        ? {}
+        : { groupName: groupNames.get(label.parentId)! }),
     });
   }
   return {

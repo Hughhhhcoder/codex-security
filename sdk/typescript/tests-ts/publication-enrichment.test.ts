@@ -6,7 +6,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -25,8 +25,18 @@ const LABELS = [
   { id: "label-internet", name: "Internet exposed" },
 ] as const;
 const GROUPED_LABELS: readonly LinearPublicationCatalogLabel[] = [
-  { id: "label-customer", name: "Customer data", groupId: "impact" },
-  { id: "label-internal", name: "Internal data", groupId: "impact" },
+  {
+    id: "label-customer",
+    name: "Customer data",
+    groupId: "impact",
+    groupName: "Impact",
+  },
+  {
+    id: "label-internal",
+    name: "Internal data",
+    groupId: "impact",
+    groupName: "Impact",
+  },
 ];
 
 afterEach(async () => {
@@ -516,13 +526,7 @@ describe("publication knowledge-base enrichment", () => {
       server.stop(true);
     }
 
-    const toolNames = requests[0]?.tools?.flatMap(({ name }) =>
-      name === undefined ? [] : [name],
-    );
-    expect(toolNames).not.toContain("view_image");
-    expect(toolNames).not.toContain("update_plan");
-    expect(toolNames).not.toContain("request_user_input");
-    expect(toolNames).not.toContain("image_gen");
+    expect(requests[0]?.tools ?? []).toEqual([]);
     expect(JSON.stringify(requests[0])).not.toContain("native_test");
     expect(
       await readFile(marker, "utf8").catch(() => undefined),
@@ -544,7 +548,7 @@ describe("publication knowledge-base enrichment", () => {
 
     await enrichPublicationIssues(
       issues().slice(0, 1),
-      LABELS,
+      GROUPED_LABELS,
       [await policyFile()],
       {
         codex: fakeCodex(
@@ -563,9 +567,14 @@ describe("publication knowledge-base enrichment", () => {
     );
 
     const input = JSON.parse(capture.prompt!.split("\n").at(-1)!) as {
+      allowedLabels: LinearPublicationCatalogLabel[];
       findings: Array<{ canonicalFinding: Finding }>;
     };
     expect(input.findings[0]!.canonicalFinding).toEqual(canonicalFinding);
+    expect(input.allowedLabels[0]).toMatchObject({
+      groupId: "impact",
+      groupName: "Impact",
+    });
   });
 
   test.each([
@@ -815,6 +824,16 @@ describe("publication knowledge-base enrichment", () => {
       CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
       OPENAI_API_KEY: "codex-key",
     });
+  });
+
+  test("expands home-relative Codex configuration paths", async () => {
+    const environment = await publicationEnrichmentEnvironment({
+      CODEX_HOME: "~/.codex-publication-test",
+    });
+
+    expect(environment["CODEX_HOME"]).toBe(
+      join(homedir(), ".codex-publication-test"),
+    );
   });
 
   test("cleans the extracted knowledge base after success", async () => {

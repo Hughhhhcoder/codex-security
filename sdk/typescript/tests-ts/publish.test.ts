@@ -2134,6 +2134,41 @@ describe("connected Linear publication", () => {
     ]);
   });
 
+  test("sanitizes model-authored identifiers in recovery diagnostics", async () => {
+    const publication = preparedPublication();
+    const unsafeIdentifier = "SYNTH\u001B]52;c;copied-secret\u0007";
+    let error: unknown;
+
+    try {
+      await publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              const drifted = handoffRecord(
+                publication,
+                publication.issues[0]!,
+                { identifier: unsafeIdentifier },
+              );
+              drifted["arguments"] = { title: "Unexpected title" };
+              await writeHandoff(input, [drifted]);
+              return { exitCode: 0, stdout: "", stderr: "" };
+            },
+          },
+        ),
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain("\u001B");
+    expect((error as Error).message).not.toContain("copied-secret");
+  });
+
   test("rejects handoffs contradicted by observed trusted Linear mutations", async () => {
     const scenarios: Array<{
       name: string;
