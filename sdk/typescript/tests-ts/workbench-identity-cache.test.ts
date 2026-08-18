@@ -491,6 +491,106 @@ with ExitStack() as stack:
             "deepId": deep["scanId"], "registeredInsideTransaction": checks,
             "generationIndex": connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'scans_by_repository_generation'").fetchone() is not None,
         }))
+    elif scenario == "scan-reuse":
+        for name, stored, live, generation in (
+            ("current", "generation-current", None, "generation-current"),
+            ("legacy", None, "generation-legacy", None),
+            ("refused", "generation-before", "generation-after", "generation-before"),
+            ("contradictory", "generation-current", None, "generation-other"),
+            ("missing", "generation-missing", None, "generation-missing"),
+        ):
+            add_target(name, stored, live)
+            add_scan(name + "-scan", name, generation=generation, status="running")
+        missing.add(paths["missing"])
+        connection.commit()
+        scan = lambda name: connection.execute(
+            "SELECT * FROM scans WHERE id = ?", (name + "-scan",)
+        ).fetchone()
+        accepted = {}
+        for name in paths:
+            try:
+                state.require_scan_checkout_owner(connection, scan(name))
+            except SystemExit:
+                accepted[name] = False
+            else:
+                accepted[name] = True
+
+        def reuse(name, kind):
+            target = Path(paths[name])
+            scan_id = name + "-scan"
+            workspace_id = "workspace-" + scan_id
+            mode = "deep" if kind.startswith("deep-") else "standard"
+            headless = kind == "headless"
+            connection.execute(
+                "UPDATE workspaces SET thread_id = 'synthetic-thread', active_scan_id = ?, "
+                "default_scope = '.', default_mode = ?, submitted = 1 WHERE id = ?",
+                (scan_id, mode, workspace_id),
+            )
+            connection.execute(
+                "UPDATE scans SET mode = ?, handoff_status = 'delivered', "
+                "handoff_claim_token = ?, continuation_thread_id = ? WHERE id = ?",
+                (mode, "synthetic-token" if headless else None,
+                 "synthetic-thread" if headless else None, scan_id),
+            )
+            connection.commit()
+            row = scan(name)
+            workspace = connection.execute(
+                "SELECT * FROM workspaces WHERE id = ?", (workspace_id,)
+            ).fetchone()
+            ensure_run = Mock()
+            with ExitStack() as mocks:
+                for module in (workbench, deep_workbench):
+                    mocks.enter_context(patch.object(module, "require_uuid", side_effect=lambda value, label: value))
+                    mocks.enter_context(patch.object(module, "require_remediation_target", return_value=target))
+                    mocks.enter_context(patch.object(module, "directory_snapshot_regular_file_count", return_value=0))
+                mocks.enter_context(patch.object(workbench, "workspace_state", return_value={}))
+                mocks.enter_context(patch.object(workbench, "scan_context", return_value={}))
+                mocks.enter_context(patch.object(workbench, "inspect_setup_values", return_value={
+                    "target": {"targetPath": str(target)}, "scope": ".", "diffTarget": None,
+                }))
+                mocks.enter_context(patch.object(workbench, "scan_target_identity", return_value=(
+                    "synthetic", None, 7, metadata[str(target)].st_ino,
+                )))
+                mocks.enter_context(patch.object(workbench, "scan_target_root", return_value=root / "artifacts"))
+                for function, value in {
+                    "require_target": target, "require_scope": ".",
+                    "require_scan": row, "require_workspace": workspace,
+                    "require_owned_scan": (row, workspace), "git_revision": "synthetic",
+                    "worktree_content_digest": "snapshot", "effective_deep_scan_config": {},
+                    "now": timestamp, "deep_scan_result": {},
+                }.items():
+                    mocks.enter_context(patch.object(deep_workbench, function, return_value=value))
+                mocks.enter_context(patch.object(deep_workbench, "require_scannable_target"))
+                mocks.enter_context(patch.object(deep_workbench, "require_current_continuation"))
+                mocks.enter_context(patch.object(deep_workbench, "ensure_deep_scan_run", ensure_run))
+                existing = [row] if kind == "deep-direct" else [None, row] if kind == "deep-transaction" else [None, None]
+                mocks.enter_context(patch.object(deep_workbench, "existing_deep_scan_for_target", side_effect=existing))
+                mocks.enter_context(patch.object(deep_workbench, "terminal_deep_scan_for_target_snapshot", return_value=row))
+                args = argparse.Namespace(
+                    workspace_id=workspace_id, target_path=str(target), scope=".", mode="standard",
+                    thread_id="synthetic-thread", diff_target_kind=None, diff_base_revision=None,
+                    diff_head_revision=None, diff_content_digest=None, user_context=None,
+                    target_summary=None, scan_root=None, model=None, reasoning_effort=None,
+                    claim_token=None, workflow_version="synthetic",
+                )
+                try:
+                    if kind == "workspace":
+                        workbench.start_scan(connection, args)
+                    elif kind in ("prompt", "headless"):
+                        workbench._start_prompt_driven_scan(connection, args, headless_standard=headless)
+                    else:
+                        deep_workbench.begin_deep_scan_for_target(connection, args, "synthetic-thread")
+                except SystemExit:
+                    return {"accepted": False, "createdRun": ensure_run.call_count != 0}
+                return {"accepted": True, "createdRun": ensure_run.call_count != 0}
+
+        kinds = ("workspace", "prompt", "headless", "deep-direct", "deep-transaction", "deep-terminal")
+        print(json.dumps({
+            "owners": accepted,
+            "reuse": {name: {kind: reuse(name, kind) for kind in kinds}
+                      for name in ("current", "refused")},
+            "legacyGeneration": scan("legacy")["repository_generation"],
+        }))
     elif scenario == "birth-time":
         path = "/synthetic repository/.git"
         real_sizeof = ctypes.sizeof
@@ -1930,6 +2030,39 @@ test("revalidates saved workspace identity inside the scan-start transaction", (
   expect(result["verifiedInsideTransaction"]).toBe(true);
   expect(result["scanCount"]).toBe(1);
   expect(result["stored"]).toBe("repository-current");
+});
+
+test("checks current ownership before rejoining saved scan tasks", () => {
+  const result = run("scan-reuse");
+
+  expect(result["owners"]).toEqual({
+    current: true,
+    legacy: true,
+    refused: false,
+    contradictory: false,
+    missing: false,
+  });
+  expect(result["reuse"]).toEqual({
+    current: {
+      workspace: { accepted: true, createdRun: false },
+      prompt: { accepted: true, createdRun: false },
+      headless: { accepted: true, createdRun: false },
+      "deep-direct": { accepted: true, createdRun: true },
+      "deep-transaction": { accepted: true, createdRun: true },
+      "deep-terminal": { accepted: true, createdRun: false },
+    },
+    refused: Object.fromEntries(
+      [
+        "workspace",
+        "prompt",
+        "headless",
+        "deep-direct",
+        "deep-transaction",
+        "deep-terminal",
+      ].map((kind) => [kind, { accepted: false, createdRun: false }]),
+    ),
+  });
+  expect(result["legacyGeneration"]).toBeNull();
 });
 
 test("quarantines unproved public-v30 bindings without discarding historical records", () => {

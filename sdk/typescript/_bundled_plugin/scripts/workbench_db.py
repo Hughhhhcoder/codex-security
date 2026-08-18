@@ -123,6 +123,7 @@ from workbench_target_state import (
     backfill_security_targets,
     ensure_security_target,
     register_security_target,
+    require_scan_checkout_owner,
 )
 from workbench_validation import (
     bounded_output_text,
@@ -821,6 +822,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             (workspace["id"],),
         ).fetchone()
         if active is not None:
+            require_scan_checkout_owner(connection, active)
             return workspace_state(connection, workspace["id"])
         workspace_version = workspace["updated_at"]
         scan_id = str(uuid.uuid4())
@@ -865,6 +867,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             (workspace["id"],),
         ).fetchone()
         if active is not None:
+            require_scan_checkout_owner(connection, active)
             if manages_transaction:
                 connection.commit()
             return workspace_state(connection, workspace["id"])
@@ -1021,6 +1024,7 @@ def _start_prompt_driven_scan(
             ),
         ).fetchone()
         if existing is not None:
+            require_scan_checkout_owner(connection, existing)
             connection.commit()
             return {**scan_context(connection, existing["id"]), "startDisposition": "joined"}
         target_root.mkdir(parents=True, exist_ok=True)

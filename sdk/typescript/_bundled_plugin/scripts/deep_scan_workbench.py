@@ -25,7 +25,7 @@ from workbench_target import (
     git_revision,
     worktree_content_digest,
 )
-from workbench_target_state import RegisteredRepositoryTarget
+from workbench_target_state import RegisteredRepositoryTarget, require_scan_checkout_owner
 from workbench_validation import optional_text, require_uuid, user_text
 
 DEEP_SCAN_WORKER_KINDS = ("setup", "discovery", "dedup")
@@ -620,6 +620,7 @@ def begin_deep_scan_for_scan(
 ) -> dict[str, Any]:
     scan_id = require_uuid(scan_id, "scan-id")
     candidate = require_scan(connection, scan_id)
+    require_scan_checkout_owner(connection, candidate)
     workspace = require_workspace(connection, candidate["workspace_id"])
     if (
         candidate["mode"] == "deep"
@@ -681,6 +682,7 @@ def begin_deep_scan_for_scan(
     connection.execute("BEGIN IMMEDIATE")
     try:
         scan, _ = require_owned_scan(connection, scan_id, thread_id)
+        require_scan_checkout_owner(connection, scan)
         require_current_continuation(
             scan,
             args.claim_token,
@@ -720,6 +722,7 @@ def begin_deep_scan_for_target(
     try:
         existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
         if existing is not None:
+            require_scan_checkout_owner(connection, existing)
             existing_run = connection.execute(
                 "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (existing["id"],)
             ).fetchone()
@@ -755,6 +758,7 @@ def begin_deep_scan_for_target(
             target_inode,
         )
         if terminal is not None:
+            require_scan_checkout_owner(connection, terminal)
             connection.commit()
             return deep_scan_result(
                 connection,

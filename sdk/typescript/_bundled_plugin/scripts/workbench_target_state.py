@@ -633,6 +633,18 @@ class RepositoryIdentityCache:
         return self._origins[state.target_path]
 
 
+def require_scan_checkout_owner(
+    connection: sqlite3.Connection, scan: sqlite3.Row | dict
+) -> None:
+    identities = RepositoryIdentityCache(connection)
+    owner = identities.for_row(scan)
+    owner.require_owner()
+    if owner.missing or not identities.scope_for_scan(scan).contains(scan):
+        raise SystemExit(
+            "The saved scan no longer matches the selected repository checkout."
+        )
+
+
 def _pre_release_repository_identities(identity: GitRepositoryIdentity) -> set[str]:
     directory = os.path.normcase(identity.common_directory)
     relative = os.path.normcase(os.fspath(Path(identity.relative_path))).replace(os.sep, "/")
