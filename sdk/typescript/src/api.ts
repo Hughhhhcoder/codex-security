@@ -49,6 +49,7 @@ import {
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   mergedCodexConfig,
+  resolveCodexProfile,
   scanApprovalPolicy,
   scanModelConfiguration,
   scanModelProvider,
@@ -669,7 +670,7 @@ export class CodexSecurity {
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
         options.auth,
-        policyCodexOverrides(session.sessionConfig),
+        policyCodexConfig(session.sessionConfig),
       );
       const reportCost = (current: Readonly<ScanCost>): void => {
         const total = addScanCosts(accumulatedCost, current);
@@ -1932,16 +1933,10 @@ export class CodexSecurity {
     session: PreparedSession,
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
-    overrides: JsonObject = {},
+    config?: JsonObject,
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
-    const {
-      runtime,
-      python,
-      modelProvider,
-      externalProvider,
-      apiKey,
-      sessionConfig,
-    } = session;
+    const { runtime, python, modelProvider, externalProvider, apiKey } =
+      session;
     const environment = {
       ...pluginExecutionEnvironment(
         python,
@@ -1955,7 +1950,7 @@ export class CodexSecurity {
       CODEX_HOME: runtime.codexHome,
       ...runtimePaths,
     };
-    const sdkCodexConfig = { ...sessionConfig, ...overrides };
+    const sdkCodexConfig = { ...(config ?? session.sessionConfig) };
     // Projects and permissions already live in generated TOML files; the SDK
     // cannot safely encode their path and selector keys as dotted overrides.
     delete sdkCodexConfig["projects"];
@@ -3505,33 +3500,18 @@ function requirePolicyConfigKeys(config: unknown): void {
     );
 }
 
-function policyCodexOverrides(config: JsonObject): JsonObject {
+function policyCodexConfig(config: JsonObject): JsonObject {
   requirePolicyConfigKeys(config);
-  const features = isRecord(config["features"]) ? config["features"] : {};
-  const profiles = isRecord(config["profiles"])
-    ? structuredClone(config["profiles"])
-    : undefined;
-  if (profiles !== undefined) {
-    for (const profile of Object.values(profiles)) {
-      if (!isRecord(profile)) continue;
-      delete profile["mcp_servers"];
-      delete profile["web_search"];
-      delete profile["sandbox_workspace_write"];
-      const profileFeatures = profile["features"];
-      if (isRecord(profileFeatures)) {
-        delete profileFeatures["plugins"];
-        delete profileFeatures["apps"];
-      }
-    }
-  }
+  const resolved = resolveCodexProfile(config);
+  const features = isRecord(resolved["features"]) ? resolved["features"] : {};
   return {
+    ...resolved,
     approval_policy: "never",
     default_permissions: POLICY_PERMISSION_PROFILE,
     features: { ...features, plugins: false, apps: false },
     mcp_servers: {},
     web_search: "disabled",
     sandbox_workspace_write: { network_access: false },
-    ...(profiles === undefined ? {} : { profiles }),
   };
 }
 

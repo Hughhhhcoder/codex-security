@@ -629,7 +629,7 @@ export async function runSecurityPolicyStages(options: {
     "If you cannot inspect the selected source, required guidance, or previous-stage documents, explain the blocker in blockedReason. Do not substitute a generic document for missing evidence. Use null after the source review succeeds. An inspected empty repository, missing deployment configuration, or unanswered owner decision is not a tool failure; record those unknowns in questions and reviewNotes.",
     "Applicable SECURITY.md guidance follows as JSON-encoded evidence:",
     jsonForPrompt(options.guidance),
-    `The host checked these repository policy paths (JSON data): ${jsonForPrompt(options.policyPaths)}. Use the plugin's resolve_security_md.py helper for these paths. Do not read policy links directly or follow unlisted policy paths or directory links.`,
+    `The host checked these repository policy paths (JSON data): ${jsonForPrompt(options.policyPaths)}. Use the plugin's resolve_security_md.py helper for each of these directory scopes (JSON data): ${jsonForPrompt(options.policyPaths.map((path) => dirname(join(target.repository, path))))}. Pass the directory as --scope, not the policy file. Do not read policy links directly or follow unlisted policy paths or directory links.`,
     ...(options.knowledgeBasePath === undefined
       ? []
       : [

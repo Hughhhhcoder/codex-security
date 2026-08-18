@@ -518,7 +518,22 @@ describe("CodexSecurity policy API", () => {
       outputDir: f.outputDir,
     });
     expect(f.prompts[0]).toContain('["component/child/SECURITY.md"]');
+    const policyScope = join(component, "child");
+    expect(f.prompts[0]).toContain(JSON.stringify([policyScope]));
     expect(f.prompts[0]).toContain("resolve_security_md.py helper");
+    expect(
+      execFileSync(
+        PYTHON,
+        [
+          join(PLUGIN_ROOT, "scripts", "resolve_security_md.py"),
+          "--repo",
+          f.repository,
+          "--scope",
+          policyScope,
+        ],
+        { encoding: "utf8" },
+      ),
+    ).toContain("# Owner policy");
     expect(f.prompts[0]).not.toContain("linked-directory/SECURITY.md");
     expect(f.prompts[0]).not.toContain("Unlisted synthetic policy");
     await f.security.close();
@@ -785,7 +800,7 @@ describe("CodexSecurity policy API", () => {
       config: {
         codexOverrides: {
           profile: "selected",
-          features: { apps: true },
+          features: { apps: true, goals: false },
           mcp_servers: { synthetic: { command: "synthetic-tool" } },
           sandbox_workspace_write: {
             network_access: true,
@@ -794,6 +809,7 @@ describe("CodexSecurity policy API", () => {
           profiles: {
             selected: {
               model: "gpt-5.6-terra",
+              model_reasoning_effort: "high",
               features: { apps: true, goals: true },
               mcp_servers: { synthetic: { command: "synthetic-profile-tool" } },
               web_search: "live",
@@ -805,15 +821,16 @@ describe("CodexSecurity policy API", () => {
     });
     await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
     expect(f.configuration()?.config).toMatchObject({
+      model: "gpt-5.6-terra",
+      model_reasoning_effort: "high",
       default_permissions: "codex_security_policy",
-      features: { plugins: false, apps: false },
+      features: { plugins: false, apps: false, goals: true },
       mcp_servers: {},
       web_search: "disabled",
       sandbox_workspace_write: { network_access: false },
-      profiles: {
-        selected: { model: "gpt-5.6-terra", features: { goals: true } },
-      },
     });
+    expect(f.configuration()?.config).not.toHaveProperty("profile");
+    expect(f.configuration()?.config).not.toHaveProperty("profiles");
     const serialized = JSON.stringify(f.configuration()?.config);
     expect(serialized).not.toContain("synthetic-tool");
     expect(serialized).not.toContain("synthetic-profile-tool");
