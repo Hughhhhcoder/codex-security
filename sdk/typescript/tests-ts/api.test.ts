@@ -2121,6 +2121,57 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "loads deep scan settings from a backslash home-relative CODEX_HOME",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const ambientHome = join(root, "ambient-home");
+      const codexHome = join(root, "runtime-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(join(ambientHome, "codex-security"), { recursive: true });
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(
+        join(ambientHome, "codex-security", "config.toml"),
+        "[deep_scan]\nworkers = 5\n",
+      );
+      const client = new TestClient(
+        {},
+        {
+          environment: {
+            CODEX_HOME: "~\\ambient-home",
+            USERPROFILE: root,
+          },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("deep scan settings captured");
+              },
+            }),
+          }),
+        },
+      );
+
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "deep scan settings captured",
+      );
+      expect(
+        await readFile(
+          join(codexHome, "codex-security", "config.toml"),
+          "utf8",
+        ),
+      ).toContain("workers = 5");
+      await client.close();
+    },
+  );
+
   test.each([
     "removed",
     "without deep settings",
@@ -2245,6 +2296,47 @@ describe("CodexSecurity orchestration", () => {
     expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
     await client.close();
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "preserves ambient configuration when the same Windows home uses different casing",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      const configPath = join(codexHome, "codex-security", "config.toml");
+      const originalConfiguration = "[other]\nenabled = true\n";
+      await mkdir(repository);
+      await mkdir(join(codexHome, "codex-security"), { recursive: true });
+      await writeFile(configPath, originalConfiguration);
+      await mkdir(scanDir, { mode: 0o700 });
+
+      const client = new TestClient(
+        {},
+        {
+          environment: { CODEX_HOME: codexHome.toUpperCase() },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed() {
+                throw new Error("deep scan settings captured");
+              },
+            }),
+          }),
+        },
+      );
+
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "deep scan settings captured",
+      );
+      expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
+      await client.close();
+    },
+  );
 
   test("rejects a scan registration without an authoritative target contract", async () => {
     const root = await temporaryDirectory();
