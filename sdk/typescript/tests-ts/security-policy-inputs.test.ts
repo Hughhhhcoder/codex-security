@@ -206,6 +206,29 @@ describe("shared security-policy inputs", () => {
     expect(result.stderr).toContain("Git metadata");
   });
 
+  test("does not confuse distinct case-sensitive Windows directories", () => {
+    const result = spawnSync(
+      python,
+      [
+        "-I",
+        "-c",
+        `import runpy, sys
+from pathlib import PureWindowsPath
+class CaseSensitivePath(PureWindowsPath):
+    def samefile(self, other):
+        return str(self) == str(other)
+guard = runpy.run_path(sys.argv[1])["_git_metadata"]
+root = CaseSensitivePath("C:/repo")
+metadata = root / "GitData"
+assert not guard(root / "gitdata" / "SECURITY.md", root, (metadata,))
+assert guard(metadata / "SECURITY.md", root, (metadata,))`,
+        join(PLUGIN_ROOT, "scripts", "resolve_security_md.py"),
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+  });
+
   test("enforces the existing byte and UTF-8 contract in both resolver modes", async () => {
     for (const content of [
       Buffer.alloc(1024 * 1024 + 1, "x"),
