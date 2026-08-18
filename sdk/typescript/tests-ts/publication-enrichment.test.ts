@@ -240,6 +240,7 @@ describe("publication knowledge-base enrichment", () => {
     expect(config).toMatchObject({
       "mcp_servers.synthetic.enabled": false,
       "mcp_servers.remote_server.enabled": false,
+      "features.image_generation": false,
       "features.view_image": false,
       tools: {
         experimental_request_user_input: { enabled: false },
@@ -277,18 +278,26 @@ describe("publication knowledge-base enrichment", () => {
     );
   });
 
-  test("disables MCP servers inherited from the enrichment working directory", async () => {
+  test("uses Codex trust decisions for project MCP configuration", async () => {
     let config: unknown;
     const project = await mkdtemp(
       join(tmpdir(), "codex-security-publication-project-config-test-"),
     );
     temporaryDirectories.push(project);
+    const codexHome = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-project-home-test-"),
+    );
+    temporaryDirectories.push(codexHome);
     const workingDirectory = join(project, "tmp", "knowledge-base");
     await mkdir(join(project, ".codex"), { recursive: true });
     await mkdir(workingDirectory, { recursive: true });
     await writeFile(
+      join(codexHome, "config.toml"),
+      '[mcp_servers.ambient_tool]\ncommand = "ambient-tool"\n',
+    );
+    await writeFile(
       join(project, ".codex", "config.toml"),
-      '[mcp_servers.project_tool]\ncommand = "project-tool"\n',
+      "[mcp_servers.ambient_tool]\nenabled = false\n",
     );
     await writeFile(join(workingDirectory, "policy.md"), "No metadata.");
 
@@ -305,7 +314,10 @@ describe("publication knowledge-base enrichment", () => {
           ),
         );
       },
-      environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
+      environment: {
+        CODEX_HOME: codexHome,
+        CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
+      },
       prepareKnowledgeBase: async () => ({
         path: workingDirectory,
         sources: [],
@@ -314,8 +326,28 @@ describe("publication knowledge-base enrichment", () => {
     });
 
     expect(config).toMatchObject({
-      "mcp_servers.project_tool.enabled": false,
+      "mcp_servers.ambient_tool.enabled": false,
     });
+  });
+
+  test("fails before prompting when effective settings prevent isolation", async () => {
+    let started = false;
+    await expect(
+      enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
+        createCodex() {
+          started = true;
+          return fakeCodex("{}");
+        },
+        environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
+        loadConfiguredMcpServers: async () => [],
+        verifyCodexIsolation: async () => {
+          throw new Error(
+            "Codex configuration does not allow publication enrichment to disable every external tool.",
+          );
+        },
+      }),
+    ).rejects.toThrow(/does not allow.*disable every external tool/u);
+    expect(started).toBe(false);
   });
 
   test("removes configurable data access from the native enrichment turn", async () => {
@@ -343,6 +375,28 @@ describe("publication knowledge-base enrichment", () => {
         "});",
       ].join("\n"),
     );
+    const jwt = (payload: Record<string, unknown>) =>
+      `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.synthetic`;
+    const token = jwt({
+      "https://api.openai.com/auth": {
+        chatgpt_plan_type: "pro",
+        chatgpt_account_id: "synthetic-account",
+        chatgpt_user_id: "synthetic-user",
+      },
+    });
+    await writeFile(
+      join(codexHome, "auth.json"),
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: {
+          id_token: token,
+          access_token: token,
+          refresh_token: "synthetic-refresh",
+          account_id: "synthetic-account",
+        },
+        last_refresh: new Date().toISOString(),
+      }),
+    );
     await writeFile(
       join(codexHome, "config.toml"),
       [
@@ -366,6 +420,10 @@ describe("publication knowledge-base enrichment", () => {
       hostname: "127.0.0.1",
       port: 0,
       async fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (request.method !== "POST" || !path.endsWith("/responses")) {
+          return Response.json({}, { status: 404 });
+        }
         requests.push(
           (await request.json()) as {
             tools?: Array<{ name?: string }>;
@@ -425,6 +483,8 @@ describe("publication knowledge-base enrichment", () => {
             ...options,
             config: {
               ...options.config,
+              chatgpt_base_url: `http://127.0.0.1:${server.port}`,
+              cli_auth_credentials_store: "file",
               model: "gpt-5.5",
               model_provider: "publication_test",
               "model_providers.publication_test": {
@@ -433,7 +493,7 @@ describe("publication knowledge-base enrichment", () => {
                 env_key: "PUBLICATION_TEST_KEY",
                 wire_api: "responses",
                 supports_websockets: false,
-                requires_openai_auth: false,
+                requires_openai_auth: true,
                 request_max_retries: 0,
                 stream_max_retries: 0,
               },
@@ -459,6 +519,7 @@ describe("publication knowledge-base enrichment", () => {
     expect(toolNames).not.toContain("view_image");
     expect(toolNames).not.toContain("update_plan");
     expect(toolNames).not.toContain("request_user_input");
+    expect(toolNames).not.toContain("image_gen");
     expect(JSON.stringify(requests[0])).not.toContain("native_test");
     expect(
       await readFile(marker, "utf8").catch(() => undefined),

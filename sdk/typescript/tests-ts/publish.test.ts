@@ -2084,6 +2084,56 @@ describe("connected Linear publication", () => {
     expect(records[1]!["issueIdentifier"]).toBe("SEC-2");
   });
 
+  test("retains a drifted issue when a trusted event reports another ID", async () => {
+    const publication = preparedPublication();
+    let handoffFile: string | undefined;
+    let persisted: readonly string[] = [];
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              const drifted = handoffRecord(
+                publication,
+                publication.issues[0]!,
+                { identifier: "SYNTH-DRIFTED" },
+              );
+              drifted["arguments"] = { title: "Unexpected title" };
+              await writeHandoff(input, [drifted]);
+              return {
+                exitCode: 0,
+                stdout: issueEvent(publication.issues[0]!, {
+                  identifier: "SYNTH-VERIFIED",
+                }),
+                stderr: "",
+              };
+            },
+            recordPublishedIssues: async (_prepared, created) => {
+              persisted = created.map(({ issueIdentifier }) => issueIdentifier);
+              return [...created];
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(/SYNTH-DRIFTED may have been created.*indeterminate/u);
+
+    expect(persisted).toEqual(["SYNTH-VERIFIED"]);
+    const records = (await readFile(handoffFile!, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => record["issueIdentifier"])).toEqual([
+      "SYNTH-DRIFTED",
+      "SYNTH-VERIFIED",
+    ]);
+  });
+
   test("rejects handoffs contradicted by observed trusted Linear mutations", async () => {
     const scenarios: Array<{
       name: string;

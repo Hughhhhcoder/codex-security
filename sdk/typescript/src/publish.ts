@@ -895,7 +895,7 @@ async function collectPublicationHandoff(
   }
 
   for (const [findingId, identifier] of argumentDriftIdentifiers) {
-    if (created.has(findingId)) continue;
+    if (created.get(findingId)?.issueIdentifier === identifier) continue;
     indeterminateError ??= `Linear issue ${identifier} may have been created for finding ${findingId} with unexpected arguments. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover the issue before retrying to avoid creating a duplicate issue.`;
   }
 
