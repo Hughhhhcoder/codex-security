@@ -210,6 +210,75 @@ describe("bundled workbench trusted Git", () => {
     expect(JSON.parse(result.stdout)).toEqual({ status: 127, output: "" });
   });
 
+  test("treats cyclic saved targets as unavailable Git probes", () => {
+    const target = fixture();
+    const result = probe(
+      target,
+      [
+        "import errno, workbench_target",
+        "from unittest.mock import patch",
+        "statuses = []",
+        "for failure in (RuntimeError('synthetic symlink loop'), OSError(errno.ELOOP, 'synthetic symlink loop')):",
+        "    with patch.object(Path, 'resolve', side_effect=failure), patch.object(workbench_target.subprocess, 'run', side_effect=AssertionError('unexpected Git execution')):",
+        "        statuses.append(git_command(Path(sys.argv[2]), 'status', text=True).returncode)",
+        "permission_error = False",
+        "try:",
+        "    with patch.object(Path, 'resolve', side_effect=PermissionError(errno.EACCES, 'synthetic permission error')):",
+        "        git_command(Path(sys.argv[2]), 'status', text=True)",
+        "except PermissionError:",
+        "    permission_error = True",
+        "print(json.dumps({'statuses': statuses, 'permissionError': permission_error}))",
+      ],
+      { environment: { CODEX_SECURITY_GIT: target.git } },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      statuses: [127, 127],
+      permissionError: true,
+    });
+  });
+
+  test("handles cyclic configured executables and PATH entries", () => {
+    const target = fixture();
+    const result = probe(target, [
+      "import errno, workbench_target",
+      "from unittest.mock import patch",
+      "repository = Path(sys.argv[2])",
+      "directory = repository.parent",
+      "loop = directory / ('git.exe' if sys.platform == 'win32' else 'git')",
+      "original_resolve = Path.resolve",
+      "outcomes = []",
+      "for failure in (RuntimeError('synthetic symlink loop'), OSError(errno.ELOOP, 'synthetic symlink loop')):",
+      "    def resolve(path, *args, **kwargs):",
+      "        if path == loop:",
+      "            raise failure",
+      "        return original_resolve(path, *args, **kwargs)",
+      "    with patch.object(Path, 'resolve', resolve):",
+      "        configured = None",
+      "        try:",
+      "            workbench_target._trusted_git_executable(repository, {'CODEX_SECURITY_GIT': str(loop), 'PATH': ''})",
+      "        except SystemExit as error:",
+      "            configured = str(error)",
+      "        from_path = workbench_target._trusted_git_executable(repository, {'PATH': str(directory)})",
+      "    def resolve_directory(path, *args, **kwargs):",
+      "        if path == directory:",
+      "            raise failure",
+      "        return original_resolve(path, *args, **kwargs)",
+      "    with patch.object(Path, 'resolve', resolve_directory):",
+      "        from_directory = workbench_target._trusted_git_executable(repository, {'PATH': str(directory)})",
+      "    outcomes.append({'configured': configured, 'path': from_path, 'directory': from_directory})",
+      "print(json.dumps(outcomes))",
+    ]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(
+      Array.from({ length: 2 }, () => ({
+        configured: "CODEX_SECURITY_GIT does not name an available executable.",
+        path: null,
+        directory: null,
+      })),
+    );
+  });
+
   test("uses default lookup only when PATH is absent", async () => {
     const target = fixture();
     const defaultPath =

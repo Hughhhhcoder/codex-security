@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import os
 import shutil
@@ -132,7 +133,12 @@ def _protected_git_root(target: Path) -> Path | None:
             except FileNotFoundError:
                 continue
             root = ancestor
-    except (FileNotFoundError, NotADirectoryError):
+    except (FileNotFoundError, NotADirectoryError, RuntimeError):
+        # pathlib raised RuntimeError for symlink loops before Python 3.13.
+        return None
+    except OSError as error:
+        if error.errno != errno.ELOOP:
+            raise
         return None
     return root
 
@@ -184,7 +190,7 @@ def _trusted_executable(
                 for ancestor in candidate.parents
             ):
                 raise SystemExit(f"{setting} must stay outside the protected repository.")
-        except OSError as error:
+        except (OSError, RuntimeError) as error:
             raise SystemExit(f"{setting} does not name an available executable.") from error
         if not _is_native_executable(candidate, canonical):
             raise SystemExit(f"{setting} does not name an available executable.")
@@ -209,7 +215,7 @@ def _trusted_executable(
             directory = Path(entry).resolve(strict=True)
             if _inside_protected_git_root(directory, root):
                 continue
-        except OSError:
+        except (OSError, RuntimeError):
             continue
         candidate: str | None = None
         safe = True
@@ -220,7 +226,7 @@ def _trusted_executable(
                 if _inside_protected_git_root(canonical, root):
                     safe = False
                     break
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
             if _is_native_executable(path, canonical):
                 candidate = candidate or str(path)

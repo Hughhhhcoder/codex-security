@@ -6,9 +6,11 @@ import {
   extname,
   isAbsolute,
   join,
+  posix,
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 
 export interface TrustedExecutable {
@@ -19,6 +21,12 @@ export interface TrustedExecutable {
 export interface InspectedExecutable {
   executable: string | null;
   environment: Record<string, string | undefined>;
+}
+
+export function isAbsoluteExecutablePath(candidate: string): boolean {
+  if (process.platform !== "win32") return posix.isAbsolute(candidate);
+  // A Windows root-relative path still depends on the current drive.
+  return win32.isAbsolute(candidate) && win32.parse(candidate).root.length > 1;
 }
 
 export function executableBinding(
@@ -141,7 +149,7 @@ export async function inspectTrustedExecutable(
     try {
       if (
         preserveInvocation &&
-        (!isAbsolute(candidate) ||
+        (!isAbsoluteExecutablePath(candidate) ||
           (await hasProtectedAncestor(roots, current.path, canonical)))
       ) {
         continue;

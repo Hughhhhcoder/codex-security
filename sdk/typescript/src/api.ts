@@ -141,6 +141,7 @@ import {
 import {
   executableBinding,
   inspectTrustedExecutable,
+  isAbsoluteExecutablePath,
   type InspectedExecutable,
 } from "./trusted-executable.js";
 
@@ -591,7 +592,7 @@ export class CodexSecurity {
         protectedGitRoots,
       );
       if (configuredRipgrep !== undefined && configuredRipgrep !== "") {
-        if (!isAbsolute(configuredRipgrep)) {
+        if (!isAbsoluteExecutablePath(configuredRipgrep)) {
           throw new ConfigurationError(
             "CODEX_SECURITY_RG must name an absolute trusted executable.",
           );

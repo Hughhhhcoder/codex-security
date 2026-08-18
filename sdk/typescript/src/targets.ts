@@ -8,6 +8,7 @@ import { ConfigurationError, InvalidTargetError } from "./errors.js";
 import {
   executableBinding,
   inspectTrustedExecutable,
+  isAbsoluteExecutablePath,
   type InspectedExecutable,
 } from "./trusted-executable.js";
 
@@ -496,7 +497,7 @@ export async function resolveGitCommand(
   if (binding.value === "") {
     executable = null;
   } else if (binding.value !== undefined) {
-    if (!isAbsolute(binding.value)) {
+    if (!isAbsoluteExecutablePath(binding.value)) {
       throw new ConfigurationError(
         "CODEX_SECURITY_GIT must name an absolute trusted executable.",
       );

@@ -84,6 +84,66 @@ async function resolveWindowsExecutable(
 }
 
 describe("trusted executable resolution", () => {
+  test("requires fully qualified Windows paths for explicit tool bindings", () => {
+    const cases: [string, string | null][] = [
+      [String.raw`\tools\git.exe`, null],
+      ["/tools/git.exe", null],
+      [String.raw`C:tools\git.exe`, null],
+      [String.raw`\\server`, null],
+      [String.raw`C:\tools\git.exe`, String.raw`C:\tools\git.exe`],
+      ["C:/tools/git.exe", "C:/tools/git.exe"],
+      [String.raw`\\server\share\git.exe`, String.raw`\\server\share\git.exe`],
+      ["//server/share/git.exe", "//server/share/git.exe"],
+      [String.raw`\\?\C:\tools\git.exe`, String.raw`\\?\C:\tools\git.exe`],
+    ];
+    const script = `
+      import { mock } from "bun:test";
+      import * as originalPromises from "node:fs/promises";
+      import * as originalPath from "node:path";
+      const [modulePath, values, repository] = process.argv.slice(1);
+      const windows = originalPath.win32;
+      const canonical = (path) => windows.resolve(windows.parse(repository).root, path);
+      const identities = new Map();
+      const identity = (path) => {
+        const key = canonical(path).toLowerCase();
+        if (!identities.has(key)) identities.set(key, BigInt(identities.size + 1));
+        return identities.get(key);
+      };
+      Object.defineProperty(process, "platform", { value: "win32" });
+      mock.module("node:path", () => ({ ...originalPath, ...windows }));
+      mock.module("node:fs/promises", () => ({
+        ...originalPromises,
+        realpath: async (path) => canonical(path),
+        access: async () => {},
+        stat: async (path) => ({ dev: 1n, ino: identity(path), isFile: () => true }),
+      }));
+      const { inspectTrustedExecutable } = await import(modulePath);
+      const results = [];
+      for (const value of JSON.parse(values)) {
+        const result = await inspectTrustedExecutable(value, { PATH: "" }, repository, {
+          preserveInvocation: true,
+        });
+        results.push(result.executable);
+      }
+      console.log(JSON.stringify(results));
+    `;
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        script,
+        fileURLToPath(new URL("../src/trusted-executable.ts", import.meta.url)),
+        JSON.stringify(cases.map(([value]) => value)),
+        String.raw`C:\repository`,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(
+      cases.map(([, executable]) => executable),
+    );
+  });
+
   test("excludes every protected root before selecting an executable", async () => {
     const root = await temporaryDirectory();
     const repositories = [join(root, "working"), join(root, "source")];

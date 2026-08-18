@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Codex, type CodexOptions, type ThreadEvent } from "@openai/codex-sdk";
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -5850,18 +5850,18 @@ describe("CodexSecurity orchestration", () => {
           await mkdir(path, { mode: 0o700 });
         }
         const filename = process.platform === "win32" ? "rg.exe" : "rg";
+        const hostTool = (name: string): string =>
+          process.platform === "win32"
+            ? win32.join("C:\\host-tools", name)
+            : join(root, "host-tools", name);
         gitHost = entry.gitAvailable
-          ? join(
-              root,
-              "host-tools",
-              process.platform === "win32" ? "git.exe" : "git",
-            )
+          ? hostTool(process.platform === "win32" ? "git.exe" : "git")
           : null;
         const staged =
           scenario === "rejected-copy"
             ? join(repository, filename)
             : join(workspace, filename);
-        host = entry.host ? join(root, "host-tools", filename) : null;
+        host = entry.host ? hostTool(filename) : null;
         rejected = scenario === "rejected-copy" ? staged : null;
         inspected.length = 0;
         gitSelections.length = 0;
