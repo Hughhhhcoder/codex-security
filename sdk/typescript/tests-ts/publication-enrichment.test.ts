@@ -7,6 +7,7 @@ import {
   publicationEnrichmentEnvironment,
   type PublicationEnrichmentCodex,
 } from "../src/publication-enrichment.js";
+import type { LinearPublicationCatalogLabel } from "../src/linear.js";
 import type { PreparedPublicationIssue } from "../src/publication.js";
 
 const temporaryDirectories: string[] = [];
@@ -14,6 +15,10 @@ const LABELS = [
   { id: "label-exploit", name: "Exploitable" },
   { id: "label-internet", name: "Internet exposed" },
 ] as const;
+const GROUPED_LABELS: readonly LinearPublicationCatalogLabel[] = [
+  { id: "label-customer", name: "Customer data", groupId: "impact" },
+  { id: "label-internal", name: "Internal data", groupId: "impact" },
+];
 
 afterEach(async () => {
   await Promise.all(
@@ -65,7 +70,12 @@ function response(
     error?: string;
   }>,
 ): string {
-  return JSON.stringify({ findings });
+  return JSON.stringify({
+    findings: findings.map((finding) => ({
+      ...finding,
+      error: finding.error ?? null,
+    })),
+  });
 }
 
 function fakeCodex(
@@ -131,6 +141,17 @@ describe("publication knowledge-base enrichment", () => {
       skipGitRepoCheck: true,
     });
     expect(capture.turn).toHaveProperty("outputSchema");
+    expect(capture.turn).toMatchObject({
+      outputSchema: {
+        properties: {
+          findings: {
+            items: {
+              required: ["findingId", "priority", "labelIds", "error"],
+            },
+          },
+        },
+      },
+    });
     expect(capture.prompt).toContain("P0 findings are urgent");
     expect(capture.prompt).toContain("label-internet");
     expect(capture.prompt).toContain("untrusted inert data");
@@ -163,6 +184,48 @@ describe("publication knowledge-base enrichment", () => {
 
     expect(enriched.every((issue) => issue.priority === undefined)).toBe(true);
     expect(enriched.every((issue) => issue.labels === undefined)).toBe(true);
+  });
+
+  test("removes ambient MCP servers from the enrichment turn", async () => {
+    let config: unknown;
+    let isolatedCodexHome: string | undefined;
+    const ambientCodexHome = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-ambient-home-test-"),
+    );
+    temporaryDirectories.push(ambientCodexHome);
+    await writeFile(
+      join(ambientCodexHome, "config.toml"),
+      '[mcp_servers.synthetic]\ncommand = "synthetic-write-tool"\n',
+    );
+    await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
+      createCodex(options) {
+        config = options.config;
+        isolatedCodexHome = options.env?.["CODEX_HOME"];
+        return fakeCodex(
+          response(
+            issues().map(({ findingId }) => ({
+              findingId,
+              priority: "none",
+              labelIds: [],
+            })),
+          ),
+        );
+      },
+      createIsolatedHome: async () =>
+        await mkdtemp(
+          join(tmpdir(), "codex-security-publication-isolated-home-test-"),
+        ),
+      environment: {
+        CODEX_HOME: ambientCodexHome,
+        CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
+      },
+      importAmbientAuth: async () => false,
+    });
+
+    expect(config).toMatchObject({ mcp_servers: {} });
+    expect(isolatedCodexHome).toBeDefined();
+    expect(isolatedCodexHome).not.toBe(ambientCodexHome);
+    await expect(stat(isolatedCodexHome!)).rejects.toThrow();
   });
 
   test.each([
@@ -285,6 +348,22 @@ describe("publication knowledge-base enrichment", () => {
       /repeated a Linear label/u,
     ],
     [
+      "mutually exclusive labels",
+      response([
+        {
+          findingId: "finding-one",
+          priority: "high",
+          labelIds: ["label-customer", "label-internal"],
+        },
+        {
+          findingId: "finding-two",
+          priority: "none",
+          labelIds: [],
+        },
+      ]),
+      /mutually exclusive Linear labels/u,
+    ],
+    [
       "contradictory policy",
       response([
         {
@@ -301,12 +380,17 @@ describe("publication knowledge-base enrichment", () => {
       ]),
       /could not classify finding finding-one/u,
     ],
-  ])("rejects %s", async (_name, finalResponse, expected) => {
+  ])("rejects %s", async (name, finalResponse, expected) => {
     await expect(
-      enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
-        codex: fakeCodex(finalResponse),
-        environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
-      }),
+      enrichPublicationIssues(
+        issues(),
+        name === "mutually exclusive labels" ? GROUPED_LABELS : LABELS,
+        [await policyFile()],
+        {
+          codex: fakeCodex(finalResponse),
+          environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
+        },
+      ),
     ).rejects.toThrow(expected);
   });
 

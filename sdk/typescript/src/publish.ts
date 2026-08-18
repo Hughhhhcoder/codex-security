@@ -206,7 +206,6 @@ export async function publishScanInternal(
       const detail = safeErrorMessage(error);
       throw new CodexSecurityError(
         `Linear publication validation failed: ${redactCredential(detail, linearApiKey!)}`,
-        { cause: error },
       );
     }
     if (prepared.issues.length > 0) {
@@ -855,11 +854,7 @@ async function collectPublicationHandoff(
     const saved = created.get(issue.findingId);
     const verified = eventCreated.get(issue.findingId);
     const eventFailure = eventFailed.get(issue.findingId);
-    if (
-      saved === undefined &&
-      verified !== undefined &&
-      (!observed.has(issue.findingId) || explicitFailures.has(issue.findingId))
-    ) {
+    if (saved === undefined && verified !== undefined) {
       failed.delete(issue.findingId);
       created.set(issue.findingId, verified);
       continue;

@@ -183,6 +183,7 @@ describe("Linear publication context", () => {
         {
           id: "label-zeta",
           name: "Zeta",
+          parentId: "label-group",
           isGroup: false,
           archivedAt: undefined as Date | undefined,
         },
@@ -236,7 +237,7 @@ describe("Linear publication context", () => {
     expect(context).toEqual({
       labels: [
         { id: "label-alpha", name: "Alpha" },
-        { id: "label-zeta", name: "Zeta" },
+        { id: "label-zeta", name: "Zeta", groupId: "label-group" },
       ],
     });
   });

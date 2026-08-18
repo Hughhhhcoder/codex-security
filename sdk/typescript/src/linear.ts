@@ -8,6 +8,10 @@ import type { JsonObject } from "./config.js";
 import { CodexSecurityError, safeErrorMessage } from "./errors.js";
 import type { LinearPublicationLabel } from "./publication.js";
 
+export interface LinearPublicationCatalogLabel extends LinearPublicationLabel {
+  groupId?: string;
+}
+
 export type LinearClientFactory<
   Method extends keyof LinearClient = "issue" | "projects",
 > = (
@@ -34,7 +38,7 @@ export function createLinearClient<Method extends keyof LinearClient>(
 }
 
 export interface LinearPublicationContext {
-  labels: LinearPublicationLabel[];
+  labels: LinearPublicationCatalogLabel[];
 }
 
 export async function loadLinearPublicationContext(
@@ -67,10 +71,14 @@ export async function loadLinearPublicationContext(
 
   const page = await team.labels({ first: 50 });
   while (page.pageInfo.hasNextPage) await page.fetchNext();
-  const labels = new Map<string, LinearPublicationLabel>();
+  const labels = new Map<string, LinearPublicationCatalogLabel>();
   for (const label of page.nodes) {
     if (label.isGroup || label.archivedAt !== undefined) continue;
-    labels.set(label.id, { id: label.id, name: label.name });
+    labels.set(label.id, {
+      id: label.id,
+      name: label.name,
+      ...(label.parentId === undefined ? {} : { groupId: label.parentId }),
+    });
   }
   return {
     labels: [...labels.values()].sort(

@@ -675,43 +675,46 @@ describe("knowledge-based Linear publication", () => {
       let historyMutated = false;
       let issueCreated = false;
       const key = "lin_api_SYNTHETIC_SECRET";
-      await expect(
-        publishScanInternal(
-          publication.scanDirectory,
+      const thrown = await publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: key,
+          knowledgeBasePaths: ["policy.md"],
+        },
+        dependencies(
+          publication,
+          {},
           {
-            ...OPTIONS,
-            linearApiKey: key,
-            knowledgeBasePaths: ["policy.md"],
-          },
-          dependencies(
-            publication,
-            {},
-            {
-              linearClient: linearApiClient(publication, {
-                create: () => {
-                  issueCreated = true;
-                },
-              }),
-              loadLinearPublicationContext: async () => {
-                if (failure === "linear-read") {
-                  throw new Error(`Linear rejected ${key}`);
-                }
-                return { labels: [] };
+            linearClient: linearApiClient(publication, {
+              create: () => {
+                issueCreated = true;
               },
-              enrichPublicationIssues: async () => {
-                throw new Error("Publication policy is contradictory.");
-              },
-              preparePublicationStore: async () => {
-                historyMutated = true;
-              },
+            }),
+            loadLinearPublicationContext: async () => {
+              if (failure === "linear-read") {
+                throw new Error(`Linear rejected ${key}`);
+              }
+              return { labels: [] };
             },
-          ),
+            enrichPublicationIssues: async () => {
+              throw new Error("Publication policy is contradictory.");
+            },
+            preparePublicationStore: async () => {
+              historyMutated = true;
+            },
+          },
         ),
-      ).rejects.toThrow(
+      ).catch((error: unknown) => error);
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe(
         failure === "linear-read"
           ? "Linear publication validation failed: Linear rejected [redacted]"
           : "Publication policy is contradictory.",
       );
+      if (failure === "linear-read") {
+        expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
+      }
       expect(historyMutated).toBe(false);
       expect(issueCreated).toBe(false);
     }
@@ -1506,6 +1509,43 @@ describe("connected Linear publication", () => {
     ]);
     expect(result.failed).toEqual([]);
     expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
+  });
+
+  test("prefers verified issue events over model-authored argument drift", async () => {
+    const publication = preparedPublication();
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      OPTIONS,
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_command, _args, input) => {
+            const issue = publication.issues[0]!;
+            const record = handoffRecord(publication, issue);
+            await writeHandoff(input, [
+              {
+                ...record,
+                arguments: {
+                  ...(record["arguments"] as Record<string, unknown>),
+                  priority: 0,
+                },
+              },
+            ]);
+            return {
+              exitCode: 0,
+              stdout: issueEvent(issue),
+              stderr: "",
+            };
+          },
+        },
+      ),
+    );
+
+    expect(result.created.map((issue) => issue.issueIdentifier)).toEqual([
+      "SEC-1",
+    ]);
+    expect(result.failed).toEqual([]);
   });
 
   test("retains verified issue mappings after model-authored failures if the publication database fails", async () => {
