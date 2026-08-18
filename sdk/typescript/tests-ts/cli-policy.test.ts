@@ -1227,44 +1227,61 @@ describe("policy CLI", () => {
     expect(await readdir(f.repository)).toEqual([]);
   });
 
-  test("preserves plain JSON recovery records while marking full-output errors", async () => {
+  test("preserves recovery records and useful sanitized error causes", async () => {
     const f = await fixture();
     const targetPath = join(f.repository, "SECURITY.md");
     const recoveryPath = join(f.outputDir, "recovery-SECURITY.md");
-    for (const [error, status] of [
+    for (const [cause, diagnostic] of [
       [
-        new SecurityPolicyVerificationError(targetPath, { recoveryPath }),
-        "written_unverified",
+        new Error("synthetic resolver unavailable"),
+        "synthetic resolver unavailable",
       ],
-      [
-        new SecurityPolicyRecoveryError(targetPath, recoveryPath),
-        "recovery_required",
-      ],
+      [new Error("api_key=synthetic-test-value"), "[redacted]"],
     ] as const) {
-      const deps = policyDependencies(f, {
-        onGenerate: () => {
-          throw error;
-        },
-      });
-      for (const fullOutput of [false, true]) {
-        const stdout = capture();
-        expect(
-          await main(
-            ["policy", "--json", ...(fullOutput ? ["--full-output"] : [])],
-            stdout.stream,
-            capture().stream,
-            deps,
-          ),
-        ).toBe(2);
-        const result = JSON.parse(stdout.text());
-        if (fullOutput) {
-          expect(result).toMatchObject({
-            ok: false,
-            error: { code: "POLICY_FAILED", message: error.message },
-          });
-          expect(result).not.toHaveProperty("data");
-        } else {
-          expect(result).toMatchObject({ status, targetPath, recoveryPath });
+      for (const [error, status] of [
+        [
+          new SecurityPolicyVerificationError(targetPath, {
+            recoveryPath,
+            cause,
+          }),
+          "written_unverified",
+        ],
+        [
+          new SecurityPolicyRecoveryError(targetPath, recoveryPath, { cause }),
+          "recovery_required",
+        ],
+      ] as const) {
+        const deps = policyDependencies(f, {
+          onGenerate: () => {
+            throw error;
+          },
+        });
+        for (const fullOutput of [false, true]) {
+          const stdout = capture();
+          const stderr = capture();
+          expect(
+            await main(
+              ["policy", "--json", ...(fullOutput ? ["--full-output"] : [])],
+              stdout.stream,
+              stderr.stream,
+              deps,
+            ),
+          ).toBe(2);
+          expect(stderr.text()).toContain(diagnostic);
+          expect(stdout.text() + stderr.text()).not.toContain(
+            "synthetic-test-value",
+          );
+          const result = JSON.parse(stdout.text());
+          if (fullOutput) {
+            expect(result).toMatchObject({
+              ok: false,
+              error: { code: "POLICY_FAILED", message: error.message },
+            });
+            expect(result.error.message).toContain(diagnostic);
+            expect(result).not.toHaveProperty("data");
+          } else {
+            expect(result).toMatchObject({ status, targetPath, recoveryPath });
+          }
         }
       }
     }

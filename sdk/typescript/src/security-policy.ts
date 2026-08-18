@@ -30,7 +30,6 @@ import {
   SecurityPolicyVerificationError,
 } from "./errors.js";
 import {
-  bundledPluginRoot,
   cleanupSdkDirectory,
   createIsolatedHome,
   installFileNoClobber,
@@ -1048,25 +1047,22 @@ export async function applySecurityPolicy(
   });
   let pluginWorkspace: string | undefined;
   try {
-    let pluginRoot: string;
-    if (pluginPath === undefined) {
-      pluginRoot = await bundledPluginRoot();
-    } else {
-      const temporaryRoot = await realpath(tmpdir());
-      requireOutputOutsideRepositories(
-        protectedRoots,
-        temporaryRoot,
-        "temporary",
-      );
-      pluginWorkspace = await createIsolatedHome(temporaryRoot, (path) =>
-        requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
-      );
-      pluginRoot = await resolvePluginPath(
-        pluginPath,
-        pluginWorkspace,
-        options.signal,
-      );
-    }
+    const pluginRoot = await resolvePluginPath(
+      pluginPath,
+      async () => {
+        const temporaryRoot = await realpath(tmpdir());
+        requireOutputOutsideRepositories(
+          protectedRoots,
+          temporaryRoot,
+          "temporary",
+        );
+        pluginWorkspace = await createIsolatedHome(temporaryRoot, (path) =>
+          requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+        );
+        return pluginWorkspace;
+      },
+      options.signal,
+    );
     const temporary = join(
       dirname(target.targetPath),
       `.SECURITY.md.${randomUUID()}.tmp`,

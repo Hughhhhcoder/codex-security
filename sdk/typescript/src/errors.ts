@@ -98,8 +98,12 @@ export class SecurityPolicyVerificationError extends CodexSecurityError {
     public readonly targetPath: string,
     options?: ErrorOptions & { recoveryPath?: string },
   ) {
+    const detail =
+      options?.cause === undefined
+        ? ""
+        : ` Cause: ${safeErrorMessage(options.cause)}`;
     super(
-      `SECURITY.md was written to ${targetPath}, but verification failed.${options?.recoveryPath === undefined ? "" : ` Recovery file: ${options.recoveryPath}.`} Review the file before retrying.`,
+      `SECURITY.md was written to ${targetPath}, but verification failed.${options?.recoveryPath === undefined ? "" : ` Recovery file: ${options.recoveryPath}.`} Review the file before retrying.${detail}`,
       options,
     );
     this.recoveryPath = options?.recoveryPath;
@@ -112,8 +116,12 @@ export class SecurityPolicyRecoveryError extends CodexSecurityError {
     public readonly recoveryPath: string,
     options?: ErrorOptions,
   ) {
+    const detail =
+      options?.cause === undefined
+        ? ""
+        : ` Cause: ${safeErrorMessage(options.cause)}`;
     super(
-      `Could not safely finish replacing ${targetPath}. The previous file is preserved at ${recoveryPath}. Review both paths before retrying.`,
+      `Could not safely finish replacing ${targetPath}. The previous file is preserved at ${recoveryPath}. Review both paths before retrying.${detail}`,
       options,
     );
   }

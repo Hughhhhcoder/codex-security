@@ -722,10 +722,21 @@ describe("security policy review and application", () => {
       "Select it explicitly",
     );
     expect(await readdir(f.repository)).toEqual([]);
-    await applySecurityPolicy(draft, {
-      pythonPath: PYTHON,
-      environment: { ...process.env, POLICY_TEST_LOG: log },
-    });
+    const temporaryVariables = ["TMPDIR", "TMP", "TEMP"] as const;
+    const previousTemporary = temporaryVariables.map((key) => process.env[key]);
+    try {
+      for (const key of temporaryVariables) process.env[key] = f.repository;
+      await applySecurityPolicy(draft, {
+        pythonPath: PYTHON,
+        environment: { ...process.env, POLICY_TEST_LOG: log },
+      });
+    } finally {
+      for (const [index, key] of temporaryVariables.entries()) {
+        const previous = previousTemporary[index];
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      }
+    }
     expect((await readFile(log, "utf8")).trimEnd().split(/\r?\n/u)).toEqual([
       "custom resolver",
       "custom resolver",
