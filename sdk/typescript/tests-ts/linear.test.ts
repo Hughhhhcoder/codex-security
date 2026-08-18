@@ -230,6 +230,37 @@ describe("Linear publication context", () => {
         this.pageInfo.hasNextPage = false;
       },
     };
+    let workspaceFilter: unknown;
+    const workspaceLabels = {
+      nodes: [
+        {
+          id: "label-workspace-group",
+          name: "Workspace impact",
+          isGroup: true,
+          teamId: undefined,
+          archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
+        },
+        {
+          id: "label-workspace",
+          name: "Workspace label",
+          parentId: "label-workspace-group",
+          isGroup: false,
+          teamId: undefined,
+          archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
+        },
+        {
+          id: "label-other-team",
+          name: "Other team",
+          isGroup: false,
+          teamId: "another-team",
+          archivedAt: undefined as Date | undefined,
+          retiredById: undefined as string | undefined,
+        },
+      ],
+      pageInfo: { hasNextPage: false },
+    };
     const context = await loadLinearPublicationContext(
       {
         team: async (id: string) => ({
@@ -240,6 +271,10 @@ describe("Linear publication context", () => {
           id,
           teams: async () => projectTeams,
         }),
+        issueLabels: async ({ filter }: { filter: unknown }) => {
+          workspaceFilter = filter;
+          return workspaceLabels;
+        },
       } as never,
       "team-example",
       "project-example",
@@ -249,6 +284,12 @@ describe("Linear publication context", () => {
       labels: [
         { id: "label-alpha", name: "Alpha" },
         {
+          id: "label-workspace",
+          name: "Workspace label",
+          groupId: "label-workspace-group",
+          groupName: "Workspace impact",
+        },
+        {
           id: "label-zeta",
           name: "Zeta",
           groupId: "label-group",
@@ -256,6 +297,7 @@ describe("Linear publication context", () => {
         },
       ],
     });
+    expect(workspaceFilter).toEqual({ team: { null: true } });
   });
 
   test("rejects a project outside the selected team", async () => {

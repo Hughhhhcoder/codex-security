@@ -43,7 +43,7 @@ export interface LinearPublicationContext {
 }
 
 export async function loadLinearPublicationContext(
-  client: Pick<LinearClient, "team" | "project">,
+  client: Pick<LinearClient, "team" | "project" | "issueLabels">,
   teamId: string,
   projectId?: string,
 ): Promise<LinearPublicationContext> {
@@ -72,9 +72,20 @@ export async function loadLinearPublicationContext(
 
   const page = await team.labels({ first: 50 });
   while (page.pageInfo.hasNextPage) await page.fetchNext();
+  const workspacePage = await client.issueLabels({
+    first: 50,
+    filter: { team: { null: true } },
+  });
+  while (workspacePage.pageInfo.hasNextPage) {
+    await workspacePage.fetchNext();
+  }
+  const applicableLabels = [
+    ...page.nodes,
+    ...workspacePage.nodes.filter(({ teamId }) => teamId === undefined),
+  ];
   const labels = new Map<string, LinearPublicationCatalogLabel>();
   const groupNames = new Map(
-    page.nodes
+    applicableLabels
       .filter(
         (label) =>
           label.isGroup &&
@@ -83,7 +94,7 @@ export async function loadLinearPublicationContext(
       )
       .map((label) => [label.id, label.name]),
   );
-  for (const label of page.nodes) {
+  for (const label of applicableLabels) {
     if (
       label.isGroup ||
       label.archivedAt !== undefined ||

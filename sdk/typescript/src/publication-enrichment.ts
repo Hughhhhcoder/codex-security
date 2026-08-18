@@ -74,19 +74,25 @@ const DISABLED_CODEX_FEATURES = [
 const CODEX_ISOLATION_SETTINGS = {
   "analytics.enabled": false,
   check_for_update_on_startup: false,
+  developer_instructions: "",
   include_apps_instructions: false,
   include_collaboration_mode_instructions: false,
   include_environment_context: false,
   include_permissions_instructions: false,
+  instructions: "",
   "otel.exporter": "none",
   "otel.log_user_prompt": false,
   "otel.metrics_exporter": "none",
   "otel.trace_exporter": "none",
+  project_doc_fallback_filenames: [],
+  project_doc_max_bytes: 0,
   "skills.bundled.enabled": false,
   "skills.include_instructions": false,
 } as const;
 const PUBLICATION_MODEL = "gpt-5.5";
 const PUBLICATION_MODEL_CATALOG = ".codex-security-publication-models.json";
+const PUBLICATION_MODEL_INSTRUCTIONS =
+  ".codex-security-publication-model-instructions.md";
 
 const enrichmentSchema = z
   .object({
@@ -151,9 +157,9 @@ export async function enrichPublicationIssues(
       options.codex === undefined
         ? resolveCodexCommand(environment).command
         : undefined;
-    const modelCatalogPath =
+    const modelFiles =
       options.codex === undefined
-        ? await prepareToolFreeModelCatalog(
+        ? await preparePublicationModelFiles(
             codexCommand!,
             environment,
             knowledgeBase.path,
@@ -175,7 +181,8 @@ export async function enrichPublicationIssues(
         environment,
         knowledgeBase.path,
         configuredMcpServers,
-        modelCatalogPath!,
+        modelFiles!.catalogPath,
+        modelFiles!.instructionsPath,
         options.signal,
       );
     }
@@ -200,7 +207,8 @@ export async function enrichPublicationIssues(
           ),
           ...Object.fromEntries(Object.entries(CODEX_ISOLATION_SETTINGS)),
           model: PUBLICATION_MODEL,
-          model_catalog_json: modelCatalogPath!,
+          model_catalog_json: modelFiles!.catalogPath,
+          model_instructions_file: modelFiles!.instructionsPath,
           tools: {
             experimental_request_user_input: { enabled: false },
             update_plan: { enabled: false },
@@ -288,6 +296,7 @@ async function verifyCodexIsolation(
   workingDirectory: string,
   servers: readonly ConfiguredMcpServer[],
   modelCatalogPath: string,
+  modelInstructionsPath: string,
   signal?: AbortSignal,
 ): Promise<void> {
   try {
@@ -295,6 +304,7 @@ async function verifyCodexIsolation(
     const overrides = isolationConfigurationArguments(
       servers,
       modelCatalogPath,
+      modelInstructionsPath,
     );
     const mcpOutput = await runCodexConfigurationCommand(
       codexCommand,
@@ -372,10 +382,12 @@ async function verifyCodexIsolation(
 function isolationConfigurationArguments(
   servers: readonly ConfiguredMcpServer[],
   modelCatalogPath: string,
+  modelInstructionsPath: string,
 ): string[] {
   return [
     `model=${JSON.stringify(PUBLICATION_MODEL)}`,
     `model_catalog_json=${JSON.stringify(modelCatalogPath)}`,
+    `model_instructions_file=${JSON.stringify(modelInstructionsPath)}`,
     ...servers.map(({ name }) => `mcp_servers.${name}.enabled=false`),
     ...DISABLED_CODEX_FEATURES.map((name) => `features.${name}=false`),
     ...Object.entries(CODEX_ISOLATION_SETTINGS).map(
@@ -499,12 +511,12 @@ async function readEffectiveCodexConfiguration(
   });
 }
 
-async function prepareToolFreeModelCatalog(
+async function preparePublicationModelFiles(
   codexCommand: string,
   environment: Record<string, string>,
   workingDirectory: string,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<{ catalogPath: string; instructionsPath: string }> {
   try {
     const output = await runCodexConfigurationCommand(
       codexCommand,
@@ -523,6 +535,13 @@ async function prepareToolFreeModelCatalog(
     if (!isRecord(bundled)) {
       throw new Error("Publication model is unavailable.");
     }
+    const baseInstructions = bundled["base_instructions"];
+    if (
+      typeof baseInstructions !== "string" ||
+      baseInstructions.trim().length === 0
+    ) {
+      throw new Error("Publication model instructions are unavailable.");
+    }
     const model: Record<string, unknown> = {
       ...bundled,
       shell_type: "disabled",
@@ -530,14 +549,24 @@ async function prepareToolFreeModelCatalog(
       supports_search_tool: false,
     };
     delete model["apply_patch_tool_type"];
-    const path = join(workingDirectory, PUBLICATION_MODEL_CATALOG);
-    await writeFile(path, JSON.stringify({ models: [model] }), {
+    const catalogPath = join(workingDirectory, PUBLICATION_MODEL_CATALOG);
+    await writeFile(catalogPath, JSON.stringify({ models: [model] }), {
       encoding: "utf8",
       flag: "wx",
       mode: 0o600,
       signal,
     });
-    return path;
+    const instructionsPath = join(
+      workingDirectory,
+      PUBLICATION_MODEL_INSTRUCTIONS,
+    );
+    await writeFile(instructionsPath, baseInstructions, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+      signal,
+    });
+    return { catalogPath, instructionsPath };
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new CodexSecurityError(

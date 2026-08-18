@@ -111,7 +111,7 @@ export interface PublicationCodexResult {
 export interface PublishScanDependencies {
   environment?: NodeJS.ProcessEnv;
   linearClient?: LinearClientFactory<
-    "users" | "createIssue" | "team" | "project"
+    "users" | "createIssue" | "team" | "project" | "issueLabels"
   >;
   prepare?: typeof prepareScanPublication;
   enrichPublicationIssues?: typeof enrichPublicationIssues;

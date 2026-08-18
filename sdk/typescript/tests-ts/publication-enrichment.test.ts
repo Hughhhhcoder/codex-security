@@ -465,6 +465,10 @@ describe("publication knowledge-base enrichment", () => {
     temporaryDirectories.push(codexHome);
     const marker = join(codexHome, "mcp-started");
     const mcpServer = join(codexHome, "mcp-server.cjs");
+    const ambientModelInstructions = join(
+      codexHome,
+      "ambient-model-instructions.md",
+    );
     const skillDirectory = join(codexHome, "skills", "publication-probe");
     await mkdir(skillDirectory, { recursive: true });
     await writeFile(
@@ -495,6 +499,10 @@ describe("publication knowledge-base enrichment", () => {
         "});",
       ].join("\n"),
     );
+    await writeFile(
+      ambientModelInstructions,
+      "PRIVATE_MODEL_INSTRUCTIONS_SYNTHETIC_MARKER",
+    );
     const jwt = (payload: Record<string, unknown>) =>
       `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.synthetic`;
     const token = jwt({
@@ -520,6 +528,10 @@ describe("publication knowledge-base enrichment", () => {
     await writeFile(
       join(codexHome, "config.toml"),
       [
+        `model_instructions_file = ${JSON.stringify(ambientModelInstructions)}`,
+        'instructions = "PRIVATE_USER_INSTRUCTIONS_SYNTHETIC_MARKER"',
+        'developer_instructions = "PRIVATE_DEVELOPER_INSTRUCTIONS_SYNTHETIC_MARKER"',
+        "",
         "[features]",
         "request_permissions_tool = true",
         "deferred_executor = true",
@@ -657,6 +669,15 @@ describe("publication knowledge-base enrichment", () => {
     );
     expect(JSON.stringify(requests[0])).not.toContain(
       "Synthetic unrelated local skill.",
+    );
+    expect(JSON.stringify(requests[0])).not.toContain(
+      "PRIVATE_MODEL_INSTRUCTIONS_SYNTHETIC_MARKER",
+    );
+    expect(JSON.stringify(requests[0])).not.toContain(
+      "PRIVATE_USER_INSTRUCTIONS_SYNTHETIC_MARKER",
+    );
+    expect(JSON.stringify(requests[0])).not.toContain(
+      "PRIVATE_DEVELOPER_INSTRUCTIONS_SYNTHETIC_MARKER",
     );
     expect(JSON.stringify(requests[0])).not.toContain("$publication-probe");
     expect(JSON.stringify(requests[0])).toContain("\\\\u0024publication-probe");
