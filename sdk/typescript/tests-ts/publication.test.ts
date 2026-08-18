@@ -8,6 +8,7 @@ import type {
   CoverageDocument,
   FindingsDocument,
   ScanManifest,
+  SeverityLevel,
 } from "../src/models.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -79,12 +80,13 @@ describe("scan publication preparation", () => {
           occurrenceId: "occ_e79cb19591e696572a1c22be",
           title:
             "[Codex Security][HIGH] Unsafe archive extraction can escape the output directory",
+          priority: 2,
         },
       ],
     });
 
+    expect(publication).not.toHaveProperty("policyFindings");
     const issue = publication.issues[0]!;
-    expect(issue).not.toHaveProperty("priority");
     expect(issue).not.toHaveProperty("labels");
     expect(issue.title).not.toContain(publication.scanId);
     expect(issue.title).not.toContain("example/repo");
@@ -325,13 +327,19 @@ describe("scan publication preparation", () => {
     }
   });
 
-  test.each(["critical", "high", "medium", "low", "informational"] as const)(
-    "does not infer Linear metadata from %s severity",
-    async (severity) => {
+  test.each([
+    ["critical", 1],
+    ["high", 2],
+    ["medium", 3],
+    ["low", 4],
+    ["informational", undefined],
+  ] as const)(
+    "maps %s severity to Linear priority %s",
+    async (severity, priority) => {
       const scanDirectory = await copyExample();
       const findingsPath = join(scanDirectory, "findings.json");
       const findings = await readJson<FindingsDocument>(findingsPath);
-      findings.findings[0]!.severity.level = severity;
+      findings.findings[0]!.severity.level = severity satisfies SeverityLevel;
       await writeJson(findingsPath, findings);
       await reseal(scanDirectory);
 
@@ -340,7 +348,8 @@ describe("scan publication preparation", () => {
       expect(issue.title).toStartWith(
         `[Codex Security][${severity.toUpperCase()}] `,
       );
-      expect(issue).not.toHaveProperty("priority");
+      expect(issue.priority).toBe(priority);
+      if (priority === undefined) expect(issue).not.toHaveProperty("priority");
       expect(issue).not.toHaveProperty("labels");
     },
   );

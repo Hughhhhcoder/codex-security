@@ -613,10 +613,12 @@ added to successful publication results, scan history, or sealed scan artifacts.
 Publication errors redact the selected API key. Without a publication knowledge
 base, `--dry-run` never contacts Linear in either mode.
 
-By default, publication leaves native Linear priority and labels unset so the
-destination's defaults apply. It does not hard-code a severity-to-priority
-mapping. Use repeatable `--knowledge-base PATH` options to apply organization-
-defined publication policy from Markdown, text, PDF, or DOCX documents:
+Without a publication knowledge base, publication preserves its existing
+severity mapping: Critical, High, Medium, and Low findings become Urgent, High,
+Medium, and Low Linear priorities, respectively; Informational findings leave
+priority unset. Use repeatable `--knowledge-base PATH` options to replace that
+mapping with organization-defined publication policy from Markdown, text, PDF,
+or DOCX documents:
 
 ```bash
 cat > linear-publication-policy.md <<'EOF'
@@ -634,9 +636,12 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
   --knowledge-base ./linear-publication-policy.md
 ```
 
-These mappings are only synthetic examples; the CLI applies the rules written
-in your documents. Knowledge-based publication starts one network-disabled,
-no-tool Codex turn using your normal Codex authentication. The Linear API key
+These mappings are only synthetic examples; when a knowledge base is supplied,
+the CLI applies only the rules written in your documents. If no explicit rule
+matches a finding, its priority and labels remain unset rather than falling back
+to the default severity mapping. Knowledge-based publication starts one
+ephemeral, network-disabled, no-tool Codex turn using your normal Codex
+authentication. The Linear API key
 is used separately to validate the exact team and project, read the team's
 label catalog, and create issues; it is not supplied to the Codex turn. Labels
 named by policy must already exist in the selected team. V1 policy output can
@@ -647,8 +652,8 @@ description, assignee, state, cycle, estimate, or due date.
 rejects it. `--dry-run --knowledge-base` makes only read-only Linear requests,
 runs the same enrichment and validation as publication, and returns the exact
 resolved fields in `issues` plus a minimal `appliedMetadata` array. Policy,
-paths, prompts, and credentials are never stored in the sealed scan or private
-publication receipt.
+paths, prompts, and credentials are never stored in the sealed scan, Codex
+session state, or private publication receipt.
 
 Each finding creates a separate new issue titled
 `[Codex Security][HIGH] Finding title`. The issue includes the scan ID,

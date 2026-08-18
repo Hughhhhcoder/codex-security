@@ -2,12 +2,6 @@ import { spawn } from "node:child_process";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import {
-  Codex,
-  type CodexOptions,
-  type ThreadOptions,
-  type TurnOptions,
-} from "@openai/codex-sdk";
 import { z } from "incur";
 import { CodexSecurityError, safeErrorMessage } from "./errors.js";
 import {
@@ -93,6 +87,8 @@ const PUBLICATION_MODEL = "gpt-5.5";
 const PUBLICATION_MODEL_CATALOG = ".codex-security-publication-models.json";
 const PUBLICATION_MODEL_INSTRUCTIONS =
   ".codex-security-publication-model-instructions.md";
+const PUBLICATION_OUTPUT_SCHEMA =
+  ".codex-security-publication-output-schema.json";
 
 const enrichmentSchema = z
   .object({
@@ -114,21 +110,19 @@ type EnrichmentResponse = z.infer<typeof enrichmentSchema>;
 type ConfiguredMcpServer = { name: string };
 
 export interface PublicationEnrichmentCodex {
-  startThread(options: ThreadOptions): {
-    run(
-      input: string,
-      options: TurnOptions,
-    ): Promise<{ finalResponse: string }>;
-  };
+  run(
+    input: string,
+    options: { outputSchema: unknown; signal?: AbortSignal },
+  ): Promise<{ finalResponse: string }>;
 }
 
 export interface PublicationEnrichmentOptions {
   codex?: PublicationEnrichmentCodex;
-  createCodex?: (options: CodexOptions) => PublicationEnrichmentCodex;
   environment?: NodeJS.ProcessEnv;
   findings?: readonly Finding[];
   loadConfiguredMcpServers?: typeof loadConfiguredMcpServers;
   prepareKnowledgeBase?: typeof prepareKnowledgeBase;
+  runCodex?: typeof runPublicationEnrichmentCodex;
   signal?: AbortSignal;
   verifyCodexIsolation?: typeof verifyCodexIsolation;
 }
@@ -186,56 +180,32 @@ export async function enrichPublicationIssues(
         options.signal,
       );
     }
-    const codex =
-      options.codex ??
-      (options.createCodex ?? ((codexOptions) => new Codex(codexOptions)))({
-        codexPathOverride: codexCommand!,
-        env: environment,
-        config: {
-          allow_login_shell: false,
-          ...Object.fromEntries(
-            configuredMcpServers.map(({ name }) => [
-              `mcp_servers.${name}.enabled`,
-              false,
-            ]),
-          ),
-          responses_api_metadata: {
-            codex_security_surface: "sdk",
-          },
-          ...Object.fromEntries(
-            DISABLED_CODEX_FEATURES.map((name) => [`features.${name}`, false]),
-          ),
-          ...Object.fromEntries(Object.entries(CODEX_ISOLATION_SETTINGS)),
-          model: PUBLICATION_MODEL,
-          model_catalog_json: modelFiles!.catalogPath,
-          model_instructions_file: modelFiles!.instructionsPath,
-          tools: {
-            experimental_request_user_input: { enabled: false },
-            update_plan: { enabled: false },
-          },
-          shell_environment_policy: {
-            inherit: "core",
-            ignore_default_excludes: false,
-            exclude: ["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
-          },
-        },
-      });
-    const thread = codex.startThread({
-      modelReasoningEffort: "medium",
-      sandboxMode: "read-only",
-      approvalPolicy: "never",
-      networkAccessEnabled: false,
-      webSearchMode: "disabled",
-      workingDirectory: knowledgeBase.path,
-      skipGitRepoCheck: true,
-    });
-    const turn = await thread.run(
-      enrichmentPrompt(issues, labels, documents, options.findings),
-      {
-        outputSchema: enrichmentOutputSchema,
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      },
+    const prompt = enrichmentPrompt(
+      issues,
+      labels,
+      documents,
+      options.findings,
     );
+    const turn =
+      options.codex === undefined
+        ? await (options.runCodex ?? runPublicationEnrichmentCodex)(
+            codexCommand!,
+            publicationEnrichmentArguments(
+              configuredMcpServers,
+              modelFiles!.catalogPath,
+              modelFiles!.instructionsPath,
+              modelFiles!.outputSchemaPath,
+              knowledgeBase.path,
+            ),
+            prompt,
+            environment,
+            knowledgeBase.path,
+            options.signal,
+          )
+        : await options.codex.run(prompt, {
+            outputSchema: enrichmentOutputSchema,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          });
     options.signal?.throwIfAborted();
 
     let response: unknown;
@@ -396,6 +366,153 @@ function isolationConfigurationArguments(
   ].flatMap((override) => ["-c", override]);
 }
 
+function publicationEnrichmentArguments(
+  servers: readonly ConfiguredMcpServer[],
+  modelCatalogPath: string,
+  modelInstructionsPath: string,
+  outputSchemaPath: string,
+  workingDirectory: string,
+): string[] {
+  return [
+    "exec",
+    ...isolationConfigurationArguments(
+      servers,
+      modelCatalogPath,
+      modelInstructionsPath,
+    ),
+    "-c",
+    "allow_login_shell=false",
+    "-c",
+    'responses_api_metadata.codex_security_surface="sdk"',
+    "-c",
+    "tools.experimental_request_user_input.enabled=false",
+    "-c",
+    "tools.update_plan.enabled=false",
+    "-c",
+    'shell_environment_policy.inherit="core"',
+    "-c",
+    "shell_environment_policy.ignore_default_excludes=false",
+    "-c",
+    'shell_environment_policy.exclude=["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"]',
+    "-c",
+    'model_reasoning_effort="medium"',
+    "-c",
+    "sandbox_workspace_write.network_access=false",
+    "-c",
+    'web_search="disabled"',
+    "-c",
+    'approval_policy="never"',
+    "--model",
+    PUBLICATION_MODEL,
+    "--ephemeral",
+    "--json",
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check",
+    "--output-schema",
+    outputSchemaPath,
+    "--cd",
+    workingDirectory,
+    "-",
+  ];
+}
+
+export async function runPublicationEnrichmentCodex(
+  command: string,
+  arguments_: readonly string[],
+  input: string,
+  environment: Record<string, string>,
+  workingDirectory: string,
+  signal?: AbortSignal,
+): Promise<{ finalResponse: string }> {
+  signal?.throwIfAborted();
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, [...arguments_], {
+      cwd: workingDirectory,
+      env: environment,
+      signal,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stdout.setEncoding("utf8");
+    child.stderr.resume();
+    let partialLine = "";
+    let finalResponse: string | undefined;
+    let completed = false;
+    let settled = false;
+    let failureRequested = false;
+    let pendingFailure: unknown;
+    let forcedTermination: ReturnType<typeof setTimeout> | undefined;
+    const fail = (error: unknown): void => {
+      if (settled || failureRequested) return;
+      failureRequested = true;
+      pendingFailure = error;
+      try {
+        child.kill();
+      } catch {
+        // The close event still owns settlement when the process already exited.
+      }
+      forcedTermination = setTimeout(() => child.kill("SIGKILL"), 1_000);
+      forcedTermination.unref();
+    };
+    const readEvent = (line: string): void => {
+      if (failureRequested || line.trim().length === 0) return;
+      let event: unknown;
+      try {
+        event = JSON.parse(line) as unknown;
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      if (!isRecord(event)) return;
+      if (event["type"] === "item.completed") {
+        const item = event["item"];
+        if (
+          isRecord(item) &&
+          item["type"] === "agent_message" &&
+          typeof item["text"] === "string"
+        ) {
+          finalResponse = item["text"];
+        }
+      } else if (event["type"] === "turn.completed") {
+        completed = true;
+      } else if (event["type"] === "turn.failed" || event["type"] === "error") {
+        fail(new Error("Codex publication enrichment failed."));
+      }
+    };
+    child.stdout.on("data", (chunk: string) => {
+      partialLine += chunk;
+      let end: number;
+      while ((end = partialLine.indexOf("\n")) !== -1) {
+        readEvent(partialLine.slice(0, end));
+        partialLine = partialLine.slice(end + 1);
+      }
+    });
+    child.stdout.once("end", () => {
+      if (partialLine.length > 0) readEvent(partialLine);
+    });
+    child.stdin.on("error", () => undefined);
+    child.once("error", fail);
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
+      if (failureRequested) {
+        reject(pendingFailure);
+      } else if (code === 0 && completed && finalResponse !== undefined) {
+        resolve({ finalResponse });
+      } else {
+        reject(
+          new CodexSecurityError(
+            "Codex could not apply the publication knowledge base.",
+          ),
+        );
+      }
+    });
+    child.stdin.end(input);
+  });
+}
+
 async function readEffectiveCodexConfiguration(
   command: string,
   environment: Record<string, string>,
@@ -516,7 +633,11 @@ async function preparePublicationModelFiles(
   environment: Record<string, string>,
   workingDirectory: string,
   signal?: AbortSignal,
-): Promise<{ catalogPath: string; instructionsPath: string }> {
+): Promise<{
+  catalogPath: string;
+  instructionsPath: string;
+  outputSchemaPath: string;
+}> {
   try {
     const output = await runCodexConfigurationCommand(
       codexCommand,
@@ -566,7 +687,14 @@ async function preparePublicationModelFiles(
       mode: 0o600,
       signal,
     });
-    return { catalogPath, instructionsPath };
+    const outputSchemaPath = join(workingDirectory, PUBLICATION_OUTPUT_SCHEMA);
+    await writeFile(outputSchemaPath, JSON.stringify(enrichmentOutputSchema), {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+      signal,
+    });
+    return { catalogPath, instructionsPath, outputSchemaPath };
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new CodexSecurityError(

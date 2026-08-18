@@ -102,9 +102,11 @@ the optional `CODEX_SECURITY_LINEAR_PROJECT` instead of passing the destination
 flags. Add `--dry-run` to preview the issues or `--json` to return
 machine-readable results.
 
-Publication does not infer Linear priority or labels from finding severity.
-To apply your organization's own publication rules, pass one or more Markdown,
-text, PDF, or DOCX policy documents with repeatable `--knowledge-base` flags:
+By default, publication preserves the existing severity mapping: Critical,
+High, Medium, and Low findings become Urgent, High, Medium, and Low Linear
+priorities, respectively. To replace that mapping and apply your organization's
+own publication rules, pass one or more Markdown, text, PDF, or DOCX policy
+documents with repeatable `--knowledge-base` flags:
 
 ```bash
 export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
@@ -116,7 +118,9 @@ npx @openai/codex-security publish scan /path/to/scan \
 
 For example, a company-authored policy can say that P0 findings use Linear's
 Urgent priority and internet-facing findings receive an existing `Internet
-exposed` label. The mapping is policy content, not built-in CLI behavior.
+exposed` label. In knowledge-based publication, that mapping is policy content,
+not built-in CLI behavior. When no explicit policy rule matches, priority and
+labels are left unset rather than falling back to the default severity mapping.
 Knowledge-based publication can set only native Linear priority and existing
 labels in the selected team; it cannot create labels or change routing,
 content, assignee, state, cycle, estimate, or due date. It requires both normal

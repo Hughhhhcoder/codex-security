@@ -413,6 +413,36 @@ describe("direct Linear API publication", () => {
     expect(receipt).not.toContain(key);
   });
 
+  test("preserves severity priority and skips enrichment without a knowledge base", async () => {
+    const publication = preparedPublication();
+    const inputs: LinearIssueInput[] = [];
+    await publishScanInternal(
+      publication.scanDirectory,
+      { ...OPTIONS, linearApiKey: "synthetic-key" },
+      dependencies(
+        publication,
+        {},
+        {
+          linearClient: linearApiClient(publication, {
+            create: (input) => {
+              inputs.push(input);
+            },
+          }),
+          loadLinearPublicationContext: async () => {
+            throw new Error("No-policy publication must not read labels.");
+          },
+          enrichPublicationIssues: async () => {
+            throw new Error("No-policy publication must not run enrichment.");
+          },
+        },
+      ),
+    );
+
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toMatchObject({ priority: 2 });
+    expect(inputs[0]).not.toHaveProperty("labelIds");
+  });
+
   test("recovers completed direct issues before honoring cancellation", async () => {
     const publication = preparedPublication(23);
     const labels = [{ id: "label-security", name: "Security" }];

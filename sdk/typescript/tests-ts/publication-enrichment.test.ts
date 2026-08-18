@@ -2,17 +2,18 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   enrichPublicationIssues,
   publicationEnrichmentEnvironment,
+  runPublicationEnrichmentCodex,
   type PublicationEnrichmentCodex,
 } from "../src/publication-enrichment.js";
 import type { LinearPublicationCatalogLabel } from "../src/linear.js";
@@ -64,6 +65,22 @@ async function policyFile(): Promise<string> {
   return path;
 }
 
+async function filesUnder(root: string): Promise<string[]> {
+  const files: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true }).catch(
+      () => [],
+    );
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) files.push(path);
+    }
+  };
+  await visit(root);
+  return files.sort();
+}
+
 function issues(): PreparedPublicationIssue[] {
   return [
     {
@@ -106,17 +123,31 @@ function fakeCodex(
   } = {},
 ): PublicationEnrichmentCodex {
   return {
-    startThread(options) {
-      capture.thread = options;
-      return {
-        async run(input, options) {
-          capture.prompt = input;
-          capture.turn = options;
-          return { finalResponse };
-        },
-      };
+    async run(input, options) {
+      capture.prompt = input;
+      capture.turn = options;
+      return { finalResponse };
     },
   };
+}
+
+function codexConfiguration(
+  arguments_: readonly string[],
+): Record<string, unknown> {
+  const config: Record<string, unknown> = {};
+  for (let index = 0; index < arguments_.length - 1; index += 1) {
+    if (arguments_[index] !== "-c") continue;
+    const override = arguments_[index + 1]!;
+    const separator = override.indexOf("=");
+    const name = override.slice(0, separator);
+    const serialized = override.slice(separator + 1);
+    try {
+      config[name] = JSON.parse(serialized) as unknown;
+    } catch {
+      config[name] = serialized;
+    }
+  }
+  return config;
 }
 
 describe("publication knowledge-base enrichment", () => {
@@ -152,13 +183,6 @@ describe("publication knowledge-base enrichment", () => {
     });
     expect(enriched[1]).not.toHaveProperty("priority");
     expect(enriched[1]).not.toHaveProperty("labels");
-    expect(capture.thread).toMatchObject({
-      sandboxMode: "read-only",
-      approvalPolicy: "never",
-      networkAccessEnabled: false,
-      webSearchMode: "disabled",
-      skipGitRepoCheck: true,
-    });
     expect(capture.turn).toHaveProperty("outputSchema");
     expect(capture.turn).toMatchObject({
       outputSchema: {
@@ -240,19 +264,22 @@ describe("publication knowledge-base enrichment", () => {
     );
     try {
       await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
-        createCodex(options) {
-          config = options.config;
-          receivedCodexHome = options.env?.["CODEX_HOME"];
-          receivedLowercaseCodexHome = options.env?.["codex_home"];
-          return fakeCodex(
-            response(
+        async runCodex(_command, args, _input, environment) {
+          config = codexConfiguration(args);
+          receivedCodexHome = environment["CODEX_HOME"];
+          receivedLowercaseCodexHome = environment["codex_home"];
+          expect(args).toContain("--ephemeral");
+          expect(args).toContain("--output-schema");
+          expect(args).toContain("read-only");
+          return {
+            finalResponse: response(
               issues().map(({ findingId }) => ({
                 findingId,
                 priority: "none",
                 labelIds: [],
               })),
             ),
-          );
+          };
         },
         environment: {
           codex_home: relative(process.cwd(), ambientCodexHome),
@@ -265,8 +292,13 @@ describe("publication knowledge-base enrichment", () => {
     }
 
     expect(config).toMatchObject({
+      allow_login_shell: false,
+      approval_policy: "never",
       "mcp_servers.synthetic.enabled": false,
       "mcp_servers.remote_server.enabled": false,
+      model_reasoning_effort: "medium",
+      "sandbox_workspace_write.network_access": false,
+      web_search: "disabled",
       "features.image_generation": false,
       "features.request_permissions_tool": false,
       "features.deferred_executor": false,
@@ -277,10 +309,8 @@ describe("publication knowledge-base enrichment", () => {
       include_permissions_instructions: false,
       "skills.bundled.enabled": false,
       "skills.include_instructions": false,
-      tools: {
-        experimental_request_user_input: { enabled: false },
-        update_plan: { enabled: false },
-      },
+      "tools.experimental_request_user_input.enabled": false,
+      "tools.update_plan.enabled": false,
     });
     expect(receivedCodexHome).toBe(ambientCodexHome);
     expect(receivedLowercaseCodexHome).toBeUndefined();
@@ -290,7 +320,7 @@ describe("publication knowledge-base enrichment", () => {
     expect((await stat(ambientCodexHome)).isDirectory()).toBe(true);
   });
 
-  test("fails closed for ambient MCP names the SDK cannot safely override", async () => {
+  test("fails closed for ambient MCP names the CLI cannot safely override", async () => {
     const codexHome = await mkdtemp(
       join(tmpdir(), "codex-security-publication-dotted-mcp-test-"),
     );
@@ -302,7 +332,7 @@ describe("publication knowledge-base enrichment", () => {
 
     await expect(
       enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
-        createCodex() {
+        runCodex() {
           throw new Error("Codex must not start.");
         },
         environment: {
@@ -331,17 +361,17 @@ describe("publication knowledge-base enrichment", () => {
       LABELS,
       [await policyFile()],
       {
-        createCodex() {
+        async runCodex() {
           started = true;
-          return fakeCodex(
-            response(
+          return {
+            finalResponse: response(
               issues().map(({ findingId }) => ({
                 findingId,
                 priority: "none",
                 labelIds: [],
               })),
             ),
-          );
+          };
         },
         environment: {
           CODEX_HOME: codexHome,
@@ -402,17 +432,17 @@ describe("publication knowledge-base enrichment", () => {
 
     try {
       await enrichPublicationIssues(issues(), LABELS, ["unused"], {
-        createCodex(options) {
-          config = options.config;
-          return fakeCodex(
-            response(
+        async runCodex(_command, args) {
+          config = codexConfiguration(args);
+          return {
+            finalResponse: response(
               issues().map(({ findingId }) => ({
                 findingId,
                 priority: "none",
                 labelIds: [],
               })),
             ),
-          );
+          };
         },
         environment: {
           CODEX_HOME: codexHome,
@@ -442,9 +472,9 @@ describe("publication knowledge-base enrichment", () => {
     let started = false;
     await expect(
       enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
-        createCodex() {
+        runCodex() {
           started = true;
-          return fakeCodex("{}");
+          throw new Error("Codex must not start.");
         },
         environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
         loadConfiguredMcpServers: async () => [],
@@ -458,7 +488,7 @@ describe("publication knowledge-base enrichment", () => {
     expect(started).toBe(false);
   });
 
-  test("removes configurable data access from the native enrichment turn", async () => {
+  test("removes configurable data access and leaves no native session state", async () => {
     const codexHome = await mkdtemp(
       join(tmpdir(), "codex-security-publication-native-home-test-"),
     );
@@ -470,6 +500,12 @@ describe("publication knowledge-base enrichment", () => {
       "ambient-model-instructions.md",
     );
     const skillDirectory = join(codexHome, "skills", "publication-probe");
+    const sessionsDirectory = join(codexHome, "sessions");
+    const stateDirectory = join(codexHome, "state");
+    await mkdir(sessionsDirectory, { recursive: true });
+    await mkdir(stateDirectory, { recursive: true });
+    await writeFile(join(sessionsDirectory, "existing-session.jsonl"), "{}\n");
+    await writeFile(join(stateDirectory, "existing-state.txt"), "existing\n");
     await mkdir(skillDirectory, { recursive: true });
     await writeFile(
       join(skillDirectory, "SKILL.md"),
@@ -525,8 +561,9 @@ describe("publication knowledge-base enrichment", () => {
         last_refresh: new Date().toISOString(),
       }),
     );
+    const configPath = join(codexHome, "config.toml");
     await writeFile(
-      join(codexHome, "config.toml"),
+      configPath,
       [
         `model_instructions_file = ${JSON.stringify(ambientModelInstructions)}`,
         'instructions = "PRIVATE_USER_INSTRUCTIONS_SYNTHETIC_MARKER"',
@@ -545,6 +582,10 @@ describe("publication knowledge-base enrichment", () => {
       ].join("\n"),
     );
     const requests: Array<{ tools?: Array<{ name?: string }> }> = [];
+    const policyMarker = "PRIVATE_PUBLICATION_POLICY_SYNTHETIC_MARKER";
+    const findingMarker = "PRIVATE_PUBLICATION_FINDING_SYNTHETIC_MARKER";
+    const nativePolicy = await policyFile();
+    await writeFile(nativePolicy, `Apply urgent priority. ${policyMarker}\n`);
     const finalResponse = response(
       issues().map(({ findingId }) => ({
         findingId,
@@ -612,52 +653,45 @@ describe("publication knowledge-base enrichment", () => {
         );
       },
     });
+    await writeFile(
+      configPath,
+      [
+        `chatgpt_base_url = "http://127.0.0.1:${server.port}"`,
+        'cli_auth_credentials_store = "file"',
+        'model_provider = "publication_test"',
+        "",
+        await readFile(configPath, "utf8"),
+        "",
+        "[model_providers.publication_test]",
+        'name = "Publication test"',
+        `base_url = "http://127.0.0.1:${server.port}/v1"`,
+        'env_key = "PUBLICATION_TEST_KEY"',
+        'wire_api = "responses"',
+        "supports_websockets = false",
+        "requires_openai_auth = true",
+        "request_max_retries = 0",
+        "stream_max_retries = 0",
+      ].join("\n"),
+    );
     try {
       const untrustedIssues = issues().map((issue, index) =>
         index === 0
           ? {
               ...issue,
-              description: `${issue.description}\n$publication-probe`,
+              description: `${issue.description}\n$publication-probe\n${findingMarker}`,
             }
           : issue,
       );
-      await enrichPublicationIssues(
-        untrustedIssues,
-        LABELS,
-        [await policyFile()],
-        {
-          createCodex(options) {
-            return new Codex({
-              ...options,
-              config: {
-                ...options.config,
-                chatgpt_base_url: `http://127.0.0.1:${server.port}`,
-                cli_auth_credentials_store: "file",
-                model: "gpt-5.5",
-                model_provider: "publication_test",
-                "model_providers.publication_test": {
-                  name: "Publication test",
-                  base_url: `http://127.0.0.1:${server.port}/v1`,
-                  env_key: "PUBLICATION_TEST_KEY",
-                  wire_api: "responses",
-                  supports_websockets: false,
-                  requires_openai_auth: true,
-                  request_max_retries: 0,
-                  stream_max_retries: 0,
-                },
-              },
-            });
-          },
-          environment: {
-            ...process.env,
-            CODEX_HOME: codexHome,
-            HOME: codexHome,
-            CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
-            PUBLICATION_TEST_KEY: "synthetic",
-          },
-          signal: AbortSignal.timeout(15_000),
+      await enrichPublicationIssues(untrustedIssues, LABELS, [nativePolicy], {
+        environment: {
+          ...process.env,
+          CODEX_HOME: codexHome,
+          HOME: codexHome,
+          CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
+          PUBLICATION_TEST_KEY: "synthetic",
         },
-      );
+        signal: AbortSignal.timeout(15_000),
+      });
     } finally {
       server.stop(true);
     }
@@ -684,6 +718,30 @@ describe("publication knowledge-base enrichment", () => {
     expect(
       await readFile(marker, "utf8").catch(() => undefined),
     ).toBeUndefined();
+    const homeFiles = await filesUnder(codexHome);
+    const sessionFiles = homeFiles.filter((path) =>
+      relative(codexHome, path).startsWith(
+        `sessions${process.platform === "win32" ? "\\" : "/"}`,
+      ),
+    );
+    expect(sessionFiles).toEqual([
+      join(sessionsDirectory, "existing-session.jsonl"),
+    ]);
+    const stateFiles = homeFiles.filter((path) => {
+      const local = relative(codexHome, path).toLowerCase();
+      return (
+        local.startsWith(`state${process.platform === "win32" ? "\\" : "/"}`) ||
+        local.includes("state_") ||
+        local.endsWith(".sqlite") ||
+        local.endsWith(".sqlite3")
+      );
+    });
+    const persistedState = await Promise.all(
+      [...sessionFiles, ...stateFiles].map((path) => readFile(path)),
+    );
+    const persistedText = Buffer.concat(persistedState).toString("utf8");
+    expect(persistedText).not.toContain(policyMarker);
+    expect(persistedText).not.toContain(findingMarker);
   });
 
   test("supplies the canonical sealed finding to publication policy", async () => {
@@ -937,13 +995,9 @@ describe("publication knowledge-base enrichment", () => {
     let cleaned = false;
     const controller = new AbortController();
     const codex: PublicationEnrichmentCodex = {
-      startThread() {
-        return {
-          async run() {
-            controller.abort("synthetic cancellation");
-            throw controller.signal.reason;
-          },
-        };
+      async run() {
+        controller.abort("synthetic cancellation");
+        throw controller.signal.reason;
       },
     };
 
@@ -962,6 +1016,76 @@ describe("publication knowledge-base enrichment", () => {
       }),
     ).rejects.toBe("synthetic cancellation");
     expect(cleaned).toBe(true);
+  });
+
+  test("waits for a failed Codex child to close before cleaning its knowledge base", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-close-test-"),
+    );
+    temporaryDirectories.push(root);
+    const knowledgeBase = join(root, "knowledge-base");
+    await mkdir(knowledgeBase);
+    await writeFile(join(knowledgeBase, "0-policy.md.txt"), "Policy");
+    const closeMarker = join(knowledgeBase, "child-closed");
+    const executable = join(root, "failing-codex.cjs");
+    await writeFile(
+      executable,
+      [
+        'const fs = require("node:fs");',
+        "let closing = false;",
+        'process.on("SIGTERM", () => {',
+        "  if (closing) return;",
+        "  closing = true;",
+        "  setTimeout(() => {",
+        '    fs.writeFileSync(process.argv[2], "closed");',
+        "    process.exit(1);",
+        "  }, 100);",
+        "});",
+        'process.stdout.write(JSON.stringify({ type: "error", message: "synthetic failure" }) + "\\n");',
+        "setInterval(() => undefined, 1_000);",
+      ].join("\n"),
+    );
+    let cleaned = false;
+
+    await expect(
+      enrichPublicationIssues(issues(), LABELS, ["unused"], {
+        environment: {
+          ...process.env,
+          CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
+        },
+        prepareKnowledgeBase: async () => ({
+          path: knowledgeBase,
+          sources: [],
+          cleanup: async () => {
+            if (process.platform !== "win32") {
+              expect(await readFile(closeMarker, "utf8")).toBe("closed");
+            }
+            await rm(knowledgeBase, { recursive: true, force: true });
+            cleaned = true;
+          },
+        }),
+        loadConfiguredMcpServers: async () => [],
+        verifyCodexIsolation: async () => undefined,
+        runCodex: async (
+          _command,
+          _arguments,
+          input,
+          environment,
+          workingDirectory,
+          signal,
+        ) =>
+          runPublicationEnrichmentCodex(
+            process.execPath,
+            [executable, closeMarker],
+            input,
+            environment,
+            workingDirectory,
+            signal,
+          ),
+      }),
+    ).rejects.toThrow("Codex publication enrichment failed");
+    expect(cleaned).toBe(true);
+    await expect(stat(knowledgeBase)).rejects.toThrow();
   });
 
   test("removes Linear credentials from the Codex environment", async () => {
@@ -991,22 +1115,21 @@ describe("publication knowledge-base enrichment", () => {
 
   test("cleans the extracted knowledge base after success", async () => {
     const policy = await policyFile();
-    let workingDirectory: string | undefined;
+    const workingDirectory = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-cleanup-test-"),
+    );
+    temporaryDirectories.push(workingDirectory);
+    await writeFile(join(workingDirectory, "0-policy.md.txt"), "Policy");
     const codex: PublicationEnrichmentCodex = {
-      startThread(options) {
-        workingDirectory = options.workingDirectory;
+      async run() {
         return {
-          async run() {
-            return {
-              finalResponse: response(
-                issues().map(({ findingId }) => ({
-                  findingId,
-                  priority: "none",
-                  labelIds: [],
-                })),
-              ),
-            };
-          },
+          finalResponse: response(
+            issues().map(({ findingId }) => ({
+              findingId,
+              priority: "none",
+              labelIds: [],
+            })),
+          ),
         };
       },
     };
@@ -1014,8 +1137,14 @@ describe("publication knowledge-base enrichment", () => {
     await enrichPublicationIssues(issues(), LABELS, [policy], {
       codex,
       environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
+      prepareKnowledgeBase: async () => ({
+        path: workingDirectory,
+        sources: [policy],
+        cleanup: async () => {
+          await rm(workingDirectory, { recursive: true, force: true });
+        },
+      }),
     });
-    expect(workingDirectory).toBeDefined();
-    await expect(stat(workingDirectory!)).rejects.toThrow();
+    await expect(stat(workingDirectory)).rejects.toThrow();
   });
 });

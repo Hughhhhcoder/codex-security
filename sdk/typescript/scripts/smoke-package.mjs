@@ -451,11 +451,7 @@ try {
   assert.equal(publication.counts.findings, 1);
   assert.equal(publication.counts.created, 0);
   assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
-  assert.equal(
-    Object.hasOwn(publication.issues[0], "priority"),
-    false,
-    "Publication must not infer Linear priority without a knowledge base.",
-  );
+  assert.equal(publication.issues[0].priority, 2);
 
   const networkGuard = join(consumer, "reject-publication-network.cjs");
   await writeFile(

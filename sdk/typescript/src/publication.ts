@@ -5,6 +5,7 @@ import type {
   FindingCodeEvidence,
   FindingLocation,
   ScanTargetRecord,
+  SeverityLevel,
 } from "./models.js";
 import { bundledPluginRoot } from "./runtime.js";
 
@@ -18,6 +19,7 @@ export interface PrepareScanPublicationOptions {
   destination: "linear";
   teamId: string;
   projectId?: string;
+  knowledgeBasePaths?: string[];
   uploadedAt?: string;
 }
 
@@ -50,6 +52,14 @@ export interface PreparedScanPublication {
   policyFindings?: Finding[];
 }
 
+const LINEAR_PRIORITIES = {
+  critical: 1,
+  high: 2,
+  medium: 3,
+  low: 4,
+  informational: undefined,
+} as const satisfies Record<SeverityLevel, 1 | 2 | 3 | 4 | undefined>;
+
 export async function prepareScanPublication(
   scanDirectory: string,
   options: PrepareScanPublicationOptions,
@@ -71,13 +81,20 @@ export async function prepareScanPublication(
         ? {}
         : { projectId: options.projectId }),
     },
-    policyFindings: contract.findings.findings,
-    issues: contract.findings.findings.map((finding) => ({
-      findingId: finding.findingId,
-      occurrenceId: finding.occurrenceId,
-      title: `[Codex Security][${finding.severity.level.toUpperCase()}] ${finding.title}`,
-      description: renderFindingDescription(contract, finding, uploadedAt),
-    })),
+    ...(options.knowledgeBasePaths === undefined ||
+    options.knowledgeBasePaths.length === 0
+      ? {}
+      : { policyFindings: contract.findings.findings }),
+    issues: contract.findings.findings.map((finding) => {
+      const priority = LINEAR_PRIORITIES[finding.severity.level];
+      return {
+        findingId: finding.findingId,
+        occurrenceId: finding.occurrenceId,
+        title: `[Codex Security][${finding.severity.level.toUpperCase()}] ${finding.title}`,
+        description: renderFindingDescription(contract, finding, uploadedAt),
+        ...(priority === undefined ? {} : { priority }),
+      };
+    }),
   };
 }
 
