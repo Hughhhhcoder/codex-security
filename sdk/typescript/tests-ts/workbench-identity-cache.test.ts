@@ -1406,12 +1406,15 @@ with ExitStack() as stack:
 
 function run(scenario: string): Record<string, unknown> {
   const python = (Bun.which("python3") ?? Bun.which("python"))!;
+  // Keep the Python fixture off the Windows command line.
   const execution = spawnSync(
     python,
-    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts"), scenario],
-    { encoding: "utf8", timeout: 10_000 },
+    ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts"), scenario],
+    { input: probe, encoding: "utf8", timeout: 10_000 },
   );
-  expect(execution.status, execution.stderr).toBe(0);
+  expect(execution.status, execution.error?.message ?? execution.stderr).toBe(
+    0,
+  );
   return JSON.parse(execution.stdout) as Record<string, unknown>;
 }
 
