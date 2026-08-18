@@ -179,6 +179,18 @@ export function validatedGitEnvironment(
   }
 }
 
+export function normalizeTarget(
+  repository: string,
+  target: ScanTarget,
+  signal?: AbortSignal,
+): Promise<NormalizedTarget>;
+/** @internal */
+export function normalizeTarget(
+  repository: string,
+  target: ScanTarget,
+  signal: AbortSignal | undefined,
+  gitCommand: InspectedExecutable,
+): Promise<NormalizedTarget>;
 export async function normalizeTarget(
   repository: string,
   target: ScanTarget,
@@ -364,6 +376,16 @@ export function validateMode(target: NormalizedTarget, mode: ScanMode): void {
   }
 }
 
+export function repositoryRevision(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string | null>;
+/** @internal */
+export function repositoryRevision(
+  repository: string,
+  signal: AbortSignal | undefined,
+  gitCommand: InspectedExecutable,
+): Promise<string | null>;
 export async function repositoryRevision(
   repository: string,
   signal?: AbortSignal,
@@ -459,6 +481,7 @@ async function gitOutput(
   return stdout.trim();
 }
 
+/** @internal */
 export async function resolveGitCommand(
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string,
@@ -482,19 +505,21 @@ export async function resolveGitCommand(
       binding.value,
       inspected.environment,
       protectedRoot,
+      { preserveInvocation: true },
     );
     if (inspected.executable === null) {
       throw new ConfigurationError(
         "CODEX_SECURITY_GIT does not name an available executable.",
       );
     }
-    executable = binding.value;
+    executable = inspected.executable;
   }
   for (const key of binding.keys) delete inspected.environment[key];
   inspected.environment["CODEX_SECURITY_GIT"] = executable ?? "";
   return { executable, environment: inspected.environment };
 }
 
+/** @internal */
 export async function outermostGitMarkerRoot(
   repository: string,
   signal?: AbortSignal,

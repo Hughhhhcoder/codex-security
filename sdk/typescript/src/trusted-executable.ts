@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import {
   delimiter,
+  dirname,
   extname,
   isAbsolute,
   join,
@@ -52,6 +53,7 @@ export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string,
+  { preserveInvocation = false }: { preserveInvocation?: boolean } = {},
 ): Promise<InspectedExecutable> {
   const root = await realpath(protectedRoot).catch(() =>
     resolve(protectedRoot),
@@ -106,7 +108,9 @@ export async function inspectTrustedExecutable(
   const candidates = pathLike
     ? extensions.map((extension) => ({
         entry: null,
-        path: resolve(`${candidate}${extension.suffix}`),
+        path: preserveInvocation
+          ? `${candidate}${extension.suffix}`
+          : resolve(`${candidate}${extension.suffix}`),
         runnable: extension.runnable,
       }))
     : entries.flatMap((entry) =>
@@ -130,12 +134,23 @@ export async function inspectTrustedExecutable(
     }
     if (!current.runnable) continue;
     try {
+      if (
+        preserveInvocation &&
+        (!isAbsolute(candidate) ||
+          (await hasProtectedAncestor(root, current.path, canonical)))
+      ) {
+        continue;
+      }
       await access(
         canonical,
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      executable ??= pathLike ? canonical : current.path;
+      executable ??= preserveInvocation
+        ? candidate
+        : pathLike
+          ? canonical
+          : current.path;
     } catch {
       continue;
     }
@@ -146,6 +161,29 @@ export async function inspectTrustedExecutable(
     .filter((entry) => !unsafeEntries.has(entry))
     .join(delimiter);
   return { executable, environment: sanitizedEnvironment };
+}
+
+async function hasProtectedAncestor(
+  root: string,
+  ...paths: string[]
+): Promise<boolean> {
+  // Identities cover case aliases and junctions in the original invocation.
+  const protectedIdentity = await stat(root, { bigint: true });
+  for (const path of paths) {
+    for (let directory = dirname(path); ; ) {
+      const identity = await stat(directory, { bigint: true });
+      if (
+        identity.dev === protectedIdentity.dev &&
+        identity.ino === protectedIdentity.ino
+      ) {
+        return true;
+      }
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  return false;
 }
 
 function isWithin(root: string, candidate: string): boolean {

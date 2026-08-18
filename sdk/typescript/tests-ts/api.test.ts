@@ -5815,6 +5815,130 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("refreshes explicit tool settings when a client reuses its runtime", async () => {
+    const name =
+      "refreshes explicit tool settings when a client reuses its runtime";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+
+    const originalTrusted = { ...trustedExecutable };
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const stateDirectory = join(root, "state");
+    const scanDir = join(root, "scan");
+    for (const path of [repository, codexHome, scanDir]) {
+      await mkdir(path, { mode: 0o700 });
+    }
+    const filename = process.platform === "win32" ? "rg.exe" : "rg";
+    const firstPath = join(root, "first-tools");
+    const nextPath = join(root, "next-tools");
+    const explicit = join(root, "selected-tools", filename);
+    const environment: Record<string, string> = {
+      PATH: firstPath,
+      CODEX_CLI_PATH: process.execPath,
+      CODEX_HOME: join(root, "ambient-home"),
+      CODEX_SECURITY_STATE_DIR: stateDirectory,
+      CODEX_SECURITY_RG: explicit,
+      OPENAI_API_KEY: "synthetic-key",
+    };
+    const runtimeEnvironment: Record<string, string> = {
+      ...environment,
+      CODEX_HOME: codexHome,
+    };
+    const runtime = {
+      ...preparedRuntime(codexHome),
+      environment: runtimeEnvironment,
+    };
+    const workbenchEnvironments: WorkbenchCommandOptions["environment"][] = [];
+    const codexEnvironments: CodexOptions["env"][] = [];
+    let runtimePreparations = 0;
+    mock.module("../src/trusted-executable.js", () => ({
+      ...originalTrusted,
+      inspectTrustedExecutable: async (
+        candidate: string,
+        current: Record<string, string | undefined>,
+        _protectedRoot: string,
+        options?: { preserveInvocation?: boolean },
+      ) => {
+        if (candidate !== "git" && candidate !== "rg") {
+          expect(options?.preserveInvocation).toBe(true);
+        }
+        return {
+          executable:
+            candidate === "git"
+              ? null
+              : candidate === "rg"
+                ? join(current["PATH"]!, filename)
+                : candidate,
+          environment: { ...current },
+        };
+      },
+    }));
+    const client = new TestClient(
+      {},
+      {
+        environment,
+        prepareRuntime: async () => {
+          runtimePreparations++;
+          return runtime;
+        },
+        resolvePluginPython: async () => join(root, "managed-python"),
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => null,
+        stageBundledRipgrep: async () => {
+          throw new Error("A selected host tool must not be restaged");
+        },
+        runWorkbench: async (
+          options: WorkbenchCommandOptions,
+          args: readonly string[],
+        ) => {
+          if (args[0] === "register-cli-scan") {
+            workbenchEnvironments.push(options.environment);
+          }
+          return mockWorkbench(args);
+        },
+        createCodex: (options: CodexOptions) => {
+          codexEnvironments.push(options.env);
+          throw new Error("captured fresh tool environment");
+        },
+      },
+    );
+    const run = async (selection: string, path: string) => {
+      await expect(client.run(repository)).rejects.toThrow(
+        "captured fresh tool environment",
+      );
+      for (const selected of [
+        workbenchEnvironments.at(-1),
+        codexEnvironments.at(-1),
+      ]) {
+        expect(selected).toMatchObject({
+          CODEX_HOME: codexHome,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+          CODEX_SECURITY_GIT: "",
+          CODEX_SECURITY_RG: selection,
+          PATH: path,
+        });
+      }
+    };
+    try {
+      await run(explicit, firstPath);
+      environment["CODEX_SECURITY_RG"] = "";
+      environment["PATH"] = nextPath;
+      await run("", nextPath);
+      delete environment["CODEX_SECURITY_RG"];
+      await run(join(nextPath, filename), nextPath);
+      environment["CODEX_SECURITY_RG"] = explicit;
+      await run(explicit, nextPath);
+      expect(runtimePreparations).toBe(1);
+      expect(runtime.environment["CODEX_SECURITY_RG"]).toBe(explicit);
+      expect(workbenchEnvironments).toHaveLength(4);
+      expect(codexEnvironments).toHaveLength(4);
+    } finally {
+      await client.close();
+      mock.module("../src/trusted-executable.js", () => originalTrusted);
+    }
+  });
+
   test("authenticates without initializing the plugin runtime", async () => {
     const root = await temporaryDirectory();
     const stateDirectory = join(root, "state");

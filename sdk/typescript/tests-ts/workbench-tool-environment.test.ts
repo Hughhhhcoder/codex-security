@@ -127,6 +127,45 @@ describe("workbench tool environments", () => {
     });
   });
 
+  test("accepts extensionless bindings and quoted Windows tool paths", () => {
+    runPythonMocks(`
+import tempfile
+with tempfile.TemporaryDirectory(prefix="workbench-tool-paths-") as temporary:
+    root = Path(temporary).resolve()
+    repository = root / "repository"
+    directory = root / "tools with spaces"
+    repository.mkdir()
+    directory.mkdir()
+    for name in ("git", "rg"):
+        (directory / (name + ".exe")).write_bytes(b"synthetic native executable")
+    (directory / "missing.com").write_bytes(b"synthetic native executable")
+    with (
+        patch.object(workbench.sys, "platform", "win32"),
+        patch.object(workbench.subprocess, "run") as run,
+    ):
+        for name in ("git", "rg"):
+            invocation = str(directory / name)
+            setting = "CODEX_SECURITY_" + name.upper()
+            assert workbench._trusted_executable(
+                repository, {"PATH": "", setting: invocation}, name,
+            ) == invocation
+            environment = {"PATH": '"' + str(directory) + '"'}
+            assert workbench._trusted_executable(
+                repository, environment, name,
+            ) == str(directory / (name + ".exe"))
+            assert environment["PATH"] == str(directory)
+            try:
+                workbench._trusted_executable(
+                    repository, {setting: str(directory / "missing")}, name,
+                )
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("extensionless invocation incorrectly selected a .com file")
+        run.assert_not_called()
+`);
+  });
+
   test("treats stale target roots as unavailable without hiding other errors", () => {
     runPythonMocks(`
 import stat

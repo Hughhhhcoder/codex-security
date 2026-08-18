@@ -99,6 +99,7 @@ test("uses one explicit Git command throughout target validation", async () => {
       candidate: string,
       environment: Record<string, string | undefined>,
       protectedRoot: string,
+      options?: { preserveInvocation?: boolean },
     ) => {
       expect(protectedRoot).toBe(repository);
       inspections.push(candidate);
@@ -107,7 +108,9 @@ test("uses one explicit Git command throughout target validation", async () => {
           candidate === "git"
             ? discovered
             : candidate === selected
-              ? canonical
+              ? options?.preserveInvocation
+                ? selected
+                : canonical
               : null,
         environment: { ...environment, PATH: "/synthetic/safe-path" },
       };

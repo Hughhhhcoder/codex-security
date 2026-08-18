@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, join, relative } from "node:path";
+import { basename, delimiter, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
@@ -151,6 +151,87 @@ describe("trusted executable resolution", () => {
       expect(result.stdout.trim()).toBe(git);
     },
   );
+
+  test("preserves explicit invocations only outside the protected directory identity", async () => {
+    const name =
+      "preserves explicit invocations only outside the protected directory identity";
+    if (runMockInSubprocess(import.meta.path, name)) return;
+
+    const originalPromises = { ...fsPromises };
+    const root = join(tmpdir(), "trusted-invocation-metadata-mock");
+    const repository = join(root, "repository");
+    const trusted = join(root, "trusted");
+    const alias = join(root, "repository-alias");
+    const caseAlias = join(root, "REPOSITORY");
+    const extension = process.platform === "win32" ? ".exe" : "";
+    const canonical = join(root, "native", `tool${extension}`);
+    const caseTarget = join(caseAlias, "native", `tool${extension}`);
+    const selected = join(trusted, "selected git");
+    const inside = join(repository, "git");
+    const linkedParent = join(repository, "host-tools", "git");
+    const aliasedParent = join(alias, "git");
+    const caseParent = join(caseAlias, "git");
+    const traversedParent = `${alias}${sep}..${sep}trusted${sep}git`;
+    const externalCaseTarget = join(trusted, "case-target");
+    const unsafe = [
+      inside,
+      linkedParent,
+      aliasedParent,
+      caseParent,
+      traversedParent,
+      externalCaseTarget,
+    ];
+    const paths = new Map([
+      [repository, repository],
+      ...[selected, ...unsafe].map((path): [string, string] => [
+        `${path}${extension}`,
+        path === externalCaseTarget ? caseTarget : canonical,
+      ]),
+    ]);
+    const protectedInode = 9_007_199_254_740_993n;
+    const identities = new Map<string, bigint>([
+      [repository, protectedInode],
+      [alias, protectedInode],
+      [caseAlias, protectedInode],
+      [trusted, protectedInode - 1n],
+    ]);
+    let nextInode = 1n;
+    mock.module("node:fs/promises", () => ({
+      ...originalPromises,
+      realpath: async (path: string) => {
+        const result = paths.get(path);
+        if (result === undefined) {
+          throw Object.assign(new Error("missing synthetic path"), {
+            code: "ENOENT",
+          });
+        }
+        return result;
+      },
+      access: async () => {},
+      stat: async (path: string, options?: { bigint?: boolean }) => {
+        if (!options?.bigint) {
+          return { isFile: () => path === canonical || path === caseTarget };
+        }
+        if (!identities.has(path)) identities.set(path, nextInode++);
+        return { dev: 1n, ino: identities.get(path)! };
+      },
+    }));
+
+    try {
+      const resolver = await import("../src/trusted-executable.js");
+      const inspect = (path: string, preserveInvocation = true) =>
+        resolver.inspectTrustedExecutable(path, { PATH: "" }, repository, {
+          preserveInvocation,
+        });
+      expect((await inspect(selected)).executable).toBe(selected);
+      expect((await inspect(inside, false)).executable).toBe(canonical);
+      for (const path of unsafe) {
+        expect((await inspect(path)).executable).toBeNull();
+      }
+    } finally {
+      mock.module("node:fs/promises", () => originalPromises);
+    }
+  });
 
   test("rejects canonical Windows batch targets without rejecting native aliases", async () => {
     if (

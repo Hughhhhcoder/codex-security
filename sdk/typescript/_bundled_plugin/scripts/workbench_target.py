@@ -175,6 +175,8 @@ def _trusted_executable(
         candidate = Path(configured)
         if not candidate.is_absolute():
             raise SystemExit(f"{setting} must name an absolute trusted executable.")
+        if sys.platform == "win32" and not os.path.splitext(candidate.name)[1]:
+            candidate = Path(f"{candidate}.exe")
         try:
             canonical = candidate.resolve(strict=True)
             if _inside_protected_git_root(canonical, root) or any(
@@ -199,6 +201,8 @@ def _trusted_executable(
                 del environment[key]
             environment["PATH"] = path
     for entry in os.get_exec_path(environment):
+        if sys.platform == "win32" and entry.startswith('"') and entry.endswith('"'):
+            entry = entry[1:-1]
         if not entry:
             continue
         try:

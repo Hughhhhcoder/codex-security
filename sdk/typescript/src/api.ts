@@ -540,7 +540,7 @@ export class CodexSecurity {
         runtimeHome,
         effectiveConfig,
         preflightConfig,
-        modelProvider,
+        scanEnvironment,
         authentication,
         approvalPolicy,
         python,
@@ -559,11 +559,11 @@ export class CodexSecurity {
           signal,
         );
       }
-      const pluginEnvironment = selectedScanEnvironment(
-        runtime.environment,
-        options.auth,
-        modelProvider,
-      );
+      const pluginEnvironment = {
+        ...withoutCodexHome(scanEnvironment),
+        CODEX_HOME: runtime.codexHome,
+        CODEX_SECURITY_STATE_DIR: stateDirectory,
+      };
       const { keys: gitKeys } = executableBinding(
         pluginEnvironment,
         "CODEX_SECURITY_GIT",
@@ -593,13 +593,14 @@ export class CodexSecurity {
           configuredRipgrep,
           ripgrep.environment,
           protectedGitRoot,
+          { preserveInvocation: true },
         );
         if (inspected.executable === null) {
           throw new ConfigurationError(
             "CODEX_SECURITY_RG does not name an available executable.",
           );
         }
-        ripgrep.environment = inspected.environment;
+        ripgrep = inspected;
       }
       if (
         configuredRipgrep === undefined &&
@@ -632,7 +633,7 @@ export class CodexSecurity {
         gitCommand.executable ?? "";
       // The Codex runtime can add its bundled tools to PATH after this point.
       trustedPluginEnvironment["CODEX_SECURITY_RG"] =
-        configuredRipgrep ?? ripgrep.executable ?? undefined;
+        configuredRipgrep === "" ? "" : ripgrep.executable ?? undefined;
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
