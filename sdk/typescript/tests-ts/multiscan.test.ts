@@ -144,7 +144,7 @@ describe("multiscan", () => {
   ] as const) {
     const name =
       location === "campaign artifacts"
-        ? "rejects selected Git from existing campaign artifacts"
+        ? "accepts selected Git from existing campaign artifacts"
         : `rejects selected Git from the ${location} repository`;
     test(name, async () => {
       if (runMockInSubprocess(import.meta.path, name)) return;
@@ -231,11 +231,13 @@ describe("multiscan", () => {
           completed: 0,
           failed: missingSource ? 2 : 1,
         });
-        expect(selectedAccepted).toBe(false);
+        expect(selectedAccepted).toBe(location === "campaign artifacts");
         expect(scans).toBe(0);
         for (const receipt of await results(summary.resultsPath)) {
           expect(receipt["error"]).toContain(
-            "CODEX_SECURITY_GIT does not name an available executable.",
+            location === "campaign artifacts"
+              ? "Inert selected Git reached the execution boundary."
+              : "CODEX_SECURITY_GIT does not name an available executable.",
           );
         }
       } finally {

@@ -1988,11 +1988,7 @@ export class CodexSecurity {
     validatedGitEnvironment(this.#dependencies.environment);
     const protectedGitRoot = await outermostGitMarkerRoot(repo, signal);
     const protectedGitRoots = await protectedGitInputRoots(
-      [
-        repositoryPath,
-        ...(options.knowledgeBasePaths ?? []),
-        ...(options.outputDir === undefined ? [] : [options.outputDir]),
-      ],
+      [repositoryPath, ...(options.knowledgeBasePaths ?? [])],
       signal,
     );
     const gitCommand = await resolveGitCommand(
