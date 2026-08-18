@@ -29,7 +29,7 @@ import {
 } from "node:path";
 import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import {
   BUNDLED_PLUGIN_VERSION,
@@ -61,6 +61,7 @@ import {
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
+  preserveCodexSecurityPluginRegistration,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -1498,6 +1499,51 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
+  test("does not preserve a different marketplace when numeric identities collide", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    const differentSource = join(home, "different-marketplace");
+    await mkdir(marketplace, { recursive: true });
+    await mkdir(differentSource);
+    await writeFile(
+      join(home, "config.toml"),
+      `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(differentSource)}\n[plugins."codex-security@codex-security-sdk"]\nenabled = true\n`,
+    );
+    const originalStat = fsPromises.stat;
+    const firstExactIdentity = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    const inspectMarketplaces = spyOn(fsPromises, "stat").mockImplementation(
+      async (path, options) => {
+        const stats = await originalStat(path, options as never);
+        const value = String(path);
+        if (value !== marketplace && value !== differentSource) {
+          return stats as never;
+        }
+        const exactIdentity =
+          firstExactIdentity + (value === marketplace ? 1n : 0n);
+        return Object.assign(
+          Object.create(Object.getPrototypeOf(stats)),
+          stats,
+          {
+            ino:
+              typeof stats.ino === "bigint"
+                ? exactIdentity
+                : Number(exactIdentity),
+          },
+        ) as never;
+      },
+    );
+    const config = { model: "comparison-model" };
+
+    try {
+      expect(await preserveCodexSecurityPluginRegistration(home, config)).toBe(
+        config,
+      );
+    } finally {
+      inspectMarketplaces.mockRestore();
+    }
+  });
+
   test("refreshes cached plugins before forwarding delegated scan attribution", async () => {
     const root = await temporaryDirectory();
     const previous = await plugin(join(root, "previous"), "0.1.19");
@@ -2043,7 +2089,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const home = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
       });
-      const stale = await lstat(home);
+      const stale = await lstat(home, { bigint: true });
       await rename(home, join(root, "original-home"));
       await mkdir(home, { mode: 0o700 });
 
@@ -2985,6 +3031,47 @@ describe("runtime directories and plugin Python boundary", () => {
         "token=sk-proj-SYNTHETIC_WINDOWS_ACL_SECRET_123",
       );
       expect((error as Error).cause).toBe(underlying);
+    }
+  });
+
+  test("rejects replacement credential homes when numeric identities collide", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const canonicalHome = await realpath(home);
+    const originalLstat = fsPromises.lstat;
+    const firstExactIdentity = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    let homeInspections = 0;
+    const inspectHome = spyOn(fsPromises, "lstat").mockImplementation(
+      async (path, options) => {
+        const stats = await originalLstat(path, options as never);
+        if (String(path) !== home && String(path) !== canonicalHome) {
+          return stats as never;
+        }
+        const exactIdentity =
+          firstExactIdentity + (homeInspections++ === 0 ? 0n : 1n);
+        return Object.assign(
+          Object.create(Object.getPrototypeOf(stats)),
+          stats,
+          {
+            ino:
+              typeof stats.ino === "bigint"
+                ? exactIdentity
+                : Number(exactIdentity),
+          },
+        ) as never;
+      },
+    );
+
+    try {
+      await expect(
+        requireSecureCredentialHome(home, {
+          platform: "win32",
+          secureWindowsHome: async () => {},
+        }),
+      ).rejects.toThrow("credential home was replaced");
+    } finally {
+      inspectHome.mockRestore();
     }
   });
 
