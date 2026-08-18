@@ -105,6 +105,20 @@ function expectation(
 }
 
 describe("canonical scan contract", () => {
+  test("ships a completed example that passes tracking preflight", () => {
+    const result = Bun.spawnSync(
+      [
+        Bun.which("python3") ?? "python",
+        "-I",
+        "-B",
+        join(PLUGIN_ROOT, "scripts", "validate_tracking_source.py"),
+        EXAMPLE,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  });
+
   test("compares exact Windows volume serials without rounding file identity", async () => {
     const scanDir = await copyExample();
     const path = join(scanDir, "scan-manifest.json");
