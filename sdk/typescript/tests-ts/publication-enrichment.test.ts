@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Codex } from "@openai/codex-sdk";
@@ -231,10 +238,10 @@ describe("publication knowledge-base enrichment", () => {
     });
 
     expect(config).toMatchObject({
-      'mcp_servers."synthetic".command': "codex-security-disabled-mcp",
-      'mcp_servers."synthetic".enabled': false,
-      'mcp_servers."remote_server".command': "codex-security-disabled-mcp",
-      'mcp_servers."remote_server".enabled': false,
+      "mcp_servers.synthetic.command": "codex-security-disabled-mcp",
+      "mcp_servers.synthetic.enabled": false,
+      "mcp_servers.remote_server.command": "codex-security-disabled-mcp",
+      "mcp_servers.remote_server.enabled": false,
       "features.view_image": false,
       tools: {
         experimental_request_user_input: { enabled: false },
@@ -309,8 +316,8 @@ describe("publication knowledge-base enrichment", () => {
     });
 
     expect(config).toMatchObject({
-      'mcp_servers."project_tool".command': "codex-security-disabled-mcp",
-      'mcp_servers."project_tool".enabled': false,
+      "mcp_servers.project_tool.command": "codex-security-disabled-mcp",
+      "mcp_servers.project_tool.enabled": false,
     });
   });
 
@@ -319,9 +326,33 @@ describe("publication knowledge-base enrichment", () => {
       join(tmpdir(), "codex-security-publication-native-home-test-"),
     );
     temporaryDirectories.push(codexHome);
+    const marker = join(codexHome, "mcp-started");
+    const mcpServer = join(codexHome, "mcp-server.cjs");
+    await writeFile(
+      mcpServer,
+      [
+        'const fs = require("node:fs");',
+        'const readline = require("node:readline");',
+        "fs.writeFileSync(process.argv[2], 'started');",
+        "const lines = readline.createInterface({ input: process.stdin });",
+        "lines.on('line', (line) => {",
+        "  const message = JSON.parse(line);",
+        "  if (message.id === undefined) return;",
+        "  let result = {};",
+        "  if (message.method === 'initialize') result = { protocolVersion: message.params.protocolVersion, capabilities: { resources: {} }, serverInfo: { name: 'publication-test', version: '1' } };",
+        "  if (message.method === 'resources/list') result = { resources: [{ uri: 'synthetic://secret', name: 'Synthetic' }] };",
+        "  if (message.method === 'resources/read') result = { contents: [{ uri: 'synthetic://secret', text: 'unrelated data' }] };",
+        "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');",
+        "});",
+      ].join("\n"),
+    );
     await writeFile(
       join(codexHome, "config.toml"),
-      '[mcp_servers.native_test]\ncommand = "native-test-tool"\n',
+      [
+        "[mcp_servers.native_test]",
+        `command = ${JSON.stringify(process.execPath)}`,
+        `args = ${JSON.stringify([mcpServer, marker])}`,
+      ].join("\n"),
     );
     const requests: Array<{ tools?: Array<{ name?: string }> }> = [];
     const finalResponse = response(
@@ -429,6 +460,9 @@ describe("publication knowledge-base enrichment", () => {
     expect(toolNames).not.toContain("update_plan");
     expect(toolNames).not.toContain("request_user_input");
     expect(JSON.stringify(requests[0])).not.toContain("native_test");
+    expect(
+      await readFile(marker, "utf8").catch(() => undefined),
+    ).toBeUndefined();
   });
 
   test("supplies the canonical sealed finding to publication policy", async () => {

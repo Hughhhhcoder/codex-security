@@ -116,7 +116,7 @@ export async function enrichPublicationIssues(
           allow_login_shell: false,
           ...Object.fromEntries(
             configuredMcpServers.flatMap(({ name }) => {
-              const key = `mcp_servers.${JSON.stringify(name)}`;
+              const key = `mcp_servers.${name}`;
               return [
                 [`${key}.command`, "codex-security-disabled-mcp"],
                 [`${key}.enabled`, false],
