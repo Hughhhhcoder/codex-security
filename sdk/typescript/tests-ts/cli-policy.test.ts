@@ -740,6 +740,32 @@ describe("policy CLI", () => {
       expect(stderr.text()).toContain("was written");
       expect(stderr.text()).not.toContain("canceled by Ctrl-C");
       expect(await readFile(draft.targetPath, "utf8")).toBe(POLICY);
+      for (const flags of [
+        [],
+        [
+          "--plugin-path",
+          pluginPath,
+          "--python",
+          join(f.root, "missing-python"),
+        ],
+      ]) {
+        const failedRetry = capture();
+        expect(
+          await main(
+            ["policy", "--apply", f.outputDir, "--write", "--json", ...flags],
+            failedRetry.stream,
+            capture().stream,
+            {
+              ...policyDependencies(f),
+              resolvePolicyPython: resolvePluginPython,
+            },
+          ),
+        ).toBe(2);
+        expect(JSON.parse(failedRetry.text())).toMatchObject({
+          status: "written_unverified",
+          targetPath: draft.targetPath,
+        });
+      }
       await writeFile(
         join(pluginPath, "scripts", "resolve_security_md.py"),
         "print('resolver accepted the policy')\n",

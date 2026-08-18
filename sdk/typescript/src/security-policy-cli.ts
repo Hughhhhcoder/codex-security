@@ -243,10 +243,7 @@ export async function runPolicyCommand(
     if (approved) {
       applyingTarget = draft.targetPath;
       const applied = await applySecurityPolicy(draft, {
-        pythonPath:
-          draft.content === draft.previousContent
-            ? undefined
-            : await resolvePython(),
+        pythonPath: python ?? options.config.pythonPath,
         pluginPath: options.config.pluginPath,
         environment: dependencies.environment,
         signal: controller.signal,

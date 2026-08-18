@@ -1015,48 +1015,50 @@ export async function applySecurityPolicy(
   draft = { ...draft };
   validatePolicyContent(draft.content);
   const target = await resolveDraftTarget(draft, options.signal);
-  if (draft.previousContent !== draft.content)
-    await validatePolicyLinks(target, options.signal);
   const alreadyApplied =
-    (await readDraftContent(target, draft, options.signal)) === draft.content;
-  if (draft.previousContent === draft.content)
-    return {
-      status: "unchanged",
-      targetPath: target.targetPath,
-      recoveryPath: null,
-    };
-  const protectedRoots = await securityPolicyProtectedRoots(
-    target.repository,
-    options.signal,
-  );
-  const protectedRoot = protectedRoots[0]!;
-  const recoveryDirectory =
-    alreadyApplied || draft.previousContent === null
-      ? null
-      : dirname(
-          await requireScanFile(
-            draft.outputDir,
-            MANIFEST_NAME,
-            MANIFEST_NAME,
-            options.signal,
-          ),
-        );
-  if (recoveryDirectory !== null)
-    requireOutputOutsideRepositories(protectedRoots, recoveryDirectory);
-  const pluginPath = options.pluginPath ?? draft.pluginPath;
-  if (draft.customPlugin && pluginPath === undefined) {
-    throw new CodexSecurityError(
-      "This draft used a custom plugin. Select it explicitly with --plugin-path or the SDK's pluginPath option before applying.",
-    );
-  }
-  const python = await resolvePluginPython({
-    configuredPath: options.pythonPath,
-    environment: options.environment,
-    protectedRoot,
-    signal: options.signal,
-  });
+    (await readSecurityPolicy(target.targetPath)) === draft.content;
+  let written = alreadyApplied && draft.previousContent !== draft.content;
+  let recoveryPath: string | null = null;
   let pluginWorkspace: string | undefined;
   try {
+    await readDraftContent(target, draft, options.signal);
+    if (draft.previousContent === draft.content)
+      return {
+        status: "unchanged",
+        targetPath: target.targetPath,
+        recoveryPath: null,
+      };
+    await validatePolicyLinks(target, options.signal);
+    const protectedRoots = await securityPolicyProtectedRoots(
+      target.repository,
+      options.signal,
+    );
+    const protectedRoot = protectedRoots[0]!;
+    const recoveryDirectory =
+      alreadyApplied || draft.previousContent === null
+        ? null
+        : dirname(
+            await requireScanFile(
+              draft.outputDir,
+              MANIFEST_NAME,
+              MANIFEST_NAME,
+              options.signal,
+            ),
+          );
+    if (recoveryDirectory !== null)
+      requireOutputOutsideRepositories(protectedRoots, recoveryDirectory);
+    const pluginPath = options.pluginPath ?? draft.pluginPath;
+    if (draft.customPlugin && pluginPath === undefined) {
+      throw new CodexSecurityError(
+        "This draft used a custom plugin. Select it explicitly with --plugin-path or the SDK's pluginPath option before applying.",
+      );
+    }
+    const python = await resolvePluginPython({
+      configuredPath: options.pythonPath,
+      environment: options.environment,
+      protectedRoot,
+      signal: options.signal,
+    });
     const pluginRoot = await resolvePluginPath(
       pluginPath,
       async () => {
@@ -1073,119 +1075,115 @@ export async function applySecurityPolicy(
       },
       options.signal,
     );
-    const temporary = join(
-      dirname(target.targetPath),
-      `.SECURITY.md.${randomUUID()}.tmp`,
-    );
-    let written = alreadyApplied;
-    let recoveryPath: string | null = null;
-    try {
-      if (!alreadyApplied) {
-        await resolveSecurityPolicyGuidance(
-          target,
-          python,
-          pluginRoot,
-          options.environment,
-          options.signal,
-        );
-        options.signal?.throwIfAborted();
-        try {
-          await writeFile(temporary, draft.content, {
-            flag: "wx",
-            mode: draft.previousContent === null ? 0o644 : 0o600,
-            signal: options.signal,
-          });
-          if (
-            (await realpath(dirname(target.targetPath))) !==
-            dirname(target.targetPath)
-          ) {
-            throw new CodexSecurityError(
-              "The security-policy destination changed. Review a new draft before writing.",
-            );
-          }
-          await resolveDraftTarget(draft, options.signal);
-          await validatePolicyLinks(target, options.signal);
-          await requireUnchangedSecurityPolicy(target, draft, options.signal);
-          options.signal?.throwIfAborted();
-          if (draft.previousContent === null) {
-            try {
-              await installFileNoClobber(temporary, target.targetPath);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-                // A failed copy fallback can leave a partial destination.
-                written =
-                  (await lstat(target.targetPath).catch(
-                    (inspectError: NodeJS.ErrnoException) => {
-                      if (
-                        inspectError.code === "ENOENT" ||
-                        inspectError.code === "ENOTDIR"
-                      )
-                        return null;
-                      throw inspectError;
-                    },
-                  )) !== null;
-              }
-              throw error;
-            }
-          } else
-            recoveryPath = await replaceExistingPolicy(
-              temporary,
-              target.targetPath,
-              draft.previousContent,
-              recoveryDirectory!,
-              options.signal,
-            );
-          written = true;
-          if (recoveryPath !== null)
-            recoveryPath = await retainPolicyRecovery(
-              recoveryPath,
-              recoveryDirectory!,
-            );
-        } finally {
-          // Preserve the write or recovery outcome if temporary cleanup fails.
-          await rm(temporary, { force: true }).catch(() => undefined);
-        }
-      }
-      // SDK cancellation must not skip post-write checks. Process interruption
-      // can still leave a written policy that needs verification on retry.
-      if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
-        throw new CodexSecurityError(
-          "The written policy contents do not match the reviewed draft.",
-        );
-      }
-      if (
-        recoveryPath !== null &&
-        (await readSecurityPolicy(recoveryPath)) !== draft.previousContent
-      ) {
-        throw new CodexSecurityError(
-          "The previous SECURITY.md changed while the replacement was being installed.",
-        );
-      }
+    if (!alreadyApplied) {
       await resolveSecurityPolicyGuidance(
         target,
         python,
         pluginRoot,
         options.environment,
+        options.signal,
       );
-      await resolveDraftTarget(draft);
-      await validatePolicyLinks(target);
-      await requireUnchangedSecurityPolicy(target, {
-        previousContent: draft.content,
-        inheritedPolicySha256: draft.inheritedPolicySha256,
-      });
-    } catch (error) {
-      if (written)
-        throw new SecurityPolicyVerificationError(target.targetPath, {
-          cause: error,
-          ...(recoveryPath === null ? {} : { recoveryPath }),
+      options.signal?.throwIfAborted();
+      const temporary = join(
+        dirname(target.targetPath),
+        `.SECURITY.md.${randomUUID()}.tmp`,
+      );
+      try {
+        await writeFile(temporary, draft.content, {
+          flag: "wx",
+          mode: draft.previousContent === null ? 0o644 : 0o600,
+          signal: options.signal,
         });
-      throw error;
+        if (
+          (await realpath(dirname(target.targetPath))) !==
+          dirname(target.targetPath)
+        ) {
+          throw new CodexSecurityError(
+            "The security-policy destination changed. Review a new draft before writing.",
+          );
+        }
+        await resolveDraftTarget(draft, options.signal);
+        await validatePolicyLinks(target, options.signal);
+        await requireUnchangedSecurityPolicy(target, draft, options.signal);
+        options.signal?.throwIfAborted();
+        if (draft.previousContent === null) {
+          try {
+            await installFileNoClobber(temporary, target.targetPath);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+              // A failed copy fallback can leave a partial destination.
+              written =
+                (await lstat(target.targetPath).catch(
+                  (inspectError: NodeJS.ErrnoException) => {
+                    if (
+                      inspectError.code === "ENOENT" ||
+                      inspectError.code === "ENOTDIR"
+                    )
+                      return null;
+                    throw inspectError;
+                  },
+                )) !== null;
+            }
+            throw error;
+          }
+        } else
+          recoveryPath = await replaceExistingPolicy(
+            temporary,
+            target.targetPath,
+            draft.previousContent,
+            recoveryDirectory!,
+            options.signal,
+          );
+        written = true;
+        if (recoveryPath !== null)
+          recoveryPath = await retainPolicyRecovery(
+            recoveryPath,
+            recoveryDirectory!,
+          );
+      } finally {
+        // Preserve the write or recovery outcome if temporary cleanup fails.
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
     }
+    // SDK cancellation must not skip post-write checks. Process interruption
+    // can still leave a written policy that needs verification on retry.
+    if ((await readSecurityPolicy(target.targetPath)) !== draft.content) {
+      throw new CodexSecurityError(
+        "The written policy contents do not match the reviewed draft.",
+      );
+    }
+    if (
+      recoveryPath !== null &&
+      (await readSecurityPolicy(recoveryPath)) !== draft.previousContent
+    ) {
+      throw new CodexSecurityError(
+        "The previous SECURITY.md changed while the replacement was being installed.",
+      );
+    }
+    await resolveSecurityPolicyGuidance(
+      target,
+      python,
+      pluginRoot,
+      options.environment,
+    );
+    await resolveDraftTarget(draft);
+    await validatePolicyLinks(target);
+    await requireUnchangedSecurityPolicy(target, {
+      previousContent: draft.content,
+      inheritedPolicySha256: draft.inheritedPolicySha256,
+    });
     return {
       status: alreadyApplied ? "unchanged" : "written",
       targetPath: target.targetPath,
       recoveryPath,
     };
+  } catch (error) {
+    if (written)
+      throw new SecurityPolicyVerificationError(target.targetPath, {
+        cause: error,
+        ...(recoveryPath === null ? {} : { recoveryPath }),
+      });
+    throw error;
   } finally {
     if (pluginWorkspace !== undefined)
       await cleanupSdkDirectory(pluginWorkspace).catch(() => undefined);

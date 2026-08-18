@@ -863,12 +863,20 @@ describe("security policy review and application", () => {
       );
       const installed = await stat(draft.targetPath);
       const artifacts = (await readdir(f.outputDir)).sort();
+      const saved = await loadSecurityPolicyDraft(f.repository, f.outputDir);
       expect(await securityPolicyDiff(draft, PYTHON)).toBe("");
       await expect(applySecurityPolicy(draft)).rejects.toBeInstanceOf(
         SecurityPolicyVerificationError,
       );
+      for (const options of [
+        { pythonPath: PYTHON },
+        { pythonPath: join(f.root, "missing-python"), pluginPath },
+        { pythonPath: PYTHON, pluginPath: join(f.root, "missing-plugin.zip") },
+      ])
+        await expect(
+          applySecurityPolicy(saved, options),
+        ).rejects.toBeInstanceOf(SecurityPolicyVerificationError);
       await rm(blocked);
-      const saved = await loadSecurityPolicyDraft(f.repository, f.outputDir);
       expect(
         await applySecurityPolicy(saved, { pythonPath: PYTHON, pluginPath }),
       ).toEqual({
@@ -2176,6 +2184,10 @@ describe("security policy review and application", () => {
         expect(await readSecurityPolicy(draft.targetPath)).toBe(
           timing === "before" ? null : POLICY,
         );
+        if (timing === "after")
+          await expect(applySecurityPolicy(draft)).rejects.toBeInstanceOf(
+            SecurityPolicyVerificationError,
+          );
       }
     }
   });
