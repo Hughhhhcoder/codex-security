@@ -17,11 +17,22 @@ class ResolutionError(ValueError):
     """Raised when a SECURITY.md chain cannot be resolved."""
 
 
+def _relative_to(path: Path, root: Path) -> Path | None:
+    """Use filesystem identity, including case-sensitive Windows directories."""
+    for ancestor in (path, *path.parents):
+        try:
+            if ancestor.samefile(root):
+                return path.relative_to(ancestor)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+    return None
+
+
 def _inside(path: Path, root: Path, label: str) -> Path:
-    try:
-        return path.relative_to(root)
-    except ValueError as exc:
-        raise ResolutionError(f"{label} is outside the scan root: {path}") from exc
+    relative = _relative_to(path, root)
+    if relative is None:
+        raise ResolutionError(f"{label} is outside the scan root: {path}")
+    return relative
 
 
 def _resolve_root(repo: Path) -> Path:
@@ -42,7 +53,7 @@ def _scope_directory(root: Path, scope: Path, *, require_directory: bool = False
         resolved = requested.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise ResolutionError(f"scan scope does not exist: {requested}") from exc
-    _inside(resolved, root, "scan scope")
+    resolved = root / _inside(resolved, root, "scan scope")
     if require_directory and not resolved.is_dir():
         raise ResolutionError(f"policy scope must be a directory: {requested}")
     return resolved if resolved.is_dir() else resolved.parent
@@ -50,16 +61,8 @@ def _scope_directory(root: Path, scope: Path, *, require_directory: bool = False
 
 def _git_metadata(path: Path, root: Path, git_dirs: tuple[Path, ...]) -> bool:
     relative = _inside(path, root, "policy path")
-    for directory in git_dirs:
-        # Path spelling does not reliably describe filesystem case sensitivity.
-        for ancestor in (path, *path.parents):
-            try:
-                if ancestor.samefile(directory):
-                    return True
-            except (FileNotFoundError, NotADirectoryError):
-                pass
-            if ancestor == root:
-                break
+    if any(_relative_to(path, directory) is not None for directory in git_dirs):
+        return True
     current = root
     for part in relative.parts:
         current /= part

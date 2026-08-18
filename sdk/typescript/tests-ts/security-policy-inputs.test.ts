@@ -173,6 +173,14 @@ describe("shared security-policy inputs", () => {
     );
     expect(result.status).toBe(2);
     expect(result.stderr).toContain("Git metadata");
+    const nestedMetadata = join(metadata, "hooks");
+    await mkdir(nestedMetadata);
+    await writeFile(join(nestedMetadata, "SECURITY.md"), "# Metadata\n");
+    for (const mode of [["--list"], ["--inspect", "--scope", "."]]) {
+      const nested = run(nestedMetadata, ...mode, "--git-dir", metadata);
+      expect(nested.status).toBe(2);
+      expect(nested.stdout).toBe("");
+    }
   });
 
   test("rejects case aliases of caller-supplied Git metadata directories", async () => {
@@ -206,7 +214,7 @@ describe("shared security-policy inputs", () => {
     expect(result.stderr).toContain("Git metadata");
   });
 
-  test("does not confuse distinct case-sensitive Windows directories", () => {
+  test("uses filesystem identity for case-sensitive Windows containment", () => {
     const result = spawnSync(
       python,
       [
@@ -217,11 +225,18 @@ from pathlib import PureWindowsPath
 class CaseSensitivePath(PureWindowsPath):
     def samefile(self, other):
         return str(self) == str(other)
-guard = runpy.run_path(sys.argv[1])["_git_metadata"]
+module = runpy.run_path(sys.argv[1])
+guard = module["_git_metadata"]
 root = CaseSensitivePath("C:/repo")
 metadata = root / "GitData"
 assert not guard(root / "gitdata" / "SECURITY.md", root, (metadata,))
-assert guard(metadata / "SECURITY.md", root, (metadata,))`,
+assert guard(metadata / "SECURITY.md", root, (metadata,))
+try:
+    module["_inside"](CaseSensitivePath("C:/Repo/SECURITY.md"), root, "scope")
+except module["ResolutionError"]:
+    pass
+else:
+    raise AssertionError("accepted a distinct case-only sibling")`,
         join(PLUGIN_ROOT, "scripts", "resolve_security_md.py"),
       ],
       { encoding: "utf8" },
