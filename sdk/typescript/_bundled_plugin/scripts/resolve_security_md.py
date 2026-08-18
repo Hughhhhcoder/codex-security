@@ -49,10 +49,21 @@ def _scope_directory(root: Path, scope: Path, *, require_directory: bool = False
 
 
 def _git_metadata(path: Path, root: Path, git_dirs: tuple[Path, ...]) -> bool:
-    if any(path.is_relative_to(directory) for directory in git_dirs):
-        return True
+    relative = _inside(path, root, "policy path")
+    for directory in git_dirs:
+        if path.is_relative_to(directory):
+            return True
+        # resolve() preserves case aliases on some case-insensitive filesystems.
+        for ancestor in (path, *path.parents):
+            try:
+                if ancestor.samefile(directory):
+                    return True
+            except (FileNotFoundError, NotADirectoryError):
+                pass
+            if ancestor == root:
+                break
     current = root
-    for part in _inside(path, root, "policy path").parts:
+    for part in relative.parts:
         current /= part
         if part == ".git":
             return True

@@ -6,6 +6,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -175,6 +176,37 @@ describe("shared security-policy inputs", () => {
       metadata,
     );
     expect(result.status).toBe(2);
+    expect(result.stderr).toContain("Git metadata");
+  });
+
+  test("rejects case aliases of caller-supplied Git metadata directories", async () => {
+    const { repository } = await fixture();
+    const metadata = join(repository, "GitData");
+    const alias = join(repository, "gitdata");
+    await mkdir(metadata);
+    await mkdir(join(repository, "component"));
+    await writeFile(join(metadata, "private.md"), "synthetic metadata\n");
+    if ((await stat(alias).catch(() => null)) === null)
+      await symlink(
+        metadata,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    await symlink(
+      join(alias, "private.md"),
+      join(repository, "SECURITY.md"),
+      "file",
+    );
+    const result = run(
+      repository,
+      "--inspect",
+      "--scope",
+      "component",
+      "--git-dir",
+      metadata,
+    );
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe("");
     expect(result.stderr).toContain("Git metadata");
   });
 
