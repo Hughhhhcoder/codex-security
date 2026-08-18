@@ -1210,8 +1210,8 @@ function accumulateTokenUsage(
     BigInt(previousRaw?.input_tokens ?? 0) +
     BigInt(previousRaw?.output_tokens ?? 0);
   const nextTotal = BigInt(next.input_tokens) + BigInt(next.output_tokens);
-  const totalDelta =
-    nextTotal >= previousTotal ? nextTotal - previousTotal : nextTotal;
+  const reset = nextTotal < previousTotal;
+  const totalDelta = reset ? nextTotal : nextTotal - previousTotal;
   if (totalDelta === 0n) {
     return accumulated ?? tokenUsage({ input_tokens: 0, output_tokens: 0 });
   }
@@ -1220,7 +1220,7 @@ function accumulateTokenUsage(
   ): number | null => {
     const previous = BigInt(previousRaw?.[field] ?? 0);
     const value = BigInt(next[field]);
-    const delta = value >= previous ? value - previous : value;
+    const delta = reset || value < previous ? value : value - previous;
     const total = BigInt(accumulated?.[field] ?? 0) + delta;
     return total <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(total) : null;
   };

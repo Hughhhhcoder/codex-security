@@ -2278,6 +2278,227 @@ describe("live scan cost tracking", () => {
     expect(costs).toEqual([0.0032, 0.0048]);
   });
 
+  test("keeps live and persisted usage aligned across counter resets", async () => {
+    if (
+      runMockInSubprocess(
+        import.meta.path,
+        "keeps live and persisted usage aligned across counter resets",
+      )
+    ) {
+      return;
+    }
+    type Usage = Record<string, number> & {
+      input_tokens: number;
+      output_tokens: number;
+    };
+    const { PLUGIN_ROOT } = await import("./plugin-root.js");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const probe = [
+      "import io, json, sys",
+      "from datetime import datetime, timezone",
+      "from pathlib import Path",
+      "from unittest.mock import patch",
+      "sys.path.insert(0, sys.argv[1])",
+      "import workbench_scan_usage as usage",
+      "case = json.loads(sys.argv[2])",
+      "inherited = case.get('inherited')",
+      "thread = 'scan-thread' if inherited is None else 'worker-thread'",
+      "parent = None if inherited is None else 'scan-thread'",
+      "stamp = '2026-07-26T12:02:00Z'",
+      "def token_event(sample):",
+      "    snapshot = {**sample, 'total_tokens': sample['input_tokens'] + sample['output_tokens']}",
+      "    return {'type': 'event_msg', 'timestamp': stamp, 'payload': {'type': 'token_count', 'info': {'total_token_usage': snapshot}}}",
+      "events = [{'type': 'session_meta', 'payload': {'id': thread, 'parent_thread_id': parent}}]",
+      "if inherited is not None:",
+      "    events.extend([token_event(inherited), {'type': 'event_msg', 'timestamp': stamp, 'payload': {'type': 'task_started', 'turn_id': 'fixture-turn'}}])",
+      "events.extend(token_event(sample) for sample in case['samples'])",
+      "session = usage.RolloutSession(thread, parent, Path('fixture-rollout'))",
+      "with patch.object(Path, 'open', return_value=io.BytesIO(b'{}\\n' * len(events))), patch.object(usage.json, 'loads', side_effect=events):",
+      "    measured, warnings = usage._read_rollout_usage(session, started_at=datetime(2026, 7, 26, 12, tzinfo=timezone.utc), completed_at=None)",
+      "print(json.dumps({'usage': measured, 'warnings': sorted(warnings)}))",
+    ].join("\n");
+    const cases: Array<{
+      samples: Usage[];
+      expected: Usage;
+      inherited?: Usage;
+      limit?: number;
+    }> = [
+      {
+        samples: [
+          { input_tokens: 1_000, output_tokens: 1_000 },
+          { input_tokens: 1_500, output_tokens: 100 },
+          { input_tokens: 1_500, output_tokens: 100 },
+        ],
+        expected: { input_tokens: 2_500, output_tokens: 1_100 },
+        limit: 0.017,
+      },
+      {
+        samples: [
+          {
+            input_tokens: 1_000,
+            cached_input_tokens: 400,
+            cache_write_input_tokens: 100,
+            output_tokens: 1_000,
+            reasoning_output_tokens: 800,
+          },
+          {
+            input_tokens: 1_500,
+            cached_input_tokens: 600,
+            cache_write_input_tokens: 200,
+            output_tokens: 100,
+            reasoning_output_tokens: 50,
+          },
+        ],
+        expected: {
+          input_tokens: 2_500,
+          cached_input_tokens: 1_000,
+          cache_write_input_tokens: 300,
+          output_tokens: 1_100,
+          reasoning_output_tokens: 850,
+        },
+      },
+      {
+        samples: [
+          {
+            input_tokens: 100,
+            cached_input_tokens: 20,
+            cache_write_input_tokens: 10,
+            output_tokens: 50,
+            reasoning_output_tokens: 10,
+          },
+          {
+            input_tokens: 150,
+            cached_input_tokens: 10,
+            cache_write_input_tokens: 20,
+            output_tokens: 30,
+            reasoning_output_tokens: 5,
+          },
+        ],
+        expected: {
+          input_tokens: 150,
+          cached_input_tokens: 30,
+          cache_write_input_tokens: 20,
+          output_tokens: 80,
+          reasoning_output_tokens: 15,
+        },
+      },
+      {
+        samples: [
+          { input_tokens: 1_000, output_tokens: 1_000 },
+          { input_tokens: 0, output_tokens: 0 },
+          { input_tokens: 1_500, output_tokens: 100 },
+        ],
+        expected: { input_tokens: 2_500, output_tokens: 1_100 },
+      },
+      {
+        inherited: { input_tokens: 1_000, output_tokens: 1_000 },
+        samples: [
+          { input_tokens: 1_500, output_tokens: 100 },
+          { input_tokens: 1_600, output_tokens: 150 },
+        ],
+        expected: { input_tokens: 1_600, output_tokens: 150 },
+      },
+      {
+        samples: [
+          { input_tokens: 100, output_tokens: 100 },
+          { input_tokens: 110, output_tokens: 90 },
+          { input_tokens: 120, output_tokens: 100 },
+        ],
+        expected: { input_tokens: 110, output_tokens: 110 },
+      },
+    ];
+    for (const { samples, inherited, expected: counters, limit } of cases) {
+      const expected = {
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        reasoning_output_tokens: 0,
+        ...counters,
+        total_tokens: counters.input_tokens + counters.output_tokens,
+      };
+      const persisted = spawnSync(
+        python!,
+        [
+          "-I",
+          "-B",
+          "-c",
+          probe,
+          join(PLUGIN_ROOT, "scripts"),
+          JSON.stringify({ samples, inherited }),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(persisted.status, persisted.stderr).toBe(0);
+      expect(JSON.parse(persisted.stdout)).toEqual({
+        usage: {
+          inputTokens: expected.input_tokens,
+          cachedInputTokens: expected.cached_input_tokens,
+          cacheWriteInputTokens: expected.cache_write_input_tokens,
+          outputTokens: expected.output_tokens,
+          reasoningOutputTokens: expected.reasoning_output_tokens,
+          totalTokens: expected.total_tokens,
+        },
+        warnings: [],
+      });
+      const events: MockAccountingEvent[] = [
+        ...(inherited === undefined
+          ? []
+          : [
+              { type: "session_meta", payload: { id: "scan-thread" } },
+              accountingEvent(inherited),
+              {
+                type: "event_msg",
+                payload: { type: "task_started", started_at: 1_785_067_320 },
+              },
+            ]),
+        ...samples.map(accountingEvent),
+      ];
+      const metadata = { timestamp: "2026-07-26T12:02:00Z" };
+      const sessions: Record<string, MockAccountingEvent[]> =
+        inherited === undefined
+          ? {
+              "scan-thread": accountingSession(
+                "scan-thread",
+                events,
+                undefined,
+                metadata,
+              ),
+            }
+          : {
+              "scan-thread": accountingSession("scan-thread", [
+                accountingEvent({ input_tokens: 0, output_tokens: 0 }),
+              ]),
+              "worker-thread": accountingSession(
+                "worker-thread",
+                events,
+                "scan-thread",
+                metadata,
+              ),
+            };
+      const costs: number[] = [];
+      await withMockAccountingSessions(
+        sessions,
+        {
+          model: "gpt-5.6-terra",
+          maxCostUsd: limit ?? 1,
+          onCost: (cost) => costs.push(cost.estimatedUsd),
+        },
+        async (tracker) => {
+          const final = await tracker.stop(undefined);
+          expect(final.usage).toEqual(expected);
+          expect(final.cost).toEqual(
+            estimateScanCost("gpt-5.6-terra", expected),
+          );
+          expect(costs.at(-1)).toBe(final.cost!.estimatedUsd);
+          if (limit !== undefined) {
+            expect(final.cost!.estimatedUsd).toBeGreaterThan(limit);
+          }
+          expect(await tracker.stop()).toBe(final);
+        },
+      );
+    }
+  });
+
   test("keeps mocked session-detail replay separate from accounting", async () => {
     if (
       runMockInSubprocess(
@@ -2804,9 +3025,10 @@ describe("live scan cost tracking", () => {
           { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 2 },
           { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 1 },
         ],
+        // The full reset would overflow input, so retain the last valid whole.
         expected: {
           input_tokens: Number.MAX_SAFE_INTEGER,
-          output_tokens: 3,
+          output_tokens: 2,
         },
       },
       {
