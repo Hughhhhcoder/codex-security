@@ -3508,6 +3508,9 @@ function policyCodexConfig(config: JsonObject): JsonObject {
     ...resolved,
     approval_policy: "never",
     default_permissions: POLICY_PERMISSION_PROFILE,
+    // The artifact directory may be inside an unrelated checkout.
+    project_doc_max_bytes: 0,
+    project_root_markers: [],
     features: { ...features, plugins: false, apps: false },
     mcp_servers: {},
     web_search: "disabled",
