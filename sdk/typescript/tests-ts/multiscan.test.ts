@@ -25,6 +25,7 @@ import type { ScanResult } from "../src/result.js";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import { runMockInSubprocess } from "./support/isolated-mock.js";
 
 type MultiscanOptions = Parameters<typeof runMultiscan>[0];
 type SecurityClient = ReturnType<MultiscanOptions["createSecurity"]>;
@@ -133,6 +134,70 @@ async function results(path: string): Promise<Record<string, unknown>[]> {
 }
 
 describe("multiscan", () => {
+  for (const setting of ["selected", "disabled", "invalid"] as const) {
+    const name = `honors ${setting} Git settings before bulk checkout`;
+    test(name, async () => {
+      if (runMockInSubprocess(import.meta.path, name)) return;
+
+      const paths = await fixture();
+      const source = await repository(paths.root, "source");
+      const trusted = await resolveTrustedExecutable(
+        "git",
+        process.env,
+        process.cwd(),
+      );
+      if (trusted === null) throw new Error("Git is required by this fixture.");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nsource,${source.path},${source.revision}\n`,
+      );
+      const previousPath = process.env["PATH"];
+      const previousGit = process.env["CODEX_SECURITY_GIT"];
+      let scans = 0;
+      try {
+        process.env["CODEX_SECURITY_GIT"] =
+          setting === "selected"
+            ? trusted.executable
+            : setting === "disabled"
+              ? ""
+              : join(paths.root, "missing-git");
+        if (setting === "selected") process.env["PATH"] = "";
+
+        const summary = await runMultiscan(
+          options(
+            paths,
+            client(async (checkout, scanOptions = {}) => {
+              scans += 1;
+              expect(
+                await readFile(join(checkout, "src", "app.ts"), "utf8"),
+              ).toContain('export const name = "source";');
+              return await completedScan(scanOptions.outputDir!);
+            }),
+            { maxAttempts: 1 },
+          ),
+        );
+
+        if (setting === "selected") {
+          expect(summary).toMatchObject({ completed: 1, failed: 0 });
+          expect(scans).toBe(1);
+        } else {
+          expect(summary).toMatchObject({ completed: 0, failed: 1 });
+          expect(scans).toBe(0);
+          expect((await results(summary.resultsPath))[0]?.["error"]).toContain(
+            setting === "disabled"
+              ? "Git is not available on a trusted PATH."
+              : "CODEX_SECURITY_GIT does not name an available executable.",
+          );
+        }
+      } finally {
+        if (previousPath === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previousPath;
+        if (previousGit === undefined) delete process.env["CODEX_SECURITY_GIT"];
+        else process.env["CODEX_SECURITY_GIT"] = previousGit;
+      }
+    });
+  }
+
   test("scopes GitHub CLI credentials to the discovered GitHub host", () => {
     expect(buildGitHubCredentialArgs(undefined)).toEqual([]);
     expect(buildGitHubCredentialArgs("github.com")).toEqual([

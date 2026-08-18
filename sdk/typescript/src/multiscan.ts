@@ -23,8 +23,7 @@ import type { ScanCost } from "./cost.js";
 import { safeErrorMessage, ScanCostLimitExceededError } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
 import { requireSecureOutputAncestry } from "./runtime.js";
-import type { ScanMode } from "./targets.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { resolveGitCommand, type ScanMode } from "./targets.js";
 
 const execFile = promisify(execFileCallback);
 const REQUIRED_ARTIFACTS = [
@@ -804,19 +803,18 @@ async function checkoutRevision(
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
-  const command = await resolveTrustedExecutable(
-    "git",
+  const { executable, environment: gitEnvironment } = await resolveGitCommand(
     environment,
     resolve(process.cwd()),
   );
-  if (command === null) {
+  if (executable === null) {
     throw new Error("Git is not available on a trusted PATH.");
   }
   const git = async (...args: string[]): Promise<string> => {
     // Use the resolved absolute path so Windows PATHEXT cannot prefer a
     // .bat/.cmd shim over the trusted executable selected above.
     const result = await execFile(
-      command.executable,
+      executable,
       [
         "-c",
         "core.hooksPath=/dev/null",
@@ -825,7 +823,7 @@ async function checkoutRevision(
         path,
         ...args,
       ],
-      { env: command.environment, signal },
+      { env: gitEnvironment, signal },
     );
     return result.stdout.trim();
   };
