@@ -589,7 +589,7 @@ export async function protectedGitInputRoots(
       current = parent;
     }
     let existing = requested;
-    let canonical: string;
+    let canonical = requested;
     while (true) {
       throwIfAborted(signal);
       try {
@@ -601,7 +601,7 @@ export async function protectedGitInputRoots(
       } catch (error) {
         if (!isUnavailablePathError(error)) throw error;
         const parent = dirname(existing);
-        if (parent === existing) throw error;
+        if (parent === existing) break;
         existing = parent;
       }
     }

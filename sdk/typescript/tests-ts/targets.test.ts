@@ -119,6 +119,64 @@ test("protects lexical and resolved input repositories without claiming missing 
   ).toEqual([outsideFile]);
 });
 
+test("keeps unavailable filesystem roots out of shared input roots", async () => {
+  const repo = await repository();
+  const script = `
+    import { mock } from "bun:test";
+    import * as original from "node:fs/promises";
+    import { dirname, join } from "node:path";
+    const [repo, targets] = process.argv.slice(1);
+    const missing = join(dirname(repo), "unavailable-root", "repo");
+    const unavailable = new Set();
+    for (let path = missing; ; path = dirname(path)) {
+      unavailable.add(path);
+      if (dirname(path) === path) break;
+    }
+    const originalPromises = { ...original };
+    let errorCode = "ENOENT";
+    mock.module("node:fs/promises", () => ({
+      ...originalPromises,
+      realpath: async (path, ...args) => {
+        if (unavailable.has(path)) {
+          throw Object.assign(new Error("synthetic unavailable root"), {
+            code: errorCode,
+          });
+        }
+        return await originalPromises.realpath(path, ...args);
+      },
+    }));
+    try {
+      const { protectedGitInputRoots } = await import(targets);
+      const roots = await protectedGitInputRoots([missing, repo]);
+      errorCode = "EACCES";
+      let unexpectedError = null;
+      try {
+        await protectedGitInputRoots([missing]);
+      } catch (error) {
+        unexpectedError = error.code;
+      }
+      console.log(JSON.stringify({ roots, unexpectedError }));
+    } finally {
+      mock.module("node:fs/promises", () => originalPromises);
+    }
+  `;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      script,
+      repo,
+      fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+    ],
+    { encoding: "utf8" },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    roots: [repo],
+    unexpectedError: "EACCES",
+  });
+});
+
 test("finds input repositories behind dangling directory links", async () => {
   const lexical = await repository();
   const resolved = await repository();
