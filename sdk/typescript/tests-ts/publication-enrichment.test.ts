@@ -218,6 +218,13 @@ describe("publication knowledge-base enrichment", () => {
       join(tmpdir(), "codex-security-publication-ambient-home-test-"),
     );
     temporaryDirectories.push(ambientCodexHome);
+    const remoteMcp = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        return Response.json({}, { status: 404 });
+      },
+    });
     await writeFile(
       join(ambientCodexHome, "config.toml"),
       [
@@ -225,34 +232,40 @@ describe("publication knowledge-base enrichment", () => {
         'command = "synthetic-write-tool"',
         "",
         "[mcp_servers.remote_server]",
-        'url = "https://user:synthetic-secret@mcp.invalid"',
+        `url = "http://user:synthetic-secret@127.0.0.1:${remoteMcp.port}/mcp"`,
       ].join("\n"),
     );
-    await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
-      createCodex(options) {
-        config = options.config;
-        receivedCodexHome = options.env?.["CODEX_HOME"];
-        receivedLowercaseCodexHome = options.env?.["codex_home"];
-        return fakeCodex(
-          response(
-            issues().map(({ findingId }) => ({
-              findingId,
-              priority: "none",
-              labelIds: [],
-            })),
-          ),
-        );
-      },
-      environment: {
-        codex_home: relative(process.cwd(), ambientCodexHome),
-        CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
-      },
-    });
+    try {
+      await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
+        createCodex(options) {
+          config = options.config;
+          receivedCodexHome = options.env?.["CODEX_HOME"];
+          receivedLowercaseCodexHome = options.env?.["codex_home"];
+          return fakeCodex(
+            response(
+              issues().map(({ findingId }) => ({
+                findingId,
+                priority: "none",
+                labelIds: [],
+              })),
+            ),
+          );
+        },
+        environment: {
+          codex_home: relative(process.cwd(), ambientCodexHome),
+          CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
+        },
+      });
+    } finally {
+      remoteMcp.stop(true);
+    }
 
     expect(config).toMatchObject({
       "mcp_servers.synthetic.enabled": false,
       "mcp_servers.remote_server.enabled": false,
       "features.image_generation": false,
+      "features.request_permissions_tool": false,
+      "features.deferred_executor": false,
       "features.view_image": false,
       tools: {
         experimental_request_user_input: { enabled: false },
@@ -413,6 +426,10 @@ describe("publication knowledge-base enrichment", () => {
     await writeFile(
       join(codexHome, "config.toml"),
       [
+        "[features]",
+        "request_permissions_tool = true",
+        "deferred_executor = true",
+        "",
         "[mcp_servers.native_test]",
         `command = ${JSON.stringify(process.execPath)}`,
         `args = ${JSON.stringify([mcpServer, marker])}`,
