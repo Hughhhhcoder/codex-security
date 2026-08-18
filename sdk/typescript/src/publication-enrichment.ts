@@ -262,14 +262,17 @@ async function loadConfiguredMcpServers(
     const configured = config["mcp_servers"];
     if (configured === null || configured === undefined) return [];
     if (!isRecord(configured)) throw new Error("Unexpected MCP configuration.");
-    return Object.keys(configured).map((name): ConfiguredMcpServer => {
-      if (!/^[A-Za-z0-9_-]+$/u.test(name)) {
-        throw new CodexSecurityError(
-          "Publication enrichment cannot safely disable an ambient Codex MCP server whose name contains punctuation. Disable that server before publishing with a knowledge base.",
-        );
-      }
-      return { name };
-    });
+    return Object.entries(configured).flatMap(
+      ([name, server]): ConfiguredMcpServer[] => {
+        if (isRecord(server) && server["enabled"] === false) return [];
+        if (!/^[A-Za-z0-9_-]+$/u.test(name)) {
+          throw new CodexSecurityError(
+            "Publication enrichment cannot safely disable an ambient Codex MCP server whose name contains punctuation. Disable that server before publishing with a knowledge base.",
+          );
+        }
+        return [{ name }];
+      },
+    );
   } catch (error) {
     if (signal?.aborted) throw error;
     if (error instanceof CodexSecurityError) throw error;

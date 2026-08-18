@@ -315,6 +315,45 @@ describe("publication knowledge-base enrichment", () => {
     );
   });
 
+  test("allows already-disabled ambient MCP names with punctuation", async () => {
+    let started = false;
+    const codexHome = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-disabled-dotted-mcp-test-"),
+    );
+    temporaryDirectories.push(codexHome);
+    await writeFile(
+      join(codexHome, "config.toml"),
+      '[mcp_servers."company.tools"]\ncommand = "company-tool"\nenabled = false\n',
+    );
+
+    const result = await enrichPublicationIssues(
+      issues(),
+      LABELS,
+      [await policyFile()],
+      {
+        createCodex() {
+          started = true;
+          return fakeCodex(
+            response(
+              issues().map(({ findingId }) => ({
+                findingId,
+                priority: "none",
+                labelIds: [],
+              })),
+            ),
+          );
+        },
+        environment: {
+          CODEX_HOME: codexHome,
+          CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
+        },
+      },
+    );
+
+    expect(started).toBe(true);
+    expect(result).toHaveLength(2);
+  });
+
   test("uses Codex trust decisions for project MCP configuration", async () => {
     let config: unknown;
     const project = await mkdtemp(
@@ -391,9 +430,11 @@ describe("publication knowledge-base enrichment", () => {
     }
 
     expect(config).toMatchObject({
-      "mcp_servers.ambient_tool.enabled": false,
       "mcp_servers.repository_probe.enabled": false,
     });
+    expect(
+      (config as Record<string, unknown>)["mcp_servers.ambient_tool.enabled"],
+    ).toBeUndefined();
     expect(projectMcpRequests).toBe(0);
   });
 
