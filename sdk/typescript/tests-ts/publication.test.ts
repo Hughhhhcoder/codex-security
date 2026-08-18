@@ -85,9 +85,7 @@ describe("scan publication preparation", () => {
       ],
     });
 
-    expect(publication).not.toHaveProperty("policyFindings");
     const issue = publication.issues[0]!;
-    expect(issue).not.toHaveProperty("labels");
     expect(issue.title).not.toContain(publication.scanId);
     expect(issue.title).not.toContain("example/repo");
     expect(issue.description).toContain("**Scan ID:** scan_example_001");
@@ -350,7 +348,6 @@ describe("scan publication preparation", () => {
       );
       expect(issue.priority).toBe(priority);
       if (priority === undefined) expect(issue).not.toHaveProperty("priority");
-      expect(issue).not.toHaveProperty("labels");
     },
   );
 

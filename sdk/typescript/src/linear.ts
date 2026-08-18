@@ -219,11 +219,26 @@ export async function importLinearIssues(options: {
         "Linear request was rate limited. Wait and retry.",
       );
     }
-    const message = safeErrorMessage(error);
     throw new CodexSecurityError(
-      `Linear request failed: ${message.includes(credential) ? "[redacted]" : message}`,
+      `Linear request failed: ${safeLinearErrorMessage(error, credential)}`,
     );
   }
+}
+
+export function safeLinearErrorMessage(
+  error: unknown,
+  credential: string | undefined,
+): string {
+  return redactLinearCredential(safeErrorMessage(error), credential);
+}
+
+export function redactLinearCredential(
+  message: string,
+  credential: string | undefined,
+): string {
+  return credential === undefined || !message.includes(credential)
+    ? message
+    : message.replaceAll(credential, "[redacted]");
 }
 
 function linearIssueFilter(input: string | undefined): JsonObject {

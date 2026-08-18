@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -8,10 +7,15 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
+import type { LinearPublicationCatalogLabel } from "./linear.js";
 import type { Finding } from "./models.js";
 import type { PreparedPublicationIssue } from "./publication.js";
-import type { LinearPublicationCatalogLabel } from "./linear.js";
-import { expandHome, resolveCodexCommand } from "./runtime.js";
+import {
+  expandHome,
+  resolveCodexCommand,
+  runCodexCommand,
+  type CodexCommand,
+} from "./runtime.js";
 import { comparisonEnvironment } from "./scan-comparison.js";
 
 const PRIORITIES = ["none", "urgent", "high", "medium", "low"] as const;
@@ -30,66 +34,10 @@ const LINEAR_CREDENTIALS = new Set([
   "LINEAR_API_KEY",
   "LINEAR_ACCESS_TOKEN",
 ]);
-const DISABLED_CODEX_FEATURES = [
-  "apps",
-  "auth_elicitation",
-  "browser_use",
-  "browser_use_external",
-  "browser_use_full_cdp_access",
-  "code_mode",
-  "code_mode_only",
-  "deferred_executor",
-  "goals",
-  "hooks",
-  "image_generation",
-  "js_repl",
-  "memories",
-  "mentions_v2",
-  "multi_agent",
-  "multi_agent_v2",
-  "plugin_sharing",
-  "plugins",
-  "recommended_plugins",
-  "remote_plugin",
-  "request_permissions_tool",
-  "shell_tool",
-  "skill_mcp_dependency_install",
-  "skill_search",
-  "standalone_web_search",
-  "tool_call_mcp_elicitation",
-  "tool_search",
-  "tool_suggest",
-  "unified_exec",
-  "view_image",
-  "web_search_cached",
-  "web_search_request",
-  "workspace_dependencies",
-] as const;
-const CODEX_ISOLATION_SETTINGS = {
-  "analytics.enabled": false,
-  check_for_update_on_startup: false,
-  developer_instructions: "",
-  include_apps_instructions: false,
-  include_collaboration_mode_instructions: false,
-  include_environment_context: false,
-  include_permissions_instructions: false,
-  instructions: "",
-  notify: [],
-  "otel.exporter": "none",
-  "otel.log_user_prompt": false,
-  "otel.metrics_exporter": "none",
-  "otel.trace_exporter": "none",
-  project_doc_fallback_filenames: [],
-  project_doc_max_bytes: 0,
-  "skills.bundled.enabled": false,
-  "skills.include_instructions": false,
-} as const;
 const PUBLICATION_MODEL = "gpt-5.5";
-const PUBLICATION_MODEL_CATALOG = ".codex-security-publication-models.json";
-const PUBLICATION_MODEL_INSTRUCTIONS =
-  ".codex-security-publication-model-instructions.md";
-const PUBLICATION_OUTPUT_SCHEMA =
-  ".codex-security-publication-output-schema.json";
+const MODEL_CATALOG_FILE = ".codex-security-models.json";
+const OUTPUT_SCHEMA_FILE = ".codex-security-output-schema.json";
+const FINAL_RESPONSE_FILE = ".codex-security-final-response.json";
 
 const enrichmentSchema = z
   .object({
@@ -108,640 +56,279 @@ const enrichmentSchema = z
 const enrichmentOutputSchema = z.toJSONSchema(enrichmentSchema);
 
 type EnrichmentResponse = z.infer<typeof enrichmentSchema>;
-type ConfiguredMcpServer = { name: string };
-
-export interface PublicationEnrichmentCodex {
-  run(
-    input: string,
-    options: { outputSchema: unknown; signal?: AbortSignal },
-  ): Promise<{ finalResponse: string }>;
-}
 
 export interface PublicationEnrichmentOptions {
-  codex?: PublicationEnrichmentCodex;
   environment?: NodeJS.ProcessEnv;
-  findings?: readonly Finding[];
-  loadConfiguredMcpServers?: typeof loadConfiguredMcpServers;
+  findings: readonly Finding[];
   prepareKnowledgeBase?: typeof prepareKnowledgeBase;
   runCodex?: typeof runPublicationEnrichmentCodex;
   signal?: AbortSignal;
-  verifyCodexIsolation?: typeof verifyCodexIsolation;
+  codexConfig?: Readonly<Record<string, unknown>>;
 }
 
 export async function enrichPublicationIssues(
   issues: readonly PreparedPublicationIssue[],
   labels: readonly LinearPublicationCatalogLabel[],
   knowledgeBasePaths: readonly string[],
-  options: PublicationEnrichmentOptions = {},
+  options: PublicationEnrichmentOptions,
 ): Promise<PreparedPublicationIssue[]> {
   options.signal?.throwIfAborted();
   if (knowledgeBasePaths.length === 0 || issues.length === 0) {
     return issues.map((issue) => ({ ...issue }));
   }
 
+  const findings = selectCanonicalFindings(issues, options.findings);
   const knowledgeBase = await (
     options.prepareKnowledgeBase ?? prepareKnowledgeBase
   )(knowledgeBasePaths, options.signal);
+  let enriched: PreparedPublicationIssue[] | undefined;
+  let primaryError: unknown;
   try {
     const documents = await readKnowledgeBase(knowledgeBase, options.signal);
     const environment = await publicationEnrichmentEnvironment(
       options.environment,
       options.signal,
     );
-    const codexCommand =
-      options.codex === undefined
-        ? resolveCodexCommand(environment).command
-        : undefined;
-    const modelFiles =
-      options.codex === undefined
-        ? await preparePublicationModelFiles(
-            codexCommand!,
-            environment,
-            knowledgeBase.path,
-            options.signal,
-          )
-        : undefined;
-    const configuredMcpServers =
-      options.codex === undefined
-        ? await (options.loadConfiguredMcpServers ?? loadConfiguredMcpServers)(
-            codexCommand!,
-            environment,
-            knowledgeBase.path,
-            options.signal,
-          )
-        : [];
-    if (options.codex === undefined) {
-      await (options.verifyCodexIsolation ?? verifyCodexIsolation)(
-        codexCommand!,
-        environment,
-        knowledgeBase.path,
-        configuredMcpServers,
-        modelFiles!.catalogPath,
-        modelFiles!.instructionsPath,
-        options.signal,
-      );
-    }
-    const prompt = enrichmentPrompt(
-      issues,
-      labels,
-      documents,
-      options.findings,
+    const turn = await (options.runCodex ?? runPublicationEnrichmentCodex)(
+      resolveCodexCommand(environment),
+      environment,
+      knowledgeBase.path,
+      enrichmentPrompt(labels, documents, findings),
+      options.codexConfig,
+      options.signal,
     );
-    const turn =
-      options.codex === undefined
-        ? await (options.runCodex ?? runPublicationEnrichmentCodex)(
-            codexCommand!,
-            publicationEnrichmentArguments(
-              configuredMcpServers,
-              modelFiles!.catalogPath,
-              modelFiles!.instructionsPath,
-              modelFiles!.outputSchemaPath,
-              knowledgeBase.path,
-            ),
-            prompt,
-            environment,
-            knowledgeBase.path,
-            options.signal,
-          )
-        : await options.codex.run(prompt, {
-            outputSchema: enrichmentOutputSchema,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          });
     options.signal?.throwIfAborted();
-
-    let response: unknown;
-    try {
-      response = JSON.parse(turn.finalResponse) as unknown;
-    } catch (error) {
-      throw new CodexSecurityError(
-        "Publication knowledge-base enrichment returned invalid JSON.",
-        { cause: error },
-      );
-    }
-    return applyEnrichment(issues, labels, response);
-  } finally {
-    await knowledgeBase.cleanup().catch(() => undefined);
-  }
-}
-
-async function loadConfiguredMcpServers(
-  codexCommand: string,
-  environment: Record<string, string>,
-  workingDirectory: string,
-  signal?: AbortSignal,
-): Promise<ConfiguredMcpServer[]> {
-  try {
-    signal?.throwIfAborted();
-    const config = await readEffectiveCodexConfiguration(
-      codexCommand,
-      environment,
-      workingDirectory,
-      signal,
-    );
-    const configured = config["mcp_servers"];
-    if (configured === null || configured === undefined) return [];
-    if (!isRecord(configured)) throw new Error("Unexpected MCP configuration.");
-    return Object.entries(configured).flatMap(
-      ([name, server]): ConfiguredMcpServer[] => {
-        if (isRecord(server) && server["enabled"] === false) return [];
-        if (!/^[A-Za-z0-9_-]+$/u.test(name)) {
-          throw new CodexSecurityError(
-            "Publication enrichment cannot safely disable an ambient Codex MCP server whose name contains punctuation. Disable that server before publishing with a knowledge base.",
-          );
-        }
-        return [{ name }];
-      },
-    );
+    enriched = parsePublicationEnrichment(issues, labels, turn.finalResponse);
   } catch (error) {
-    if (signal?.aborted) throw error;
-    if (error instanceof CodexSecurityError) throw error;
-    throw new CodexSecurityError(
-      "Could not inspect Codex's effective MCP configuration for publication enrichment.",
-    );
+    primaryError = error;
   }
-}
-
-async function verifyCodexIsolation(
-  codexCommand: string,
-  environment: Record<string, string>,
-  workingDirectory: string,
-  servers: readonly ConfiguredMcpServer[],
-  modelCatalogPath: string,
-  modelInstructionsPath: string,
-  signal?: AbortSignal,
-): Promise<void> {
+  let cleanupError: unknown;
   try {
-    signal?.throwIfAborted();
-    const overrides = isolationConfigurationArguments(
-      servers,
-      modelCatalogPath,
-      modelInstructionsPath,
-    );
-    const mcpOutput = await runCodexConfigurationCommand(
-      codexCommand,
-      ["-C", workingDirectory, ...overrides, "mcp", "list", "--json"],
-      environment,
-      workingDirectory,
-      signal,
-    );
-    const mcp = JSON.parse(mcpOutput) as unknown;
-    if (
-      !Array.isArray(mcp) ||
-      mcp.some(
-        (entry) =>
-          !isRecord(entry) ||
-          typeof entry["enabled"] !== "boolean" ||
-          entry["enabled"] === true,
-      )
-    ) {
-      throw new Error("An MCP server remains enabled.");
-    }
-    const featureOutput = await runCodexConfigurationCommand(
-      codexCommand,
-      ["-C", workingDirectory, ...overrides, "features", "list"],
-      environment,
-      workingDirectory,
-      signal,
-    );
-    const featureStates = new Map(
-      featureOutput
-        .split(/\r?\n/u)
-        .map((line) => line.trim().split(/\s{2,}/u))
-        .filter(
-          (parts): parts is [string, string, string] => parts.length === 3,
-        )
-        .map(([name, _stage, enabled]) => [name, enabled]),
-    );
-    if (
-      DISABLED_CODEX_FEATURES.some(
-        (name) => featureStates.get(name) !== "false",
-      )
-    ) {
-      throw new Error("A prohibited Codex feature remains enabled.");
-    }
-    const modelOutput = await runCodexConfigurationCommand(
-      codexCommand,
-      ["-C", workingDirectory, ...overrides, "debug", "models"],
-      environment,
-      workingDirectory,
-      signal,
-    );
-    const modelCatalog = JSON.parse(modelOutput) as unknown;
-    if (!isRecord(modelCatalog) || !Array.isArray(modelCatalog["models"])) {
-      throw new Error("Unexpected Codex model catalog.");
-    }
-    const model = modelCatalog["models"].find(
-      (entry) => isRecord(entry) && entry["slug"] === PUBLICATION_MODEL,
-    );
-    if (
-      !isRecord(model) ||
-      model["shell_type"] !== "disabled" ||
-      (model["apply_patch_tool_type"] !== undefined &&
-        model["apply_patch_tool_type"] !== null)
-    ) {
-      throw new Error("The publication model still exposes local tools.");
-    }
+    await knowledgeBase.cleanup();
   } catch (error) {
-    if (signal?.aborted) throw error;
-    throw new CodexSecurityError(
-      "Codex configuration does not allow publication enrichment to disable every external tool.",
-      { cause: error },
+    cleanupError = error;
+  }
+  if (primaryError !== undefined && cleanupError !== undefined) {
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      primaryError instanceof Error
+        ? primaryError.message
+        : String(primaryError),
     );
   }
-}
-
-function isolationConfigurationArguments(
-  servers: readonly ConfiguredMcpServer[],
-  modelCatalogPath: string,
-  modelInstructionsPath: string,
-): string[] {
-  return [
-    `model=${JSON.stringify(PUBLICATION_MODEL)}`,
-    `model_catalog_json=${JSON.stringify(modelCatalogPath)}`,
-    `model_instructions_file=${JSON.stringify(modelInstructionsPath)}`,
-    ...servers.map(({ name }) => `mcp_servers.${name}.enabled=false`),
-    ...DISABLED_CODEX_FEATURES.map((name) => `features.${name}=false`),
-    ...Object.entries(CODEX_ISOLATION_SETTINGS).map(
-      ([name, value]) => `${name}=${JSON.stringify(value)}`,
-    ),
-  ].flatMap((override) => ["-c", override]);
-}
-
-function publicationEnrichmentArguments(
-  servers: readonly ConfiguredMcpServer[],
-  modelCatalogPath: string,
-  modelInstructionsPath: string,
-  outputSchemaPath: string,
-  workingDirectory: string,
-): string[] {
-  return [
-    "exec",
-    ...isolationConfigurationArguments(
-      servers,
-      modelCatalogPath,
-      modelInstructionsPath,
-    ),
-    "-c",
-    "allow_login_shell=false",
-    "-c",
-    'responses_api_metadata.codex_security_surface="sdk"',
-    "-c",
-    "tools.experimental_request_user_input.enabled=false",
-    "-c",
-    "tools.update_plan.enabled=false",
-    "-c",
-    'shell_environment_policy.inherit="core"',
-    "-c",
-    "shell_environment_policy.ignore_default_excludes=false",
-    "-c",
-    'shell_environment_policy.exclude=["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"]',
-    "-c",
-    'model_reasoning_effort="medium"',
-    "-c",
-    "sandbox_workspace_write.network_access=false",
-    "-c",
-    'web_search="disabled"',
-    "-c",
-    'approval_policy="never"',
-    "--model",
-    PUBLICATION_MODEL,
-    "--ephemeral",
-    "--json",
-    "--sandbox",
-    "read-only",
-    "--skip-git-repo-check",
-    "--output-schema",
-    outputSchemaPath,
-    "--cd",
-    workingDirectory,
-    "-",
-  ];
+  if (primaryError !== undefined) throw primaryError;
+  if (cleanupError !== undefined) {
+    throw new CodexSecurityError(
+      `Could not clean up publication knowledge-base data: ${safeErrorMessage(cleanupError)}`,
+      { cause: cleanupError },
+    );
+  }
+  return enriched!;
 }
 
 export async function runPublicationEnrichmentCodex(
-  command: string,
-  arguments_: readonly string[],
-  input: string,
+  command: CodexCommand,
   environment: Record<string, string>,
   workingDirectory: string,
+  prompt: string,
+  config: Readonly<Record<string, unknown>> = {},
   signal?: AbortSignal,
 ): Promise<{ finalResponse: string }> {
   signal?.throwIfAborted();
-  return await new Promise((resolve, reject) => {
-    const child = spawn(command, [...arguments_], {
-      cwd: workingDirectory,
-      env: environment,
-      signal,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    child.stdout.setEncoding("utf8");
-    child.stderr.resume();
-    let partialLine = "";
-    let finalResponse: string | undefined;
-    let completed = false;
-    let settled = false;
-    let failureRequested = false;
-    let pendingFailure: unknown;
-    let forcedTermination: ReturnType<typeof setTimeout> | undefined;
-    const fail = (error: unknown): void => {
-      if (settled || failureRequested) return;
-      failureRequested = true;
-      pendingFailure = error;
-      try {
-        child.kill();
-      } catch {
-        // The close event still owns settlement when the process already exited.
-      }
-      forcedTermination = setTimeout(() => child.kill("SIGKILL"), 1_000);
-      forcedTermination.unref();
-    };
-    const readEvent = (line: string): void => {
-      if (failureRequested || line.trim().length === 0) return;
-      let event: unknown;
-      try {
-        event = JSON.parse(line) as unknown;
-      } catch (error) {
-        fail(error);
-        return;
-      }
-      if (!isRecord(event)) return;
-      if (event["type"] === "item.completed") {
-        const item = event["item"];
-        if (
-          isRecord(item) &&
-          item["type"] === "agent_message" &&
-          typeof item["text"] === "string"
-        ) {
-          finalResponse = item["text"];
-        }
-      } else if (event["type"] === "turn.completed") {
-        completed = true;
-      } else if (event["type"] === "turn.failed") {
-        fail(new Error("Codex publication enrichment failed."));
-      }
-    };
-    child.stdout.on("data", (chunk: string) => {
-      partialLine += chunk;
-      let end: number;
-      while ((end = partialLine.indexOf("\n")) !== -1) {
-        readEvent(partialLine.slice(0, end));
-        partialLine = partialLine.slice(end + 1);
-      }
-    });
-    child.stdout.once("end", () => {
-      if (partialLine.length > 0) readEvent(partialLine);
-    });
-    child.stdin.on("error", () => undefined);
-    child.once("error", fail);
-    child.once("close", (code) => {
-      if (settled) return;
-      settled = true;
-      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
-      if (failureRequested) {
-        reject(pendingFailure);
-      } else if (code === 0 && completed && finalResponse !== undefined) {
-        resolve({ finalResponse });
-      } else {
-        reject(
-          new CodexSecurityError(
-            "Codex could not apply the publication knowledge base.",
-          ),
-        );
-      }
-    });
-    child.stdin.end(input);
-  });
-}
-
-async function readEffectiveCodexConfiguration(
-  command: string,
-  environment: Record<string, string>,
-  workingDirectory: string,
-  signal?: AbortSignal,
-): Promise<Record<string, unknown>> {
-  signal?.throwIfAborted();
-  const inspectionEnvironment = Object.fromEntries(
-    Object.entries(environment).filter(
-      ([name]) => !/(?:credential|key|password|secret|token)/iu.test(name),
-    ),
+  const catalogResult = await runCodexCommand(
+    command,
+    ["debug", "models", "--bundled"],
+    environment,
+    undefined,
+    signal,
   );
-  return await new Promise<Record<string, unknown>>((resolve, reject) => {
-    const baseOverrides = [
-      ...DISABLED_CODEX_FEATURES.map((name) => `features.${name}=false`),
-      ...Object.entries(CODEX_ISOLATION_SETTINGS).map(
-        ([name, value]) => `${name}=${JSON.stringify(value)}`,
-      ),
-    ].flatMap((override) => ["-c", override]);
-    const child = spawn(
-      command,
-      [
-        "-C",
-        workingDirectory,
-        ...baseOverrides,
-        "app-server",
-        "--listen",
-        "stdio://",
-      ],
-      {
-        cwd: workingDirectory,
-        env: inspectionEnvironment,
-        signal,
-        stdio: ["pipe", "pipe", "ignore"],
-        windowsHide: true,
-      },
-    );
-    child.stdout.setEncoding("utf8");
-    let partialLine = "";
-    let configuration: Record<string, unknown> | undefined;
-    let settled = false;
-    const fail = (error: unknown): void => {
-      if (settled) return;
-      settled = true;
-      child.kill();
-      reject(error);
-    };
-    const send = (message: unknown): void => {
-      child.stdin.write(`${JSON.stringify(message)}\n`);
-    };
-    child.stdin.once("error", (error) => {
-      if (configuration === undefined) fail(error);
-    });
-    child.stdout.on("data", (chunk: string) => {
-      partialLine += chunk;
-      let end: number;
-      while ((end = partialLine.indexOf("\n")) !== -1) {
-        const line = partialLine.slice(0, end).trim();
-        partialLine = partialLine.slice(end + 1);
-        if (line.length === 0) continue;
-        let message: unknown;
-        try {
-          message = JSON.parse(line) as unknown;
-        } catch (error) {
-          fail(error);
-          return;
-        }
-        if (!isRecord(message)) continue;
-        if (message["id"] === 0) {
-          if (!isRecord(message["result"])) {
-            fail(new Error("Codex app-server initialization failed."));
-            return;
-          }
-          send({ method: "initialized", params: {} });
-          send({
-            method: "config/read",
-            id: 1,
-            params: { cwd: workingDirectory },
-          });
-          continue;
-        }
-        if (message["id"] !== 1) continue;
-        const result = message["result"];
-        const config = isRecord(result) ? result["config"] : undefined;
-        if (!isRecord(config)) {
-          fail(new Error("Codex returned an invalid effective configuration."));
-          return;
-        }
-        configuration = config;
-        child.stdin.end();
-      }
-    });
-    child.once("error", fail);
-    child.once("close", (code) => {
-      if (settled) return;
-      settled = true;
-      if (code === 0 && configuration !== undefined) resolve(configuration);
-      else
-        reject(new Error("Codex effective configuration inspection failed."));
-    });
-    send({
-      method: "initialize",
-      id: 0,
-      params: {
-        clientInfo: {
-          name: "codex_security",
-          title: "Codex Security",
-          version: "0.1.0",
-        },
-        capabilities: null,
-      },
-    });
-  });
-}
-
-async function preparePublicationModelFiles(
-  codexCommand: string,
-  environment: Record<string, string>,
-  workingDirectory: string,
-  signal?: AbortSignal,
-): Promise<{
-  catalogPath: string;
-  instructionsPath: string;
-  outputSchemaPath: string;
-}> {
-  try {
-    const output = await runCodexConfigurationCommand(
-      codexCommand,
-      ["-C", workingDirectory, "debug", "models", "--bundled"],
-      environment,
-      workingDirectory,
-      signal,
-    );
-    const catalog = JSON.parse(output) as unknown;
-    if (!isRecord(catalog) || !Array.isArray(catalog["models"])) {
-      throw new Error("Unexpected bundled model catalog.");
-    }
-    const bundled = catalog["models"].find(
-      (entry) => isRecord(entry) && entry["slug"] === PUBLICATION_MODEL,
-    );
-    if (!isRecord(bundled)) {
-      throw new Error("Publication model is unavailable.");
-    }
-    const baseInstructions = bundled["base_instructions"];
-    if (
-      typeof baseInstructions !== "string" ||
-      baseInstructions.trim().length === 0
-    ) {
-      throw new Error("Publication model instructions are unavailable.");
-    }
-    const model: Record<string, unknown> = {
-      ...bundled,
-      shell_type: "disabled",
-      experimental_supported_tools: [],
-      supports_search_tool: false,
-    };
-    delete model["apply_patch_tool_type"];
-    const catalogPath = join(workingDirectory, PUBLICATION_MODEL_CATALOG);
-    await writeFile(catalogPath, JSON.stringify({ models: [model] }), {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-      signal,
-    });
-    const instructionsPath = join(
-      workingDirectory,
-      PUBLICATION_MODEL_INSTRUCTIONS,
-    );
-    await writeFile(instructionsPath, baseInstructions, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-      signal,
-    });
-    const outputSchemaPath = join(workingDirectory, PUBLICATION_OUTPUT_SCHEMA);
-    await writeFile(outputSchemaPath, JSON.stringify(enrichmentOutputSchema), {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-      signal,
-    });
-    return { catalogPath, instructionsPath, outputSchemaPath };
-  } catch (error) {
-    if (signal?.aborted) throw error;
+  if (!catalogResult.success) {
     throw new CodexSecurityError(
-      "Could not prepare a tool-free Codex model for publication enrichment.",
+      "Codex could not prepare publication knowledge-base enrichment.",
+    );
+  }
+  let catalog: unknown;
+  try {
+    catalog = JSON.parse(catalogResult.stdout) as unknown;
+  } catch (error) {
+    throw new CodexSecurityError(
+      "Codex returned an invalid bundled model catalog.",
       { cause: error },
     );
   }
-}
-
-async function runCodexConfigurationCommand(
-  command: string,
-  arguments_: readonly string[],
-  environment: Record<string, string>,
-  workingDirectory: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  signal?.throwIfAborted();
-  return await new Promise<string>((resolve, reject) => {
-    const child = spawn(command, [...arguments_], {
-      cwd: workingDirectory,
-      env: environment,
-      signal,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    const stdout: string[] = [];
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => stdout.push(chunk));
-    child.stderr.resume();
-    let settled = false;
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    });
-    child.once("close", (code) => {
-      if (settled) return;
-      settled = true;
-      if (code === 0) resolve(stdout.join(""));
-      else reject(new Error("Codex configuration inspection failed."));
-    });
+  if (!isRecord(catalog) || !Array.isArray(catalog["models"])) {
+    throw new CodexSecurityError(
+      "Codex returned an invalid bundled model catalog.",
+    );
+  }
+  const bundled = catalog["models"].find(
+    (model) => isRecord(model) && model["slug"] === PUBLICATION_MODEL,
+  );
+  if (!isRecord(bundled)) {
+    throw new CodexSecurityError(
+      "Codex does not provide the publication enrichment model.",
+    );
+  }
+  const model: Record<string, unknown> = {
+    ...bundled,
+    shell_type: "disabled",
+    experimental_supported_tools: [],
+    supports_search_tool: false,
+  };
+  delete model["apply_patch_tool_type"];
+  const mcpResult = await runCodexCommand(
+    command,
+    ["-C", workingDirectory, "mcp", "list", "--json"],
+    environment,
+    undefined,
+    signal,
+  );
+  if (!mcpResult.success) {
+    throw new CodexSecurityError(
+      "Codex could not inspect configured external integrations for publication enrichment.",
+    );
+  }
+  let configuredServers: unknown;
+  try {
+    configuredServers = JSON.parse(mcpResult.stdout) as unknown;
+  } catch (error) {
+    throw new CodexSecurityError(
+      "Codex returned an invalid external integration catalog.",
+      { cause: error },
+    );
+  }
+  if (
+    !Array.isArray(configuredServers) ||
+    configuredServers.some(
+      (server) =>
+        !isRecord(server) ||
+        typeof server["name"] !== "string" ||
+        typeof server["enabled"] !== "boolean",
+    )
+  ) {
+    throw new CodexSecurityError(
+      "Codex returned an invalid external integration catalog.",
+    );
+  }
+  const disabledMcpServers = disabledMcpServerConfiguration(
+    configuredServers.map((server) => server["name"] as string),
+  );
+  const catalogPath = join(workingDirectory, MODEL_CATALOG_FILE);
+  const schemaPath = join(workingDirectory, OUTPUT_SCHEMA_FILE);
+  const responsePath = join(workingDirectory, FINAL_RESPONSE_FILE);
+  await writeFile(catalogPath, JSON.stringify({ models: [model] }), {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+    signal,
   });
+  await writeFile(schemaPath, JSON.stringify(enrichmentOutputSchema), {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+    signal,
+  });
+  const configuration = {
+    ...config,
+    model_catalog_json: catalogPath,
+    allow_login_shell: false,
+    "analytics.enabled": false,
+    approval_policy: "never",
+    developer_instructions: "",
+    "features.apps": false,
+    "features.goals": false,
+    "features.hooks": false,
+    "features.memories": false,
+    "features.multi_agent": false,
+    "features.multi_agent_v2": false,
+    "features.plugins": false,
+    "features.shell_tool": false,
+    "features.tool_search": false,
+    "features.tool_suggest": false,
+    "features.unified_exec": false,
+    "features.view_image": false,
+    instructions: "",
+    notify: [],
+    "otel.exporter": "none",
+    "otel.log_user_prompt": false,
+    "otel.metrics_exporter": "none",
+    "otel.trace_exporter": "none",
+    project_doc_fallback_filenames: [],
+    project_doc_max_bytes: 0,
+    "responses_api_metadata.codex_security_surface": "sdk",
+    "sandbox_workspace_write.network_access": false,
+    "skills.bundled.enabled": false,
+    "skills.include_instructions": false,
+    "tools.experimental_request_user_input.enabled": false,
+    "tools.update_plan.enabled": false,
+    web_search: "disabled",
+  };
+  const result = await runCodexCommand(
+    command,
+    [
+      "exec",
+      "--ignore-user-config",
+      "--ignore-rules",
+      ...Object.entries(configuration).flatMap(([name, value]) => [
+        "-c",
+        `${name}=${JSON.stringify(value)}`,
+      ]),
+      "-c",
+      `mcp_servers=${disabledMcpServers}`,
+      "--model",
+      PUBLICATION_MODEL,
+      "--ephemeral",
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      "--output-schema",
+      schemaPath,
+      "--output-last-message",
+      responsePath,
+      "--cd",
+      workingDirectory,
+      "-",
+    ],
+    environment,
+    prompt,
+    signal,
+  );
+  if (!result.success) {
+    throw new CodexSecurityError(
+      "Codex could not apply the publication knowledge base.",
+    );
+  }
+  return {
+    finalResponse: await readFile(responsePath, { encoding: "utf8", signal }),
+  };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export function parsePublicationEnrichment(
+  issues: readonly PreparedPublicationIssue[],
+  labels: readonly LinearPublicationCatalogLabel[],
+  finalResponse: string,
+): PreparedPublicationIssue[] {
+  let response: unknown;
+  try {
+    response = JSON.parse(finalResponse) as unknown;
+  } catch (error) {
+    throw new CodexSecurityError(
+      "Publication knowledge-base enrichment returned invalid JSON.",
+      { cause: error },
+    );
+  }
+  return applyEnrichment(issues, labels, response);
+}
+
+export function disabledMcpServerConfiguration(
+  names: readonly string[],
+): string {
+  return `{${names
+    .map(
+      (name) =>
+        `${JSON.stringify(name)}={enabled=false,command="codex-security-disabled"}`,
+    )
+    .join(",")}}`;
 }
 
 export async function publicationEnrichmentEnvironment(
@@ -776,6 +363,30 @@ export async function publicationEnrichmentEnvironment(
   return environment;
 }
 
+function selectCanonicalFindings(
+  issues: readonly PreparedPublicationIssue[],
+  findings: readonly Finding[],
+): Finding[] {
+  const byId = new Map<string, Finding>();
+  for (const finding of findings) {
+    if (byId.has(finding.findingId)) {
+      throw new CodexSecurityError(
+        "Publication knowledge-base enrichment received a duplicate canonical finding.",
+      );
+    }
+    byId.set(finding.findingId, finding);
+  }
+  return issues.map(({ findingId }) => {
+    const finding = byId.get(findingId);
+    if (finding === undefined) {
+      throw new CodexSecurityError(
+        "Publication knowledge-base enrichment is missing a canonical finding.",
+      );
+    }
+    return finding;
+  });
+}
+
 async function readKnowledgeBase(
   knowledgeBase: PreparedKnowledgeBase,
   signal?: AbortSignal,
@@ -800,14 +411,10 @@ async function readKnowledgeBase(
 }
 
 function enrichmentPrompt(
-  issues: readonly PreparedPublicationIssue[],
   labels: readonly LinearPublicationCatalogLabel[],
   documents: readonly { name: string; text: string }[],
-  findings: readonly Finding[] = [],
+  findings: readonly Finding[],
 ): string {
-  const canonicalFindings = new Map(
-    findings.map((finding) => [finding.findingId, finding]),
-  );
   return [
     "Apply the supplied publication policy documents to every supplied Codex Security finding.",
     "Use only explicit rules in the policy documents. Do not infer organization-specific policy from general security knowledge.",
@@ -826,12 +433,7 @@ function enrichmentPrompt(
         ...(groupId === undefined ? {} : { groupId }),
         ...(groupName === undefined ? {} : { groupName }),
       })),
-      findings: issues.map(({ findingId, title, description }) => ({
-        findingId,
-        title,
-        description,
-        canonicalFinding: canonicalFindings.get(findingId),
-      })),
+      findings,
     }),
   ].join("\n");
 }
@@ -927,4 +529,8 @@ function validateFindingCoverage(
       "Publication knowledge-base enrichment did not classify every finding.",
     );
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

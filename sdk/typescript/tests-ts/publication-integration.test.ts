@@ -318,7 +318,6 @@ describe("database-backed Linear publication integration", () => {
                 teamId: OPTIONS.teamId,
                 priority: 2,
               });
-              expect(input).not.toHaveProperty("labelIds");
               expect(input).not.toHaveProperty("assigneeId");
               expect(input).not.toHaveProperty("projectId");
               if (index >= 20)
@@ -438,7 +437,6 @@ describe("database-backed Linear publication integration", () => {
                     title: `[Codex Security][HIGH] Synthetic finding ${index + 1}`,
                     priority: 2,
                   });
-                  expect(finding.arguments).not.toHaveProperty("labelIds");
                   expect(finding.arguments["description"]).toContain(
                     finding.findingId,
                   );

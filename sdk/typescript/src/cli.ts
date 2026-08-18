@@ -85,6 +85,7 @@ import type { SeverityLevel } from "./models.js";
 import {
   importLinearIssues,
   resolveLinearApiKey,
+  safeLinearErrorMessage,
   type ImportedIssue,
   type LinearClientFactory,
 } from "./linear.js";
@@ -1912,18 +1913,12 @@ export async function main(
           const recovery =
             error === signal
               ? ""
-              : ` ${redactPublicationCredential(
-                  diagnosticValue(safeErrorMessage(error)),
-                  publicationLinearApiKey,
-                )}`;
+              : ` ${diagnosticValue(safeLinearErrorMessage(error, publicationLinearApiKey))}`;
           errorOutput.write(`codex-security: ${reason}${recovery}\n`);
           exitCode = signal === "SIGINT" ? 130 : 143;
         } else {
           errorOutput.write(
-            `codex-security: ${redactPublicationCredential(
-              errorMessage(error),
-              publicationLinearApiKey,
-            )}\n`,
+            `codex-security: ${safeLinearErrorMessage(error, publicationLinearApiKey)}\n`,
           );
           exitCode = 2;
         }
@@ -2826,15 +2821,6 @@ export async function main(
     errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
     return 2;
   }
-}
-
-function redactPublicationCredential(
-  message: string,
-  credential: string | undefined,
-): string {
-  return credential === undefined || !message.includes(credential)
-    ? message
-    : message.replaceAll(credential, "[redacted]");
 }
 
 function defaultListCommand(argv: readonly string[]): readonly string[] {

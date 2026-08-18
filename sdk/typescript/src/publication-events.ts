@@ -1,8 +1,6 @@
-import {
-  publicationIssueFields,
-  type LinearPublicationDestination,
-  type PreparedPublicationIssue,
-  type PreparedScanPublication,
+import type {
+  PreparedPublicationIssue,
+  PreparedScanPublication,
 } from "./publication.js";
 
 export interface CollectedPublicationEvents {
@@ -13,10 +11,6 @@ export interface CollectedPublicationEvents {
     url?: string;
   }>;
   failed: Array<{ findingId: string; error: string }>;
-  argumentDrift?: Array<{
-    findingId: string;
-    arguments: Record<string, unknown>;
-  }>;
 }
 
 export function collectPublicationEvents(
@@ -29,7 +23,6 @@ export function collectPublicationEvents(
     CollectedPublicationEvents["created"][number]
   >();
   const failed = new Map<string, string>();
-  const argumentDrift = new Map<string, Record<string, unknown>>();
   const unexpected: string[] = [];
 
   for (const line of output.split(/\r?\n/)) {
@@ -53,17 +46,12 @@ export function collectPublicationEvents(
     }
 
     const args = item["arguments"];
-    if (!isRecord(args)) {
-      unexpected.push("Codex attempted to create an unexpected Linear issue.");
-      continue;
-    }
-    const issue = matchPublicationIssue(publication, args);
+    const issue = isRecord(args)
+      ? matchPublicationIssue(publication, args)
+      : undefined;
     if (issue === undefined) {
       unexpected.push("Codex attempted to create an unexpected Linear issue.");
       continue;
-    }
-    if (!matchesPublicationArguments(publication.destination, issue, args)) {
-      argumentDrift.set(issue.findingId, args);
     }
     if (failed.has(issue.findingId) || created.has(issue.findingId)) {
       failed.set(
@@ -106,19 +94,12 @@ export function collectPublicationEvents(
     failed.set(target.findingId, unexpected.join(" "));
   }
 
-  const createdIssues = publication.issues.flatMap((issue) => {
-    if (failed.has(issue.findingId)) return [];
-    const result = created.get(issue.findingId);
-    return result === undefined ? [] : [result];
-  });
-  const driftedArguments = createdIssues.flatMap((issue) => {
-    const arguments_ = argumentDrift.get(issue.findingId);
-    return arguments_ === undefined
-      ? []
-      : [{ findingId: issue.findingId, arguments: arguments_ }];
-  });
   return {
-    created: createdIssues,
+    created: publication.issues.flatMap((issue) => {
+      if (failed.has(issue.findingId)) return [];
+      const result = created.get(issue.findingId);
+      return result === undefined ? [] : [result];
+    }),
     failed: publication.issues.flatMap((issue) => {
       const error = failed.get(issue.findingId);
       if (error !== undefined) return [{ findingId: issue.findingId, error }];
@@ -126,46 +107,7 @@ export function collectPublicationEvents(
         ? []
         : [{ findingId: issue.findingId, error: failureMessage }];
     }),
-    ...(driftedArguments.length === 0
-      ? {}
-      : { argumentDrift: driftedArguments }),
   };
-}
-
-function matchesPublicationArguments(
-  destination: LinearPublicationDestination,
-  issue: PreparedPublicationIssue,
-  arguments_: Record<string, unknown>,
-): boolean {
-  return sameJsonValue(arguments_, {
-    team: destination.teamId,
-    ...(destination.projectId === undefined
-      ? {}
-      : { project: destination.projectId }),
-    ...publicationIssueFields(issue),
-  });
-}
-
-function sameJsonValue(left: unknown, right: unknown): boolean {
-  if (left === right) return true;
-  if (Array.isArray(left) || Array.isArray(right)) {
-    return (
-      Array.isArray(left) &&
-      Array.isArray(right) &&
-      left.length === right.length &&
-      left.every((value, index) => sameJsonValue(value, right[index]))
-    );
-  }
-  if (!isRecord(left) || !isRecord(right)) return false;
-  const leftKeys = Object.keys(left).sort();
-  const rightKeys = Object.keys(right).sort();
-  return (
-    leftKeys.length === rightKeys.length &&
-    leftKeys.every(
-      (key, index) =>
-        key === rightKeys[index] && sameJsonValue(left[key], right[key]),
-    )
-  );
 }
 
 export function matchPublicationIssue(

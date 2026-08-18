@@ -392,12 +392,6 @@ describe("Codex Linear publication events", () => {
       expect(result.created).toHaveLength(1);
       expect(result.created[0]?.findingId).toBe("finding_0");
       expect(result.failed).toEqual([]);
-      expect(result.argumentDrift).toEqual([
-        {
-          findingId: "finding_0",
-          arguments: expect.any(Object),
-        },
-      ]);
     },
   );
 

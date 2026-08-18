@@ -155,7 +155,7 @@ describe("Linear issue intake", () => {
       [new RatelimitedLinearError(), "Linear request was rate limited."],
       [
         new Error("Invalid lin_api_SYNTHETIC_SECRET"),
-        "Linear request failed: [redacted]",
+        "Linear request failed: Invalid [redacted]",
       ],
     ] as const) {
       await expect(

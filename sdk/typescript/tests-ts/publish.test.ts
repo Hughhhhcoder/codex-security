@@ -78,7 +78,6 @@ function issueEvent(
     error?: string;
     identifier?: string;
     url?: string;
-    arguments?: Record<string, unknown>;
   } = {},
 ): string {
   const identifier = options.identifier ?? `SEC-${issue.findingId.slice(8)}`;
@@ -90,15 +89,12 @@ function issueEvent(
       type: "mcp_tool_call",
       server: "codex_apps",
       tool: "linear_save_issue",
-      arguments: options.arguments ?? {
+      arguments: {
         team: OPTIONS.teamId,
         project: OPTIONS.projectId,
         title: issue.title,
         description: issue.description,
         ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-        ...(issue.labels === undefined || issue.labels.length === 0
-          ? {}
-          : { labelIds: issue.labels.map(({ id }) => id) }),
       },
       ...(options.status === "failed"
         ? {
@@ -232,9 +228,6 @@ function handoffRecord(
       title: issue.title,
       description: issue.description,
       ...(issue.priority === undefined ? {} : { priority: issue.priority }),
-      ...(issue.labels === undefined || issue.labels.length === 0
-        ? {}
-        : { labelIds: issue.labels.map(({ id }) => id) }),
     },
   };
 }
@@ -384,6 +377,67 @@ describe("direct Linear API publication", () => {
     ]);
   });
 
+  test("recovers completed direct issues before honoring cancellation", async () => {
+    const publication = preparedPublication(23);
+    const controller = new AbortController();
+    let started = 0;
+    let stopped = 0;
+    let persisted: string[] = [];
+    let receipt: unknown;
+    const injected = dependencies(
+      publication,
+      {},
+      {
+        linearClient: linearApiClient(publication, {
+          create: async (input, signal) => {
+            started += 1;
+            if (input.title === publication.issues[0]!.title) return;
+            await new Promise<void>((_resolve, reject) => {
+              signal?.addEventListener(
+                "abort",
+                () => {
+                  stopped += 1;
+                  reject(new Error("Publication canceled."));
+                },
+                { once: true },
+              );
+            });
+          },
+        }),
+        recordPublishedIssues: async (_prepared, issues) => {
+          persisted = issues.map(({ issueIdentifier }) => issueIdentifier);
+          return [...issues];
+        },
+        writeReceipt: async (result) => {
+          receipt = result;
+        },
+      },
+    );
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        {
+          ...OPTIONS,
+          linearApiKey: "synthetic-key",
+          signal: controller.signal,
+          onProgress: ({ type }) => {
+            if (type === "issue_completed") controller.abort("SIGINT");
+          },
+        },
+        injected,
+      ),
+    ).rejects.toThrow(/publication handoff remains at/u);
+
+    expect({ started, stopped, persisted }).toEqual({
+      started: 20,
+      stopped: 19,
+      persisted: ["SEC-1"],
+    });
+    expect(receipt).toMatchObject({
+      counts: { findings: 23, created: 1, failed: 22 },
+    });
+  });
   test("redacts Linear credentials from persisted direct-publication failures", async () => {
     const publication = preparedPublication();
     const key = "lin_api_SYNTHETIC_SECRET";
@@ -443,7 +497,7 @@ describe("direct Linear API publication", () => {
     expect(inputs[0]).not.toHaveProperty("labelIds");
   });
 
-  test("recovers completed direct issues before honoring cancellation", async () => {
+  test("includes applied metadata in interrupted direct publication receipts", async () => {
     const publication = preparedPublication(23);
     const labels = [{ id: "label-security", name: "Security" }];
     const controller = new AbortController();
@@ -1543,58 +1597,6 @@ describe("connected Linear publication", () => {
     expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
   });
 
-  test("prefers verified issue events over model-authored argument drift", async () => {
-    const publication = preparedPublication();
-    let handoffFile: string | undefined;
-    const result = await publishScanInternal(
-      publication.scanDirectory,
-      OPTIONS,
-      dependencies(
-        publication,
-        {},
-        {
-          runCodex: async (_command, _args, input) => {
-            const issue = publication.issues[0]!;
-            const record = handoffRecord(publication, issue);
-            handoffFile = publicationData(input).handoffFile;
-            await writeHandoff(input, [
-              {
-                ...record,
-                arguments: {
-                  ...(record["arguments"] as Record<string, unknown>),
-                  priority: 0,
-                },
-              },
-            ]);
-            return {
-              exitCode: 0,
-              stdout: issueEvent(issue),
-              stderr: "",
-            };
-          },
-          recordPublishedIssues: async (_prepared, created) => {
-            const records = (await readFile(handoffFile!, "utf8"))
-              .trim()
-              .split("\n")
-              .map((line) => JSON.parse(line) as Record<string, unknown>);
-            expect(records).toHaveLength(2);
-            expect(records[0]!["arguments"]).toHaveProperty("priority", 0);
-            expect(records[1]!["issueIdentifier"]).toBe("SEC-1");
-            expect(records[1]!["arguments"]).toEqual(
-              handoffRecord(publication, publication.issues[0]!)["arguments"],
-            );
-            return [...created];
-          },
-        },
-      ),
-    );
-
-    expect(result.created.map((issue) => issue.issueIdentifier)).toEqual([
-      "SEC-1",
-    ]);
-    expect(result.failed).toEqual([]);
-  });
-
   test("retains verified issue mappings after model-authored failures if the publication database fails", async () => {
     const publication = preparedPublication(2);
     let handoffFile: string | undefined;
@@ -1649,64 +1651,6 @@ describe("connected Linear publication", () => {
     expect(records[1]!["error"]).toBe(
       "The model could not write the created issue.",
     );
-  });
-
-  test("appends the exact verified mapping before a database failure", async () => {
-    const publication = preparedPublication();
-    let handoffFile: string | undefined;
-
-    await expect(
-      publishScanInternal(
-        publication.scanDirectory,
-        OPTIONS,
-        dependencies(
-          publication,
-          {},
-          {
-            runCodex: async (_command, _args, input) => {
-              const issue = publication.issues[0]!;
-              const record = handoffRecord(publication, issue, {
-                identifier: "SEC-INCORRECT",
-              });
-              handoffFile = publicationData(input).handoffFile;
-              await writeHandoff(input, [
-                {
-                  ...record,
-                  arguments: {
-                    ...(record["arguments"] as Record<string, unknown>),
-                    priority: 0,
-                  },
-                },
-              ]);
-              return {
-                exitCode: 0,
-                stdout: issueEvent(issue, { identifier: "SEC-VERIFIED" }),
-                stderr: "",
-              };
-            },
-            recordPublishedIssues: async () => {
-              throw new Error("The publication database is unavailable.");
-            },
-          },
-        ),
-      ),
-    ).rejects.toThrow(
-      /database is unavailable.*publication handoff remains at.*avoid creating duplicate issues/u,
-    );
-
-    const records = (await readFile(handoffFile!, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(
-      records.map((record) => [
-        record["issueIdentifier"],
-        (record["arguments"] as Record<string, unknown>)["priority"],
-      ]),
-    ).toEqual([
-      ["SEC-INCORRECT", 0],
-      ["SEC-VERIFIED", 2],
-    ]);
   });
 
   test("recovers validated partial mappings after cancellation before preserving its private handoff", async () => {
@@ -1992,12 +1936,9 @@ describe("connected Linear publication", () => {
             runCodex: async (_command, _args, input) => {
               handoffFile = publicationData(input).handoffFile;
               await writeHandoff(input, [
-                {
-                  ...handoffRecord(publication, issue, {
-                    identifier: "SYNTH-DUPLICATE-A",
-                  }),
-                  arguments: { priority: 0 },
-                },
+                handoffRecord(publication, issue, {
+                  identifier: "SYNTH-DUPLICATE-A",
+                }),
                 handoffRecord(publication, issue, {
                   identifier: "SYNTH-DUPLICATE-B",
                 }),
@@ -2037,227 +1978,42 @@ describe("connected Linear publication", () => {
     ]);
   });
 
-  test("retains durable handoffs when a created issue has argument drift", async () => {
-    const publication = preparedPublication();
-    let handoffFile: string | undefined;
-
-    await expect(
-      publishScanInternal(
-        publication.scanDirectory,
-        OPTIONS,
-        dependencies(
-          publication,
-          {},
-          {
-            runCodex: async (_command, _args, input) => {
-              handoffFile = publicationData(input).handoffFile;
-              const record = handoffRecord(publication, publication.issues[0]!);
-              record["arguments"] = { title: "Normalized issue title" };
-              await writeHandoff(input, [record]);
-              return { exitCode: 0, stdout: "", stderr: "" };
-            },
+  test("matches durable publication handoffs by scan and finding IDs only", async () => {
+    const publication = preparedPublication(3);
+    const result = await publishScanInternal(
+      publication.scanDirectory,
+      OPTIONS,
+      dependencies(
+        publication,
+        {},
+        {
+          runCodex: async (_command, _args, input) => {
+            await writeHandoff(
+              input,
+              publication.issues.map((issue, index) => {
+                const record = handoffRecord(publication, issue);
+                if (index === 0) {
+                  record["arguments"] = { title: "Normalized issue title" };
+                } else if (index === 1) {
+                  delete record["arguments"];
+                } else {
+                  record["connectorRequestId"] = "request-example";
+                }
+                return record;
+              }),
+            );
+            return { exitCode: 0, stdout: "", stderr: "" };
           },
-        ),
+        },
       ),
-    ).rejects.toThrow(
-      /SEC-1 may have been created.*unexpected arguments.*indeterminate.*publication handoff remains at.*recover the issue.*avoid creating a duplicate issue/u,
     );
 
-    expect(await readFile(handoffFile!, "utf8")).toContain("SEC-1");
-  });
-
-  test("persists other verified issues before reporting argument drift", async () => {
-    const publication = preparedPublication(2);
-    let handoffFile: string | undefined;
-    let persisted: readonly string[] = [];
-
-    await expect(
-      publishScanInternal(
-        publication.scanDirectory,
-        OPTIONS,
-        dependencies(
-          publication,
-          {},
-          {
-            runCodex: async (_command, _args, input) => {
-              handoffFile = publicationData(input).handoffFile;
-              const drifted = handoffRecord(
-                publication,
-                publication.issues[0]!,
-              );
-              drifted["arguments"] = { title: "Unexpected title" };
-              await writeHandoff(input, [drifted]);
-              return {
-                exitCode: 0,
-                stdout: issueEvent(publication.issues[1]!),
-                stderr: "",
-              };
-            },
-            recordPublishedIssues: async (_prepared, created) => {
-              persisted = created.map(({ findingId }) => findingId);
-              return [...created];
-            },
-          },
-        ),
-      ),
-    ).rejects.toThrow(
-      /SEC-1 may have been created.*unexpected arguments.*indeterminate/u,
-    );
-
-    expect(persisted).toEqual(["finding-2"]);
-    const records = (await readFile(handoffFile!, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(records.map((record) => record["findingId"])).toEqual([
+    expect(result.counts).toEqual({ findings: 3, created: 3, failed: 0 });
+    expect(result.created.map((issue) => issue.findingId)).toEqual([
       "finding-1",
       "finding-2",
+      "finding-3",
     ]);
-    expect(records[1]!["issueIdentifier"]).toBe("SEC-2");
-  });
-
-  test("retains a drifted issue when a trusted event reports another ID", async () => {
-    const publication = preparedPublication();
-    let handoffFile: string | undefined;
-    let persisted: readonly string[] = [];
-
-    await expect(
-      publishScanInternal(
-        publication.scanDirectory,
-        OPTIONS,
-        dependencies(
-          publication,
-          {},
-          {
-            runCodex: async (_command, _args, input) => {
-              handoffFile = publicationData(input).handoffFile;
-              const drifted = handoffRecord(
-                publication,
-                publication.issues[0]!,
-                { identifier: "SYNTH-DRIFTED" },
-              );
-              drifted["arguments"] = { title: "Unexpected title" };
-              await writeHandoff(input, [drifted]);
-              return {
-                exitCode: 0,
-                stdout: issueEvent(publication.issues[0]!, {
-                  identifier: "SYNTH-VERIFIED",
-                }),
-                stderr: "",
-              };
-            },
-            recordPublishedIssues: async (_prepared, created) => {
-              persisted = created.map(({ issueIdentifier }) => issueIdentifier);
-              return [...created];
-            },
-          },
-        ),
-      ),
-    ).rejects.toThrow(/SYNTH-DRIFTED may have been created.*indeterminate/u);
-
-    expect(persisted).toEqual(["SYNTH-VERIFIED"]);
-    const records = (await readFile(handoffFile!, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(records.map((record) => record["issueIdentifier"])).toEqual([
-      "SYNTH-DRIFTED",
-      "SYNTH-VERIFIED",
-    ]);
-  });
-
-  test("keeps trusted events with drifted arguments indeterminate after a rejected handoff", async () => {
-    const publication = preparedPublication();
-    const issue = publication.issues[0]!;
-    let handoffFile: string | undefined;
-    let persisted = false;
-
-    await expect(
-      publishScanInternal(
-        publication.scanDirectory,
-        OPTIONS,
-        dependencies(
-          publication,
-          {},
-          {
-            runCodex: async (_command, _args, input) => {
-              handoffFile = publicationData(input).handoffFile;
-              await writeHandoff(input, [
-                {
-                  ...handoffRecord(publication, issue),
-                  scanId: "unexpected-scan",
-                },
-              ]);
-              return {
-                exitCode: 0,
-                stdout: issueEvent(issue, {
-                  arguments: {
-                    team: "unexpected-team",
-                    project: publication.destination.projectId,
-                    title: issue.title,
-                    description: issue.description,
-                    priority: issue.priority,
-                  },
-                }),
-                stderr: "",
-              };
-            },
-            recordPublishedIssues: async () => {
-              persisted = true;
-              return [];
-            },
-          },
-        ),
-      ),
-    ).rejects.toThrow(
-      /SEC-1 was created.*unexpected arguments.*indeterminate.*recover the issue.*avoid creating a duplicate/u,
-    );
-
-    expect(persisted).toBe(false);
-    const records = (await readFile(handoffFile!, "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(records).toHaveLength(2);
-    expect(records[1]!["issueIdentifier"]).toBe("SEC-1");
-    expect(records[1]!["arguments"]).toMatchObject({
-      team: "unexpected-team",
-    });
-  });
-
-  test("sanitizes model-authored identifiers in recovery diagnostics", async () => {
-    const publication = preparedPublication();
-    const unsafeIdentifier = "SYNTH\u001B]52;c;copied-secret\u0007";
-    let error: unknown;
-
-    try {
-      await publishScanInternal(
-        publication.scanDirectory,
-        OPTIONS,
-        dependencies(
-          publication,
-          {},
-          {
-            runCodex: async (_command, _args, input) => {
-              const drifted = handoffRecord(
-                publication,
-                publication.issues[0]!,
-                { identifier: unsafeIdentifier },
-              );
-              drifted["arguments"] = { title: "Unexpected title" };
-              await writeHandoff(input, [drifted]);
-              return { exitCode: 0, stdout: "", stderr: "" };
-            },
-          },
-        ),
-      );
-    } catch (caught) {
-      error = caught;
-    }
-
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).not.toContain("\u001B");
-    expect((error as Error).message).not.toContain("copied-secret");
   });
 
   test("rejects handoffs contradicted by observed trusted Linear mutations", async () => {
