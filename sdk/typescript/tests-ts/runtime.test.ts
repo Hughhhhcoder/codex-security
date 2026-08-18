@@ -61,7 +61,7 @@ import {
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
-  preparePersistentScanRoot,
+  preparePersistentOutputRoot,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -3576,8 +3576,9 @@ describe("runtime directories and plugin Python boundary", () => {
         CODEX_SECURITY_STATE_DIR: join(root, "explicit-state"),
       }),
     ).toBe(join(root, "explicit-state"));
-    const scanRoot = await preparePersistentScanRoot(
+    const scanRoot = await preparePersistentOutputRoot(
       join(root, "state"),
+      "scans",
       "repository with spaces",
     );
     expect(scanRoot).toBe(
@@ -3594,7 +3595,11 @@ describe("runtime directories and plugin Python boundary", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
     expect(
-      await preparePersistentScanRoot(linkedState, "linked repository"),
+      await preparePersistentOutputRoot(
+        linkedState,
+        "scans",
+        "linked repository",
+      ),
     ).toBe(join(root, "state", "scans", "linked-repository"));
   });
 
@@ -3617,7 +3622,7 @@ describe("runtime directories and plugin Python boundary", () => {
       );
 
       await expect(
-        preparePersistentScanRoot(state, "repository"),
+        preparePersistentOutputRoot(state, "scans", "repository"),
       ).rejects.toThrow("Persistent scan output must use real directories");
       expect(await readdir(external)).toEqual([]);
     }
