@@ -165,6 +165,7 @@ const distFiles = new Set(
     "bulk-scan-discovery",
     "cli",
     "cli-manifest",
+    "codex-prompt",
     "config",
     "contract",
     "cost",
