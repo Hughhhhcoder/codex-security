@@ -1,4 +1,4 @@
-import { readFile, readdir, rm } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,9 +13,10 @@ import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
 } from "./knowledge-base.js";
+import { parse } from "smol-toml";
 import type { PreparedPublicationIssue } from "./publication.js";
 import type { LinearPublicationCatalogLabel } from "./linear.js";
-import { createIsolatedHome, importAmbientAuth } from "./runtime.js";
+import { resolveCodexCommand } from "./runtime.js";
 import { comparisonEnvironment } from "./scan-comparison.js";
 
 const PRIORITIES = ["none", "urgent", "high", "medium", "low"] as const;
@@ -49,8 +50,12 @@ const enrichmentSchema = z
     ),
   })
   .strict();
+const enrichmentOutputSchema = z.toJSONSchema(enrichmentSchema);
 
 type EnrichmentResponse = z.infer<typeof enrichmentSchema>;
+type ConfiguredMcpServer =
+  | { name: string; transport: { type: "stdio"; command: string } }
+  | { name: string; transport: { type: string; url: string } };
 
 export interface PublicationEnrichmentCodex {
   startThread(options: ThreadOptions): {
@@ -64,9 +69,8 @@ export interface PublicationEnrichmentCodex {
 export interface PublicationEnrichmentOptions {
   codex?: PublicationEnrichmentCodex;
   createCodex?: (options: CodexOptions) => PublicationEnrichmentCodex;
-  createIsolatedHome?: typeof createIsolatedHome;
   environment?: NodeJS.ProcessEnv;
-  importAmbientAuth?: typeof importAmbientAuth;
+  loadConfiguredMcpServers?: typeof loadConfiguredMcpServers;
   prepareKnowledgeBase?: typeof prepareKnowledgeBase;
   signal?: AbortSignal;
 }
@@ -85,44 +89,56 @@ export async function enrichPublicationIssues(
   const knowledgeBase = await (
     options.prepareKnowledgeBase ?? prepareKnowledgeBase
   )(knowledgeBasePaths, options.signal);
-  let isolatedCodexHome: string | undefined;
   try {
     const documents = await readKnowledgeBase(knowledgeBase, options.signal);
-    let environment = await publicationEnrichmentEnvironment(
+    const environment = await publicationEnrichmentEnvironment(
       options.environment,
       options.signal,
     );
-    if (options.codex === undefined) {
-      isolatedCodexHome = await (
-        options.createIsolatedHome ?? createIsolatedHome
-      )();
-      const ambientCodexHome =
-        environment["CODEX_HOME"]?.trim() || join(homedir(), ".codex");
-      await (options.importAmbientAuth ?? importAmbientAuth)(
-        ambientCodexHome,
-        isolatedCodexHome,
-      );
-      environment = { ...environment, CODEX_HOME: isolatedCodexHome };
-    }
+    const codexCommand =
+      options.codex === undefined
+        ? resolveCodexCommand(environment).command
+        : undefined;
+    const configuredMcpServers =
+      options.codex === undefined
+        ? await (options.loadConfiguredMcpServers ?? loadConfiguredMcpServers)(
+            environment,
+            options.signal,
+          )
+        : [];
     const codex =
       options.codex ??
       (options.createCodex ?? ((codexOptions) => new Codex(codexOptions)))({
+        codexPathOverride: codexCommand!,
         env: environment,
         config: {
           allow_login_shell: false,
           mcp_servers: {},
+          ...Object.fromEntries(
+            configuredMcpServers.flatMap(({ name, transport }) => [
+              [
+                `mcp_servers.${name}.${"command" in transport ? "command" : "url"}`,
+                "command" in transport ? transport.command : transport.url,
+              ],
+              [`mcp_servers.${name}.enabled`, false],
+            ]),
+          ),
           responses_api_metadata: {
             codex_security_surface: "sdk",
           },
           "features.apps": false,
           "features.code_mode": false,
           "features.code_mode_only": false,
+          "features.goals": false,
+          "features.hooks": false,
           "features.js_repl": false,
+          "features.memories": false,
           "features.multi_agent": false,
           "features.multi_agent_v2": false,
           "features.plugins": false,
           "features.shell_tool": false,
           "features.unified_exec": false,
+          "tools.view_image": false,
           shell_environment_policy: {
             inherit: "core",
             ignore_default_excludes: false,
@@ -140,9 +156,7 @@ export async function enrichPublicationIssues(
       skipGitRepoCheck: true,
     });
     const turn = await thread.run(enrichmentPrompt(issues, labels, documents), {
-      outputSchema: z.toJSONSchema(enrichmentSchema, {
-        target: "openapi-3.0",
-      }),
+      outputSchema: enrichmentOutputSchema,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
     options.signal?.throwIfAborted();
@@ -158,14 +172,115 @@ export async function enrichPublicationIssues(
     }
     return applyEnrichment(issues, labels, response);
   } finally {
-    await Promise.all([
-      knowledgeBase.cleanup().catch(() => undefined),
-      isolatedCodexHome === undefined
-        ? undefined
-        : rm(isolatedCodexHome, { recursive: true, force: true }).catch(
-            () => undefined,
-          ),
-    ]);
+    await knowledgeBase.cleanup().catch(() => undefined);
+  }
+}
+
+async function loadConfiguredMcpServers(
+  environment: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<ConfiguredMcpServer[]> {
+  try {
+    signal?.throwIfAborted();
+    const configuredHome = environment["CODEX_HOME"]?.trim();
+    const codexHome =
+      configuredHome === undefined || configuredHome.length === 0
+        ? join(homedir(), ".codex")
+        : configuredHome === "~"
+          ? homedir()
+          : configuredHome.startsWith("~/")
+            ? join(homedir(), configuredHome.slice(2))
+            : configuredHome;
+    const configPaths = [
+      ...(process.platform === "win32" ? [] : ["/etc/codex/config.toml"]),
+      join(codexHome, "config.toml"),
+      ...(process.platform === "win32"
+        ? []
+        : ["/etc/codex/managed_config.toml"]),
+      join(codexHome, "managed_config.toml"),
+    ];
+    const configured = new Map<string, Record<string, unknown>>();
+    let selectedProfile: string | undefined;
+    for (const configPath of configPaths) {
+      signal?.throwIfAborted();
+      let contents: string;
+      try {
+        contents = await readFile(configPath, { encoding: "utf8", signal });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      const document = parse(contents) as unknown;
+      if (typeof document !== "object" || document === null) {
+        throw new Error("Unexpected Codex configuration.");
+      }
+      const profile = (document as { profile?: unknown }).profile;
+      if (typeof profile === "string" && profile.length > 0) {
+        selectedProfile = profile;
+      }
+      mergeMcpServers(configured, document);
+    }
+    if (selectedProfile !== undefined) {
+      if (!/^[A-Za-z0-9_-]+$/u.test(selectedProfile)) {
+        throw new Error("Unexpected Codex profile name.");
+      }
+      const profilePath = join(codexHome, `${selectedProfile}.config.toml`);
+      try {
+        const contents = await readFile(profilePath, {
+          encoding: "utf8",
+          signal,
+        });
+        mergeMcpServers(configured, parse(contents) as unknown);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    const servers = [...configured].flatMap(
+      ([name, server]): ConfiguredMcpServer[] => {
+        if (server["enabled"] === false) return [];
+        if (!/^[A-Za-z0-9_-]+$/u.test(name)) {
+          throw new Error("Unexpected MCP server name.");
+        }
+        const command = server["command"];
+        if (typeof command === "string" && command.length > 0) {
+          return [{ name, transport: { type: "stdio", command } }];
+        }
+        const url = server["url"];
+        if (typeof url === "string" && url.length > 0) {
+          return [{ name, transport: { type: "streamable_http", url } }];
+        }
+        throw new Error("Unexpected MCP server transport.");
+      },
+    );
+    return servers;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new CodexSecurityError(
+      "Could not inspect Codex MCP configuration for publication enrichment.",
+    );
+  }
+}
+
+function mergeMcpServers(
+  configured: Map<string, Record<string, unknown>>,
+  document: unknown,
+): void {
+  if (typeof document !== "object" || document === null) {
+    throw new Error("Unexpected Codex configuration.");
+  }
+  const servers = (document as { mcp_servers?: unknown }).mcp_servers;
+  if (servers === undefined) return;
+  if (typeof servers !== "object" || servers === null) {
+    throw new Error("Unexpected MCP configuration.");
+  }
+  for (const [name, server] of Object.entries(servers)) {
+    if (typeof server !== "object" || server === null) {
+      throw new Error("Unexpected MCP server entry.");
+    }
+    configured.set(name, {
+      ...(configured.get(name) ?? {}),
+      ...(server as Record<string, unknown>),
+    });
   }
 }
 

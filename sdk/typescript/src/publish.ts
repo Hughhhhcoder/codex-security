@@ -710,6 +710,7 @@ async function collectPublicationHandoff(
   const failed = new Map<string, string>();
   const observed = new Set<string>();
   const explicitFailures = new Set<string>();
+  const candidateIdentifiers = new Map<string, string>();
   const unexpected: string[] = [];
   const expectedIssues = new Map(
     publication.issues.map((issue) => [issue.findingId, issue]),
@@ -735,29 +736,24 @@ async function collectPublicationHandoff(
       );
       continue;
     }
-    if (observed.has(issue.findingId)) {
-      const saved = created.get(issue.findingId);
-      const identifiers = ["issueIdentifier", "identifier", "id"].filter(
-        (name) => Object.hasOwn(record, name),
-      );
-      const identifier =
-        identifiers.length === 1 ? record[identifiers[0]!] : undefined;
-      const url = record["url"];
+    const candidateIdentifier = publicationCandidateIdentifier(
+      record,
+      publication,
+      issue,
+    );
+    if (candidateIdentifier !== undefined) {
+      const priorIdentifier = candidateIdentifiers.get(issue.findingId);
       if (
-        saved !== undefined &&
-        record["scanId"] === publication.scanId &&
-        record["occurrenceId"] === issue.occurrenceId &&
-        !Object.hasOwn(record, "error") &&
-        typeof identifier === "string" &&
-        identifier.trim().length > 0 &&
-        identifier !== saved.issueIdentifier &&
-        (url === undefined ||
-          (typeof url === "string" && url.trim().length > 0))
+        priorIdentifier !== undefined &&
+        priorIdentifier !== candidateIdentifier
       ) {
         throw new CodexSecurityError(
-          `More than one Linear issue was created for finding ${issue.findingId}: ${saved.issueIdentifier} and ${identifier}. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover both issues before retrying to avoid creating duplicate issues.`,
+          `More than one Linear issue was created for finding ${issue.findingId}: ${priorIdentifier} and ${candidateIdentifier}. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover both issues before retrying to avoid creating duplicate issues.`,
         );
       }
+      candidateIdentifiers.set(issue.findingId, candidateIdentifier);
+    }
+    if (observed.has(issue.findingId)) {
       explicitFailures.delete(issue.findingId);
       created.delete(issue.findingId);
       failed.set(
@@ -896,6 +892,31 @@ async function collectPublicationHandoff(
   };
 }
 
+function publicationCandidateIdentifier(
+  record: Record<string, unknown>,
+  publication: PreparedScanPublication,
+  issue: PreparedPublicationIssue,
+): string | undefined {
+  if (
+    record["scanId"] !== publication.scanId ||
+    record["occurrenceId"] !== issue.occurrenceId ||
+    Object.hasOwn(record, "error")
+  ) {
+    return undefined;
+  }
+  const identifiers = ["issueIdentifier", "identifier", "id"].filter((name) =>
+    Object.hasOwn(record, name),
+  );
+  const identifier =
+    identifiers.length === 1 ? record[identifiers[0]!] : undefined;
+  const url = record["url"];
+  return typeof identifier === "string" &&
+    identifier.trim().length > 0 &&
+    (url === undefined || (typeof url === "string" && url.trim().length > 0))
+    ? identifier
+    : undefined;
+}
+
 async function preserveVerifiedHandoff(
   file: string,
   publication: PreparedScanPublication,
@@ -907,18 +928,12 @@ async function preserveVerifiedHandoff(
   } catch {
     current = "";
   }
-  const recorded = new Set<string>();
+  const recorded: unknown[] = [];
   for (const line of current.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
     try {
       const record = JSON.parse(line) as unknown;
-      if (
-        isRecord(record) &&
-        typeof record["findingId"] === "string" &&
-        !Object.hasOwn(record, "error")
-      ) {
-        recorded.add(record["findingId"]);
-      }
+      recorded.push(record);
     } catch {
       // Preserve malformed original lines without losing verified mappings.
     }
@@ -928,7 +943,12 @@ async function preserveVerifiedHandoff(
     publication.issues.map((issue) => [issue.findingId, issue]),
   );
   const records = issues
-    .filter((issue) => !recorded.has(issue.findingId))
+    .filter((issue) => {
+      const expected = planned.get(issue.findingId)!;
+      return !recorded.some((record) =>
+        isVerifiedPublicationHandoff(record, publication, expected, issue),
+      );
+    })
     .map((issue) => {
       const expected = planned.get(issue.findingId)!;
       return JSON.stringify({
@@ -946,6 +966,37 @@ async function preserveVerifiedHandoff(
     encoding: "utf8",
     mode: 0o600,
   });
+}
+
+function isVerifiedPublicationHandoff(
+  record: unknown,
+  publication: PreparedScanPublication,
+  expected: PreparedPublicationIssue,
+  verified: PublishedScanIssue,
+): boolean {
+  if (
+    !isRecord(record) ||
+    Object.hasOwn(record, "error") ||
+    record["scanId"] !== publication.scanId ||
+    record["findingId"] !== verified.findingId ||
+    record["occurrenceId"] !== verified.occurrenceId ||
+    !sameJsonValue(
+      record["arguments"],
+      publicationHandoffArguments(publication, expected),
+    )
+  ) {
+    return false;
+  }
+  const identifiers = ["issueIdentifier", "identifier", "id"].filter((name) =>
+    Object.hasOwn(record, name),
+  );
+  if (
+    identifiers.length !== 1 ||
+    record[identifiers[0]!] !== verified.issueIdentifier
+  ) {
+    return false;
+  }
+  return record["url"] === verified.url;
 }
 
 function codexFailureMessage(stderr: string, exitCode: number): string {

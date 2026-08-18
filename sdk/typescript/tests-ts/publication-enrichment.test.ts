@@ -146,6 +146,11 @@ describe("publication knowledge-base enrichment", () => {
         properties: {
           findings: {
             items: {
+              properties: {
+                error: {
+                  anyOf: [{ type: "string" }, { type: "null" }],
+                },
+              },
               required: ["findingId", "priority", "labelIds", "error"],
             },
           },
@@ -186,21 +191,27 @@ describe("publication knowledge-base enrichment", () => {
     expect(enriched.every((issue) => issue.labels === undefined)).toBe(true);
   });
 
-  test("removes ambient MCP servers from the enrichment turn", async () => {
+  test("disables ambient MCP servers without changing the authenticated home", async () => {
     let config: unknown;
-    let isolatedCodexHome: string | undefined;
+    let receivedCodexHome: string | undefined;
     const ambientCodexHome = await mkdtemp(
       join(tmpdir(), "codex-security-publication-ambient-home-test-"),
     );
     temporaryDirectories.push(ambientCodexHome);
     await writeFile(
       join(ambientCodexHome, "config.toml"),
-      '[mcp_servers.synthetic]\ncommand = "synthetic-write-tool"\n',
+      [
+        "[mcp_servers.synthetic]",
+        'command = "synthetic-write-tool"',
+        "",
+        "[mcp_servers.remote_server]",
+        'url = "https://mcp.invalid"',
+      ].join("\n"),
     );
     await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
       createCodex(options) {
         config = options.config;
-        isolatedCodexHome = options.env?.["CODEX_HOME"];
+        receivedCodexHome = options.env?.["CODEX_HOME"];
         return fakeCodex(
           response(
             issues().map(({ findingId }) => ({
@@ -211,21 +222,22 @@ describe("publication knowledge-base enrichment", () => {
           ),
         );
       },
-      createIsolatedHome: async () =>
-        await mkdtemp(
-          join(tmpdir(), "codex-security-publication-isolated-home-test-"),
-        ),
       environment: {
         CODEX_HOME: ambientCodexHome,
         CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
       },
-      importAmbientAuth: async () => false,
     });
 
-    expect(config).toMatchObject({ mcp_servers: {} });
-    expect(isolatedCodexHome).toBeDefined();
-    expect(isolatedCodexHome).not.toBe(ambientCodexHome);
-    await expect(stat(isolatedCodexHome!)).rejects.toThrow();
+    expect(config).toMatchObject({
+      mcp_servers: {},
+      "mcp_servers.synthetic.command": "synthetic-write-tool",
+      "mcp_servers.synthetic.enabled": false,
+      "mcp_servers.remote_server.url": "https://mcp.invalid",
+      "mcp_servers.remote_server.enabled": false,
+      "tools.view_image": false,
+    });
+    expect(receivedCodexHome).toBe(ambientCodexHome);
+    expect((await stat(ambientCodexHome)).isDirectory()).toBe(true);
   });
 
   test.each([

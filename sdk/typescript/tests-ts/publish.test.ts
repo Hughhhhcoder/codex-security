@@ -1513,6 +1513,7 @@ describe("connected Linear publication", () => {
 
   test("prefers verified issue events over model-authored argument drift", async () => {
     const publication = preparedPublication();
+    let handoffFile: string | undefined;
     const result = await publishScanInternal(
       publication.scanDirectory,
       OPTIONS,
@@ -1523,6 +1524,7 @@ describe("connected Linear publication", () => {
           runCodex: async (_command, _args, input) => {
             const issue = publication.issues[0]!;
             const record = handoffRecord(publication, issue);
+            handoffFile = publicationData(input).handoffFile;
             await writeHandoff(input, [
               {
                 ...record,
@@ -1537,6 +1539,19 @@ describe("connected Linear publication", () => {
               stdout: issueEvent(issue),
               stderr: "",
             };
+          },
+          recordPublishedIssues: async (_prepared, created) => {
+            const records = (await readFile(handoffFile!, "utf8"))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line) as Record<string, unknown>);
+            expect(records).toHaveLength(2);
+            expect(records[0]!["arguments"]).toHaveProperty("priority", 0);
+            expect(records[1]!["issueIdentifier"]).toBe("SEC-1");
+            expect(records[1]!["arguments"]).toEqual(
+              handoffRecord(publication, publication.issues[0]!)["arguments"],
+            );
+            return [...created];
           },
         },
       ),
@@ -1602,6 +1617,64 @@ describe("connected Linear publication", () => {
     expect(records[1]!["error"]).toBe(
       "The model could not write the created issue.",
     );
+  });
+
+  test("appends the exact verified mapping before a database failure", async () => {
+    const publication = preparedPublication();
+    let handoffFile: string | undefined;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              const issue = publication.issues[0]!;
+              const record = handoffRecord(publication, issue, {
+                identifier: "SEC-INCORRECT",
+              });
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(input, [
+                {
+                  ...record,
+                  arguments: {
+                    ...(record["arguments"] as Record<string, unknown>),
+                    priority: 0,
+                  },
+                },
+              ]);
+              return {
+                exitCode: 0,
+                stdout: issueEvent(issue, { identifier: "SEC-VERIFIED" }),
+                stderr: "",
+              };
+            },
+            recordPublishedIssues: async () => {
+              throw new Error("The publication database is unavailable.");
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /database is unavailable.*publication handoff remains at.*avoid creating duplicate issues/u,
+    );
+
+    const records = (await readFile(handoffFile!, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(
+      records.map((record) => [
+        record["issueIdentifier"],
+        (record["arguments"] as Record<string, unknown>)["priority"],
+      ]),
+    ).toEqual([
+      ["SEC-INCORRECT", 0],
+      ["SEC-VERIFIED", 2],
+    ]);
   });
 
   test("recovers validated partial mappings after cancellation before preserving its private handoff", async () => {
@@ -1887,9 +1960,12 @@ describe("connected Linear publication", () => {
             runCodex: async (_command, _args, input) => {
               handoffFile = publicationData(input).handoffFile;
               await writeHandoff(input, [
-                handoffRecord(publication, issue, {
-                  identifier: "SYNTH-DUPLICATE-A",
-                }),
+                {
+                  ...handoffRecord(publication, issue, {
+                    identifier: "SYNTH-DUPLICATE-A",
+                  }),
+                  arguments: { priority: 0 },
+                },
                 handoffRecord(publication, issue, {
                   identifier: "SYNTH-DUPLICATE-B",
                 }),
