@@ -78,6 +78,7 @@ function issueEvent(
     error?: string;
     identifier?: string;
     url?: string;
+    arguments?: Record<string, unknown>;
   } = {},
 ): string {
   const identifier = options.identifier ?? `SEC-${issue.findingId.slice(8)}`;
@@ -89,7 +90,7 @@ function issueEvent(
       type: "mcp_tool_call",
       server: "codex_apps",
       tool: "linear_save_issue",
-      arguments: {
+      arguments: options.arguments ?? {
         team: OPTIONS.teamId,
         project: OPTIONS.projectId,
         title: issue.title,
@@ -2132,6 +2133,65 @@ describe("connected Linear publication", () => {
       "SYNTH-DRIFTED",
       "SYNTH-VERIFIED",
     ]);
+  });
+
+  test("keeps trusted events with drifted arguments indeterminate after a rejected handoff", async () => {
+    const publication = preparedPublication();
+    const issue = publication.issues[0]!;
+    let handoffFile: string | undefined;
+    let persisted = false;
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              await writeHandoff(input, [
+                {
+                  ...handoffRecord(publication, issue),
+                  scanId: "unexpected-scan",
+                },
+              ]);
+              return {
+                exitCode: 0,
+                stdout: issueEvent(issue, {
+                  arguments: {
+                    team: "unexpected-team",
+                    project: publication.destination.projectId,
+                    title: issue.title,
+                    description: issue.description,
+                    priority: issue.priority,
+                  },
+                }),
+                stderr: "",
+              };
+            },
+            recordPublishedIssues: async () => {
+              persisted = true;
+              return [];
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /SEC-1 was created.*unexpected arguments.*indeterminate.*recover the issue.*avoid creating a duplicate/u,
+    );
+
+    expect(persisted).toBe(false);
+    const records = (await readFile(handoffFile!, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toHaveLength(2);
+    expect(records[1]!["issueIdentifier"]).toBe("SEC-1");
+    expect(records[1]!["arguments"]).toMatchObject({
+      team: "unexpected-team",
+    });
   });
 
   test("sanitizes model-authored identifiers in recovery diagnostics", async () => {

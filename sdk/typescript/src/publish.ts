@@ -373,6 +373,13 @@ export async function publishScanInternal(
     events,
     failureMessage,
   );
+  if (handoffResults.recoverable !== undefined) {
+    await preserveRecoveryHandoff(
+      handoff.file,
+      prepared,
+      handoffResults.recoverable,
+    );
+  }
   if (handoffResults.created.length > 0) {
     await preserveVerifiedHandoff(
       handoff.file,
@@ -707,6 +714,10 @@ async function collectPublicationHandoff(
 ): Promise<
   ReturnType<typeof collectPublicationEvents> & {
     indeterminateError?: string;
+    recoverable?: Array<{
+      issue: PublishedScanIssue;
+      arguments: Record<string, unknown>;
+    }>;
   }
 > {
   let content: string;
@@ -861,11 +872,27 @@ async function collectPublicationHandoff(
   const eventFailed = new Map(
     events.failed.map((issue) => [issue.findingId, issue.error]),
   );
+  const eventArgumentDrift = new Map(
+    events.argumentDrift?.map((entry) => [entry.findingId, entry.arguments]),
+  );
+  const recoverable: Array<{
+    issue: PublishedScanIssue;
+    arguments: Record<string, unknown>;
+  }> = [];
   for (const issue of publication.issues) {
     const saved = created.get(issue.findingId);
     const verified = eventCreated.get(issue.findingId);
     const eventFailure = eventFailed.get(issue.findingId);
+    const driftedArguments = eventArgumentDrift.get(issue.findingId);
     if (saved === undefined && verified !== undefined) {
+      if (observed.has(issue.findingId) && driftedArguments !== undefined) {
+        recoverable.push({ issue: verified, arguments: driftedArguments });
+        const safeIdentifier = stripVTControlCharacters(
+          safeErrorMessage(verified.issueIdentifier),
+        );
+        indeterminateError ??= `Linear issue ${safeIdentifier} was created for finding ${issue.findingId} with unexpected arguments. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover the issue before retrying to avoid creating a duplicate issue.`;
+        continue;
+      }
       failed.delete(issue.findingId);
       created.set(issue.findingId, verified);
       continue;
@@ -913,6 +940,7 @@ async function collectPublicationHandoff(
       return error === undefined ? [] : [{ findingId: issue.findingId, error }];
     }),
     ...(indeterminateError === undefined ? {} : { indeterminateError }),
+    ...(recoverable.length === 0 ? {} : { recoverable }),
   };
 }
 
@@ -985,6 +1013,38 @@ async function preserveVerifiedHandoff(
       });
     });
   if (records.length === 0) return;
+  const prefix = current.length === 0 || current.endsWith("\n") ? "" : "\n";
+  await appendFile(file, `${prefix}${records.join("\n")}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+async function preserveRecoveryHandoff(
+  file: string,
+  publication: PreparedScanPublication,
+  recoverable: readonly {
+    issue: PublishedScanIssue;
+    arguments: Record<string, unknown>;
+  }[],
+): Promise<void> {
+  const records = recoverable.map(({ issue, arguments: arguments_ }) =>
+    JSON.stringify({
+      scanId: publication.scanId,
+      findingId: issue.findingId,
+      occurrenceId: issue.occurrenceId,
+      issueIdentifier: issue.issueIdentifier,
+      ...(issue.url === undefined ? {} : { url: issue.url }),
+      arguments: arguments_,
+    }),
+  );
+  if (records.length === 0) return;
+  let current = "";
+  try {
+    current = await readFile(file, "utf8");
+  } catch {
+    // Recreate the private recovery handoff if it was removed unexpectedly.
+  }
   const prefix = current.length === 0 || current.endsWith("\n") ? "" : "\n";
   await appendFile(file, `${prefix}${records.join("\n")}\n`, {
     encoding: "utf8",
