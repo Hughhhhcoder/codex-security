@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   link,
   mkdir,
@@ -13,14 +13,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
+import { resolvePluginPython } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
-const python = execFileSync(
-  process.env["PYTHON"] ??
-    (process.platform === "win32" ? "python" : "python3"),
-  ["-c", "import sys; print(sys.executable)"],
-  { encoding: "utf8" },
-).trim();
+const python = await resolvePluginPython();
 const roots: string[] = [];
 
 afterEach(async () => {
