@@ -226,10 +226,7 @@ describe("CodexSecurity orchestration", () => {
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-          ): Promise<JsonObject> => {
+          runWorkbench: async (_options, args): Promise<JsonObject> => {
             if (args[0] === "register-cli-scan") {
               recipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
             }
@@ -1045,10 +1042,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
             savedRecipe = JSON.parse(args[args.indexOf("--recipe-json") + 1]!);
           }
@@ -1335,10 +1329,7 @@ describe("CodexSecurity orchestration", () => {
         prepareRuntime: async () => preparedRuntime(codexHome),
         resolvePluginPython: async () => "/managed/python",
         repositoryRevision: async () => null,
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           if (args[0] === "get-scan-feedback") {
             return {
               scanId: "scan_example_001",
@@ -1788,10 +1779,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
             return mockScanRegistration(args);
@@ -1999,10 +1987,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
             return {
               ...mockScanRegistration(args),
@@ -2082,10 +2067,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           if (args[0] !== "register-cli-scan") {
             return {
               scanId: "scan_example_001",
@@ -2281,10 +2263,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> =>
+        runWorkbench: async (_options, args): Promise<JsonObject> =>
           args[0] === "register-cli-scan"
             ? {
                 ...mockScanRegistration(args),
@@ -2321,10 +2300,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           commands.push(args[0]!);
           if (args[0] === "register-cli-scan") {
             return mockScanRegistration(args);
@@ -2388,10 +2364,7 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-          ): Promise<JsonObject> => {
+          runWorkbench: async (_options, args): Promise<JsonObject> => {
             commands.push(args[0]!);
             return mockWorkbench(args);
           },
@@ -2443,10 +2416,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> =>
+        runWorkbench: async (_options, args): Promise<JsonObject> =>
           args[0] === "register-cli-scan"
             ? { ...mockScanRegistration(args), scopeFileCount: 4_207 }
             : mockWorkbench(args),
@@ -2524,10 +2494,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> =>
+        runWorkbench: async (_options, args): Promise<JsonObject> =>
           args[0] === "register-cli-scan"
             ? { ...mockScanRegistration(args), scopeFileCount: 1_258 }
             : mockWorkbench(args),
@@ -2665,10 +2632,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
             return mockScanRegistration(args);
@@ -2776,10 +2740,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           commands.push(args[0]!);
           return args[0] === "register-cli-scan"
             ? mockScanRegistration(args)
@@ -2820,10 +2781,7 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-          ): Promise<JsonObject> => {
+          runWorkbench: async (_options, args): Promise<JsonObject> => {
             if (args[0] === "register-cli-scan") {
               return { ...mockScanRegistration(args), scanId };
             }
@@ -2919,10 +2877,7 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-          ): Promise<JsonObject> => {
+          runWorkbench: async (_options, args): Promise<JsonObject> => {
             commands.push(args);
             if (args[0] === "get-scan-feedback") {
               return {
@@ -3051,10 +3006,7 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-          ): Promise<JsonObject> => {
+          runWorkbench: async (_options, args): Promise<JsonObject> => {
             if (args[0] === "register-cli-scan") {
               return mockScanRegistration(args);
             }
@@ -3115,10 +3067,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
             return mockScanRegistration(args);
@@ -3184,10 +3133,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           commands.push(args);
           return mockWorkbench(args);
         },
@@ -3354,10 +3300,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
             return mockScanRegistration(args);
@@ -3486,10 +3429,7 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-          ): Promise<JsonObject> => {
+          runWorkbench: async (_options, args): Promise<JsonObject> => {
             commands.push(args);
             if (args[0] !== "complete-budget-exhausted-scan") {
               return mockWorkbench(args);
@@ -3621,10 +3561,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
             return mockScanRegistration(args);
@@ -3708,10 +3645,7 @@ describe("CodexSecurity orchestration", () => {
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args): Promise<JsonObject> => {
           if (args[0] === "get-scan-feedback") {
             return {
               scanId: "scan_example_001",
@@ -4238,7 +4172,7 @@ describe("CodexSecurity orchestration", () => {
 
     try {
       const results = await Promise.allSettled(
-        clients.map((client) => client.run(repository)),
+        clients.map((client) => client.run(repository).finally(releaseScans)),
       );
       for (const result of results) {
         expect(result).toMatchObject({
@@ -4250,6 +4184,7 @@ describe("CodexSecurity orchestration", () => {
       }
       expect(scansStarted).toBe(2);
     } finally {
+      releaseScans();
       await Promise.all(clients.map(async (client) => await client.close()));
     }
   });
@@ -6044,20 +5979,17 @@ setInterval(() => {}, 1000);
     );
     const login = client.loginApiKey("secret-key");
     void login.catch(() => undefined);
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const started = await import("node:fs/promises").then(({ stat }) =>
-        stat(ready).catch(() => null),
-      );
-      if (started !== null) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    try {
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(ready) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(existsSync(ready), "the fake login process started").toBe(true);
+      await client.close();
+      await expect(login).rejects.toThrow();
+      await expect(stat(codexHome)).resolves.toBeDefined();
+    } finally {
+      await client.close();
     }
-    await expect(
-      import("node:fs/promises").then(({ stat }) => stat(ready)),
-    ).resolves.toBeDefined();
-    await client.close();
-    await expect(login).rejects.toThrow();
-    await expect(
-      import("node:fs/promises").then(({ stat }) => stat(codexHome)),
-    ).resolves.toBeDefined();
-  });
+  }, 30_000);
 });
