@@ -2034,6 +2034,56 @@ describe("connected Linear publication", () => {
     expect(await readFile(handoffFile!, "utf8")).toContain("SEC-1");
   });
 
+  test("persists other verified issues before reporting argument drift", async () => {
+    const publication = preparedPublication(2);
+    let handoffFile: string | undefined;
+    let persisted: readonly string[] = [];
+
+    await expect(
+      publishScanInternal(
+        publication.scanDirectory,
+        OPTIONS,
+        dependencies(
+          publication,
+          {},
+          {
+            runCodex: async (_command, _args, input) => {
+              handoffFile = publicationData(input).handoffFile;
+              const drifted = handoffRecord(
+                publication,
+                publication.issues[0]!,
+              );
+              drifted["arguments"] = { title: "Unexpected title" };
+              await writeHandoff(input, [drifted]);
+              return {
+                exitCode: 0,
+                stdout: issueEvent(publication.issues[1]!),
+                stderr: "",
+              };
+            },
+            recordPublishedIssues: async (_prepared, created) => {
+              persisted = created.map(({ findingId }) => findingId);
+              return [...created];
+            },
+          },
+        ),
+      ),
+    ).rejects.toThrow(
+      /SEC-1 may have been created.*unexpected arguments.*indeterminate/u,
+    );
+
+    expect(persisted).toEqual(["finding-2"]);
+    const records = (await readFile(handoffFile!, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.map((record) => record["findingId"])).toEqual([
+      "finding-1",
+      "finding-2",
+    ]);
+    expect(records[1]!["issueIdentifier"]).toBe("SEC-2");
+  });
+
   test("rejects handoffs contradicted by observed trusted Linear mutations", async () => {
     const scenarios: Array<{
       name: string;

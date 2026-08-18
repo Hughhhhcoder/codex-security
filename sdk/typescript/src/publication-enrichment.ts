@@ -1,6 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import {
   Codex,
   type CodexOptions,
@@ -115,13 +116,10 @@ export async function enrichPublicationIssues(
         config: {
           allow_login_shell: false,
           ...Object.fromEntries(
-            configuredMcpServers.flatMap(({ name }) => {
-              const key = `mcp_servers.${name}`;
-              return [
-                [`${key}.command`, "codex-security-disabled-mcp"],
-                [`${key}.enabled`, false],
-              ];
-            }),
+            configuredMcpServers.map(({ name }) => [
+              `mcp_servers.${name}.enabled`,
+              false,
+            ]),
           ),
           responses_api_metadata: {
             codex_security_surface: "sdk",
@@ -418,7 +416,7 @@ function applyEnrichment(
   for (const result of parsed.data.findings) {
     if (result.error !== null) {
       throw new CodexSecurityError(
-        `Publication policy could not classify finding ${result.findingId}: ${safeErrorMessage(result.error)}`,
+        `Publication policy could not classify finding ${result.findingId}: ${stripVTControlCharacters(safeErrorMessage(result.error))}`,
       );
     }
     const seenLabels = new Set<string>();

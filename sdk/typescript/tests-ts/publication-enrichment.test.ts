@@ -238,9 +238,7 @@ describe("publication knowledge-base enrichment", () => {
     });
 
     expect(config).toMatchObject({
-      "mcp_servers.synthetic.command": "codex-security-disabled-mcp",
       "mcp_servers.synthetic.enabled": false,
-      "mcp_servers.remote_server.command": "codex-security-disabled-mcp",
       "mcp_servers.remote_server.enabled": false,
       "features.view_image": false,
       tools: {
@@ -316,7 +314,6 @@ describe("publication knowledge-base enrichment", () => {
     });
 
     expect(config).toMatchObject({
-      "mcp_servers.project_tool.command": "codex-security-disabled-mcp",
       "mcp_servers.project_tool.enabled": false,
     });
   });
@@ -352,6 +349,9 @@ describe("publication knowledge-base enrichment", () => {
         "[mcp_servers.native_test]",
         `command = ${JSON.stringify(process.execPath)}`,
         `args = ${JSON.stringify([mcpServer, marker])}`,
+        "",
+        "[mcp_servers.native_http_test]",
+        'url = "http://127.0.0.1:9/mcp"',
       ].join("\n"),
     );
     const requests: Array<{ tools?: Array<{ name?: string }> }> = [];
@@ -668,6 +668,38 @@ describe("publication knowledge-base enrichment", () => {
         },
       ),
     ).rejects.toThrow(expected);
+  });
+
+  test("removes terminal controls from model-authored policy errors", async () => {
+    const policyError = "Conflicting rule.\u001B]52;c;copied-secret\u0007";
+    let error: unknown;
+    try {
+      await enrichPublicationIssues(issues(), LABELS, [await policyFile()], {
+        codex: fakeCodex(
+          response([
+            {
+              findingId: "finding-one",
+              priority: "none",
+              labelIds: [],
+              error: policyError,
+            },
+            {
+              findingId: "finding-two",
+              priority: "none",
+              labelIds: [],
+            },
+          ]),
+        ),
+        environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("Conflicting rule.");
+    expect((error as Error).message).not.toContain("\u001B");
+    expect((error as Error).message).not.toContain("copied-secret");
   });
 
   test("cleans prepared knowledge bases when enrichment is canceled", async () => {

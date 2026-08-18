@@ -393,6 +393,9 @@ export async function publishScanInternal(
   result.failed = handoffResults.failed;
   result.counts.created = result.created.length;
   result.counts.failed = result.failed.length;
+  if (handoffResults.indeterminateError !== undefined) {
+    throw new CodexSecurityError(handoffResults.indeterminateError);
+  }
   if (options.signal?.aborted) {
     try {
       await (dependencies.writeReceipt ?? writePublicationReceipt)(
@@ -700,7 +703,11 @@ async function collectPublicationHandoff(
   publication: PreparedScanPublication,
   events: ReturnType<typeof collectPublicationEvents>,
   failureMessage: string,
-): Promise<ReturnType<typeof collectPublicationEvents>> {
+): Promise<
+  ReturnType<typeof collectPublicationEvents> & {
+    indeterminateError?: string;
+  }
+> {
   let content: string;
   try {
     content = await readFile(file, "utf8");
@@ -715,6 +722,7 @@ async function collectPublicationHandoff(
   const explicitFailures = new Set<string>();
   const candidateIdentifiers = new Map<string, string>();
   const argumentDriftIdentifiers = new Map<string, string>();
+  let indeterminateError: string | undefined;
   const unexpected: string[] = [];
   const expectedIssues = new Map(
     publication.issues.map((issue) => [issue.findingId, issue]),
@@ -751,9 +759,7 @@ async function collectPublicationHandoff(
         priorIdentifier !== undefined &&
         priorIdentifier !== candidateIdentifier
       ) {
-        throw new CodexSecurityError(
-          `More than one Linear issue was created for finding ${issue.findingId}: ${priorIdentifier} and ${candidateIdentifier}. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover both issues before retrying to avoid creating duplicate issues.`,
-        );
+        indeterminateError ??= `More than one Linear issue was created for finding ${issue.findingId}: ${priorIdentifier} and ${candidateIdentifier}. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover both issues before retrying to avoid creating duplicate issues.`;
       }
       candidateIdentifiers.set(issue.findingId, candidateIdentifier);
     }
@@ -890,9 +896,7 @@ async function collectPublicationHandoff(
 
   for (const [findingId, identifier] of argumentDriftIdentifiers) {
     if (created.has(findingId)) continue;
-    throw new CodexSecurityError(
-      `Linear issue ${identifier} may have been created for finding ${findingId} with unexpected arguments. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover the issue before retrying to avoid creating a duplicate issue.`,
-    );
+    indeterminateError ??= `Linear issue ${identifier} may have been created for finding ${findingId} with unexpected arguments. The publication outcome is indeterminate; the publication handoff remains at ${file}; recover the issue before retrying to avoid creating a duplicate issue.`;
   }
 
   return {
@@ -904,6 +908,7 @@ async function collectPublicationHandoff(
       const error = failed.get(issue.findingId);
       return error === undefined ? [] : [{ findingId: issue.findingId, error }];
     }),
+    ...(indeterminateError === undefined ? {} : { indeterminateError }),
   };
 }
 
