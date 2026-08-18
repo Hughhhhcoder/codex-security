@@ -4689,11 +4689,6 @@ describe("CodexSecurity orchestration", () => {
                 startThread: () => ({
                   id: null,
                   async runStreamed() {
-                    expect(
-                      existsSync(
-                        join(credentialHome, ".codex-security-scan.lock"),
-                      ),
-                    ).toBe(false);
                     if (++scansStarted === 2) releaseScans();
                     const credentialConfig = parseToml(
                       await readFile(
@@ -4709,6 +4704,11 @@ describe("CodexSecurity orchestration", () => {
                       workers: index + 2,
                     });
                     await concurrentScans;
+                    expect(
+                      existsSync(
+                        join(credentialHome, ".codex-security-scan.lock"),
+                      ),
+                    ).toBe(false);
                     const after = parseToml(
                       await readFile(deepScanConfigPath!, "utf8"),
                     );
