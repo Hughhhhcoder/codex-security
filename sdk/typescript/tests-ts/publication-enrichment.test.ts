@@ -307,6 +307,7 @@ describe("publication knowledge-base enrichment", () => {
       include_collaboration_mode_instructions: false,
       include_environment_context: false,
       include_permissions_instructions: false,
+      notify: [],
       "skills.bundled.enabled": false,
       "skills.include_instructions": false,
       "tools.experimental_request_user_input.enabled": false,
@@ -495,6 +496,8 @@ describe("publication knowledge-base enrichment", () => {
     temporaryDirectories.push(codexHome);
     const marker = join(codexHome, "mcp-started");
     const mcpServer = join(codexHome, "mcp-server.cjs");
+    const notificationMarker = join(codexHome, "notification-prompt");
+    const notificationHook = join(codexHome, "notification-hook.cjs");
     const ambientModelInstructions = join(
       codexHome,
       "ambient-model-instructions.md",
@@ -536,6 +539,13 @@ describe("publication knowledge-base enrichment", () => {
       ].join("\n"),
     );
     await writeFile(
+      notificationHook,
+      [
+        'const fs = require("node:fs");',
+        'fs.writeFileSync(process.argv[2], process.argv.slice(3).join("\\n"));',
+      ].join("\n"),
+    );
+    await writeFile(
       ambientModelInstructions,
       "PRIVATE_MODEL_INSTRUCTIONS_SYNTHETIC_MARKER",
     );
@@ -565,6 +575,7 @@ describe("publication knowledge-base enrichment", () => {
     await writeFile(
       configPath,
       [
+        `notify = ${JSON.stringify([process.execPath, notificationHook, notificationMarker])}`,
         `model_instructions_file = ${JSON.stringify(ambientModelInstructions)}`,
         'instructions = "PRIVATE_USER_INSTRUCTIONS_SYNTHETIC_MARKER"',
         'developer_instructions = "PRIVATE_DEVELOPER_INSTRUCTIONS_SYNTHETIC_MARKER"',
@@ -717,6 +728,9 @@ describe("publication knowledge-base enrichment", () => {
     expect(JSON.stringify(requests[0])).toContain("\\\\u0024publication-probe");
     expect(
       await readFile(marker, "utf8").catch(() => undefined),
+    ).toBeUndefined();
+    expect(
+      await readFile(notificationMarker, "utf8").catch(() => undefined),
     ).toBeUndefined();
     const homeFiles = await filesUnder(codexHome);
     const sessionFiles = homeFiles.filter((path) =>
@@ -1018,6 +1032,32 @@ describe("publication knowledge-base enrichment", () => {
     expect(cleaned).toBe(true);
   });
 
+  test("allows Codex to recover after a transient stream error event", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-retry-test-"),
+    );
+    temporaryDirectories.push(root);
+    const executable = join(root, "recovering-codex.cjs");
+    await writeFile(
+      executable,
+      [
+        'process.stdout.write(JSON.stringify({ type: "error", message: "Reconnecting... 1/2" }) + "\\n");',
+        'process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "recovered" } }) + "\\n");',
+        'process.stdout.write(JSON.stringify({ type: "turn.completed" }) + "\\n");',
+      ].join("\n"),
+    );
+
+    await expect(
+      runPublicationEnrichmentCodex(
+        process.execPath,
+        [executable],
+        "synthetic prompt",
+        { ...process.env } as Record<string, string>,
+        root,
+      ),
+    ).resolves.toEqual({ finalResponse: "recovered" });
+  });
+
   test("waits for a failed Codex child to close before cleaning its knowledge base", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "codex-security-publication-close-test-"),
@@ -1041,7 +1081,7 @@ describe("publication knowledge-base enrichment", () => {
         "    process.exit(1);",
         "  }, 100);",
         "});",
-        'process.stdout.write(JSON.stringify({ type: "error", message: "synthetic failure" }) + "\\n");',
+        'process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: "synthetic failure" } }) + "\\n");',
         "setInterval(() => undefined, 1_000);",
       ].join("\n"),
     );
@@ -1111,6 +1151,15 @@ describe("publication knowledge-base enrichment", () => {
     expect(environment["CODEX_HOME"]).toBe(
       join(homedir(), ".codex-publication-test"),
     );
+  });
+
+  test("treats an empty Codex home as unset", async () => {
+    const environment = await publicationEnrichmentEnvironment({
+      codex_home: "",
+    });
+
+    expect(environment).not.toHaveProperty("CODEX_HOME");
+    expect(environment).not.toHaveProperty("codex_home");
   });
 
   test("cleans the extracted knowledge base after success", async () => {

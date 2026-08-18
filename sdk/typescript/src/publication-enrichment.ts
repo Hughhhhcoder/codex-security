@@ -74,6 +74,7 @@ const CODEX_ISOLATION_SETTINGS = {
   include_environment_context: false,
   include_permissions_instructions: false,
   instructions: "",
+  notify: [],
   "otel.exporter": "none",
   "otel.log_user_prompt": false,
   "otel.metrics_exporter": "none",
@@ -476,7 +477,7 @@ export async function runPublicationEnrichmentCodex(
         }
       } else if (event["type"] === "turn.completed") {
         completed = true;
-      } else if (event["type"] === "turn.failed" || event["type"] === "error") {
+      } else if (event["type"] === "turn.failed") {
         fail(new Error("Codex publication enrichment failed."));
       }
     };
@@ -768,7 +769,9 @@ export async function publicationEnrichmentEnvironment(
     for (const key of Object.keys(environment)) {
       if (key.toUpperCase() === "CODEX_HOME") delete environment[key];
     }
-    environment["CODEX_HOME"] = resolve(expandHome(codexHome));
+    if (codexHome.trim().length > 0) {
+      environment["CODEX_HOME"] = resolve(expandHome(codexHome));
+    }
   }
   return environment;
 }

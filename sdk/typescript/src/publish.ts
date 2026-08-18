@@ -210,16 +210,23 @@ export async function publishScanInternal(
       );
     }
     if (prepared.issues.length > 0) {
-      const issues = await (
-        dependencies.enrichPublicationIssues ?? enrichPublicationIssues
-      )(prepared.issues, context.labels, knowledgeBasePaths, {
-        environment,
-        ...(prepared.policyFindings === undefined
-          ? {}
-          : { findings: prepared.policyFindings }),
-        signal: options.signal,
-      });
-      prepared = { ...prepared, issues };
+      try {
+        const issues = await (
+          dependencies.enrichPublicationIssues ?? enrichPublicationIssues
+        )(prepared.issues, context.labels, knowledgeBasePaths, {
+          environment,
+          ...(prepared.policyFindings === undefined
+            ? {}
+            : { findings: prepared.policyFindings }),
+          signal: options.signal,
+        });
+        prepared = { ...prepared, issues };
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        throw new CodexSecurityError(
+          redactCredential(safeErrorMessage(error), linearApiKey!),
+        );
+      }
     }
     options.signal?.throwIfAborted();
     reportPublicationProgress(options.onProgress, {

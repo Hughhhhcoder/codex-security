@@ -729,7 +729,9 @@ describe("knowledge-based Linear publication", () => {
               return { labels: [] };
             },
             enrichPublicationIssues: async () => {
-              throw new Error("Publication policy is contradictory.");
+              throw new Error(
+                `Publication policy is contradictory for ${key}.`,
+              );
             },
             preparePublicationStore: async () => {
               historyMutated = true;
@@ -741,11 +743,10 @@ describe("knowledge-based Linear publication", () => {
       expect((thrown as Error).message).toBe(
         failure === "linear-read"
           ? "Linear publication validation failed: Linear rejected [redacted]"
-          : "Publication policy is contradictory.",
+          : "Publication policy is contradictory for [redacted].",
       );
-      if (failure === "linear-read") {
-        expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
-      }
+      expect((thrown as Error & { cause?: unknown }).cause).toBeUndefined();
+      expect(JSON.stringify(thrown)).not.toContain(key);
       expect(historyMutated).toBe(false);
       expect(issueCreated).toBe(false);
     }
