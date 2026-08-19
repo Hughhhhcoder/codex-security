@@ -3203,9 +3203,15 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
         values,
     ).fetchone()[0]
     next_offset = args.offset + len(rows)
+    relations = scan_history.finding_relations(
+        connection, scan["id"], (row["id"] for row in rows)
+    )
     return {
         "findingsPage": {
-            "findings": [finding_result(connection, scan, row) for row in rows],
+            "findings": [
+                finding_result(connection, scan, row, related=relations.get(row["id"], []))
+                for row in rows
+            ],
             "limit": limit,
             "nextOffset": next_offset if next_offset < total else None,
             "offset": args.offset,
@@ -3297,6 +3303,9 @@ def scan_result(
             "completed": independent_reviews["completed"],
             "consolidating": independent_reviews["consolidating"],
         }
+    relations = scan_history.finding_relations(
+        connection, scan["id"], (row["id"] for row in occurrence_rows)
+    )
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],
@@ -3304,7 +3313,10 @@ def scan_result(
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
         "failureMessage": scan["failure_message"],
-        "findings": [finding_result(connection, scan, row) for row in occurrence_rows],
+        "findings": [
+            finding_result(connection, scan, row, related=relations.get(row["id"], []))
+            for row in occurrence_rows
+        ],
         "findingCount": finding_count,
         "findingsTruncated": finding_count > len(occurrence_rows),
         "severityCounts": severity_counts,
@@ -3449,6 +3461,8 @@ def finding_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     occurrence: sqlite3.Row,
+    *,
+    related: list[dict[str, Any]],
 ) -> dict[str, Any]:
     details = bounded_finding_details(read_finding_details(occurrence["details_json"]))
     confidence = details.get("confidence")
@@ -3513,6 +3527,8 @@ def finding_result(
         result["matches"] = matches
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
+    if related:
+        result["related"] = related
     result.pop("artifactPaths", None)
     source_excerpt = finding_source_excerpt(scan, target, locations)
     if source_excerpt:
