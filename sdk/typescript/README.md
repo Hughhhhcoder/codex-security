@@ -752,9 +752,10 @@ vector database, or separate API key is required.
 
 Only high-confidence duplicates are grouped. Plausible duplicates can remain
 uncertain, while findings with related but independent root causes are shown as
-related and kept separate. An old related label is hidden if later confirmed
-links establish that the findings are the same issue. Matching preserves the
-original findings, triage, and sealed scan artifacts. Use
+related and kept separate. If later confirmed links establish that the findings
+are the same issue, older comparisons use the current grouping and omit the
+superseded related label. Matching preserves the original findings, triage, and
+sealed scan artifacts. Use
 `scans match --all --force` to rebuild saved comparisons in chronological order.
 Ctrl-C stops matching and preserves comparisons that have already been saved.
 

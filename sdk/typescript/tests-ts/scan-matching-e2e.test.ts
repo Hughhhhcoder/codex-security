@@ -522,9 +522,24 @@ test("matches sealed scan history end to end without merging related findings", 
     expect((combined["findings"] as JsonObject[])[0]?.["matchReason"]).toBe(
       largeReason,
     );
-    expect(
-      (await cli(["scans", "compare", first.scanId, third.scanId]))["related"],
-    ).toBeUndefined();
+    const linkedComparison = await cli([
+      "scans",
+      "compare",
+      first.scanId,
+      third.scanId,
+    ]);
+    expect(linkedComparison).toMatchObject({
+      summary: { new: 0, persisting: 1, resolved: 0, unknown: 0 },
+      findings: [
+        {
+          beforeOccurrenceId: a.occurrenceId,
+          afterOccurrenceIds: [c.occurrenceId, d.occurrenceId],
+          matchReason: "The same synthetic root control.",
+          status: "persisting",
+        },
+      ],
+    });
+    expect(linkedComparison["related"]).toBeUndefined();
     const linkedDetail = await workbench([
       "get-scan",
       "--scan-id",

@@ -158,6 +158,131 @@ test("loads each scan once and scopes saved links to uncached history", () => {
   });
 });
 
+test("reconciles cached statuses without losing grouped coverage or uncertainty", () => {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  if (python === null) throw new Error("A Python interpreter is required.");
+  const probe = `
+import argparse, json, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+import workbench_scan_history as history
+connection = sqlite3.connect(':memory:')
+connection.row_factory = sqlite3.Row
+connection.executescript('''
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT);
+CREATE TABLE finding_occurrences (
+    id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
+);
+CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);
+CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
+CREATE TABLE scan_comparisons (
+    before_scan_id TEXT, after_scan_id TEXT, result_json TEXT,
+    PRIMARY KEY(before_scan_id, after_scan_id)
+);
+CREATE TABLE scan_comparison_matches (
+    before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT
+);
+CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
+CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
+''')
+for scan in ('before', 'after', 'later', 'latest'):
+    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
+for scan, names in [('before', ('a1', 'a2')), ('after', ('b1', 'b2')),
+                    ('later', ('c1', 'c2')), ('latest', ('d1',))]:
+    for name in names:
+        severity = 'low' if name.endswith('1') else 'high'
+        path = 'src/excluded.py' if name == 'a1' else 'src/covered.py'
+        connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?)', (name, name, scan, name, severity))
+        connection.execute('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', (name, path, 'root_control', 0))
+def link(before, after):
+    connection.execute('''INSERT INTO scan_comparison_matches
+        SELECT previous.scan_id, current.scan_id, previous.id, current.id
+        FROM finding_occurrences AS previous, finding_occurrences AS current
+        WHERE previous.id = ? AND current.id = ?''', (before, after))
+for before, after in [('a1', 'c1'), ('a2', 'c1'), ('b1', 'c2'), ('b2', 'c2')]:
+    link(before, after)
+payload = {
+    'matches': [],
+    'uncertain': [{'beforeOccurrenceId': 'a1', 'afterOccurrenceId': 'b1', 'reason': 'Synthetic uncertainty.'}],
+    'related': [{'beforeOccurrenceId': 'a2', 'afterOccurrenceId': 'b2', 'reason': 'Separate synthetic controls.'}]
+}
+def cache():
+    connection.execute('INSERT OR REPLACE INTO scan_comparisons VALUES (?, ?, ?)', ('before', 'after', json.dumps(payload)))
+coverage = {'completeness': 'complete', 'includePaths': ['src'],
+            'excludePaths': ['src/excluded.py'], 'explicitExclusions': []}
+def compare():
+    return history.compare_scans(
+        connection, argparse.Namespace(before_scan_id='before', after_scan_id='after'),
+        require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
+        read_coverage=lambda _: coverage, require_matches=True)
+cache()
+uncertain = compare()
+payload['uncertain'] = []
+cache()
+excluded = compare()
+coverage['excludePaths'] = []
+resolved = compare()
+connection.execute('INSERT INTO finding_triage VALUES (?, ?, ?)', ('a1', 'closed', 'already_fixed'))
+link('c1', 'd1')
+link('c2', 'd1')
+linked = compare()
+unchanged = json.loads(connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0]) == payload
+connection.execute("DELETE FROM scan_comparison_matches WHERE after_scan_id = 'latest'")
+restored = compare()
+print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': resolved,
+                  'linked': linked, 'unchanged': unchanged, 'restored': restored}))
+`;
+  const result = spawnSync(
+    python,
+    [
+      "-I",
+      "-B",
+      "-c",
+      probe,
+      join(PLUGIN_ROOT, "scripts"),
+      join(tmpdir(), "codex-security-comparison-fixture"),
+    ],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  const observed = JSON.parse(result.stdout) as Record<string, unknown>;
+  expect(observed).toMatchObject({
+    uncertain: {
+      summary: { new: 0, resolved: 0, unknown: 2 },
+      findings: [
+        {
+          findingId: "a2",
+          beforeOccurrenceIds: ["a1", "a2"],
+          severity: "high",
+          status: "unknown",
+          reason: "Synthetic uncertainty.",
+        },
+        {
+          findingId: "b2",
+          afterOccurrenceIds: ["b1", "b2"],
+          status: "unknown",
+          reason: "Synthetic uncertainty.",
+        },
+      ],
+    },
+    excluded: { summary: { new: 1, resolved: 0, unknown: 1 } },
+    resolved: { summary: { new: 1, resolved: 1, unknown: 0 } },
+    linked: {
+      summary: { new: 0, persisting: 0, reopened: 1, resolved: 0, unknown: 0 },
+      findings: [
+        {
+          beforeOccurrenceIds: ["a1", "a2"],
+          afterOccurrenceIds: ["b1", "b2"],
+          matchReason: expect.any(String),
+          status: "reopened",
+        },
+      ],
+    },
+    unchanged: true,
+  });
+  expect(observed["linked"]).not.toHaveProperty("related");
+  expect(observed["restored"]).toEqual(observed["resolved"]);
+});
+
 test("loads displayed relations in bulk and follows current confirmed identities", () => {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   if (python === null) throw new Error("A Python interpreter is required.");
