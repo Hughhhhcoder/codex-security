@@ -884,6 +884,58 @@ describe("CLI authentication", () => {
     }
   });
 
+  test("explains stored sign-in recovery regardless of the selected scan credential", async () => {
+    for (const auth of ["chatgpt", "api-key"] as const) {
+      for (const detail of [
+        "Your access token could not be refreshed.",
+        "Your access token could not be refreshed because your refresh token has expired.",
+        "Your authentication session could not be refreshed automatically.",
+      ]) {
+        const stdout = capture();
+        const stderr = capture(false);
+        const deps = dependencies({
+          environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
+        });
+        const partial = join(stateDirectory, "partial-scan");
+        deps.createSecurity = () => ({
+          run: async (_repository, options) => {
+            options?.onOutputDirReady?.(partial);
+            throw new CodexSecurityError(
+              `Codex Exec exited with code 1: Error: ${detail} Please log out and sign in again. org-example sk-proj-SYNTHETIC_SECRET_456`,
+            );
+          },
+          preflight: async () => fakePreflight(),
+          close: async () => {},
+        });
+
+        expect(
+          await main(
+            ["scan", ".", "--auth", auth, "--json", "--verbose"],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain("workspace-managed policies");
+        expect(stderr.text()).toContain("npx @openai/codex-security logout");
+        expect(stderr.text()).toContain("npx @openai/codex-security login");
+        expect(stderr.text()).toContain(
+          'classification="reauthentication_required"',
+        );
+        expect(stderr.text()).toContain(
+          `Partial output was kept at ${partial}.`,
+        );
+        expect(stderr.text()).not.toContain("provide a valid API key");
+        expect(stderr.text()).not.toContain(
+          "Your ChatGPT sign-in was not used",
+        );
+        expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
+        expect(stderr.text()).not.toContain("org-example");
+      }
+    }
+  });
+
   test("prints the ChatGPT recovery hint on noninteractive scan output", async () => {
     const stdout = capture();
     const stderr = capture(false);

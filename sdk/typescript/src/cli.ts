@@ -5178,6 +5178,12 @@ function scanFailureMessage(
   // the JSON error field.
   if (isLocalScanFailure(error)) return diagnosticValue(error);
   switch (classifyConnectionFailure(error)) {
+    case "reauthentication_required":
+      return (
+        "Codex Security's stored sign-in could not be refreshed. " +
+        "Codex may need a valid ChatGPT sign-in to load workspace-managed policies, even when an API key is selected. " +
+        "Run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login', and retry."
+      );
     case "unauthorized":
       if (authentication?.method === "aws_credentials") {
         return (
@@ -5187,7 +5193,6 @@ function scanFailureMessage(
       }
       return authentication?.method === "api_key"
         ? `Authentication failed using ${authentication.source}. ` +
-            "Your ChatGPT sign-in was not used. " +
             "Retry with '--auth chatgpt' or provide a valid API key."
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
