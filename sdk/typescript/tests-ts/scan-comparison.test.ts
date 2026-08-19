@@ -751,6 +751,25 @@ describe("semantic scan comparison", () => {
       error: "invalid match result",
     },
     {
+      label: "unexpected result fields",
+      result: { matches: [], uncertain: [], unexpected: true },
+      error: "invalid match result",
+    },
+    {
+      label: "blank match reasons",
+      result: { matches: [{ ...match(), reason: " " }], uncertain: [] },
+      error: "invalid match result",
+    },
+    {
+      label: "malformed related pairs",
+      result: {
+        matches: [],
+        uncertain: [],
+        related: [{ ...uncertain(), beforeOccurrenceId: 1 }],
+      },
+      error: "invalid match result",
+    },
+    {
       label: "low confidence",
       result: { matches: [{ ...match(), confidence: "low" }], uncertain: [] },
       error: "invalid match result",

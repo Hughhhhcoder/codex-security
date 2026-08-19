@@ -309,7 +309,27 @@ test("loads each scan once and scopes saved links to uncached history", () => {
     "    return {}",
     "unavailable = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
     "forced = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=True), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
-    "print(json.dumps({'result': result, 'backfilled': backfilled, 'findingQueries': finding_queries, 'cached': cached, 'cachedLinkQueries': cached_link_queries, 'scopedLinks': [dict(row) for row in scoped], 'scopedQueryCount': len(link_queries), 'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries), 'unavailable': unavailable, 'forcedKnownGroups': [batch.get('knownFindingGroups') for batch in forced['batches']]}))",
+    "connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)', [('scan-1', 'scan-2', 'scan-1', 'scan-2'), ('scan-2', 'scan-0', 'scan-2', 'scan-0'), ('scan-0', 'foreign-a', 'scan-0', 'foreign-a'), ('foreign-a', 'scan-1', 'foreign-a', 'scan-1')])",
+    "limited = hasattr(connection, 'setlimit')",
+    "if limited:",
+    "    old_limit = connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 2)",
+    "queries.clear()",
+    "batched = history._saved_finding_links(connection, {'scan-2', 'scan-0', 'scan-1'})",
+    "batched_queries = len(queries)",
+    "if limited:",
+    "    connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)",
+    "queries.clear()",
+    "empty = history._saved_finding_links(connection, set())",
+    "print(json.dumps({",
+    "    'result': result, 'backfilled': backfilled, 'findingQueries': finding_queries,",
+    "    'cached': cached, 'cachedLinkQueries': cached_link_queries,",
+    "    'scopedLinks': [dict(row) for row in scoped], 'scopedQueryCount': len(link_queries),",
+    "    'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries),",
+    "    'unavailable': unavailable, 'forcedKnownGroups': [batch.get('knownFindingGroups') for batch in forced['batches']],",
+    "    'batchedLinks': [[row['before_scan_id'], row['after_scan_id']] for row in batched],",
+    "    'batchedQueryCount': batched_queries, 'expectedBatchedQueryCount': 2 if limited else 1,",
+    "    'emptyLinks': empty, 'emptyQueryCount': len(queries),",
+    "}))",
   ].join("\n");
 
   const result = spawnSync(
@@ -327,14 +347,22 @@ test("loads each scan once and scopes saved links to uncached history", () => {
 
   expect(result.status).toBe(0);
   expect(result.stderr).toBe("");
-  expect(JSON.parse(result.stdout)).toMatchObject({
+  const observed = JSON.parse(result.stdout) as Record<string, unknown>;
+  expect(observed).toMatchObject({
     backfilled: ["scan-0", "scan-1", "scan-2"],
     findingQueries: 3,
     cached: { batches: [], skippedPairs: 3 },
     cachedLinkQueries: 0,
     scopedLinks: [{ before_finding_id: "scan-0", after_finding_id: "scan-1" }],
-    scopedQueryCount: 2,
+    scopedQueryCount: 1,
     unscopedQueries: 0,
+    batchedLinks: [
+      ["scan-0", "scan-1"],
+      ["scan-1", "scan-2"],
+      ["scan-2", "scan-0"],
+    ],
+    emptyLinks: [],
+    emptyQueryCount: 0,
     unavailable: {
       scanCount: 5,
       unavailableScans: 3,
@@ -358,6 +386,9 @@ test("loads each scan once and scopes saved links to uncached history", () => {
       ],
     },
   });
+  expect(observed["batchedQueryCount"]).toBe(
+    observed["expectedBatchedQueryCount"],
+  );
 });
 
 test("reconciles cached statuses without losing grouped coverage or uncertainty", () => {

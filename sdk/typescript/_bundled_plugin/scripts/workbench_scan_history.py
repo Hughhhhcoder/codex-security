@@ -318,18 +318,18 @@ def _saved_finding_links(
 ) -> list[sqlite3.Row]:
     return [
         row
-        for scan_id in sorted(scan_ids)
-        for row in connection.execute(
+        for row in _rows_for_ids(
+            connection,
             """
             SELECT before.scan_id AS before_scan_id, before.finding_id AS before_finding_id,
                 after.scan_id AS after_scan_id, after.finding_id AS after_finding_id
             FROM scan_comparison_matches AS matches
             JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
             JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
-            WHERE matches.before_scan_id = ?
-            ORDER BY after.scan_id, before.finding_id, after.finding_id
+            WHERE matches.before_scan_id IN ({placeholders})
+            ORDER BY matches.before_scan_id, after.scan_id, before.finding_id, after.finding_id
             """,
-            (scan_id,),
+            sorted(scan_ids),
         )
         if row["before_scan_id"] in scan_ids and row["after_scan_id"] in scan_ids
     ]

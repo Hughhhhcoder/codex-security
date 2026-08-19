@@ -297,26 +297,23 @@ export async function matchScanFindingsInternal(
     }
     const { request: modelRequest, ...result } = parsed.data;
     let request = modelRequest;
-    let matched = result;
     if (request == null) {
       const unseenPage = pages.findIndex((_, index) => !seenPages.has(index));
       if (unseenPage !== -1) {
-        seenPages.add(unseenPage);
-        prompt = comparisonPrompt(pages[unseenPage]!, unseenPage, pages.length);
-        progress("catalogue", unseenPage + 1);
-        continue;
+        request = { kind: "catalogue", page: unseenPage };
+      } else {
+        validateComparison(
+          initialCatalogue,
+          result,
+          options.allowHistoricalUncertainty ?? false,
+        );
+        // Give Codex missing evidence instead of accepting a premature match.
+        request = requiredEvidenceRequest(
+          result.matches,
+          omittedEvidence,
+          requestedEvidence,
+        );
       }
-      matched = validateComparison(
-        initialCatalogue,
-        result,
-        options.allowHistoricalUncertainty ?? false,
-      );
-      // Give Codex missing evidence instead of accepting a premature match.
-      request = requiredEvidenceRequest(
-        matched.matches,
-        omittedEvidence,
-        requestedEvidence,
-      );
     } else if (
       result.matches.length > 0 ||
       result.uncertain.length > 0 ||
@@ -438,14 +435,14 @@ export async function matchScanFindingsInternal(
     const expanded = reconcileComparison(
       input,
       {
-        matches: matched.matches.map((match) => ({
+        matches: result.matches.map((match) => ({
           ...match,
           beforeOccurrenceIds: match.beforeOccurrenceIds.flatMap(expandBefore),
         })),
-        uncertain: expandPairs(matched.uncertain),
-        ...(matched.related === undefined
+        uncertain: expandPairs(result.uncertain),
+        ...(result.related === undefined
           ? {}
-          : { related: expandPairs(matched.related) }),
+          : { related: expandPairs(result.related) }),
       },
       options.allowHistoricalUncertainty ?? false,
     );
@@ -541,11 +538,7 @@ function reconcileComparison(
   comparison: ScanComparisonResult;
   complete: boolean;
 } {
-  const semantic = validateComparison(
-    input,
-    response,
-    allowHistoricalUncertainty,
-  );
+  validateComparison(input, response, allowHistoricalUncertainty);
   const beforeIds = new Set(
     input.before.map(({ occurrenceId }) => occurrenceId),
   );
@@ -553,7 +546,7 @@ function reconcileComparison(
   const groups = groupFindings(
     [...input.before, ...input.after],
     input.knownFindingGroups,
-    semantic.matches.map(({ beforeOccurrenceIds, afterOccurrenceIds }) => [
+    response.matches.map(({ beforeOccurrenceIds, afterOccurrenceIds }) => [
       ...beforeOccurrenceIds,
       ...afterOccurrenceIds,
     ]),
@@ -564,7 +557,7 @@ function reconcileComparison(
     ),
   );
   const semanticGroups = Map.groupBy(
-    semantic.matches,
+    response.matches,
     (match) => groupByOccurrence.get(match.beforeOccurrenceIds[0]!)!,
   );
   const orderedGroups = new Set([...semanticGroups.keys(), ...groups.keys()]);
@@ -605,27 +598,24 @@ function reconcileComparison(
   const matchedAfter = new Set(
     matches.flatMap((match) => match.afterOccurrenceIds),
   );
-  const comparison = validateComparison(
-    input,
-    {
-      matches,
-      uncertain: semantic.uncertain.filter(
-        ({ beforeOccurrenceId, afterOccurrenceId }) =>
-          !matchedBefore.has(beforeOccurrenceId) &&
-          (allowHistoricalUncertainty || !matchedAfter.has(afterOccurrenceId)),
-      ),
-      ...(semantic.related === undefined
-        ? {}
-        : {
-            related: semantic.related.filter(
-              ({ beforeOccurrenceId, afterOccurrenceId }) =>
-                groupByOccurrence.get(beforeOccurrenceId) !==
-                groupByOccurrence.get(afterOccurrenceId),
-            ),
-          }),
-    },
-    allowHistoricalUncertainty,
-  );
+  const comparison = {
+    matches,
+    uncertain: response.uncertain.filter(
+      ({ beforeOccurrenceId, afterOccurrenceId }) =>
+        !matchedBefore.has(beforeOccurrenceId) &&
+        (allowHistoricalUncertainty || !matchedAfter.has(afterOccurrenceId)),
+    ),
+    ...(response.related === undefined
+      ? {}
+      : {
+          related: response.related.filter(
+            ({ beforeOccurrenceId, afterOccurrenceId }) =>
+              groupByOccurrence.get(beforeOccurrenceId) !==
+              groupByOccurrence.get(afterOccurrenceId),
+          ),
+        }),
+  };
+  validateComparison(input, comparison, allowHistoricalUncertainty);
   return { comparison, complete: matches.length === groups.length };
 }
 
@@ -915,15 +905,9 @@ function environmentEntry(
 
 function validateComparison(
   input: ScanComparisonInput,
-  response: unknown,
+  response: ScanComparisonResult,
   allowHistoricalUncertainty: boolean,
-): ScanComparisonResult {
-  const parsed = comparisonSchema.safeParse(response);
-  if (!parsed.success) {
-    throw new CodexSecurityError(
-      "Scan comparison returned an invalid match result.",
-    );
-  }
+): void {
   const beforeIds = new Set(
     input.before.map(({ occurrenceId }) => occurrenceId),
   );
@@ -932,7 +916,7 @@ function validateComparison(
   const matchedAfter = new Map<string, number>();
   const uncertainPairs = new Set<string>();
 
-  for (const [group, match] of parsed.data.matches.entries()) {
+  for (const [group, match] of response.matches.entries()) {
     for (const [side, values, expected, used] of [
       ["before", match.beforeOccurrenceIds, beforeIds, matchedBefore],
       ["after", match.afterOccurrenceIds, afterIds, matchedAfter],
@@ -953,7 +937,7 @@ function validateComparison(
     }
   }
 
-  for (const candidate of parsed.data.uncertain) {
+  for (const candidate of response.uncertain) {
     if (
       !beforeIds.has(candidate.beforeOccurrenceId) ||
       matchedBefore.has(candidate.beforeOccurrenceId) ||
@@ -978,7 +962,7 @@ function validateComparison(
   }
 
   const relatedPairs = new Set<string>();
-  for (const candidate of parsed.data.related ?? []) {
+  for (const candidate of response.related ?? []) {
     const beforeGroup = matchedBefore.get(candidate.beforeOccurrenceId);
     const pair = JSON.stringify([
       candidate.beforeOccurrenceId,
@@ -998,6 +982,4 @@ function validateComparison(
     }
     relatedPairs.add(pair);
   }
-
-  return parsed.data;
 }

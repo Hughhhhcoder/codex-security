@@ -3438,12 +3438,9 @@ async function matchAllScans(
             ...options,
             allowHistoricalUncertainty: true,
           });
-    const comparisons = beforeScans.map(({ scanId, findings }) => ({
-      scanId,
-      comparison: comparisonForScan(matching, findings),
-    }));
-    for (const { scanId, comparison } of comparisons) {
+    for (const { scanId, findings } of beforeScans) {
       options.signal?.throwIfAborted();
+      const comparison = comparisonForScan(matching, findings);
       await dependencies.runWorkbench(
         [
           "save-scan-comparison",
