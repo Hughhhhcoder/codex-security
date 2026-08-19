@@ -5049,7 +5049,7 @@ describe("CodexSecurity orchestration", () => {
       expect(captured[1]).not.toHaveProperty(denied[0]!);
     } finally {
       releaseScans();
-      await Promise.all(clients.map(async (client) => await client.close()));
+      for (const client of clients) await client.close();
     }
   });
 
