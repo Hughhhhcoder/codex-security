@@ -2969,7 +2969,7 @@ export function classifyConnectionFailure(
     return "unknown";
   }
   if (
-    /\byour (?:access token|authentication session) could not be refreshed\b/iu.test(
+    /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
       message,
     )
   ) {

@@ -889,7 +889,8 @@ describe("CLI authentication", () => {
       for (const detail of [
         "Your access token could not be refreshed.",
         "Your access token could not be refreshed because your refresh token has expired.",
-        "Your authentication session could not be refreshed automatically.",
+        "Your access token could not be refreshed because your refresh token was already used.",
+        "Your access token could not be refreshed because your refresh token was revoked.",
       ]) {
         const stdout = capture();
         const stderr = capture(false);
@@ -933,6 +934,42 @@ describe("CLI authentication", () => {
         expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
         expect(stderr.text()).not.toContain("org-example");
       }
+    }
+  });
+
+  test("preserves native recovery advice for account changes and access-token failures", async () => {
+    for (const [message, environment] of [
+      [
+        "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.",
+        {},
+      ],
+      [
+        "Your authentication session could not be refreshed automatically. Please log out and sign in again.",
+        {},
+      ],
+      [
+        "Your authentication session could not be refreshed automatically. Please log out and sign in again.",
+        { CODEX_ACCESS_TOKEN: "SYNTHETIC_ACCESS_TOKEN" },
+      ],
+    ] as const) {
+      const stdout = capture();
+      const stderr = capture(false);
+      const deps = dependencies({ environment });
+      deps.createSecurity = () => ({
+        run: async () => {
+          throw new CodexSecurityError(message);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+
+      expect(
+        await main(["scan", "--json"], stdout.stream, stderr.stream, deps),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(`${message}\n`);
+      expect(stderr.text()).not.toContain("npx @openai/codex-security logout");
+      expect(stderr.text()).not.toContain("SYNTHETIC_ACCESS_TOKEN");
     }
   });
 

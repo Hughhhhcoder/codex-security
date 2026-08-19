@@ -164,8 +164,9 @@ when the dedicated home does not already contain stored credentials. Logging
 out prevents later scans from automatically reimporting that ambient sign-in
 until you explicitly log in again.
 
-If Codex reports that the stored sign-in cannot be refreshed, repair the
-sign-in in this dedicated home:
+Check the current sign-in with `npx @openai/codex-security login status`.
+If you recently changed accounts, retry the scan before logging out. To replace
+an expired stored ChatGPT sign-in in this dedicated home:
 
 ```bash
 npx @openai/codex-security logout

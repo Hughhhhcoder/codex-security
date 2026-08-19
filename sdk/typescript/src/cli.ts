@@ -5180,7 +5180,7 @@ function scanFailureMessage(
   switch (classifyConnectionFailure(error)) {
     case "reauthentication_required":
       return (
-        "Codex Security's stored sign-in could not be refreshed. " +
+        "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
         "Codex may need a valid ChatGPT sign-in to load workspace-managed policies, even when an API key is selected. " +
         "Run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login', and retry."
       );
