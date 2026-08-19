@@ -30,7 +30,7 @@ type Finding = ComparisonFinding;
 export interface ScanComparisonInput {
   before: readonly Finding[];
   after: readonly Finding[];
-  /** Previously confirmed groups of stable finding IDs, from earlier scans. */
+  /** Previously confirmed groups of stable finding IDs. */
   knownFindingGroups?: readonly (readonly string[])[];
 }
 
@@ -159,14 +159,12 @@ export async function matchScanFindingsInternal(
   if (input.before.length === 0 || input.after.length === 0) {
     return { matches: [], uncertain: [] };
   }
-  const known = knownFindingMatches(input);
-  if (known.complete) {
-    return validateComparison(
-      input,
-      { matches: known.matches, uncertain: [] },
-      options.allowHistoricalUncertainty ?? false,
-    );
-  }
+  const known = reconcileComparison(
+    input,
+    { matches: [], uncertain: [] },
+    options.allowHistoricalUncertainty ?? false,
+  );
+  if (known.complete) return known.comparison;
   const codex =
     options.codex ??
     new Codex({
@@ -327,27 +325,22 @@ export async function matchScanFindingsInternal(
           beforeOccurrenceId,
         })),
       );
-    const expanded = validateComparison(
+    const expanded = reconcileComparison(
       input,
-      withKnownMatches(
-        known.matches,
-        {
-          matches: matched.matches.map((match) => ({
-            ...match,
-            beforeOccurrenceIds:
-              match.beforeOccurrenceIds.flatMap(expandBefore),
-          })),
-          uncertain: expandPairs(matched.uncertain),
-          ...(matched.related === undefined
-            ? {}
-            : { related: expandPairs(matched.related) }),
-        },
-        options.allowHistoricalUncertainty ?? false,
-      ),
+      {
+        matches: matched.matches.map((match) => ({
+          ...match,
+          beforeOccurrenceIds: match.beforeOccurrenceIds.flatMap(expandBefore),
+        })),
+        uncertain: expandPairs(matched.uncertain),
+        ...(matched.related === undefined
+          ? {}
+          : { related: expandPairs(matched.related) }),
+      },
       options.allowHistoricalUncertainty ?? false,
     );
     progress("complete");
-    return expanded;
+    return expanded.comparison;
   }
 }
 
@@ -404,24 +397,24 @@ export async function matchCompletedScan(
       ? {}
       : { knownFindingGroups: batch.knownFindingGroups }),
   };
-  const known = knownFindingMatches(input);
+  const known = reconcileComparison(
+    input,
+    { matches: [], uncertain: [] },
+    true,
+  );
   const comparison = known.complete
-    ? { matches: known.matches, uncertain: [] }
-    : validateComparison(
+    ? known.comparison
+    : reconcileComparison(
         input,
-        withKnownMatches(
-          known.matches,
-          await (options.matchFindings ?? matchScanFindings)(input, {
-            allowHistoricalUncertainty: true,
-            environment: options.environment,
-            model: options.model,
-            signal: options.signal,
-            workingDirectory: options.repository,
-          }),
-          true,
-        ),
+        await (options.matchFindings ?? matchScanFindings)(input, {
+          allowHistoricalUncertainty: true,
+          environment: options.environment,
+          model: options.model,
+          signal: options.signal,
+          workingDirectory: options.repository,
+        }),
         true,
-      );
+      ).comparison;
 
   for (const [scanId, previous] of groups) {
     options.signal?.throwIfAborted();
@@ -442,10 +435,19 @@ export async function matchCompletedScan(
   }
 }
 
-function knownFindingMatches(input: ScanComparisonInput): {
-  matches: ScanComparisonResult["matches"];
+function reconcileComparison(
+  input: ScanComparisonInput,
+  response: ScanComparisonResult,
+  allowHistoricalUncertainty: boolean,
+): {
+  comparison: ScanComparisonResult;
   complete: boolean;
 } {
+  const semantic = validateComparison(
+    input,
+    response,
+    allowHistoricalUncertainty,
+  );
   const beforeIds = new Set(
     input.before.map(({ occurrenceId }) => occurrenceId),
   );
@@ -453,104 +455,80 @@ function knownFindingMatches(input: ScanComparisonInput): {
   const groups = groupFindings(
     [...input.before, ...input.after],
     input.knownFindingGroups,
+    semantic.matches.map(({ beforeOccurrenceIds, afterOccurrenceIds }) => [
+      ...beforeOccurrenceIds,
+      ...afterOccurrenceIds,
+    ]),
   );
-  const matches = groups.flatMap((occurrences) => {
-    const ids = [
-      ...new Set(occurrences.map(({ occurrenceId }) => occurrenceId)),
-    ];
-    const beforeOccurrenceIds = ids.filter((id) => beforeIds.has(id));
-    const afterOccurrenceIds = ids.filter((id) => afterIds.has(id));
-    return beforeOccurrenceIds.length > 0 && afterOccurrenceIds.length > 0
-      ? [
-          {
-            beforeOccurrenceIds,
-            afterOccurrenceIds,
-            confidence: "high" as const,
-            reason:
-              "The findings share a stable identity or a previously confirmed link.",
-          },
-        ]
-      : [];
-  });
-  return { matches, complete: matches.length === groups.length };
-}
-
-function withKnownMatches(
-  known: ScanComparisonResult["matches"],
-  semantic: ScanComparisonResult,
-  allowHistoricalUncertainty: boolean,
-): ScanComparisonResult {
-  if (known.length === 0) return semantic;
-  const matches = [...semantic.matches, ...known];
-  const parents = matches.map((_, index) => index);
-  const root = (index: number): number => {
-    while (parents[index] !== index) {
-      parents[index] = parents[parents[index]!]!;
-      index = parents[index]!;
-    }
-    return index;
-  };
-  const occurrences = new Map<string, number>();
-  for (const [index, match] of matches.entries()) {
-    for (const side of ["before", "after"] as const) {
-      for (const id of match[`${side}OccurrenceIds`]) {
-        const key = `${side}:${id}`;
-        const previous = occurrences.get(key);
-        if (previous === undefined) occurrences.set(key, index);
-        else parents[root(index)] = root(previous);
-      }
-    }
-  }
-  const semanticMatches = new Set(semantic.matches);
-  const merged = [
-    ...Map.groupBy(matches, (_, index) => root(index)).values(),
-  ].map((group) => {
-    const reasons = [
-      ...new Set(
-        group
-          .filter((match) => semanticMatches.has(match))
-          .map(({ reason }) => reason),
-      ),
-    ];
-    return {
-      beforeOccurrenceIds: [
-        ...new Set(
-          group.flatMap(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
-        ),
-      ],
-      afterOccurrenceIds: [
-        ...new Set(
-          group.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
-        ),
-      ],
-      confidence: "high" as const,
-      reason: reasons.length > 0 ? reasons.join(" ") : group[0]!.reason,
-    };
-  });
-  return {
-    matches: merged,
-    uncertain: semantic.uncertain.filter(
-      ({ beforeOccurrenceId, afterOccurrenceId }) =>
-        !occurrences.has(`before:${beforeOccurrenceId}`) &&
-        (allowHistoricalUncertainty ||
-          !occurrences.has(`after:${afterOccurrenceId}`)),
+  const groupByOccurrence = new Map(
+    groups.flatMap((group, index) =>
+      group.map(({ occurrenceId }) => [occurrenceId, index] as const),
     ),
-    ...(semantic.related === undefined
-      ? {}
-      : {
-          related: semantic.related.filter(
-            ({ beforeOccurrenceId, afterOccurrenceId }) => {
-              const before = occurrences.get(`before:${beforeOccurrenceId}`);
-              const after = occurrences.get(`after:${afterOccurrenceId}`);
-              return (
-                before === undefined ||
-                after === undefined ||
-                root(before) !== root(after)
-              );
-            },
-          ),
-        }),
-  };
+  );
+  const semanticGroups = Map.groupBy(
+    semantic.matches,
+    (match) => groupByOccurrence.get(match.beforeOccurrenceIds[0]!)!,
+  );
+  const orderedGroups = new Set([...semanticGroups.keys(), ...groups.keys()]);
+  const matches = [...orderedGroups].flatMap((index) => {
+    const semanticMatches = semanticGroups.get(index) ?? [];
+    const ids = groups[index]!.map(({ occurrenceId }) => occurrenceId);
+    const beforeOccurrenceIds = [
+      ...new Set([
+        ...semanticMatches.flatMap((match) => match.beforeOccurrenceIds),
+        ...ids.filter((id) => beforeIds.has(id)),
+      ]),
+    ];
+    const afterOccurrenceIds = [
+      ...new Set([
+        ...semanticMatches.flatMap((match) => match.afterOccurrenceIds),
+        ...ids.filter((id) => afterIds.has(id)),
+      ]),
+    ];
+    if (beforeOccurrenceIds.length === 0 || afterOccurrenceIds.length === 0) {
+      return [];
+    }
+    const reasons = [...new Set(semanticMatches.map(({ reason }) => reason))];
+    return [
+      {
+        beforeOccurrenceIds,
+        afterOccurrenceIds,
+        confidence: "high" as const,
+        reason:
+          reasons.length > 0
+            ? reasons.join(" ")
+            : "The findings share a stable identity or a previously confirmed link.",
+      },
+    ];
+  });
+  const matchedBefore = new Set(
+    matches.flatMap((match) => match.beforeOccurrenceIds),
+  );
+  const matchedAfter = new Set(
+    matches.flatMap((match) => match.afterOccurrenceIds),
+  );
+  const comparison = validateComparison(
+    input,
+    {
+      matches,
+      uncertain: semantic.uncertain.filter(
+        ({ beforeOccurrenceId, afterOccurrenceId }) =>
+          !matchedBefore.has(beforeOccurrenceId) &&
+          (allowHistoricalUncertainty || !matchedAfter.has(afterOccurrenceId)),
+      ),
+      ...(semantic.related === undefined
+        ? {}
+        : {
+            related: semantic.related.filter(
+              ({ beforeOccurrenceId, afterOccurrenceId }) =>
+                groupByOccurrence.get(beforeOccurrenceId) !==
+                groupByOccurrence.get(afterOccurrenceId),
+            ),
+          }),
+    },
+    allowHistoricalUncertainty,
+  );
+  return { comparison, complete: matches.length === groups.length };
 }
 
 export function comparisonForScan(

@@ -97,7 +97,17 @@ test("loads each scan once and scopes saved links to uncached history", () => {
     "queries.clear()",
     "scoped = history._saved_finding_links(connection, {'scan-0', 'scan-1'})",
     "link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]",
-    "print(json.dumps({'result': result, 'backfilled': backfilled, 'findingQueries': finding_queries, 'cached': cached, 'cachedLinkQueries': cached_link_queries, 'scopedLinks': [dict(row) for row in scoped], 'scopedQueryCount': len(link_queries), 'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries)}))",
+    "for index in (3, 4):",
+    "    scan = f'scan-{index}'",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', str(index)))",
+    "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))",
+    "def coverage(scan):",
+    "    if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:",
+    "        raise SystemExit('Synthetic unavailable artifacts')",
+    "    return {}",
+    "unavailable = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=False), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
+    "forced = history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[2], force=True), backfill_finding_details=lambda *_: None, read_coverage=coverage)",
+    "print(json.dumps({'result': result, 'backfilled': backfilled, 'findingQueries': finding_queries, 'cached': cached, 'cachedLinkQueries': cached_link_queries, 'scopedLinks': [dict(row) for row in scoped], 'scopedQueryCount': len(link_queries), 'unscopedQueries': sum('WHERE matches.before_scan_id' not in query for query in link_queries), 'unavailable': unavailable, 'forcedKnownGroups': [batch.get('knownFindingGroups') for batch in forced['batches']]}))",
   ].join("\n");
 
   const result = spawnSync(
@@ -123,6 +133,18 @@ test("loads each scan once and scopes saved links to uncached history", () => {
     scopedLinks: [{ before_finding_id: "scan-0", after_finding_id: "scan-1" }],
     scopedQueryCount: 2,
     unscopedQueries: 0,
+    unavailable: {
+      scanCount: 5,
+      unavailableScans: 3,
+      batches: [
+        {
+          afterScanId: "scan-4",
+          beforeScans: [{ scanId: "scan-3" }],
+          knownFindingGroups: [["scan-0", "scan-1"]],
+        },
+      ],
+    },
+    forcedKnownGroups: [null],
     result: {
       scanCount: 3,
       batches: [

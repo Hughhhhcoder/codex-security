@@ -11,6 +11,7 @@ export interface CatalogueEntry {
 export function groupFindings(
   findings: readonly ComparisonFinding[],
   knownFindingGroups: readonly (readonly string[])[] = [],
+  occurrenceGroups: readonly (readonly string[])[] = [],
 ): ComparisonFinding[][] {
   const parents = new Map<string, string>();
   const root = (value: string): string => {
@@ -23,23 +24,35 @@ export function groupFindings(
     for (const item of path) parents.set(item, current);
     return current;
   };
-  for (const group of knownFindingGroups) {
-    const first = group[0];
-    if (first === undefined) continue;
-    for (const value of group.slice(1)) {
-      const previous = root(`finding:${first}`);
-      const current = root(`finding:${value}`);
-      if (previous !== current) parents.set(current, previous);
+  const link = (first: string, second: string): void => {
+    const previous = root(first);
+    const current = root(second);
+    if (previous !== current) parents.set(current, previous);
+  };
+  for (const [prefix, groups] of [
+    ["finding", knownFindingGroups],
+    ["occurrence", occurrenceGroups],
+  ] as const) {
+    for (const group of groups) {
+      const first = group[0];
+      if (first === undefined) continue;
+      for (const value of group.slice(1)) {
+        link(`${prefix}:${first}`, `${prefix}:${value}`);
+      }
+    }
+  }
+  for (const finding of findings) {
+    if (typeof finding["findingId"] === "string") {
+      link(
+        `finding:${finding["findingId"]}`,
+        `occurrence:${finding.occurrenceId}`,
+      );
     }
   }
 
   const groups = new Map<string, ComparisonFinding[]>();
   for (const finding of findings) {
-    const identity =
-      typeof finding["findingId"] === "string"
-        ? `finding:${finding["findingId"]}`
-        : `occurrence:${finding.occurrenceId}`;
-    const key = root(identity);
+    const key = root(`occurrence:${finding.occurrenceId}`);
     const group = groups.get(key);
     if (group === undefined) groups.set(key, [finding]);
     else group.push(finding);

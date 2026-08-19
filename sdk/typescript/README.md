@@ -739,7 +739,8 @@ Pass `SCAN_ID` to rerun another scan.
 `scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
 cause; `scans match --all` matches all completed scans of the current repository,
 including other worktrees and clones. Saved matches appear in `scans show` and
-are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
+are reused unless `--force` is passed. Scans without sealed artifacts are skipped,
+but their indexed confirmed links can still be reused.
 
 Matching reuses confirmed historical links to build a compact catalogue of known
 issues. Stable identities and confirmed aliases apply across both scans; a fully

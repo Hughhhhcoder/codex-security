@@ -272,7 +272,7 @@ def list_unmatched_scan_pairs(
             known_links = (
                 []
                 if args.force
-                else _saved_finding_links(connection, {scan["id"] for scan in available})
+                else _saved_finding_links(connection, {scan["id"] for scan in selected})
             )
         for scan in (*previous, after):
             if scan["id"] not in matching_findings:
@@ -282,7 +282,12 @@ def list_unmatched_scan_pairs(
                     for row in _scan_findings(connection, scan["id"]).values()
                 ]
         known_groups = _known_finding_groups(
-            known_links, {scan["id"] for scan in available[:index]}
+            known_links,
+            {
+                scan["id"]
+                for scan in selected
+                if (scan["started_at"], scan["id"]) <= (after["started_at"], after["id"])
+            },
         )
         batches.append(
             {
@@ -512,17 +517,23 @@ def compare_scans(
                 for pair in related
             ]
     if include_matching_inputs:
-        prior_scan_ids = {
+        known_scan_ids = {
             scan["id"]
             for scan in connection.execute(
                 "SELECT * FROM scans WHERE status = 'complete' "
-                "AND (started_at < ? OR (started_at = ? AND id < ?))",
+                "AND (started_at < ? OR (started_at = ? AND id <= ?))",
                 (after["started_at"], after["started_at"], after["id"]),
             )
             if _same_repository(scan, after)
         }
+        excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
         known_groups = _known_finding_groups(
-            _saved_finding_links(connection, prior_scan_ids), prior_scan_ids
+            [
+                link
+                for link in _saved_finding_links(connection, known_scan_ids)
+                if (link["before_scan_id"], link["after_scan_id"]) not in excluded_pairs
+            ],
+            known_scan_ids,
         )
         result["matchingCached"] = cached is not None
         result["matchingInputs"] = {

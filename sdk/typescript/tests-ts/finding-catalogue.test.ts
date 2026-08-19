@@ -244,6 +244,58 @@ describe("finding catalogue", () => {
     },
   );
 
+  test("extends semantic matches through aliases found only on the later side", async () => {
+    const observed = conversation(() => ({
+      matches: [
+        {
+          beforeOccurrenceIds: ["old-y"],
+          afterOccurrenceIds: ["new-b"],
+          confidence: "high",
+          reason: "The second route reaches the shared control.",
+        },
+        {
+          beforeOccurrenceIds: ["old-x"],
+          afterOccurrenceIds: ["new-a"],
+          confidence: "high",
+          reason: "The first route reaches the shared control.",
+        },
+      ],
+      uncertain: [],
+      related: [
+        {
+          beforeOccurrenceId: "old-x",
+          afterOccurrenceId: "new-b",
+          reason: "The model did not reuse the confirmed alias.",
+        },
+      ],
+    }));
+    const result = await matchScanFindings(
+      {
+        before: [finding("old-x"), finding("old-y")],
+        after: [
+          finding("new-a", { findingId: "identity-a" }),
+          finding("new-b", { findingId: "identity-b" }),
+          finding("new-c", { findingId: "identity-c" }),
+        ],
+        knownFindingGroups: [
+          ["identity-a", "identity-b"],
+          ["identity-b", "identity-c"],
+        ],
+      },
+      { codex: observed.codex },
+    );
+    expect(result.matches).toEqual([
+      {
+        beforeOccurrenceIds: ["old-y", "old-x"],
+        afterOccurrenceIds: ["new-b", "new-a", "new-c"],
+        confidence: "high",
+        reason:
+          "The second route reaches the shared control. The first route reaches the shared control.",
+      },
+    ]);
+    expect(result.related).toEqual([]);
+  });
+
   test("lets Codex inspect a selected issue and expands its saved occurrences", async () => {
     const before = [
       finding("old-a", {

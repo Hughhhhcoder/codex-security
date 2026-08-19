@@ -232,6 +232,46 @@ test("matches sealed scan history end to end without merging related findings", 
       batches.find(({ afterScanId }) => afterScanId === third.scanId)
         ?.knownFindingGroups,
     ).toEqual([[a.findingId, b.findingId].sort()]);
+    expect(
+      batches.find(({ afterScanId }) => afterScanId === fourth.scanId)
+        ?.knownFindingGroups,
+    ).toEqual([[a.findingId, b.findingId, e.findingId].sort()]);
+    const resumedPair = await workbench([
+      "compare-scans",
+      "--before-scan-id",
+      first.scanId,
+      "--after-scan-id",
+      fourth.scanId,
+      "--include-matching-inputs",
+    ]);
+    const reused = await matchScanFindings(
+      resumedPair["matchingInputs"] as unknown as ScanComparisonInput,
+      {
+        codex: {
+          startThread() {
+            throw new Error("An already-confirmed alias must not need Codex.");
+          },
+        },
+      },
+    );
+    expect(reused.matches).toEqual([
+      expect.objectContaining({
+        beforeOccurrenceIds: [a.occurrenceId],
+        afterOccurrenceIds: [e.occurrenceId],
+      }),
+    ]);
+    const recomputedPair = await workbench([
+      "compare-scans",
+      "--before-scan-id",
+      first.scanId,
+      "--after-scan-id",
+      second.scanId,
+      "--include-matching-inputs",
+    ]);
+    expect(
+      (recomputedPair["matchingInputs"] as unknown as ScanComparisonInput)
+        .knownFindingGroups,
+    ).toBeUndefined();
     const forced = await workbench([
       "list-unmatched-scan-pairs",
       "--repository",
@@ -321,7 +361,7 @@ test("matches sealed scan history end to end without merging related findings", 
         },
       });
     };
-    const cli = async (args: string[]) => {
+    const cli = async (args: string[], matcher = onMatch) => {
       const stdout = capture();
       const stderr = capture();
       expect(
@@ -333,13 +373,34 @@ test("matches sealed scan history end to end without merging related findings", 
             currentDirectory: repository,
             environment,
             onWorkbench: workbench,
-            onMatch,
+            onMatch: matcher,
           }),
         ),
         stderr.text(),
       ).toBe(0);
       return JSON.parse(stdout.text()) as JsonObject;
     };
+
+    for (const [before, after] of [
+      [first.scanId, third.scanId],
+      [second.scanId, third.scanId],
+      [third.scanId, fourth.scanId],
+    ] as const) {
+      await save(before, after, empty);
+    }
+    expect(
+      await cli(["scans", "match", "--all"], async (input, options) =>
+        matchScanFindings(input, {
+          ...options,
+          codex: {
+            startThread() {
+              throw new Error("Cached transitive links must not need Codex.");
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({ matchedPairs: 1, skippedPairs: 5, findingMatches: 1 });
+    expect(modelCalls).toBe(0);
 
     expect(await cli(["scans", "match", "--all", "--force"])).toMatchObject({
       scanCount: 4,
