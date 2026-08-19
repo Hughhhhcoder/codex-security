@@ -763,6 +763,9 @@ superseded related label. Matching preserves the original findings, triage, and
 sealed scan artifacts. Use
 `scans match --all --force` to rebuild saved comparisons in chronological order.
 Ctrl-C stops matching and preserves comparisons that have already been saved.
+Older custom plugins still save confirmed and uncertain matches. Use the bundled
+plugin to save related-finding links and comparisons too large for command-line
+arguments.
 
 `scans compare` compares the two latest completed scans. Pass one scan ID to
 compare it with the latest completed scan, or two IDs to select both scans. It

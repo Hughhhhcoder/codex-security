@@ -1348,40 +1348,30 @@ export async function preparePersistentOutputRoot(
   return root;
 }
 
+const workbenchComparisonStdinSupport = new Map<string, boolean>();
+
 export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
 ): Promise<JsonObject> {
-  const arguments_ = [...args];
-  let input: string | undefined;
-  const matchesIndex = arguments_.indexOf("--matches-json");
-  if (
-    arguments_[0] === "save-scan-comparison" &&
-    matchesIndex !== -1 &&
-    arguments_[matchesIndex + 1] !== undefined
-  ) {
-    input = arguments_[matchesIndex + 1];
-    arguments_.splice(matchesIndex, 2, "--matches-json-stdin");
-  }
-  let stdout: string;
-  try {
+  const script = join(options.pluginRoot, "scripts", "workbench_db.py");
+  const environment = Object.fromEntries(
+    Object.entries(options.environment).filter(
+      ([name]) =>
+        name.toUpperCase() !== "OPENAI_API_KEY" &&
+        name.toUpperCase() !== "CODEX_API_KEY" &&
+        name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+        name.toUpperCase() !== "FIREWORKS_API_KEY",
+    ),
+  );
+  const run = async (
+    arguments_: readonly string[],
+    input?: string,
+  ): Promise<string> => {
     const result = await runCodexCommand(
       { command: options.python },
-      [
-        "-I",
-        "-B",
-        join(options.pluginRoot, "scripts", "workbench_db.py"),
-        ...arguments_,
-      ],
-      Object.fromEntries(
-        Object.entries(options.environment).filter(
-          ([name]) =>
-            name.toUpperCase() !== "OPENAI_API_KEY" &&
-            name.toUpperCase() !== "CODEX_API_KEY" &&
-            name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-            name.toUpperCase() !== "FIREWORKS_API_KEY",
-        ),
-      ),
+      ["-I", "-B", script, ...arguments_],
+      environment,
       input,
       options.signal,
     );
@@ -1392,7 +1382,37 @@ export async function runWorkbench(
           `Python exited with status ${result.exitCode}.`,
       );
     }
-    stdout = result.stdout;
+    return result.stdout;
+  };
+  let stdout: string;
+  try {
+    const arguments_ = [...args];
+    let input: string | undefined;
+    const matchesIndex = arguments_.indexOf("--matches-json");
+    const matches =
+      matchesIndex === -1 ? undefined : arguments_[matchesIndex + 1];
+    if (arguments_[0] === "save-scan-comparison" && matches !== undefined) {
+      const key = JSON.stringify([options.python, script]);
+      let supportsStdin = workbenchComparisonStdinSupport.get(key);
+      if (supportsStdin === undefined) {
+        const help = await run(["save-scan-comparison", "--help"]);
+        options.signal?.throwIfAborted();
+        supportsStdin = help.includes("--matches-json-stdin");
+        workbenchComparisonStdinSupport.set(key, supportsStdin);
+      }
+      if (supportsStdin) {
+        input = matches;
+        arguments_.splice(matchesIndex, 2, "--matches-json-stdin");
+      } else {
+        // Older custom plugins accept only the original comparison format.
+        const comparison: unknown = JSON.parse(matches);
+        if (isRecord(comparison) && "related" in comparison) {
+          delete comparison["related"];
+          arguments_[matchesIndex + 1] = JSON.stringify(comparison);
+        }
+      }
+    }
+    stdout = await run(arguments_, input);
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
