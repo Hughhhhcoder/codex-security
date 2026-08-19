@@ -603,6 +603,94 @@ describe("CLI workbench", () => {
     },
   );
 
+  test.each(["cached comparison", "matching plan", "final save"] as const)(
+    "reports cancellation during a %s instead of success",
+    async (stage) => {
+      const signals = new FakeSignals();
+      const stdout = capture();
+      const stderr = capture();
+      let observedSignal: AbortSignal | undefined;
+      const target =
+        stage === "cached comparison"
+          ? "compare-scans"
+          : stage === "matching plan"
+            ? "list-unmatched-scan-pairs"
+            : "save-scan-comparison";
+      const args = stage === "matching plan" ? ["--all"] : ["before", "after"];
+      expect(
+        await main(
+          ["scans", "match", ...args, "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            signals,
+            onWorkbench: (command, signal): JsonObject => {
+              if (command[0] === target) {
+                observedSignal = signal;
+                signals.emit("SIGTERM");
+              }
+              if (command[0] === "compare-scans")
+                return {
+                  matchingCached: stage === "cached comparison",
+                  matchingInputs: { before: [], after: [] },
+                  summary: { persisting: 1 },
+                };
+              if (command[0] === "list-unmatched-scan-pairs")
+                return { batches: [] };
+              return { summary: { persisting: 1 } };
+            },
+          }),
+        ),
+      ).toBe(143);
+      expect(observedSignal?.aborted).toBe(true);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("terminated by SIGTERM");
+    },
+  );
+
+  test("forwards cancellation and allows a second signal to terminate a blocked workbench", async () => {
+    const signals = new FakeSignals();
+    let began!: () => void;
+    const started = new Promise<void>((resolve) => {
+      began = resolve;
+    });
+    let finish!: (value: JsonObject) => void;
+    const pending = new Promise<JsonObject>((resolve) => {
+      finish = resolve;
+    });
+    let observedSignal: AbortSignal | undefined;
+    const forced: string[] = [];
+    const deps = dependencies({
+      signals,
+      onWorkbench: async (_args, signal) => {
+        observedSignal = signal;
+        began();
+        return await pending;
+      },
+    });
+    deps.forceExit = (signal) => {
+      forced.push(signal);
+    };
+    const running = main(
+      ["scans", "match", "before", "after", "--json"],
+      capture().stream,
+      capture().stream,
+      deps,
+    );
+    await started;
+    signals.emit("SIGINT");
+    expect(observedSignal?.aborted).toBe(true);
+    signals.emit("SIGINT");
+    expect(forced).toEqual(["SIGINT"]);
+    expect(
+      [...signals.listeners.values()].every(
+        (listeners) => listeners.size === 0,
+      ),
+    ).toBe(true);
+    finish({ matchingCached: true, summary: {} });
+    expect(await running).toBe(130);
+  });
+
   test("matches all scans once per later scan", async () => {
     const finding = (occurrenceId: string) => ({ occurrenceId });
     const batches = [

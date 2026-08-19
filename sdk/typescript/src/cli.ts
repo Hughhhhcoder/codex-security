@@ -800,7 +800,10 @@ interface CliDependencies {
   ): Promise<string>;
   bulkScan?: BulkScanDiscoveryDependencies;
   linearClient?: LinearClientFactory;
-  runWorkbench(args: readonly string[]): Promise<JsonObject>;
+  runWorkbench(
+    args: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
@@ -945,17 +948,18 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     }
     return undefined;
   },
-  runWorkbench: async (args) => {
+  runWorkbench: async (args, signal) => {
     const environment = {
       ...exportEnvironment(),
       CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
     };
-    const python = await resolvePluginPython({ environment });
+    const python = await resolvePluginPython({ environment, signal });
     return await runWorkbench(
       {
         python,
         pluginRoot: await bundledPluginRoot(),
         environment,
+        signal,
         failureMessage: "Could not read Codex Security scan history",
       },
       args,
@@ -1254,13 +1258,25 @@ export async function main(
     operation: (options: ScanComparisonOptions) => Promise<JsonObject>,
   ): Promise<JsonObject | undefined> => {
     const controller = new AbortController();
-    const onInterrupt = (): void => controller.abort("SIGINT");
-    const onTerminate = (): void => controller.abort("SIGTERM");
+    const cancel = (signal: SignalName): void => {
+      if (controller.signal.aborted) {
+        removeListeners();
+        dependencies.forceExit(signal);
+      } else {
+        controller.abort(signal);
+      }
+    };
+    const onInterrupt = (): void => cancel("SIGINT");
+    const onTerminate = (): void => cancel("SIGTERM");
+    const removeListeners = (): void => {
+      dependencies.removeSignalListener("SIGINT", onInterrupt);
+      dependencies.removeSignalListener("SIGTERM", onTerminate);
+    };
     dependencies.addSignalListener("SIGINT", onInterrupt);
     dependencies.addSignalListener("SIGTERM", onTerminate);
     let previousProgress = "";
     try {
-      return await operation({
+      const result = await operation({
         environment: dependencies.environment,
         workingDirectory: dependencies.currentDirectory(),
         signal: controller.signal,
@@ -1276,6 +1292,8 @@ export async function main(
           errorOutput.write(`codex-security: ${message}\n`);
         },
       });
+      controller.signal.throwIfAborted();
+      return result;
     } catch (error) {
       const interrupted = controller.signal.reason;
       exitCode =
@@ -1289,8 +1307,7 @@ export async function main(
       errorOutput.write(`codex-security: ${message}\n`);
       return undefined;
     } finally {
-      dependencies.removeSignalListener("SIGINT", onInterrupt);
-      dependencies.removeSignalListener("SIGTERM", onTerminate);
+      removeListeners();
     }
   };
   const matchScanPair = async (
@@ -1300,29 +1317,35 @@ export async function main(
   ): Promise<JsonObject | undefined> =>
     runMatching(async (options) => {
       const { matchingCached, matchingInputs, ...comparison } =
-        await dependencies.runWorkbench([
-          "compare-scans",
-          "--before-scan-id",
-          beforeId,
-          "--after-scan-id",
-          afterId,
-          "--include-matching-inputs",
-        ]);
+        await dependencies.runWorkbench(
+          [
+            "compare-scans",
+            "--before-scan-id",
+            beforeId,
+            "--after-scan-id",
+            afterId,
+            "--include-matching-inputs",
+          ],
+          options.signal,
+        );
       if (matchingCached && !force) return comparison;
       const matching = await dependencies.matchFindings(
         matchingInputs as JsonObject & ScanComparisonInput,
         options,
       );
       options.signal?.throwIfAborted();
-      return await dependencies.runWorkbench([
-        "save-scan-comparison",
-        "--before-scan-id",
-        beforeId,
-        "--after-scan-id",
-        afterId,
-        "--matches-json",
-        JSON.stringify(matching),
-      ]);
+      return await dependencies.runWorkbench(
+        [
+          "save-scan-comparison",
+          "--before-scan-id",
+          beforeId,
+          "--after-scan-id",
+          afterId,
+          "--matches-json",
+          JSON.stringify(matching),
+        ],
+        options.signal,
+      );
     });
   const presentHistory = (
     result: JsonObject | undefined,
@@ -3368,12 +3391,15 @@ async function matchAllScans(
   force: boolean,
   options: ScanComparisonOptions = {},
 ): Promise<JsonObject> {
-  const result = (await dependencies.runWorkbench([
-    "list-unmatched-scan-pairs",
-    "--repository",
-    dependencies.currentDirectory(),
-    ...(force ? ["--force"] : []),
-  ])) as MatchingPlan;
+  const result = (await dependencies.runWorkbench(
+    [
+      "list-unmatched-scan-pairs",
+      "--repository",
+      dependencies.currentDirectory(),
+      ...(force ? ["--force"] : []),
+    ],
+    options.signal,
+  )) as MatchingPlan;
   const { repository, scanCount, unavailableScans, skippedPairs, batches } =
     result;
 
@@ -3409,15 +3435,18 @@ async function matchAllScans(
     }));
     for (const { scanId, comparison } of comparisons) {
       options.signal?.throwIfAborted();
-      await dependencies.runWorkbench([
-        "save-scan-comparison",
-        "--before-scan-id",
-        scanId,
-        "--after-scan-id",
-        afterScanId,
-        "--matches-json",
-        JSON.stringify(comparison),
-      ]);
+      await dependencies.runWorkbench(
+        [
+          "save-scan-comparison",
+          "--before-scan-id",
+          scanId,
+          "--after-scan-id",
+          afterScanId,
+          "--matches-json",
+          JSON.stringify(comparison),
+        ],
+        options.signal,
+      );
       matchedPairs += 1;
       findingMatches += comparison.matches.reduce(
         (count, { beforeOccurrenceIds, afterOccurrenceIds }) =>

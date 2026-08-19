@@ -326,6 +326,58 @@ describe("finding catalogue", () => {
     expect(canceled.prompts).toHaveLength(1);
   });
 
+  test.each(["alternating", "reordered"] as const)(
+    "stops %s requests for evidence already supplied",
+    async (scenario) => {
+      const request = (
+        beforeOccurrenceIds: string[],
+        afterOccurrenceIds: string[] = [],
+      ) => ({
+        ...empty,
+        request: {
+          kind: "evidence",
+          beforeOccurrenceIds,
+          afterOccurrenceIds,
+          offset: 0,
+        },
+      });
+      const requests =
+        scenario === "alternating"
+          ? [request(["a"]), request([], ["new"]), request(["a"])]
+          : [request(["a", "b"]), request(["b", "a", "a"])];
+      const observed = conversation(
+        (_prompt, index) => requests[index % requests.length],
+      );
+      await expect(
+        matchScanFindings(
+          { before: [finding("a"), finding("b")], after: [finding("new")] },
+          { codex: observed.codex },
+        ),
+      ).rejects.toThrow("without making progress");
+      expect(observed.prompts).toHaveLength(requests.length);
+    },
+  );
+
+  test("does not resend catalogue pages already delivered", async () => {
+    const observed = conversation((_prompt, index) => ({
+      ...empty,
+      request: { kind: "catalogue", page: index === 0 ? 1 : 0 },
+    }));
+    await expect(
+      matchScanFindings(
+        {
+          before: [
+            finding("a", { rootCause: "a".repeat(600_000) }),
+            finding("b", { rootCause: "b".repeat(600_000) }),
+          ],
+          after: [finding("new")],
+        },
+        { codex: observed.codex },
+      ),
+    ).rejects.toThrow("without making progress");
+    expect(observed.prompts).toHaveLength(2);
+  });
+
   test("keeps related findings separate from confirmed and uncertain pairs", async () => {
     const input = {
       before: [finding("old")],

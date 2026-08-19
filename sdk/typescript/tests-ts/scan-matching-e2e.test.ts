@@ -66,8 +66,11 @@ test("matches sealed scan history end to end without merging related findings", 
       PATH: process.env["PATH"],
       CODEX_SECURITY_STATE_DIR: state,
     };
-    const workbench = (args: readonly string[]) =>
-      runWorkbench({ python, pluginRoot: PLUGIN_ROOT, environment }, args);
+    const workbench = (args: readonly string[], signal?: AbortSignal) =>
+      runWorkbench(
+        { python, pluginRoot: PLUGIN_ROOT, environment, signal },
+        args,
+      );
     const readJson = async <T>(path: string): Promise<T> =>
       JSON.parse(await readFile(path, "utf8")) as T;
     const writeJson = async (path: string, value: unknown) =>

@@ -561,6 +561,107 @@ describe("semantic scan comparison", () => {
     },
   );
 
+  test.each(["new", "resolved", "split", "combined"] as const)(
+    "preserves deterministic matches while reconciling a %s issue",
+    async (scenario) => {
+      const oldA = { findingId: "identity-a", occurrenceId: "old-a" };
+      const oldB = { findingId: "identity-b", occurrenceId: "old-b" };
+      const newA = { findingId: "identity-a", occurrenceId: "new-a" };
+      const newB = { findingId: "identity-b", occurrenceId: "new-b" };
+      const before =
+        scenario === "resolved" || scenario === "combined"
+          ? [oldA, oldB]
+          : [oldA];
+      const after =
+        scenario === "new" || scenario === "split" ? [newA, newB] : [newA];
+      const extendsKnown = scenario === "split" || scenario === "combined";
+      const saved: ScanComparisonResult[] = [];
+      await matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: before,
+        falsePositives: [],
+        findings: after,
+        async workbench(args) {
+          if (args[0] === "list-unmatched-scan-pairs")
+            return {
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: after,
+                  beforeScans: [{ scanId: "prior", findings: before }],
+                },
+              ],
+            };
+          saved.push(JSON.parse(args.at(-1)!) as ScanComparisonResult);
+          return {};
+        },
+        async matchFindings() {
+          return {
+            matches: extendsKnown
+              ? [
+                  {
+                    beforeOccurrenceIds: [
+                      scenario === "split"
+                        ? oldA.occurrenceId
+                        : oldB.occurrenceId,
+                    ],
+                    afterOccurrenceIds: [
+                      scenario === "split"
+                        ? newB.occurrenceId
+                        : newA.occurrenceId,
+                    ],
+                    confidence: "high",
+                    reason: "The same control was split or combined.",
+                  },
+                ]
+              : [],
+            uncertain: extendsKnown
+              ? []
+              : [
+                  {
+                    beforeOccurrenceId: oldA.occurrenceId,
+                    afterOccurrenceId: newA.occurrenceId,
+                    reason: "The model omitted the proven identity.",
+                  },
+                ],
+            related:
+              scenario === "resolved"
+                ? []
+                : [
+                    {
+                      beforeOccurrenceId: oldA.occurrenceId,
+                      afterOccurrenceId:
+                        scenario === "new"
+                          ? newB.occurrenceId
+                          : newA.occurrenceId,
+                      reason: "A related control.",
+                    },
+                  ],
+          };
+        },
+      });
+      expect(saved).toHaveLength(1);
+      expect(saved[0]!.matches).toHaveLength(1);
+      expect(new Set(saved[0]!.matches[0]!.beforeOccurrenceIds)).toEqual(
+        new Set(
+          (extendsKnown ? before : [oldA]).map(
+            ({ occurrenceId }) => occurrenceId,
+          ),
+        ),
+      );
+      expect(new Set(saved[0]!.matches[0]!.afterOccurrenceIds)).toEqual(
+        new Set(
+          (extendsKnown ? after : [newA]).map(
+            ({ occurrenceId }) => occurrenceId,
+          ),
+        ),
+      );
+      expect(saved[0]!.uncertain).toEqual([]);
+      expect(saved[0]!.related).toHaveLength(scenario === "new" ? 1 : 0);
+    },
+  );
+
   test("rejects malformed model JSON", async () => {
     const { codex } = fakeCodex("not-json");
     await expect(

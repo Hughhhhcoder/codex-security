@@ -257,7 +257,7 @@ def list_unmatched_scan_pairs(
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
-    known_links = [] if args.force else _saved_finding_links(connection)
+    known_links: list[sqlite3.Row] | None = None
     for index, after in enumerate(available):
         previous = [
             before
@@ -267,6 +267,12 @@ def list_unmatched_scan_pairs(
         skipped += index - len(previous)
         if not previous:
             continue
+        if known_links is None:
+            known_links = (
+                []
+                if args.force
+                else _saved_finding_links(connection, {scan["id"] for scan in available})
+            )
         for scan in (*previous, after):
             if scan["id"] not in matching_findings:
                 backfill_finding_details(connection, scan)
@@ -300,17 +306,26 @@ def list_unmatched_scan_pairs(
     }
 
 
-def _saved_finding_links(connection: sqlite3.Connection) -> list[sqlite3.Row]:
-    return connection.execute(
-        """
-        SELECT before.scan_id AS before_scan_id, before.finding_id AS before_finding_id,
-            after.scan_id AS after_scan_id, after.finding_id AS after_finding_id
-        FROM scan_comparison_matches AS matches
-        JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
-        JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
-        ORDER BY before.scan_id, after.scan_id, before.finding_id, after.finding_id
-        """
-    ).fetchall()
+def _saved_finding_links(
+    connection: sqlite3.Connection, scan_ids: set[str]
+) -> list[sqlite3.Row]:
+    return [
+        row
+        for scan_id in sorted(scan_ids)
+        for row in connection.execute(
+            """
+            SELECT before.scan_id AS before_scan_id, before.finding_id AS before_finding_id,
+                after.scan_id AS after_scan_id, after.finding_id AS after_finding_id
+            FROM scan_comparison_matches AS matches
+            JOIN finding_occurrences AS before ON before.id = matches.before_occurrence_id
+            JOIN finding_occurrences AS after ON after.id = matches.after_occurrence_id
+            WHERE matches.before_scan_id = ?
+            ORDER BY after.scan_id, before.finding_id, after.finding_id
+            """,
+            (scan_id,),
+        )
+        if row["before_scan_id"] in scan_ids and row["after_scan_id"] in scan_ids
+    ]
 
 
 def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[list[str]]:
@@ -493,7 +508,9 @@ def compare_scans(
             )
             if _same_repository(scan, after)
         }
-        known_groups = _known_finding_groups(_saved_finding_links(connection), prior_scan_ids)
+        known_groups = _known_finding_groups(
+            _saved_finding_links(connection, prior_scan_ids), prior_scan_ids
+        )
         result["matchingCached"] = cached is not None
         result["matchingInputs"] = {
             "before": [_matching_input(row) for row in before_findings.values()],
