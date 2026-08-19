@@ -135,6 +135,8 @@ const matchingTurnSchema = comparisonSchema.extend({
 // Codex's upstream limit applies to Unicode characters in one user message.
 // https://github.com/openai/codex/blob/956f590ad549e75913894614ce0cbec4d5fd677a/codex-rs/protocol/src/user_input.rs#L8-L9
 const MAX_CODEX_INPUT_CHARACTERS = 1 << 20;
+const AUTOMATIC_MATCHING_LIMIT_MESSAGE =
+  "Automatic finding matching needs additional model calls. Run 'codex-security scans match --all' to finish matching outside the scan cost limit.";
 
 interface CataloguePage {
   before: Finding[];
@@ -153,7 +155,7 @@ export async function matchScanFindings(
 export async function matchScanFindingsInternal(
   input: ScanComparisonInput,
   options: ScanComparisonOptions = {},
-  runtimeOptions: { surface: CodexSecuritySurface },
+  runtimeOptions: { surface: CodexSecuritySurface; singleTurn?: boolean },
 ): Promise<ScanComparisonResult> {
   options.signal?.throwIfAborted();
   if (input.before.length === 0 || input.after.length === 0) {
@@ -165,6 +167,25 @@ export async function matchScanFindingsInternal(
     options.allowHistoricalUncertainty ?? false,
   );
   if (known.complete) return known.comparison;
+  const catalogue = findingCatalogue(input.before, input.knownFindingGroups);
+  const after = new Map(
+    input.after.map((finding) => [finding.occurrenceId, finding]),
+  );
+  const initialCatalogue = {
+    before: [...catalogue.values()].map(({ card }) => card),
+    after: input.after.map(compactFinding),
+  };
+  // Cost-limited scans retain the existing one-call post-scan allowance.
+  if (
+    runtimeOptions.singleTurn &&
+    characterCount(comparisonPrompt(initialCatalogue, 0, 1)) >
+      MAX_CODEX_INPUT_CHARACTERS
+  ) {
+    throw new CodexSecurityError(AUTOMATIC_MATCHING_LIMIT_MESSAGE);
+  }
+  const pages = runtimeOptions.singleTurn
+    ? [initialCatalogue]
+    : cataloguePages(initialCatalogue);
   const codex =
     options.codex ??
     new Codex({
@@ -203,14 +224,6 @@ export async function matchScanFindingsInternal(
     webSearchMode: "disabled",
     workingDirectory: options.workingDirectory ?? process.cwd(),
     skipGitRepoCheck: true,
-  });
-  const catalogue = findingCatalogue(input.before, input.knownFindingGroups);
-  const after = new Map(
-    input.after.map((finding) => [finding.occurrenceId, finding]),
-  );
-  const pages = cataloguePages({
-    before: [...catalogue.values()].map(({ card }) => card),
-    after: input.after.map(compactFinding),
   });
   const seenPages = new Set([0]);
   const evidenceOffsets = new Map<string, number | null>();
@@ -263,6 +276,9 @@ export async function matchScanFindingsInternal(
         throw new CodexSecurityError(
           "Scan comparison cannot request evidence and finish at the same time.",
         );
+      }
+      if (runtimeOptions.singleTurn) {
+        throw new CodexSecurityError(AUTOMATIC_MATCHING_LIMIT_MESSAGE);
       }
       if (request.kind === "catalogue") {
         const page = pages[request.page];

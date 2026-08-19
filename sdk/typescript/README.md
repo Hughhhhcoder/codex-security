@@ -56,7 +56,9 @@ scan.
 
 Successful results include open repository findings in `repositoryFindings`,
 when available; `findings` remains the current scan. Matching earlier findings
-can make one additional model call, including with a scan cost limit.
+can make additional model calls. With a scan cost limit, automatic matching
+makes at most one additional call. If it needs more context, the completed scan
+is kept and a warning directs you to run `scans match --all` explicitly.
 
 Results can contain source excerpts, vulnerability details, and reproduction
 steps. Keep result directories and saved reports outside the repository and
@@ -546,6 +548,8 @@ unvalidated candidates as follow-up work. Requests already in progress can
 finish above the limit; preparing the partial report makes no additional model
 requests. Incomplete coverage retains its existing exit code.
 For `bulk-scan`, the limit applies separately to each repository attempt.
+Automatic finding-history matching makes at most one extra model call with
+`--max-cost`; comparisons that need more context are deferred to `scans match --all`.
 
 Run `npx @openai/codex-security scan --help` or `npx @openai/codex-security bulk-scan --help`
 for the complete CLI references.

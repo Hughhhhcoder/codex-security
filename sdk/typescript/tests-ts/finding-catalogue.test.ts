@@ -7,6 +7,7 @@ import {
 } from "../src/finding-catalogue.js";
 import {
   matchScanFindings,
+  matchScanFindingsInternal,
   type ScanComparisonInput,
   type ScanComparisonOptions,
   type ScanComparisonResult,
@@ -369,6 +370,73 @@ describe("finding catalogue", () => {
     expect(observed.threads()).toBe(1);
     expect(observed.prompts).toHaveLength(2);
   });
+
+  test("keeps cost-limited automatic matching to one model call", async () => {
+    const input = { before: [finding("old")], after: [finding("new")] };
+    const response = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["old"],
+          afterOccurrenceIds: ["new"],
+          confidence: "high" as const,
+          reason: "The same synthetic control.",
+        },
+      ],
+      uncertain: [],
+    };
+    const direct = conversation(() => response);
+    expect(
+      await matchScanFindingsInternal(
+        input,
+        { codex: direct.codex },
+        { surface: "sdk", singleTurn: true },
+      ),
+    ).toEqual(response);
+    expect(direct.prompts).toHaveLength(1);
+
+    const evidence = conversation(() => ({
+      ...empty,
+      request: {
+        kind: "evidence",
+        beforeOccurrenceIds: ["old"],
+        afterOccurrenceIds: ["new"],
+        offset: 0,
+      },
+    }));
+    await expect(
+      matchScanFindingsInternal(
+        input,
+        { codex: evidence.codex },
+        { surface: "sdk", singleTurn: true },
+      ),
+    ).rejects.toThrow("scans match --all");
+    expect(evidence.prompts).toHaveLength(1);
+  });
+
+  test.each(["multiple cards", "one oversized card"] as const)(
+    "defers a cost-limited catalogue with %s before starting Codex",
+    async (scenario) => {
+      const observed = conversation(() => empty);
+      await expect(
+        matchScanFindingsInternal(
+          {
+            before:
+              scenario === "multiple cards"
+                ? [
+                    finding("a", { rootCause: "a".repeat(600_000) }),
+                    finding("b", { rootCause: "b".repeat(600_000) }),
+                  ]
+                : [finding("a", { rootCause: "a".repeat(1 << 20) })],
+            after: [finding("new")],
+          },
+          { codex: observed.codex },
+          { surface: "sdk", singleTurn: true },
+        ),
+      ).rejects.toThrow("scans match --all");
+      expect(observed.threads()).toBe(0);
+      expect(observed.prompts).toHaveLength(0);
+    },
+  );
 
   test("delivers every oversized catalogue page before accepting a result", async () => {
     const input = {
