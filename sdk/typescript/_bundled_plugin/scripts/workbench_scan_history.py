@@ -610,9 +610,8 @@ def save_scan_comparison(
         "before": {row["id"] for row in before_findings.values()},
         "after": {row["id"] for row in after_findings.values()},
     }
-    consumed: dict[str, set[str]] = {"before": set(), "after": set()}
-    confirmed_pairs: set[tuple[str, str]] = set()
-    for match in payload["matches"]:
+    consumed: dict[str, dict[str, int]] = {"before": {}, "after": {}}
+    for group, match in enumerate(payload["matches"]):
         if (
             not isinstance(match, dict)
             or match.get("confidence") != "high"
@@ -631,23 +630,20 @@ def save_scan_comparison(
                 not occurrences
                 or len(unique) != len(occurrences)
                 or not unique.issubset(allowed[side])
-                or not consumed[side].isdisjoint(unique)
+                or not unique.isdisjoint(consumed[side])
             ):
                 raise SystemExit("Scan comparison matches must identify distinct scan findings.")
-            consumed[side].update(unique)
-        confirmed_pairs.update(
-            (previous, current)
-            for previous in match["beforeOccurrenceIds"]
-            for current in match["afterOccurrenceIds"]
-        )
+            consumed[side].update((occurrence_id, group) for occurrence_id in unique)
     uncertain_pairs = set()
     for match in payload["uncertain"]:
         if not _valid_finding_pair(match):
             raise SystemExit("Uncertain scan comparison matches must identify distinct findings.")
         pair = (match["beforeOccurrenceId"], match["afterOccurrenceId"])
         if (
-            pair[0] not in allowed["before"] - consumed["before"]
-            or pair[1] not in allowed["after"] - consumed["after"]
+            pair[0] not in allowed["before"]
+            or pair[0] in consumed["before"]
+            or pair[1] not in allowed["after"]
+            or pair[1] in consumed["after"]
             or pair in uncertain_pairs
         ):
             raise SystemExit("Uncertain scan comparison matches must identify distinct findings.")
@@ -657,10 +653,11 @@ def save_scan_comparison(
         if not _valid_finding_pair(match):
             raise SystemExit("Related scan comparison findings must identify distinct findings.")
         pair = (match["beforeOccurrenceId"], match["afterOccurrenceId"])
+        group = consumed["before"].get(pair[0])
         if (
             pair[0] not in allowed["before"]
             or pair[1] not in allowed["after"]
-            or pair in confirmed_pairs
+            or (group is not None and group == consumed["after"].get(pair[1]))
             or pair in uncertain_pairs
             or pair in related_pairs
         ):

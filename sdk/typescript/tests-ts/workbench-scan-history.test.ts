@@ -58,6 +58,105 @@ test("keeps inline and stdin comparison transports compatible", () => {
   expect(conflicting.stderr).toContain("not allowed with argument");
 });
 
+test("validates related pairs by confirmed group without replacing saved results", () => {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  if (python === null) throw new Error("A Python interpreter is required.");
+  const probe = `
+import argparse, json, sqlite3, sys
+sys.path.insert(0, sys.argv[1])
+import workbench_scan_history as history
+connection = sqlite3.connect(':memory:')
+connection.row_factory = sqlite3.Row
+connection.executescript('''
+PRAGMA foreign_keys = ON;
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT);
+CREATE TABLE finding_occurrences (
+    id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
+);
+CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);
+CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
+CREATE TABLE scan_comparisons (
+    before_scan_id TEXT, after_scan_id TEXT, result_json TEXT, created_at TEXT, updated_at TEXT,
+    PRIMARY KEY(before_scan_id, after_scan_id)
+);
+CREATE TABLE scan_comparison_matches (
+    before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT,
+    reason TEXT,
+    FOREIGN KEY(before_scan_id, after_scan_id)
+        REFERENCES scan_comparisons(before_scan_id, after_scan_id) ON DELETE CASCADE
+);
+CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
+CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
+''')
+for scan, names in [('before', ('a1', 'a2', 'b', 'c')), ('after', ('x1', 'x2', 'y', 'z'))]:
+    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
+    for name in names:
+        connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?)', (name, name, scan, name, 'high'))
+        connection.execute('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', (name, 'src/example.py', 'root_control', 0))
+connection.commit()
+def pair(before, after):
+    return {'beforeOccurrenceId': before, 'afterOccurrenceId': after, 'reason': 'Separate synthetic controls.'}
+def group(before, after):
+    return {'beforeOccurrenceIds': before, 'afterOccurrenceIds': after,
+            'confidence': 'high', 'reason': 'The same synthetic control.'}
+payload = {'matches': [group(['a1', 'a2'], ['x1', 'x2']), group(['b'], ['y'])],
+           'uncertain': [], 'related': [pair('a2', 'y'), pair('c', 'z')]}
+def save(value):
+    return history.save_scan_comparison(
+        connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=json.dumps(value)),
+        now=lambda: '2026-01-01T00:00:00Z',
+        require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
+        read_coverage=lambda _: {'completeness': 'complete', 'includePaths': ['src'],
+                                 'excludePaths': [], 'explicitExclusions': []})
+def snapshot():
+    return (connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0],
+            [tuple(row) for row in connection.execute('SELECT * FROM scan_comparison_matches ORDER BY before_occurrence_id, after_occurrence_id')])
+accepted = save(payload)
+original = snapshot()
+invalid = [
+    {**payload, 'related': [pair('a2', 'x2')]},
+    {**payload, 'related': [pair('b', 'y')]},
+    {**payload, 'related': [pair('a2', 'y'), pair('a2', 'y')]},
+    {**payload, 'related': [pair('outside', 'z')]},
+    {**payload, 'uncertain': [pair('c', 'z')]},
+    {**payload, 'uncertain': [pair('a1', 'z')]},
+    {**payload, 'uncertain': [pair('c', 'y')]},
+    {**payload, 'matches': [payload['matches'][0], group(['b', 'a1'], ['y'])]},
+]
+for value in invalid:
+    try:
+        save(value)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError('Invalid comparison was accepted')
+    assert snapshot() == original
+print(json.dumps({'related': [(item['beforeOccurrenceId'], item['afterOccurrenceId']) for item in accepted['related']],
+                  'savedPairs': len(original[1]), 'rejected': len(invalid)}))
+`;
+  const result = spawnSync(
+    python,
+    [
+      "-I",
+      "-B",
+      "-c",
+      probe,
+      join(PLUGIN_ROOT, "scripts"),
+      join(tmpdir(), "codex-security-validation-fixture"),
+    ],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    related: [
+      ["a2", "y"],
+      ["c", "z"],
+    ],
+    savedPairs: 5,
+    rejected: 8,
+  });
+});
+
 test("upgrades existing history with indexed identity and reverse comparison lookups", () => {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   if (python === null) throw new Error("A Python interpreter is required.");

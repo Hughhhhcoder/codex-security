@@ -503,6 +503,65 @@ describe("finding catalogue", () => {
     );
   });
 
+  test("prepares interleaved evidence selections only once", async () => {
+    const ids = ["a", "b"] as const;
+    type Id = (typeof ids)[number];
+    const text = {
+      a: "a".repeat(1 << 20) + "🙂",
+      b: "b".repeat(1 << 20) + "🙂",
+    };
+    const reads = { a: 0, b: 0 };
+    const pieces: Record<Id, string[]> = { a: [], b: [] };
+    const offsets = new Map<Id, number | null>();
+    const request = (id: Id, offset = 0) => ({
+      ...empty,
+      request: {
+        kind: "evidence",
+        beforeOccurrenceIds: [id],
+        afterOccurrenceIds: [],
+        offset,
+      },
+    });
+    const before = ids.map((id) =>
+      finding(id, {
+        codeEvidence: [
+          {
+            get code() {
+              reads[id] += 1;
+              return text[id];
+            },
+          },
+        ],
+      }),
+    );
+    const observed = conversation((prompt, index) => {
+      if (index === 0) return request("a");
+      const page = data<EvidenceData>(prompt);
+      const id = page.beforeOccurrenceIds[0] as Id;
+      pieces[id].push(page.content);
+      offsets.set(id, page.nextOffset);
+      const other = id === "a" ? "b" : "a";
+      if (!offsets.has(other)) return request(other);
+      const next = offsets.get(other);
+      if (next != null) return request(other, next);
+      return page.nextOffset === null ? empty : request(id, page.nextOffset);
+    });
+    expect(
+      await matchScanFindings(
+        { before, after: [finding("new")] },
+        { codex: observed.codex },
+      ),
+    ).toEqual(empty);
+    expect(reads).toEqual({ a: 1, b: 1 });
+    for (const id of ids) {
+      expect(pieces[id].length).toBeGreaterThan(1);
+      expect(JSON.parse(pieces[id].join(""))).toEqual({
+        before: [finding(id, { codeEvidence: [{ code: text[id] }] })],
+        after: [],
+      });
+    }
+  });
+
   test.each(["overlap", "skip"] as const)(
     "rejects an evidence cursor that would %s the previous page",
     async (scenario) => {
@@ -782,6 +841,49 @@ describe("finding catalogue", () => {
     ]) {
       await expect(
         matchScanFindings(input, { codex: conversation(() => invalid).codex }),
+      ).rejects.toThrow("invalid related pair");
+    }
+  });
+
+  test("allows related pairs across different confirmed groups", async () => {
+    const input = {
+      before: ["a1", "a2", "b", "unmatched-before"].map((id) => finding(id)),
+      after: ["x1", "x2", "y", "unmatched-after"].map((id) => finding(id)),
+    };
+    const pair = (beforeOccurrenceId: string, afterOccurrenceId: string) => ({
+      beforeOccurrenceId,
+      afterOccurrenceId,
+      reason: "Separate synthetic controls.",
+    });
+    const response: ScanComparisonResult = {
+      matches: [
+        {
+          beforeOccurrenceIds: ["a1", "a2"],
+          afterOccurrenceIds: ["x1", "x2"],
+          confidence: "high",
+          reason: "First synthetic control.",
+        },
+        {
+          beforeOccurrenceIds: ["b"],
+          afterOccurrenceIds: ["y"],
+          confidence: "high",
+          reason: "Second synthetic control.",
+        },
+      ],
+      uncertain: [],
+      related: [pair("a2", "y"), pair("unmatched-before", "unmatched-after")],
+    };
+    expect(
+      await matchScanFindings(input, {
+        codex: conversation(() => response).codex,
+      }),
+    ).toEqual(response);
+    for (const related of [pair("a2", "x2"), pair("b", "y")]) {
+      await expect(
+        matchScanFindings(input, {
+          codex: conversation(() => ({ ...response, related: [related] }))
+            .codex,
+        }),
       ).rejects.toThrow("invalid related pair");
     }
   });

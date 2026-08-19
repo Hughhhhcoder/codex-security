@@ -397,7 +397,7 @@ describe("semantic scan comparison", () => {
             CODEX_SECURITY_SCAN_ID: "current",
           },
         });
-        return {
+        const response = {
           matches: [
             {
               beforeOccurrenceIds: ["old-dismissed"],
@@ -414,6 +414,10 @@ describe("semantic scan comparison", () => {
             },
           ],
         };
+        return await matchScanFindings(value, {
+          ...options,
+          codex: fakeCodex(response).codex,
+        });
       },
     });
     expect(input).toEqual({ before: [open, dismissed], after: [after] });
@@ -448,7 +452,7 @@ describe("semantic scan comparison", () => {
         occurrenceId: "new",
       };
       let calls = 0;
-      let modelCalled = false;
+      const model = fakeCodex({ matches: [], uncertain: [] });
       await matchCompletedScan({
         scanId: "current",
         repository: "/repository",
@@ -471,13 +475,11 @@ describe("semantic scan comparison", () => {
               }
             : {};
         },
-        async matchFindings() {
-          modelCalled = true;
-          return { matches: [], uncertain: [] };
-        },
+        matchFindings: (input, options) =>
+          matchScanFindings(input, { ...options, codex: model.codex }),
       });
       expect(calls).toBe(expectedCalls);
-      expect(modelCalled).toBe(expectedModel);
+      expect(model.calls.prompt !== undefined).toBe(expectedModel);
     },
   );
 
@@ -499,7 +501,17 @@ describe("semantic scan comparison", () => {
         scenario === "confirmed alias"
           ? [["identity-a", "identity-b"]]
           : undefined;
-      let modelCalled = false;
+      const model = fakeCodex({
+        matches: [
+          {
+            beforeOccurrenceIds: before.map(({ occurrenceId }) => occurrenceId),
+            afterOccurrenceIds: after.map(({ occurrenceId }) => occurrenceId),
+            confidence: "high",
+            reason: "The scan split or combined the same defective control.",
+          },
+        ],
+        uncertain: [],
+      });
       const saved: ScanComparisonResult[] = [];
       await matchCompletedScan({
         scanId: "current",
@@ -523,28 +535,21 @@ describe("semantic scan comparison", () => {
           saved.push(JSON.parse(args.at(-1)!) as ScanComparisonResult);
           return {};
         },
-        async matchFindings(input) {
-          modelCalled = true;
-          expect(input).toEqual({ before, after });
-          return {
-            matches: [
-              {
-                beforeOccurrenceIds: before.map(
-                  ({ occurrenceId }) => occurrenceId,
-                ),
-                afterOccurrenceIds: after.map(
-                  ({ occurrenceId }) => occurrenceId,
-                ),
-                confidence: "high",
-                reason:
-                  "The scan split or combined the same defective control.",
-              },
-            ],
-            uncertain: [],
-          };
+        async matchFindings(input, options) {
+          expect(input).toEqual({
+            before,
+            after,
+            ...(knownFindingGroups === undefined ? {} : { knownFindingGroups }),
+          });
+          return await matchScanFindings(input, {
+            ...options,
+            codex: model.codex,
+          });
         },
       });
-      expect(modelCalled).toBe(scenario !== "confirmed alias");
+      expect(model.calls.prompt !== undefined).toBe(
+        scenario !== "confirmed alias",
+      );
       expect(saved).toEqual([
         {
           matches: [
@@ -596,8 +601,8 @@ describe("semantic scan comparison", () => {
           saved.push(JSON.parse(args.at(-1)!) as ScanComparisonResult);
           return {};
         },
-        async matchFindings() {
-          return {
+        async matchFindings(input, options) {
+          const response = {
             matches: extendsKnown
               ? [
                   {
@@ -639,6 +644,10 @@ describe("semantic scan comparison", () => {
                     },
                   ],
           };
+          return await matchScanFindings(input, {
+            ...options,
+            codex: fakeCodex(response).codex,
+          });
         },
       });
       expect(saved).toHaveLength(1);
