@@ -740,41 +740,32 @@ the same reason still applies.
 `scans rerun` repeats the latest completed scan against the current checkout.
 Pass `SCAN_ID` to rerun another scan.
 
-`scans match BEFORE_SCAN_ID AFTER_SCAN_ID` links findings with the same root
-cause; `scans match --all` matches all completed scans of the current repository,
-including other worktrees and clones. Saved matches appear in `scans show` and
-are reused unless `--force` is passed. Scans without sealed artifacts are skipped,
-but their indexed confirmed links can still be reused.
-
-Matching reuses confirmed historical links to build a compact catalogue of known
-issues. Stable identities and confirmed aliases apply across both scans; a fully
-known comparison does not need a model call. When new judgments are needed,
-Codex compares the later findings against the catalogue and can request the full
-stored evidence for selected issues. Overlapping requests do not resend the same
-stored occurrences. Large inputs are paged within Codex's message limit. If a
-summary was omitted or Codex started reading a long record, the relevant pages
-are finished before it can confirm a match. This uses the existing Codex
-authentication; no embedding model,
-vector database, or separate API key is required.
-
-Only high-confidence duplicates are grouped. Plausible duplicates can remain
-uncertain, while findings with related but independent root causes are shown as
-related and kept separate. If later confirmed links establish that the findings
-are the same issue, older comparisons use the current grouping and omit the
-superseded related label. Matching preserves the original findings, triage, and
-sealed scan artifacts. Use
-`scans match --all --force` to rebuild saved comparisons in chronological order.
-Ctrl-C stops matching and preserves comparisons that have already been saved.
-Older custom plugins still save confirmed and uncertain matches. Use the bundled
-plugin to save related-finding links and comparisons too large for command-line
-arguments.
-
 `scans compare` compares the two latest completed scans. Pass one scan ID to
 compare it with the latest completed scan, or two IDs to select both scans. It
 matches findings by root cause, reuses saved matches, and reports findings as
 new, persisting, reopened, resolved, or unknown. Missing findings are not
 treated as resolved when the later scan is incomplete or does not cover their
 original scope.
+
+`scans match BEFORE_SCAN_ID AFTER_SCAN_ID` matches a specific pair of scans.
+`scans match --all` matches all completed scans of the current repository,
+including other worktrees and clones. Saved matches appear in `scans show` and
+are reused unless `--force` is passed. Use `scans match --all --force` to rebuild
+saved comparisons in chronological order. Ctrl-C stops matching and keeps
+comparisons that have already been saved.
+
+Only high-confidence duplicates are grouped. Possible duplicates remain
+uncertain. Findings with related but independent root causes are shown as
+related and kept separate. A later confirmed match replaces an earlier related
+label. Matching preserves the original findings, triage, and sealed scan
+artifacts.
+
+Matching reuses stable finding IDs and confirmed links. Codex is called only
+when a new decision is needed, using the existing Codex authentication. No
+additional service or API key is required. Scans without sealed artifacts are
+skipped, but their confirmed links can still be reused. Older custom plugins
+still save confirmed and uncertain matches. Use the bundled plugin for
+related-finding links and large comparisons.
 
 SDK callers can compare findings without saving a workbench comparison:
 
@@ -794,12 +785,7 @@ const after = JSON.parse(
 
 const comparison = await matchScanFindings(
   { before: before.findings, after: after.findings },
-  {
-    workingDirectory: "/path/to/repository",
-    onProgress: ({ phase, beforeIssues }) => {
-      console.error(`${phase}: ${beforeIssues} known issues`);
-    },
-  },
+  { workingDirectory: "/path/to/repository" },
 );
 console.log(comparison.matches, comparison.uncertain, comparison.related ?? []);
 ```

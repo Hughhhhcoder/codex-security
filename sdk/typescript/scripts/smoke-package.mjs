@@ -360,6 +360,61 @@ try {
     { cwd: consumer },
   );
 
+  const comparisonConsumer = join(consumer, "scan-comparison.ts");
+  await writeFile(
+    comparisonConsumer,
+    `import {
+      matchScanFindings,
+      type ScanComparisonInput,
+      type ScanComparisonOptions,
+      type ScanComparisonResult,
+    } from ${JSON.stringify(packageManifest.name)};
+
+    const input: ScanComparisonInput = {
+      before: [],
+      after: [],
+      knownFindingGroups: [["finding-a", "finding-b"]],
+    };
+    const options: ScanComparisonOptions = {
+      environment: { CODEX_SECURITY_STATE_DIR: "." },
+      model: "synthetic-model",
+      reasoningEffort: "medium",
+      signal: new AbortController().signal,
+      workingDirectory: ".",
+      onProgress: ({ phase }) => { void phase; },
+    };
+    const result: Promise<ScanComparisonResult> = matchScanFindings(input, options);
+    void result;
+
+    // @ts-expect-error Historical matching policy is internal.
+    matchScanFindings(input, { allowHistoricalUncertainty: true });
+    const codex = {
+      startThread: () => ({ run: async () => ({ finalResponse: "{}" }) }),
+    };
+    // @ts-expect-error Codex injection is internal.
+    matchScanFindings(input, { codex });
+    `,
+  );
+  run(
+    process.execPath,
+    [
+      fileURLToPath(import.meta.resolve("typescript/bin/tsc")),
+      "--noEmit",
+      "--strict",
+      "--skipLibCheck",
+      "--module",
+      "NodeNext",
+      "--target",
+      "ES2024",
+      "--types",
+      "node",
+      "--typeRoots",
+      join(packageRoot, "node_modules", "@types"),
+      comparisonConsumer,
+    ],
+    { cwd: consumer },
+  );
+
   assert.equal(
     typeof installedManifest.bin?.["codex-security"],
     "string",

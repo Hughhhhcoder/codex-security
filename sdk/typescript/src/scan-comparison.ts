@@ -49,6 +49,7 @@ export interface ScanComparisonProgress {
   pages?: number;
 }
 
+/** @internal */
 interface ComparisonCodex {
   startThread(options: ThreadOptions): {
     run(
@@ -59,7 +60,9 @@ interface ComparisonCodex {
 }
 
 export interface ScanComparisonOptions {
+  /** @internal */
   allowHistoricalUncertainty?: boolean;
+  /** @internal */
   codex?: ComparisonCodex;
   environment?: NodeJS.ProcessEnv;
   model?: string;
