@@ -728,28 +728,26 @@ def _rows_for_ids(
 def _confirmed_finding_aliases(
     connection: sqlite3.Connection, occurrence_ids: Iterable[str]
 ) -> dict[str, str]:
-    # Keep the selected identities outermost instead of scanning all saved links.
+    # Stable finding IDs already include the target identity. Follow their indexed
+    # occurrences instead of resolving repository paths or scanning every saved link.
     neighbors = """
         FROM linked
-        CROSS JOIN scans AS source_scan ON source_scan.target_id = linked.target_id
         CROSS JOIN finding_occurrences AS source
-            ON source.scan_id = source_scan.id AND source.finding_id = linked.finding_id
+            ON source.finding_id = linked.finding_id
         CROSS JOIN scan_comparison_matches AS matches
             ON matches.before_occurrence_id = source.id OR matches.after_occurrence_id = source.id
         CROSS JOIN finding_occurrences AS neighbor ON neighbor.id = CASE
             WHEN matches.before_occurrence_id = source.id THEN matches.after_occurrence_id
             ELSE matches.before_occurrence_id END
-        CROSS JOIN scans AS neighbor_scan ON neighbor_scan.id = neighbor.scan_id
     """
     # Traverse only the selected findings' components, including recurring stable IDs.
     query = f"""
-        WITH RECURSIVE linked(target_id, finding_id) AS (
-            SELECT scans.target_id, occurrences.finding_id
+        WITH RECURSIVE linked(finding_id) AS (
+            SELECT occurrences.finding_id
             FROM finding_occurrences AS occurrences
-            JOIN scans ON scans.id = occurrences.scan_id
             WHERE occurrences.id IN ({{placeholders}})
             UNION
-            SELECT neighbor_scan.target_id, neighbor.finding_id
+            SELECT neighbor.finding_id
             {neighbors}
         )
         SELECT DISTINCT linked.finding_id AS before_finding_id,

@@ -430,6 +430,37 @@ describe("finding catalogue", () => {
     );
   });
 
+  test.each(["overlap", "skip"] as const)(
+    "rejects an evidence cursor that would %s the previous page",
+    async (scenario) => {
+      const request = (offset: number) => ({
+        ...empty,
+        request: {
+          kind: "evidence",
+          beforeOccurrenceIds: ["large"],
+          afterOccurrenceIds: [],
+          offset,
+        },
+      });
+      const observed = conversation((prompt, index) => {
+        if (index === 0) return request(0);
+        const nextOffset = data<EvidenceData>(prompt).nextOffset;
+        expect(nextOffset).not.toBeNull();
+        return request(nextOffset! + (scenario === "overlap" ? -1 : 1));
+      });
+      await expect(
+        matchScanFindings(
+          {
+            before: [finding("large", { codeEvidence: "x".repeat(1 << 21) })],
+            after: [finding("new")],
+          },
+          { codex: observed.codex },
+        ),
+      ).rejects.toThrow("invalid evidence offset");
+      expect(observed.prompts).toHaveLength(2);
+    },
+  );
+
   test.each([
     [
       "another finding",
@@ -440,6 +471,16 @@ describe("finding catalogue", () => {
         offset: 0,
       },
       "outside its findings",
+    ],
+    [
+      "a nonzero first offset",
+      {
+        kind: "evidence",
+        beforeOccurrenceIds: ["old"],
+        afterOccurrenceIds: [],
+        offset: 1,
+      },
+      "invalid evidence offset",
     ],
     [
       "an invalid offset",
@@ -478,7 +519,7 @@ describe("finding catalogue", () => {
     const input = { before: [finding("old")], after: [finding("new")] };
     await expect(
       matchScanFindings(input, { codex: repeated.codex }),
-    ).rejects.toThrow("without making progress");
+    ).rejects.toThrow("invalid evidence offset");
     expect(repeated.prompts).toHaveLength(2);
 
     const controller = new AbortController();
@@ -523,7 +564,7 @@ describe("finding catalogue", () => {
           { before: [finding("a"), finding("b")], after: [finding("new")] },
           { codex: observed.codex },
         ),
-      ).rejects.toThrow("without making progress");
+      ).rejects.toThrow("invalid evidence offset");
       expect(observed.prompts).toHaveLength(requests.length);
     },
   );

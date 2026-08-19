@@ -58,6 +58,109 @@ test("keeps inline and stdin comparison transports compatible", () => {
   expect(conflicting.stderr).toContain("not allowed with argument");
 });
 
+test("upgrades existing history with indexed identity and reverse comparison lookups", () => {
+  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  if (python === null) throw new Error("A Python interpreter is required.");
+  const probe = `
+import json, sqlite3, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from finalize_scan_contract import _derived_finding_identity_rows
+from workbench_schema import MIGRATIONS, apply_migrations
+connection = sqlite3.connect(':memory:')
+connection.row_factory = sqlite3.Row
+connection.execute('PRAGMA foreign_keys = ON')
+timestamp = '2026-01-01T00:00:00Z'
+def migrate(migrations):
+    apply_migrations(connection, migrations, lambda: timestamp, lambda _: None)
+migrate(tuple(item for item in MIGRATIONS if item[0] < 31))
+connection.execute('INSERT INTO security_targets VALUES (?, ?, ?, ?, ?)', ('target', sys.argv[2], 'Synthetic target', timestamp, timestamp))
+connection.execute('INSERT INTO workspaces (id, target_id, created_at, updated_at) VALUES (?, ?, ?, ?)', ('workspace', 'target', timestamp, timestamp))
+connection.executemany('''INSERT INTO scans (
+    id, workspace_id, target_id, target_path, target_revision, scope, mode, scan_dir,
+    status, phase, started_at, created_at, updated_at
+) VALUES (?, 'workspace', 'target', ?, 'unversioned', '.', 'standard', ?, 'complete', 'reporting', ?, ?, ?)''', (
+    (f'scan-{index:03d}', sys.argv[2], str(Path(sys.argv[2]) / f'scan-{index:03d}'), timestamp, timestamp, timestamp)
+    for index in range(200)
+))
+connection.executemany('INSERT INTO scan_comparisons VALUES (?, ?, ?, ?, ?)', (
+    (f'scan-{before:03d}', f'scan-{after:03d}', json.dumps({'matches': [], 'uncertain': []}), timestamp, timestamp)
+    for after in range(200) for before in range(after)
+))
+def rows():
+    return [tuple(row) for row in connection.execute('SELECT * FROM scan_comparisons ORDER BY before_scan_id, after_scan_id')]
+original = rows()
+migrate(MIGRATIONS)
+migrate(MIGRATIONS)
+query = '''SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons
+    WHERE before_scan_id = ? OR after_scan_id = ? ORDER BY before_scan_id, after_scan_id'''
+plan = [row['detail'] for row in connection.execute('EXPLAIN QUERY PLAN ' + query, ('scan-100', 'scan-100'))]
+identity_plan = [row['detail'] for row in connection.execute(
+    'EXPLAIN QUERY PLAN SELECT id FROM finding_occurrences WHERE finding_id = ?', ('synthetic-finding',))]
+indexes = {
+    name: [row['name'] for row in connection.execute(f'PRAGMA index_info({name})')]
+    for name in ('finding_occurrences_by_finding', 'scan_comparisons_by_after_scan')
+}
+def identity(target, scan):
+    finding = {'ruleId': 'synthetic-control', 'identity': {'anchor': 'synthetic-control'}}
+    return _derived_finding_identity_rows(
+        {'scan': {'id': scan, 'target': {'targetId': target}}},
+        {'scanId': scan, 'findings': [finding]})[0][2:4]
+first_identity = identity('target', 'first')
+recurring_identity = identity('target', 'second')
+other_identity = identity('another-target', 'third')
+print(json.dumps({'unchanged': rows() == original, 'comparisons': len(original),
+                  'plan': plan, 'identityPlan': identity_plan, 'indexes': indexes,
+                  'stableIdentity': first_identity[0] == recurring_identity[0],
+                  'distinctOccurrences': first_identity[1] != recurring_identity[1],
+                  'targetScopedIdentity': first_identity[0] != other_identity[0],
+                  'foreignKeyErrors': len(connection.execute('PRAGMA foreign_key_check').fetchall())}))
+`;
+  const result = spawnSync(
+    python,
+    [
+      "-I",
+      "-B",
+      "-c",
+      probe,
+      join(PLUGIN_ROOT, "scripts"),
+      join(tmpdir(), "codex-security-index-fixture"),
+    ],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+  expect(result.status, result.stderr).toBe(0);
+  const observed = JSON.parse(result.stdout) as {
+    plan: string[];
+    identityPlan: string[];
+  };
+  expect(observed).toMatchObject({
+    unchanged: true,
+    comparisons: 19_900,
+    foreignKeyErrors: 0,
+    stableIdentity: true,
+    distinctOccurrences: true,
+    targetScopedIdentity: true,
+    indexes: {
+      finding_occurrences_by_finding: ["finding_id", "id"],
+      scan_comparisons_by_after_scan: ["after_scan_id", "before_scan_id"],
+    },
+  });
+  expect(observed.plan.some((step) => step.includes("before_scan_id=?"))).toBe(
+    true,
+  );
+  expect(observed.plan.some((step) => step.includes("after_scan_id=?"))).toBe(
+    true,
+  );
+  expect(
+    observed.plan.some((step) => step.startsWith("SCAN scan_comparisons")),
+  ).toBe(false);
+  expect(
+    observed.identityPlan.some((step) =>
+      step.includes("finding_occurrences_by_finding"),
+    ),
+  ).toBe(true);
+});
+
 test("loads each scan once and scopes saved links to uncached history", () => {
   const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
   expect(python).not.toBeNull();
@@ -299,6 +402,7 @@ CREATE TABLE finding_occurrences (
     id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT,
     UNIQUE(scan_id, finding_id)
 );
+CREATE INDEX occurrences_by_finding ON finding_occurrences(finding_id, id);
 CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT);
 CREATE TABLE scan_comparison_matches (
     before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT
@@ -308,7 +412,7 @@ CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
 ''')
 connection.executemany('INSERT INTO scans VALUES (?, ?)', [
     ('one', 'target'), ('two', 'target'), ('three', 'clone'),
-    ('four', 'target'), ('foreign-one', 'unrelated-target'),
+    ('four', 'clone'), ('foreign-one', 'unrelated-target'),
     ('foreign-two', 'unrelated-target')
 ])
 connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (

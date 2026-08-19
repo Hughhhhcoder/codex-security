@@ -162,6 +162,7 @@ const OUTPUT_OPTION =
 const HIDE_CURSOR = "\u001B[?25l";
 const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
+const DUPLICATE_SIGNAL_WINDOW_MS = 500;
 const PUBLICATION_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
@@ -1258,11 +1259,19 @@ export async function main(
     operation: (options: ScanComparisonOptions) => Promise<JsonObject>,
   ): Promise<JsonObject | undefined> => {
     const controller = new AbortController();
+    let firstSignalAt = 0;
     const cancel = (signal: SignalName): void => {
       if (controller.signal.aborted) {
+        if (
+          signal === controller.signal.reason &&
+          dependencies.now() - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS
+        ) {
+          return;
+        }
         removeListeners();
         dependencies.forceExit(signal);
       } else {
+        firstSignalAt = dependencies.now();
         controller.abort(signal);
       }
     };
@@ -4492,7 +4501,7 @@ async function executeScan(
       // A later repeated signal intentionally restores the conventional escape hatch.
       if (
         signal === requestedSignal &&
-        dependencies.now() - firstSignalAt < 500
+        dependencies.now() - firstSignalAt < DUPLICATE_SIGNAL_WINDOW_MS
       ) {
         return;
       }
