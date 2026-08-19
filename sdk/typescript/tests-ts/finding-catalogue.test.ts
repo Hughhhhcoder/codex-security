@@ -25,6 +25,7 @@ type EvidenceData = {
   beforeOccurrenceIds: string[];
   afterOccurrenceIds: string[];
   content: string;
+  offset: number;
   nextOffset: number | null;
 };
 const characters = (value: string): number => Array.from(value).length;
@@ -467,9 +468,10 @@ describe("finding catalogue", () => {
 
   test("pages a single oversized evidence record without losing Unicode", async () => {
     const original = finding("large", {
-      rootCause: "x".repeat(1 << 20) + "🙂",
+      rootCause: "🙂".repeat(1 << 20) + "x",
     });
     const pieces: string[] = [];
+    let expectedOffset = 0;
     const request = (offset: number) => ({
       ...empty,
       request: {
@@ -488,6 +490,11 @@ describe("finding catalogue", () => {
         return request(0);
       }
       const payload = data<EvidenceData>(prompt);
+      expect(payload.offset).toBe(expectedOffset);
+      expect(payload.content.isWellFormed()).toBe(true);
+      expectedOffset += characters(payload.content);
+      if (payload.nextOffset !== null)
+        expect(payload.nextOffset).toBe(expectedOffset);
       pieces.push(payload.content);
       return payload.nextOffset === null ? empty : request(payload.nextOffset);
     });
