@@ -21,7 +21,12 @@ const finding = (
 const data = <T>(prompt: string): T =>
   JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as T;
 type CatalogueData = { findings: ScanComparisonInput };
-type EvidenceData = { content: string; nextOffset: number | null };
+type EvidenceData = {
+  beforeOccurrenceIds: string[];
+  afterOccurrenceIds: string[];
+  content: string;
+  nextOffset: number | null;
+};
 const characters = (value: string): number => Array.from(value).length;
 
 function conversation(
@@ -531,6 +536,16 @@ describe("finding catalogue", () => {
 
   test.each([
     [
+      "no findings",
+      {
+        kind: "evidence",
+        beforeOccurrenceIds: [],
+        afterOccurrenceIds: [],
+        offset: 0,
+      },
+      "outside its findings",
+    ],
+    [
       "another finding",
       {
         kind: "evidence",
@@ -636,6 +651,86 @@ describe("finding catalogue", () => {
       expect(observed.prompts).toHaveLength(requests.length);
     },
   );
+
+  test("sends only new evidence from overlapping selections", async () => {
+    const ids = ["a", "b", "c", "d"];
+    const sentBefore: string[] = [];
+    const sentAfter: string[] = [];
+    const request = (beforeOccurrenceIds: string[]) => ({
+      ...empty,
+      request: {
+        kind: "evidence",
+        beforeOccurrenceIds,
+        afterOccurrenceIds: ["new"],
+        offset: 0,
+      },
+    });
+    const observed = conversation((prompt, index) => {
+      if (index > 0) {
+        const payload = data<EvidenceData>(prompt);
+        const evidence = JSON.parse(payload.content) as ScanComparisonInput;
+        sentBefore.push(...evidence.before.map((item) => item.occurrenceId));
+        sentAfter.push(...evidence.after.map((item) => item.occurrenceId));
+        expect(payload.beforeOccurrenceIds).toEqual([ids[index - 1]!]);
+        expect(payload.afterOccurrenceIds).toEqual(index === 1 ? ["new"] : []);
+      }
+      return request(index < ids.length ? ids.slice(0, index + 1) : ["b", "d"]);
+    });
+    await expect(
+      matchScanFindings(
+        { before: ids.map((id) => finding(id)), after: [finding("new")] },
+        { codex: observed.codex },
+      ),
+    ).rejects.toThrow("without making progress");
+    expect(sentBefore).toEqual(ids);
+    expect(sentAfter).toEqual(["new"]);
+    expect(observed.prompts).toHaveLength(ids.length + 1);
+  });
+
+  test("continues filtered evidence with either the original or returned IDs", async () => {
+    const small = finding("small");
+    const large = finding("large", {
+      codeEvidence: "x".repeat(2 * (1 << 20)) + "🙂",
+    });
+    const pieces: string[] = [];
+    const request = (beforeOccurrenceIds: string[], offset = 0) => ({
+      ...empty,
+      request: {
+        kind: "evidence",
+        beforeOccurrenceIds,
+        afterOccurrenceIds: [],
+        offset,
+      },
+    });
+    const observed = conversation((prompt, index) => {
+      if (index === 0) return request(["small"]);
+      const payload = data<EvidenceData>(prompt);
+      if (index === 1) {
+        expect(JSON.parse(payload.content)).toEqual({
+          before: [small],
+          after: [],
+        });
+        return request(["small", "large"]);
+      }
+      expect(payload.beforeOccurrenceIds).toEqual(["large"]);
+      pieces.push(payload.content);
+      return payload.nextOffset === null
+        ? empty
+        : request(
+            index === 2 ? ["small", "large"] : payload.beforeOccurrenceIds,
+            payload.nextOffset,
+          );
+    });
+    expect(
+      await matchScanFindings(
+        { before: [small, large], after: [finding("new")] },
+        { codex: observed.codex },
+      ),
+    ).toEqual(empty);
+    expect(pieces.length).toBeGreaterThan(2);
+    expect(JSON.parse(pieces.join(""))).toEqual({ before: [large], after: [] });
+    expect(observed.prompts).toHaveLength(pieces.length + 2);
+  });
 
   test("does not resend catalogue pages already delivered", async () => {
     const observed = conversation((_prompt, index) => ({

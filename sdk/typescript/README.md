@@ -750,8 +750,9 @@ Matching reuses confirmed historical links to build a compact catalogue of known
 issues. Stable identities and confirmed aliases apply across both scans; a fully
 known comparison does not need a model call. When new judgments are needed,
 Codex compares the later findings against the catalogue and can request the full
-stored evidence for selected issues. Large inputs are paged within Codex's
-message limit. This uses the existing Codex authentication; no embedding model,
+stored evidence for selected issues. Overlapping requests do not resend the same
+stored occurrences. Large inputs are paged within Codex's message limit. This
+uses the existing Codex authentication; no embedding model,
 vector database, or separate API key is required.
 
 Only high-confidence duplicates are grouped. Plausible duplicates can remain
