@@ -268,8 +268,11 @@ export function dependencies(
       : { linearClient: options.linearClient }),
     runWorkbench: async (args) =>
       (await options.onWorkbench?.(args)) ?? { scans: [] },
-    matchFindings: async (input) =>
-      (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
+    matchFindings: async (input, comparisonOptions) =>
+      (await options.onMatch?.(input, comparisonOptions)) ?? {
+        matches: [],
+        uncertain: [],
+      },
     exportFindings: async (arguments_) =>
       new TextEncoder().encode(
         arguments_.format === "csv"

@@ -8,6 +8,7 @@ import { main } from "../src/cli.js";
 import {
   capture,
   dependencies,
+  FakeSignals,
   fakeResult,
   SYNTHETIC_CREDENTIALS,
 } from "./cli-fixtures.js";
@@ -503,6 +504,105 @@ describe("CLI workbench", () => {
     expect(calls).toEqual(["compare-scans"]);
   });
 
+  test.each([false, true])(
+    "keeps matching progress on stderr with TTY=%s",
+    async (isTTY) => {
+      const stdout = capture();
+      const stderr = capture(isTTY);
+      expect(
+        await main(
+          ["scans", "match", "before", "after", "--json"],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onWorkbench: (args): JsonObject =>
+              args[0] === "compare-scans"
+                ? { matchingInputs: { before: [], after: [] } }
+                : { summary: { persisting: 1 } },
+            onMatch: async (_input, options) => {
+              const progress = {
+                phase: "catalogue" as const,
+                beforeFindings: 10,
+                beforeIssues: 3,
+                afterFindings: 2,
+                page: 1,
+                pages: 2,
+              };
+              options?.onProgress?.(progress);
+              options?.onProgress?.(progress);
+              options?.onProgress?.({ ...progress, phase: "evidence" });
+              return { matches: [], uncertain: [] };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual({ summary: { persisting: 1 } });
+      if (isTTY) {
+        expect(stderr.text().match(/Matching 2 findings/g)).toHaveLength(1);
+        expect(stderr.text()).toContain("3 known issues");
+        expect(stderr.text()).toContain("catalogue page 1/2");
+        expect(stderr.text()).toContain("selected finding evidence");
+      } else {
+        expect(stderr.text()).toBe("");
+      }
+    },
+  );
+
+  test.each([
+    [["before", "after"], "SIGINT", 130],
+    [["--all"], "SIGTERM", 143],
+  ] as const)(
+    "cancels matching %j on %s before saving",
+    async (args, signal, expectedExit) => {
+      const signals = new FakeSignals();
+      const commands: string[] = [];
+      const stderr = capture();
+      expect(
+        await main(
+          ["scans", "match", ...args, "--json"],
+          capture().stream,
+          stderr.stream,
+          dependencies({
+            signals,
+            environment: { CODEX_SECURITY_STATE_DIR: "/synthetic/state" },
+            onWorkbench: (command): JsonObject => {
+              commands.push(command[0]!);
+              const before = [{ occurrenceId: "before" }];
+              const after = [{ occurrenceId: "after" }];
+              return command[0] === "compare-scans"
+                ? { matchingInputs: { before, after } }
+                : {
+                    batches: [
+                      {
+                        afterScanId: "after",
+                        afterFindings: after,
+                        beforeScans: [{ scanId: "before", findings: before }],
+                      },
+                    ],
+                  };
+            },
+            onMatch: async (_input, options) => {
+              expect(options).toMatchObject({
+                environment: { CODEX_SECURITY_STATE_DIR: "/synthetic/state" },
+                workingDirectory: "/current/repository",
+              });
+              signals.emit(signal);
+              expect(options?.signal?.aborted).toBe(true);
+              return { matches: [], uncertain: [] };
+            },
+          }),
+        ),
+      ).toBe(expectedExit);
+      expect(commands).not.toContain("save-scan-comparison");
+      expect(stderr.text()).toContain("Saved comparisons are preserved");
+      expect(
+        [...signals.listeners.values()].every(
+          (listeners) => listeners.size === 0,
+        ),
+      ).toBe(true);
+    },
+  );
+
   test("matches all scans once per later scan", async () => {
     const finding = (occurrenceId: string) => ({ occurrenceId });
     const batches = [
@@ -625,6 +725,8 @@ describe("CLI workbench", () => {
       matchedPairs: 3,
       skippedPairs: 1,
       findingMatches: 4,
+      relatedPairs: 0,
+      uncertainPairs: 1,
     });
   });
 

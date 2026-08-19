@@ -741,12 +741,58 @@ cause; `scans match --all` matches all completed scans of the current repository
 including other worktrees and clones. Saved matches appear in `scans show` and
 are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
 
+Matching reuses confirmed historical links to build a compact catalogue of known
+issues. Codex compares the later findings against that catalogue and can request
+the full stored evidence for selected issues. Large inputs are paged within
+Codex's message limit. This uses the existing Codex authentication; no embedding
+model, vector database, or separate API key is required.
+
+Only high-confidence duplicates are grouped. Plausible duplicates can remain
+uncertain, while findings with related but independent root causes are shown as
+related and kept separate. Matching preserves the original findings, triage,
+and sealed scan artifacts. Use `scans match --all --force` to rebuild saved
+comparisons in chronological order. Ctrl-C stops matching and preserves
+comparisons that have already been saved.
+
 `scans compare` compares the two latest completed scans. Pass one scan ID to
 compare it with the latest completed scan, or two IDs to select both scans. It
 matches findings by root cause, reuses saved matches, and reports findings as
 new, persisting, reopened, resolved, or unknown. Missing findings are not
 treated as resolved when the later scan is incomplete or does not cover their
 original scope.
+
+SDK callers can compare findings without saving a workbench comparison:
+
+```ts
+import { readFile } from "node:fs/promises";
+import {
+  matchScanFindings,
+  type FindingsDocument,
+} from "@openai/codex-security";
+
+const before = JSON.parse(
+  await readFile("/path/to/earlier-scan/findings.json", "utf8"),
+) as FindingsDocument;
+const after = JSON.parse(
+  await readFile("/path/to/later-scan/findings.json", "utf8"),
+) as FindingsDocument;
+
+const comparison = await matchScanFindings(
+  { before: before.findings, after: after.findings },
+  {
+    workingDirectory: "/path/to/repository",
+    onProgress: ({ phase, beforeIssues }) => {
+      console.error(`${phase}: ${beforeIssues} known issues`);
+    },
+  },
+);
+console.log(comparison.matches, comparison.uncertain, comparison.related ?? []);
+```
+
+Pass `knownFindingGroups` in the input to reuse confirmed groups of stable
+`findingId` values from your own store. Returned matches always identify the
+original `occurrenceId` values. The options also accept a model, reasoning
+effort, and `AbortSignal`.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a

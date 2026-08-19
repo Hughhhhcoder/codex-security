@@ -324,8 +324,23 @@ describe("semantic scan comparison", () => {
     });
     expect(calls.turnOptions).toMatchObject({ signal: controller.signal });
     expect(calls.turnOptions?.outputSchema).toMatchObject({
-      required: ["matches", "uncertain"],
+      required: ["matches", "uncertain", "related", "request"],
     });
+    const strictObjects = (schema: unknown): void => {
+      if (schema === null || typeof schema !== "object") return;
+      const object = schema as Record<string, unknown>;
+      if (object["type"] === "object") {
+        expect(object["required"]).toEqual(
+          Object.keys(object["properties"] as object),
+        );
+        expect(object["additionalProperties"]).toBe(false);
+      }
+      for (const value of Object.values(object)) strictObjects(value);
+    };
+    strictObjects(calls.turnOptions?.outputSchema);
+    expect(JSON.stringify(calls.turnOptions?.outputSchema)).toContain(
+      '"type":"null"',
+    );
     expect(calls.prompt).toContain(
       "same underlying root cause and remediation",
     );
@@ -466,11 +481,111 @@ describe("semantic scan comparison", () => {
     },
   );
 
+  test.each(["split", "combined", "confirmed alias"] as const)(
+    "retains known identities when a later finding is %s",
+    async (scenario) => {
+      const oldA = { findingId: "identity-a", occurrenceId: "old-a" };
+      const oldB = { findingId: "identity-b", occurrenceId: "old-b" };
+      const newA = { findingId: "identity-a", occurrenceId: "new-a" };
+      const newB = { findingId: "identity-b", occurrenceId: "new-b" };
+      const before = scenario === "combined" ? [oldA, oldB] : [oldA];
+      const after =
+        scenario === "split"
+          ? [newA, newB]
+          : scenario === "combined"
+            ? [newA]
+            : [newB];
+      const knownFindingGroups =
+        scenario === "confirmed alias"
+          ? [["identity-a", "identity-b"]]
+          : undefined;
+      let modelCalled = false;
+      const saved: ScanComparisonResult[] = [];
+      await matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: before,
+        falsePositives: [],
+        findings: after,
+        async workbench(args) {
+          if (args[0] === "list-unmatched-scan-pairs") {
+            return {
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: after,
+                  beforeScans: [{ scanId: "prior", findings: before }],
+                  knownFindingGroups,
+                },
+              ],
+            };
+          }
+          saved.push(JSON.parse(args.at(-1)!) as ScanComparisonResult);
+          return {};
+        },
+        async matchFindings(input) {
+          modelCalled = true;
+          expect(input).toEqual({ before, after });
+          return {
+            matches: [
+              {
+                beforeOccurrenceIds: before.map(
+                  ({ occurrenceId }) => occurrenceId,
+                ),
+                afterOccurrenceIds: after.map(
+                  ({ occurrenceId }) => occurrenceId,
+                ),
+                confidence: "high",
+                reason:
+                  "The scan split or combined the same defective control.",
+              },
+            ],
+            uncertain: [],
+          };
+        },
+      });
+      expect(modelCalled).toBe(scenario !== "confirmed alias");
+      expect(saved).toEqual([
+        {
+          matches: [
+            expect.objectContaining({
+              beforeOccurrenceIds: before.map(
+                ({ occurrenceId }) => occurrenceId,
+              ),
+              afterOccurrenceIds: after.map(({ occurrenceId }) => occurrenceId),
+            }),
+          ],
+          uncertain: [],
+        },
+      ]);
+    },
+  );
+
   test("rejects malformed model JSON", async () => {
     const { codex } = fakeCodex("not-json");
     await expect(
-      matchScanFindings({ before: [], after: [] }, { codex }),
+      matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        { codex },
+      ),
     ).rejects.toThrow("invalid JSON");
+  });
+
+  test("does not start Codex when either scan has no findings", async () => {
+    const codex: NonNullable<ScanComparisonOptions["codex"]> = {
+      startThread() {
+        throw new Error("No model is needed.");
+      },
+    };
+    for (const input of [
+      { before: [], after: [finding("after")] },
+      { before: [finding("before")], after: [] },
+    ]) {
+      expect(await matchScanFindings(input, { codex })).toEqual({
+        matches: [],
+        uncertain: [],
+      });
+    }
   });
 
   test("allows cross-history uncertainty without relaxing two-scan matching", async () => {

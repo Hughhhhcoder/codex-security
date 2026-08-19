@@ -19,6 +19,7 @@ test("loads each scan's matching findings once across historical batches", () =>
     "CREATE TABLE security_targets (id TEXT, current_path TEXT);",
     "CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, status TEXT, started_at TEXT);",
     "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);",
+    "CREATE TABLE scan_comparison_matches (before_occurrence_id TEXT, after_occurrence_id TEXT);",
     "CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, details_json TEXT, remediation TEXT, severity TEXT, summary TEXT, title TEXT);",
     "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);",
     "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
