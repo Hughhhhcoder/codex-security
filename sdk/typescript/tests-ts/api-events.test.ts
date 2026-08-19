@@ -897,8 +897,6 @@ describe("one-shot scan events", () => {
     for (const message of [
       "Reconnecting... 1/5 (401 invalid API key org-private)",
       "Reconnecting... 1/5 (403 model access denied org-private)",
-      "Reconnecting... 1/5 (Your access token could not be refreshed. Please log out and sign in again.)",
-      "Reconnecting... 1/5 (Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.)",
     ]) {
       const scanDir = join(await temporaryDirectory(), "partial-scan");
       await mkdir(scanDir, { mode: 0o700 });

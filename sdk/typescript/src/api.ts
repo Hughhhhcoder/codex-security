@@ -2435,11 +2435,7 @@ async function readCodexTurn(options: {
     } else if (event.type === "error" && typeof event["message"] === "string") {
       const message = event["message"];
       const classification = classifyConnectionFailure(message);
-      if (
-        classification === "reauthentication_required" ||
-        classification === "unauthorized" ||
-        classification === "forbidden"
-      ) {
+      if (classification === "unauthorized" || classification === "forbidden") {
         throw new CodexSecurityError(message);
       }
       const reconnect = reconnectAttempt(message);
@@ -2957,7 +2953,6 @@ function turnFailureMessage(error: unknown): string {
 export function classifyConnectionFailure(
   error: unknown,
 ):
-  | "reauthentication_required"
   | "rate_limited"
   | "unauthorized"
   | "forbidden"
@@ -2967,13 +2962,6 @@ export function classifyConnectionFailure(
   const message = error instanceof Error ? error.message : String(error);
   if (/\b(?:sqlite3?|database|workbench)\b/iu.test(message)) {
     return "unknown";
-  }
-  if (
-    /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
-      message,
-    )
-  ) {
-    return "reauthentication_required";
   }
   if (
     /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b/iu.test(

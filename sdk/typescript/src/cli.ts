@@ -5177,13 +5177,19 @@ function scanFailureMessage(
   // errors can name the organization or project, which must not reach stderr or
   // the JSON error field.
   if (isLocalScanFailure(error)) return diagnosticValue(error);
+  if (
+    /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
+      errorMessage(error),
+    )
+  ) {
+    return (
+      "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
+      "Codex may need it to load workspace-managed policies, even when an API key is selected. " +
+      "Check 'npx @openai/codex-security login status' and retry if the sign-in has changed. " +
+      "To replace a stale ChatGPT sign-in, run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
+    );
+  }
   switch (classifyConnectionFailure(error)) {
-    case "reauthentication_required":
-      return (
-        "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
-        "Codex may need a valid ChatGPT sign-in to load workspace-managed policies, even when an API key is selected. " +
-        "Run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login', and retry."
-      );
     case "unauthorized":
       if (authentication?.method === "aws_credentials") {
         return (

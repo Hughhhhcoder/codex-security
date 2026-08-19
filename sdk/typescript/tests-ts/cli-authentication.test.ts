@@ -894,19 +894,17 @@ describe("CLI authentication", () => {
       ]) {
         const stdout = capture();
         const stderr = capture(false);
+        const partial = join(stateDirectory, "partial-scan");
         const deps = dependencies({
           environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
-        });
-        const partial = join(stateDirectory, "partial-scan");
-        deps.createSecurity = () => ({
-          run: async (_repository, options) => {
-            options?.onOutputDirReady?.(partial);
+          onTurn: (_repository, options) => {
+            (options as ScanOptions).onOutputDirReady?.(partial);
+          },
+          onRun: () => {
             throw new CodexSecurityError(
               `Codex Exec exited with code 1: Error: ${detail} Please log out and sign in again. org-example sk-proj-SYNTHETIC_SECRET_456`,
             );
           },
-          preflight: async () => fakePreflight(),
-          close: async () => {},
         });
 
         expect(
@@ -919,11 +917,12 @@ describe("CLI authentication", () => {
         ).toBe(2);
         expect(stdout.text()).toBe("");
         expect(stderr.text()).toContain("workspace-managed policies");
+        expect(stderr.text()).toContain(
+          "npx @openai/codex-security login status",
+        );
+        expect(stderr.text()).toContain("retry if the sign-in has changed");
         expect(stderr.text()).toContain("npx @openai/codex-security logout");
         expect(stderr.text()).toContain("npx @openai/codex-security login");
-        expect(stderr.text()).toContain(
-          'classification="reauthentication_required"',
-        );
         expect(stderr.text()).toContain(
           `Partial output was kept at ${partial}.`,
         );
@@ -954,13 +953,11 @@ describe("CLI authentication", () => {
     ] as const) {
       const stdout = capture();
       const stderr = capture(false);
-      const deps = dependencies({ environment });
-      deps.createSecurity = () => ({
-        run: async () => {
+      const deps = dependencies({
+        environment,
+        onRun: () => {
           throw new CodexSecurityError(message);
         },
-        preflight: async () => fakePreflight(),
-        close: async () => {},
       });
 
       expect(
