@@ -3848,7 +3848,7 @@ describe("runtime directories and plugin Python boundary", () => {
           "assert os.environ.get('OPENROUTER_API_KEY') is None",
           "assert os.environ.get('FIREWORKS_API_KEY') is None",
           "if '--help' in sys.argv:",
-          "    with Path(__file__).with_name('help-calls').open('a') as calls: calls.write('help\\n')",
+          "    with Path(__file__).with_name('help-calls').open('ab') as calls: calls.write(b'help\\n')",
           "    if os.environ.get('FAIL_COMPARISON_HELP'): sys.exit('Synthetic help failure')",
           "parser = argparse.ArgumentParser()",
           "command = parser.add_subparsers(dest='command', required=True).add_parser('save-scan-comparison')",

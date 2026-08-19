@@ -14,6 +14,20 @@ import {
 } from "../src/scan-comparison.js";
 
 const empty = { matches: [], uncertain: [] } satisfies ScanComparisonResult;
+const confirmedPair = (
+  before: string,
+  after: string,
+): ScanComparisonResult => ({
+  matches: [
+    {
+      beforeOccurrenceIds: [before],
+      afterOccurrenceIds: [after],
+      confidence: "high",
+      reason: "The same synthetic control.",
+    },
+  ],
+  uncertain: [],
+});
 const finding = (
   occurrenceId: string,
   details: Record<string, unknown> = {},
@@ -303,79 +317,90 @@ describe("finding catalogue", () => {
     expect(result.related).toEqual([]);
   });
 
-  test("lets Codex inspect a selected issue and expands its saved occurrences", async () => {
-    const before = [
-      finding("old-a", {
-        findingId: "identity-a",
-        title: "Old title",
-        codeEvidence: [{ code: "EARLIER_EVIDENCE" }],
-      }),
-      finding("old-b", {
-        findingId: "identity-b",
-        title: "New title",
-        codeEvidence: [{ code: "LATEST_EVIDENCE" }],
-      }),
-      finding("unrelated", {
-        findingId: "identity-c",
-        codeEvidence: [{ code: "UNREQUESTED_EVIDENCE" }],
-      }),
-    ];
-    const after = [
-      finding("new", {
-        title: "Current title",
-        codeEvidence: [{ code: "CURRENT_EVIDENCE" }],
-      }),
-    ];
-    const observed = conversation((prompt, index) => {
-      if (index === 0) {
-        expect(data<CatalogueData>(prompt).findings.before).toHaveLength(2);
-        expect(prompt).not.toContain("EARLIER_EVIDENCE");
+  test.each(["sync", "async"])(
+    "inspects selected evidence and expands saved occurrences despite a failing %s progress observer",
+    async (failure) => {
+      const before = [
+        finding("old-a", {
+          findingId: "identity-a",
+          title: "Old title",
+          codeEvidence: [{ code: "EARLIER_EVIDENCE" }],
+        }),
+        finding("old-b", {
+          findingId: "identity-b",
+          title: "New title",
+          codeEvidence: [{ code: "LATEST_EVIDENCE" }],
+        }),
+        finding("unrelated", {
+          findingId: "identity-c",
+          codeEvidence: [{ code: "UNREQUESTED_EVIDENCE" }],
+        }),
+      ];
+      const after = [
+        finding("new", {
+          title: "Current title",
+          codeEvidence: [{ code: "CURRENT_EVIDENCE" }],
+        }),
+      ];
+      const observed = conversation((prompt, index) => {
+        if (index === 0) {
+          expect(data<CatalogueData>(prompt).findings.before).toHaveLength(2);
+          expect(prompt).not.toContain("EARLIER_EVIDENCE");
+          return {
+            ...empty,
+            request: {
+              kind: "evidence",
+              beforeOccurrenceIds: ["old-b"],
+              afterOccurrenceIds: ["new"],
+              offset: 0,
+            },
+          };
+        }
+        const evidence = JSON.parse(
+          data<EvidenceData>(prompt).content,
+        ) as ScanComparisonInput;
+        expect(evidence.before.map((item) => item.occurrenceId)).toEqual([
+          "old-a",
+          "old-b",
+        ]);
+        expect(prompt).toContain("EARLIER_EVIDENCE");
+        expect(prompt).toContain("CURRENT_EVIDENCE");
+        expect(prompt).not.toContain("UNREQUESTED_EVIDENCE");
         return {
-          ...empty,
-          request: {
-            kind: "evidence",
-            beforeOccurrenceIds: ["old-b"],
-            afterOccurrenceIds: ["new"],
-            offset: 0,
-          },
+          matches: [
+            {
+              beforeOccurrenceIds: ["old-b"],
+              afterOccurrenceIds: ["new"],
+              confidence: "high",
+              reason: "Same shared control.",
+            },
+          ],
+          uncertain: [],
         };
-      }
-      const evidence = JSON.parse(
-        data<EvidenceData>(prompt).content,
-      ) as ScanComparisonInput;
-      expect(evidence.before.map((item) => item.occurrenceId)).toEqual([
+      });
+
+      const phases: string[] = [];
+      const result = await matchScanFindings(
+        { before, after, knownFindingGroups: [["identity-a", "identity-b"]] },
+        {
+          codex: observed.codex,
+          onProgress(progress) {
+            phases.push(progress.phase);
+            const error = new Error("Optional observer");
+            if (failure === "async") return Promise.reject(error);
+            throw error;
+          },
+        },
+      );
+      expect(result.matches[0]?.beforeOccurrenceIds).toEqual([
         "old-a",
         "old-b",
       ]);
-      expect(prompt).toContain("EARLIER_EVIDENCE");
-      expect(prompt).toContain("CURRENT_EVIDENCE");
-      expect(prompt).not.toContain("UNREQUESTED_EVIDENCE");
-      return {
-        matches: [
-          {
-            beforeOccurrenceIds: ["old-b"],
-            afterOccurrenceIds: ["new"],
-            confidence: "high",
-            reason: "Same shared control.",
-          },
-        ],
-        uncertain: [],
-      };
-    });
-
-    const result = await matchScanFindings(
-      { before, after, knownFindingGroups: [["identity-a", "identity-b"]] },
-      {
-        codex: observed.codex,
-        onProgress() {
-          throw new Error("Optional observer");
-        },
-      },
-    );
-    expect(result.matches[0]?.beforeOccurrenceIds).toEqual(["old-a", "old-b"]);
-    expect(observed.threads()).toBe(1);
-    expect(observed.prompts).toHaveLength(2);
-  });
+      expect(observed.threads()).toBe(1);
+      expect(observed.prompts).toHaveLength(2);
+      expect(phases).toEqual(["catalogue", "evidence", "complete"]);
+    },
+  );
 
   test("keeps cost-limited automatic matching to one model call", async () => {
     const input = { before: [finding("old")], after: [finding("new")] };
@@ -464,6 +489,120 @@ describe("finding catalogue", () => {
       return [...page.before, ...page.after].map((item) => item.occurrenceId);
     });
     expect(seen).toEqual(["a", "b", "c"]);
+  });
+
+  test("supplies omitted evidence before accepting a proposed match", async () => {
+    const input = {
+      before: [finding("old", { rootCause: "a".repeat(1_100_000) })],
+      after: [finding("new", { rootCause: "b".repeat(1_100_000) })],
+    };
+    const proposed = confirmedPair("old", "new");
+    const revised: ScanComparisonResult = {
+      ...empty,
+      related: [
+        {
+          beforeOccurrenceId: "old",
+          afterOccurrenceId: "new",
+          reason: "The complete evidence identifies separate controls.",
+        },
+      ],
+    };
+    const pieces: string[] = [];
+    let offset = 0;
+    const observed = conversation((prompt, index) => {
+      if (index === 0) {
+        const cards = data<CatalogueData>(prompt).findings;
+        expect(cards.before).toEqual([
+          { occurrenceId: "old", detailsOmitted: true },
+        ]);
+        expect(cards.after).toEqual([
+          { occurrenceId: "new", detailsOmitted: true },
+        ]);
+        return proposed;
+      }
+      const page = data<EvidenceData>(prompt);
+      expect(page.beforeOccurrenceIds).toEqual(["old"]);
+      expect(page.afterOccurrenceIds).toEqual(["new"]);
+      expect(page.offset).toBe(offset);
+      pieces.push(page.content);
+      offset += characters(page.content);
+      return page.nextOffset === null ? revised : proposed;
+    });
+    expect(await matchScanFindings(input, { codex: observed.codex })).toEqual(
+      revised,
+    );
+    expect(pieces.length).toBeGreaterThan(1);
+    expect(JSON.parse(pieces.join(""))).toEqual(input);
+  });
+
+  test("finishes requested evidence before accepting a proposed match", async () => {
+    const original = finding("old", {
+      codeEvidence: [{ code: "x".repeat(2_200_000) }],
+    });
+    const proposed = confirmedPair("old", "new");
+    const pieces: string[] = [];
+    let offset = 0;
+    const observed = conversation((prompt, index) => {
+      if (index === 0)
+        return {
+          ...empty,
+          request: {
+            kind: "evidence",
+            beforeOccurrenceIds: ["old"],
+            afterOccurrenceIds: [],
+            offset: 0,
+          },
+        };
+      const page = data<EvidenceData>(prompt);
+      expect(page.offset).toBe(offset);
+      pieces.push(page.content);
+      offset += characters(page.content);
+      return proposed;
+    });
+    expect(
+      await matchScanFindings(
+        { before: [original], after: [finding("new")] },
+        { codex: observed.codex },
+      ),
+    ).toEqual(proposed);
+    expect(pieces.length).toBeGreaterThan(1);
+    expect(JSON.parse(pieces.join(""))).toEqual({
+      before: [original],
+      after: [],
+    });
+  });
+
+  test("does not finish unrelated evidence when confirming another match", async () => {
+    const proposed = confirmedPair("old", "new");
+    const observed = conversation((prompt, index) => {
+      if (index === 0)
+        return {
+          ...empty,
+          request: {
+            kind: "evidence",
+            beforeOccurrenceIds: ["other"],
+            afterOccurrenceIds: [],
+            offset: 0,
+          },
+        };
+      expect(data<EvidenceData>(prompt).nextOffset).not.toBeNull();
+      return proposed;
+    });
+    expect(
+      await matchScanFindings(
+        {
+          before: [
+            finding("old"),
+            finding("other", {
+              codeEvidence: [{ code: "x".repeat(2_200_000) }],
+            }),
+          ],
+          after: [finding("new")],
+        },
+        { codex: observed.codex },
+      ),
+    ).toEqual(proposed);
+    expect(observed.prompts).toHaveLength(2);
   });
 
   test("pages a single oversized evidence record without losing Unicode", async () => {

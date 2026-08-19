@@ -751,8 +751,10 @@ issues. Stable identities and confirmed aliases apply across both scans; a fully
 known comparison does not need a model call. When new judgments are needed,
 Codex compares the later findings against the catalogue and can request the full
 stored evidence for selected issues. Overlapping requests do not resend the same
-stored occurrences. Large inputs are paged within Codex's message limit. This
-uses the existing Codex authentication; no embedding model,
+stored occurrences. Large inputs are paged within Codex's message limit. If a
+summary was omitted or Codex started reading a long record, the relevant pages
+are finished before it can confirm a match. This uses the existing Codex
+authentication; no embedding model,
 vector database, or separate API key is required.
 
 Only high-confidence duplicates are grouped. Plausible duplicates can remain
@@ -805,7 +807,8 @@ console.log(comparison.matches, comparison.uncertain, comparison.related ?? []);
 Pass `knownFindingGroups` in the input to reuse confirmed groups of stable
 `findingId` values from your own store. Returned matches always identify the
 original `occurrenceId` values. The options also accept a model, reasoning
-effort, and `AbortSignal`.
+effort, and `AbortSignal`. Progress callbacks are optional; their errors do not
+interrupt matching.
 
 The CLI uses [Incur](https://github.com/wevm/incur) for agent-friendly discovery
 and structured output. Inspect the command manifest with `--llms`, inspect a
