@@ -313,7 +313,7 @@ describe("scan history renderer", () => {
       "5 scans",
       "0 comparisons",
       "0 root-cause matches",
-      "2 related pairs kept separate",
+      "2 related pairs recorded",
       "1 uncertain pair",
       "2 scans unavailable",
     ]) {

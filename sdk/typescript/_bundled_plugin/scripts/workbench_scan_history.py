@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import sys
+from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -328,8 +329,9 @@ def _saved_finding_links(
     ]
 
 
-def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[list[str]]:
+def _finding_aliases(links: Iterable[tuple[str, str]]) -> dict[str, str]:
     parents: dict[str, str] = {}
+    finding_ids: set[str] = set()
 
     def root(value: str) -> str:
         path = []
@@ -340,18 +342,25 @@ def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[
             parents[item] = value
         return value
 
-    for link in links:
-        if link["before_scan_id"] not in scan_ids or link["after_scan_id"] not in scan_ids:
-            continue
-        before = root(link["before_finding_id"])
-        after = root(link["after_finding_id"])
+    for before_id, after_id in links:
+        finding_ids.update((before_id, after_id))
+        before = root(before_id)
+        after = root(after_id)
         if before != after:
             parents[after] = before
-    groups: dict[str, set[str]] = {}
-    for finding_id in parents:
-        identity = root(finding_id)
-        groups.setdefault(identity, {identity}).add(finding_id)
-    return sorted(sorted(group) for group in groups.values())
+    return {finding_id: root(finding_id) for finding_id in finding_ids}
+
+
+def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[list[str]]:
+    aliases = _finding_aliases(
+        (link["before_finding_id"], link["after_finding_id"])
+        for link in links
+        if link["before_scan_id"] in scan_ids and link["after_scan_id"] in scan_ids
+    )
+    groups: dict[str, list[str]] = {}
+    for finding_id, identity in aliases.items():
+        groups.setdefault(identity, []).append(finding_id)
+    return sorted(sorted(group) for group in groups.values() if len(group) > 1)
 
 
 def compare_scans(
@@ -490,14 +499,18 @@ def compare_scans(
     if matches is not None and matches.get("related"):
         before_by_id = {row["id"]: row for row in before_findings.values()}
         after_by_id = {row["id"]: row for row in after_findings.values()}
-        result["related"] = [
-            {
-                **pair,
-                "beforeTitle": before_by_id[pair["beforeOccurrenceId"]]["title"],
-                "afterTitle": after_by_id[pair["afterOccurrenceId"]]["title"],
-            }
-            for pair in matches["related"]
-        ]
+        related = _separate_finding_pairs(
+            connection, matches["related"], {**before_by_id, **after_by_id}
+        )
+        if related:
+            result["related"] = [
+                {
+                    **pair,
+                    "beforeTitle": before_by_id[pair["beforeOccurrenceId"]]["title"],
+                    "afterTitle": after_by_id[pair["afterOccurrenceId"]]["title"],
+                }
+                for pair in related
+            ]
     if include_matching_inputs:
         prior_scan_ids = {
             scan["id"]
@@ -656,10 +669,86 @@ def _valid_finding_pair(value: Any) -> bool:
     )
 
 
+def _rows_for_ids(
+    connection: sqlite3.Connection, query: str, ids: Iterable[str]
+) -> Iterator[sqlite3.Row]:
+    values = tuple(dict.fromkeys(ids))
+    getlimit = getattr(connection, "getlimit", None)
+    # Python 3.10 lacks getlimit; 999 is SQLite's older host-parameter limit.
+    limit = getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if getlimit else 999
+    for start in range(0, len(values), limit):
+        batch = values[start : start + limit]
+        yield from connection.execute(
+            query.format(placeholders=", ".join("?" for _ in batch)), batch
+        )
+
+
+def _confirmed_finding_aliases(
+    connection: sqlite3.Connection, occurrence_ids: Iterable[str]
+) -> dict[str, str]:
+    # Keep the selected identities outermost instead of scanning all saved links.
+    neighbors = """
+        FROM linked
+        CROSS JOIN scans AS source_scan ON source_scan.target_id = linked.target_id
+        CROSS JOIN finding_occurrences AS source
+            ON source.scan_id = source_scan.id AND source.finding_id = linked.finding_id
+        CROSS JOIN scan_comparison_matches AS matches
+            ON matches.before_occurrence_id = source.id OR matches.after_occurrence_id = source.id
+        CROSS JOIN finding_occurrences AS neighbor ON neighbor.id = CASE
+            WHEN matches.before_occurrence_id = source.id THEN matches.after_occurrence_id
+            ELSE matches.before_occurrence_id END
+        CROSS JOIN scans AS neighbor_scan ON neighbor_scan.id = neighbor.scan_id
+    """
+    # Traverse only the selected findings' components, including recurring stable IDs.
+    query = f"""
+        WITH RECURSIVE linked(target_id, finding_id) AS (
+            SELECT scans.target_id, occurrences.finding_id
+            FROM finding_occurrences AS occurrences
+            JOIN scans ON scans.id = occurrences.scan_id
+            WHERE occurrences.id IN ({{placeholders}})
+            UNION
+            SELECT neighbor_scan.target_id, neighbor.finding_id
+            {neighbors}
+        )
+        SELECT DISTINCT linked.finding_id AS before_finding_id,
+            neighbor.finding_id AS after_finding_id
+        {neighbors}
+    """
+    return _finding_aliases(
+        (row["before_finding_id"], row["after_finding_id"])
+        for row in _rows_for_ids(connection, query, occurrence_ids)
+    )
+
+
+def _separate_finding_pairs(
+    connection: sqlite3.Connection,
+    pairs: list[dict[str, Any]],
+    occurrences: dict[str, sqlite3.Row],
+) -> list[dict[str, Any]]:
+    if not pairs:
+        return []
+    aliases = _confirmed_finding_aliases(
+        connection, (pair["beforeOccurrenceId"] for pair in pairs)
+    )
+
+    def identity(occurrence_id: str) -> str:
+        finding_id = occurrences[occurrence_id]["finding_id"]
+        return aliases.get(finding_id, finding_id)
+
+    return [
+        pair
+        for pair in pairs
+        if identity(pair["beforeOccurrenceId"]) != identity(pair["afterOccurrenceId"])
+    ]
+
+
 def finding_relations(
-    connection: sqlite3.Connection, scan_id: str
+    connection: sqlite3.Connection, scan_id: str, occurrence_ids: Iterable[str]
 ) -> dict[str, list[dict[str, Any]]]:
-    result: dict[str, list[dict[str, Any]]] = {}
+    selected = set(occurrence_ids)
+    if not selected:
+        return {}
+    pairs = []
     for comparison in connection.execute(
         "SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons "
         "WHERE before_scan_id = ? OR after_scan_id = ? "
@@ -669,20 +758,48 @@ def finding_relations(
         side = "before" if comparison["before_scan_id"] == scan_id else "after"
         other = "after" if side == "before" else "before"
         for pair in json.loads(comparison["result_json"]).get("related", []):
-            finding = connection.execute(
-                "SELECT id, finding_id, title FROM finding_occurrences WHERE id = ? AND scan_id = ?",
-                (pair[f"{other}OccurrenceId"], comparison[f"{other}_scan_id"]),
-            ).fetchone()
-            if finding is not None:
-                result.setdefault(pair[f"{side}OccurrenceId"], []).append(
+            if pair[f"{side}OccurrenceId"] in selected:
+                pairs.append(
                     {
-                        "findingId": finding["finding_id"],
-                        "occurrenceId": finding["id"],
+                        "beforeOccurrenceId": pair[f"{side}OccurrenceId"],
+                        "afterOccurrenceId": pair[f"{other}OccurrenceId"],
+                        "afterScanId": comparison[f"{other}_scan_id"],
                         "reason": pair["reason"],
-                        "scanId": comparison[f"{other}_scan_id"],
-                        "title": finding["title"],
                     }
                 )
+    occurrences = {
+        row["id"]: row
+        for row in _rows_for_ids(
+            connection,
+            "SELECT id, finding_id, scan_id, title FROM finding_occurrences "
+            "WHERE id IN ({placeholders})",
+            (
+                pair[key]
+                for pair in pairs
+                for key in ("beforeOccurrenceId", "afterOccurrenceId")
+            ),
+        )
+    }
+    pairs = [
+        pair
+        for pair in pairs
+        if pair["beforeOccurrenceId"] in occurrences
+        and occurrences[pair["beforeOccurrenceId"]]["scan_id"] == scan_id
+        and pair["afterOccurrenceId"] in occurrences
+        and occurrences[pair["afterOccurrenceId"]]["scan_id"] == pair["afterScanId"]
+    ]
+    result: dict[str, list[dict[str, Any]]] = {}
+    for pair in _separate_finding_pairs(connection, pairs, occurrences):
+        finding = occurrences[pair["afterOccurrenceId"]]
+        result.setdefault(pair["beforeOccurrenceId"], []).append(
+            {
+                "findingId": finding["finding_id"],
+                "occurrenceId": finding["id"],
+                "reason": pair["reason"],
+                "scanId": pair["afterScanId"],
+                "title": finding["title"],
+            }
+        )
     return result
 
 

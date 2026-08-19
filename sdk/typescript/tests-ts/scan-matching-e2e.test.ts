@@ -444,6 +444,38 @@ test("matches sealed scan history end to end without merging related findings", 
     expect(await cli(["scans", "compare", first.scanId, third.scanId])).toEqual(
       compared,
     );
+    const largeReason =
+      "Later synthetic evidence confirms a combined control. ".repeat(40_000) +
+      "🙂";
+    const combined = await save(third.scanId, fourth.scanId, {
+      matches: [
+        {
+          beforeOccurrenceIds: [c.occurrenceId, d.occurrenceId],
+          afterOccurrenceIds: [e.occurrenceId],
+          confidence: "high",
+          reason: largeReason,
+        },
+      ],
+      uncertain: [],
+    });
+    expect((combined["findings"] as JsonObject[])[0]?.["matchReason"]).toBe(
+      largeReason,
+    );
+    expect(
+      (await cli(["scans", "compare", first.scanId, third.scanId]))["related"],
+    ).toBeUndefined();
+    const linkedDetail = await workbench([
+      "get-scan",
+      "--scan-id",
+      third.scanId,
+      "--occurrence-id",
+      d.occurrenceId,
+    ]);
+    const linkedFinding = (
+      (linkedDetail["scan"] as JsonObject)["findings"] as JsonObject[]
+    ).find((finding) => finding["occurrenceId"] === d.occurrenceId);
+    expect(linkedFinding).toBeDefined();
+    expect(linkedFinding?.["related"]).toBeUndefined();
     expect(await digest()).toEqual(originalArtifacts);
   } finally {
     await rm(root, { recursive: true, force: true });

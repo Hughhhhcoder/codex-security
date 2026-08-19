@@ -126,6 +126,124 @@ describe("finding catalogue", () => {
     ]);
   });
 
+  test.each(["stable identity", "confirmed alias"] as const)(
+    "reuses a %s across opposite sides without starting Codex",
+    async (kind) => {
+      const observed = conversation(() => empty);
+      const result = await matchScanFindings(
+        {
+          before: [finding("old", { findingId: "identity-a" })],
+          after: [
+            finding("new", {
+              findingId:
+                kind === "stable identity" ? "identity-a" : "identity-b",
+            }),
+          ],
+          knownFindingGroups: [
+            ["identity-a", "identity-bridge"],
+            ["identity-bridge", "identity-b"],
+          ],
+        },
+        { codex: observed.codex },
+      );
+      expect(result).toMatchObject({
+        matches: [
+          {
+            beforeOccurrenceIds: ["old"],
+            afterOccurrenceIds: ["new"],
+            confidence: "high",
+          },
+        ],
+        uncertain: [],
+      });
+      expect(observed.threads()).toBe(0);
+    },
+  );
+
+  test.each(["omitted", "extended"] as const)(
+    "preserves an %s cross-side alias while matching another finding",
+    async (kind) => {
+      const observed = conversation(() => ({
+        matches:
+          kind === "extended"
+            ? [
+                {
+                  beforeOccurrenceIds: ["old"],
+                  afterOccurrenceIds: ["other"],
+                  confidence: "high",
+                  reason: "The same control was split.",
+                },
+              ]
+            : [],
+        uncertain:
+          kind === "omitted"
+            ? [
+                {
+                  beforeOccurrenceId: "old",
+                  afterOccurrenceId: "new",
+                  reason: "The model omitted a confirmed alias.",
+                },
+              ]
+            : [],
+        related: [
+          {
+            beforeOccurrenceId: "old",
+            afterOccurrenceId: kind === "omitted" ? "other" : "new",
+            reason: "A related control.",
+          },
+        ],
+      }));
+      const result = await matchScanFindings(
+        {
+          before: [finding("old", { findingId: "identity-a" })],
+          after: [
+            finding("new", { findingId: "identity-b" }),
+            finding("other", { findingId: "identity-c" }),
+          ],
+          knownFindingGroups: [["identity-a", "identity-b"]],
+        },
+        { codex: observed.codex },
+      );
+      expect(result.matches).toHaveLength(1);
+      expect(result.matches[0]!.beforeOccurrenceIds).toEqual(["old"]);
+      expect(new Set(result.matches[0]!.afterOccurrenceIds)).toEqual(
+        new Set(kind === "omitted" ? ["new"] : ["new", "other"]),
+      );
+      expect(result.uncertain).toEqual([]);
+      expect(result.related).toHaveLength(kind === "omitted" ? 1 : 0);
+      expect(observed.threads()).toBe(1);
+    },
+  );
+
+  test.each([false, true])(
+    "reconciles known after identities with historical uncertainty set to %s",
+    async (allowHistoricalUncertainty) => {
+      const uncertain = [
+        {
+          beforeOccurrenceId: "other",
+          afterOccurrenceId: "new",
+          reason: "A different historical finding may share the control.",
+        },
+      ];
+      const observed = conversation(() => ({ matches: [], uncertain }));
+      const result = await matchScanFindings(
+        {
+          before: [
+            finding("old", { findingId: "identity-a" }),
+            finding("other", { findingId: "identity-c" }),
+          ],
+          after: [finding("new", { findingId: "identity-b" })],
+          knownFindingGroups: [["identity-a", "identity-b"]],
+        },
+        { codex: observed.codex, allowHistoricalUncertainty },
+      );
+      expect(result.matches).toHaveLength(1);
+      expect(result.uncertain).toEqual(
+        allowHistoricalUncertainty ? uncertain : [],
+      );
+    },
+  );
+
   test("lets Codex inspect a selected issue and expands its saved occurrences", async () => {
     const before = [
       finding("old-a", {

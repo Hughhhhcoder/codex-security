@@ -14,6 +14,7 @@ import { CodexSecurityError } from "./errors.js";
 import {
   compactFinding,
   findingCatalogue,
+  groupFindings,
   type CatalogueEntry,
   type ComparisonFinding,
 } from "./finding-catalogue.js";
@@ -157,6 +158,14 @@ export async function matchScanFindingsInternal(
   options.signal?.throwIfAborted();
   if (input.before.length === 0 || input.after.length === 0) {
     return { matches: [], uncertain: [] };
+  }
+  const known = knownFindingMatches(input);
+  if (known.complete) {
+    return validateComparison(
+      input,
+      { matches: known.matches, uncertain: [] },
+      options.allowHistoricalUncertainty ?? false,
+    );
   }
   const codex =
     options.codex ??
@@ -320,16 +329,21 @@ export async function matchScanFindingsInternal(
       );
     const expanded = validateComparison(
       input,
-      {
-        matches: matched.matches.map((match) => ({
-          ...match,
-          beforeOccurrenceIds: match.beforeOccurrenceIds.flatMap(expandBefore),
-        })),
-        uncertain: expandPairs(matched.uncertain),
-        ...(matched.related === undefined
-          ? {}
-          : { related: expandPairs(matched.related) }),
-      },
+      withKnownMatches(
+        known.matches,
+        {
+          matches: matched.matches.map((match) => ({
+            ...match,
+            beforeOccurrenceIds:
+              match.beforeOccurrenceIds.flatMap(expandBefore),
+          })),
+          uncertain: expandPairs(matched.uncertain),
+          ...(matched.related === undefined
+            ? {}
+            : { related: expandPairs(matched.related) }),
+        },
+        options.allowHistoricalUncertainty ?? false,
+      ),
       options.allowHistoricalUncertainty ?? false,
     );
     progress("complete");
@@ -390,47 +404,24 @@ export async function matchCompletedScan(
       ? {}
       : { knownFindingGroups: batch.knownFindingGroups }),
   };
-  const beforeIds = new Set(
-    input.before.map(({ occurrenceId }) => occurrenceId),
-  );
-  const afterIds = new Set(input.after.map(({ occurrenceId }) => occurrenceId));
-  const known = [
-    ...findingCatalogue(
-      [...input.before, ...input.after],
-      input.knownFindingGroups,
-    ).values(),
-  ].map(({ occurrences }) => ({
-    beforeOccurrenceIds: occurrences.flatMap(({ occurrenceId }) =>
-      beforeIds.has(occurrenceId) ? [occurrenceId] : [],
-    ),
-    afterOccurrenceIds: occurrences.flatMap(({ occurrenceId }) =>
-      afterIds.has(occurrenceId) ? [occurrenceId] : [],
-    ),
-    confidence: "high" as const,
-    reason:
-      "The findings share a stable identity or a previously confirmed link.",
-  }));
-  const confirmed = known.filter(
-    ({ beforeOccurrenceIds, afterOccurrenceIds }) =>
-      beforeOccurrenceIds.length > 0 && afterOccurrenceIds.length > 0,
-  );
-  const comparison =
-    confirmed.length === known.length
-      ? { matches: confirmed, uncertain: [] }
-      : validateComparison(
-          input,
-          withKnownMatches(
-            confirmed,
-            await (options.matchFindings ?? matchScanFindings)(input, {
-              allowHistoricalUncertainty: true,
-              environment: options.environment,
-              model: options.model,
-              signal: options.signal,
-              workingDirectory: options.repository,
-            }),
-          ),
+  const known = knownFindingMatches(input);
+  const comparison = known.complete
+    ? { matches: known.matches, uncertain: [] }
+    : validateComparison(
+        input,
+        withKnownMatches(
+          known.matches,
+          await (options.matchFindings ?? matchScanFindings)(input, {
+            allowHistoricalUncertainty: true,
+            environment: options.environment,
+            model: options.model,
+            signal: options.signal,
+            workingDirectory: options.repository,
+          }),
           true,
-        );
+        ),
+        true,
+      );
 
   for (const [scanId, previous] of groups) {
     options.signal?.throwIfAborted();
@@ -451,9 +442,43 @@ export async function matchCompletedScan(
   }
 }
 
+function knownFindingMatches(input: ScanComparisonInput): {
+  matches: ScanComparisonResult["matches"];
+  complete: boolean;
+} {
+  const beforeIds = new Set(
+    input.before.map(({ occurrenceId }) => occurrenceId),
+  );
+  const afterIds = new Set(input.after.map(({ occurrenceId }) => occurrenceId));
+  const groups = groupFindings(
+    [...input.before, ...input.after],
+    input.knownFindingGroups,
+  );
+  const matches = groups.flatMap((occurrences) => {
+    const ids = [
+      ...new Set(occurrences.map(({ occurrenceId }) => occurrenceId)),
+    ];
+    const beforeOccurrenceIds = ids.filter((id) => beforeIds.has(id));
+    const afterOccurrenceIds = ids.filter((id) => afterIds.has(id));
+    return beforeOccurrenceIds.length > 0 && afterOccurrenceIds.length > 0
+      ? [
+          {
+            beforeOccurrenceIds,
+            afterOccurrenceIds,
+            confidence: "high" as const,
+            reason:
+              "The findings share a stable identity or a previously confirmed link.",
+          },
+        ]
+      : [];
+  });
+  return { matches, complete: matches.length === groups.length };
+}
+
 function withKnownMatches(
   known: ScanComparisonResult["matches"],
   semantic: ScanComparisonResult,
+  allowHistoricalUncertainty: boolean,
 ): ScanComparisonResult {
   if (known.length === 0) return semantic;
   const matches = [...semantic.matches, ...known];
@@ -505,8 +530,10 @@ function withKnownMatches(
   return {
     matches: merged,
     uncertain: semantic.uncertain.filter(
-      ({ beforeOccurrenceId }) =>
-        !occurrences.has(`before:${beforeOccurrenceId}`),
+      ({ beforeOccurrenceId, afterOccurrenceId }) =>
+        !occurrences.has(`before:${beforeOccurrenceId}`) &&
+        (allowHistoricalUncertainty ||
+          !occurrences.has(`after:${afterOccurrenceId}`)),
     ),
     ...(semantic.related === undefined
       ? {}

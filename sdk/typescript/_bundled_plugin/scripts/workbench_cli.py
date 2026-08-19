@@ -163,7 +163,9 @@ def parse_args(description: str) -> argparse.Namespace:
     save_scan_comparison = subparsers.add_parser("save-scan-comparison")
     save_scan_comparison.add_argument("--before-scan-id", required=True)
     save_scan_comparison.add_argument("--after-scan-id", required=True)
-    save_scan_comparison.add_argument("--matches-json", required=True)
+    matches_transport = save_scan_comparison.add_mutually_exclusive_group(required=True)
+    matches_transport.add_argument("--matches-json")
+    matches_transport.add_argument("--matches-json-stdin", action="store_true")
 
     list_global_findings = subparsers.add_parser("list-global-findings")
     list_global_findings.add_argument("--query")
@@ -315,7 +317,13 @@ def parse_args(description: str) -> argparse.Namespace:
             parser.error("pass exactly one user-context transport")
         index = arguments.index("--user-context-stdin")
         arguments[index : index + 1] = ["--user-context", sys.stdin.read()]
-    return parser.parse_args(arguments)
+    parsed = parser.parse_args(arguments)
+    if getattr(parsed, "matches_json_stdin", False):
+        try:
+            parsed.matches_json = sys.stdin.buffer.read().decode("utf-8")
+        except UnicodeDecodeError:
+            parser.error("--matches-json-stdin requires UTF-8 JSON")
+    return parsed
 
 
 def non_negative_int(value: str) -> int:

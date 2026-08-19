@@ -8,10 +8,10 @@ export interface CatalogueEntry {
   occurrences: readonly ComparisonFinding[];
 }
 
-export function findingCatalogue(
+export function groupFindings(
   findings: readonly ComparisonFinding[],
   knownFindingGroups: readonly (readonly string[])[] = [],
-): Map<string, CatalogueEntry> {
+): ComparisonFinding[][] {
   const parents = new Map<string, string>();
   const root = (value: string): string => {
     const path: string[] = [];
@@ -45,8 +45,15 @@ export function findingCatalogue(
     else group.push(finding);
   }
 
+  return [...groups.values()];
+}
+
+export function findingCatalogue(
+  findings: readonly ComparisonFinding[],
+  knownFindingGroups: readonly (readonly string[])[] = [],
+): Map<string, CatalogueEntry> {
   return new Map(
-    [...groups.values()].map((occurrences) => {
+    groupFindings(findings, knownFindingGroups).map((occurrences) => {
       const latest = occurrences.at(-1)!;
       const card = compactFinding(latest);
       if (occurrences.length > 1) {

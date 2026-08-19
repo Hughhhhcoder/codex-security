@@ -3203,7 +3203,9 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
         values,
     ).fetchone()[0]
     next_offset = args.offset + len(rows)
-    relations = scan_history.finding_relations(connection, scan["id"]) if rows else {}
+    relations = scan_history.finding_relations(
+        connection, scan["id"], (row["id"] for row in rows)
+    )
     return {
         "findingsPage": {
             "findings": [
@@ -3301,7 +3303,9 @@ def scan_result(
             "completed": independent_reviews["completed"],
             "consolidating": independent_reviews["consolidating"],
         }
-    relations = scan_history.finding_relations(connection, scan["id"]) if occurrence_rows else {}
+    relations = scan_history.finding_relations(
+        connection, scan["id"], (row["id"] for row in occurrence_rows)
+    )
     return {
         "artifacts": artifacts,
         "canceledAt": scan["canceled_at"],

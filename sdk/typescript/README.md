@@ -742,17 +742,20 @@ including other worktrees and clones. Saved matches appear in `scans show` and
 are reused unless `--force` is passed. Scans without sealed artifacts are skipped.
 
 Matching reuses confirmed historical links to build a compact catalogue of known
-issues. Codex compares the later findings against that catalogue and can request
-the full stored evidence for selected issues. Large inputs are paged within
-Codex's message limit. This uses the existing Codex authentication; no embedding
-model, vector database, or separate API key is required.
+issues. Stable identities and confirmed aliases apply across both scans; a fully
+known comparison does not need a model call. When new judgments are needed,
+Codex compares the later findings against the catalogue and can request the full
+stored evidence for selected issues. Large inputs are paged within Codex's
+message limit. This uses the existing Codex authentication; no embedding model,
+vector database, or separate API key is required.
 
 Only high-confidence duplicates are grouped. Plausible duplicates can remain
 uncertain, while findings with related but independent root causes are shown as
-related and kept separate. Matching preserves the original findings, triage,
-and sealed scan artifacts. Use `scans match --all --force` to rebuild saved
-comparisons in chronological order. Ctrl-C stops matching and preserves
-comparisons that have already been saved.
+related and kept separate. An old related label is hidden if later confirmed
+links establish that the findings are the same issue. Matching preserves the
+original findings, triage, and sealed scan artifacts. Use
+`scans match --all --force` to rebuild saved comparisons in chronological order.
+Ctrl-C stops matching and preserves comparisons that have already been saved.
 
 `scans compare` compares the two latest completed scans. Pass one scan ID to
 compare it with the latest completed scan, or two IDs to select both scans. It

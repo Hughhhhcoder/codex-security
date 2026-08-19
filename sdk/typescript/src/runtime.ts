@@ -1352,32 +1352,47 @@ export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
 ): Promise<JsonObject> {
+  const arguments_ = [...args];
+  let input: string | undefined;
+  const matchesIndex = arguments_.indexOf("--matches-json");
+  if (
+    arguments_[0] === "save-scan-comparison" &&
+    matchesIndex !== -1 &&
+    arguments_[matchesIndex + 1] !== undefined
+  ) {
+    input = arguments_[matchesIndex + 1];
+    arguments_.splice(matchesIndex, 2, "--matches-json-stdin");
+  }
   let stdout: string;
   try {
-    ({ stdout } = await execFile(
-      options.python,
+    const result = await runCodexCommand(
+      { command: options.python },
       [
         "-I",
         "-B",
         join(options.pluginRoot, "scripts", "workbench_db.py"),
-        ...args,
+        ...arguments_,
       ],
-      {
-        env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY" &&
-              name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-              name.toUpperCase() !== "FIREWORKS_API_KEY",
-          ),
+      Object.fromEntries(
+        Object.entries(options.environment).filter(
+          ([name]) =>
+            name.toUpperCase() !== "OPENAI_API_KEY" &&
+            name.toUpperCase() !== "CODEX_API_KEY" &&
+            name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+            name.toUpperCase() !== "FIREWORKS_API_KEY",
         ),
-        encoding: "utf8",
-        maxBuffer: Infinity,
-        windowsHide: true,
-        signal: options.signal,
-      },
-    ));
+      ),
+      input,
+      options.signal,
+    );
+    if (!result.success) {
+      throw new Error(
+        result.stderr.trim() ||
+          result.stdout.trim() ||
+          `Python exited with status ${result.exitCode}.`,
+      );
+    }
+    stdout = result.stdout;
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);

@@ -444,7 +444,7 @@ export function renderScanHistory(
       const related = result["relatedPairs"] ?? 0;
       const uncertain = result["uncertainPairs"] ?? 0;
       lines.push(
-        `  ${clean(related)} related pair${related === 1 ? "" : "s"} kept separate    ${clean(uncertain)} uncertain pair${uncertain === 1 ? "" : "s"}`,
+        `  ${clean(related)} related pair${related === 1 ? "" : "s"} recorded    ${clean(uncertain)} uncertain pair${uncertain === 1 ? "" : "s"}`,
       );
     }
     if (result["unavailableScans"]) {
