@@ -337,6 +337,32 @@ describe("semantic scan comparison", () => {
     expect(calls.prompt).toContain(JSON.stringify(input));
   });
 
+  test("uses the requested scan model and effort for component matching", async () => {
+    const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+    const config = {
+      codexOverrides: {
+        model: "configured-model",
+        model_reasoning_effort: "high",
+        model_provider: "synthetic-provider",
+      },
+    };
+    await matchScanFindings({ before: [], after: [] }, { config, codex });
+    expect(calls.threadOptions).toMatchObject({
+      model: "configured-model",
+      modelReasoningEffort: "high",
+      sandboxMode: "read-only",
+      networkAccessEnabled: false,
+    });
+    await matchScanFindings(
+      { before: [], after: [] },
+      { config, codex, model: "explicit-model", reasoningEffort: "low" },
+    );
+    expect(calls.threadOptions).toMatchObject({
+      model: "explicit-model",
+      modelReasoningEffort: "low",
+    });
+  });
+
   test("matches open and dismissed findings from the same target", async () => {
     const open = { findingId: "open", occurrenceId: "old-open" };
     const dismissed = { findingId: "dismissed", occurrenceId: "old-dismissed" };
