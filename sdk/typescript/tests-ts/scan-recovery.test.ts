@@ -319,17 +319,42 @@ describe("malformed scan artifact recovery", () => {
         }),
       ]),
     );
-    const sealed = await readFile(coveragePath, "utf8");
-    await writeFile(coveragePath, `${sealed}\n`);
-    const unavailable = await workbench(fixture, [
+    for (const artifactPath of [coveragePath, manifestPath]) {
+      const sealed = await readFile(artifactPath, "utf8");
+      await writeFile(artifactPath, `${sealed}\n`);
+      try {
+        const unavailable = await workbench(fixture, [
+          "get-scan",
+          "--scan-id",
+          fixture.scanId,
+        ]);
+        expect(
+          (unavailable["scan"] as Record<string, unknown>)["coverage"],
+        ).toBeUndefined();
+        expect(await readFile(artifactPath, "utf8")).toBe(`${sealed}\n`);
+      } finally {
+        await writeFile(artifactPath, sealed);
+      }
+    }
+  });
+
+  test("reads sealed history coverage without loading unrelated findings", async () => {
+    const fixture = await startDraftScan("directory", ["src"]);
+    await completeScan(fixture);
+    await writeFile(join(fixture.scanDir, "findings.json"), "not available\n");
+    const history = await workbench(fixture, [
       "get-scan",
       "--scan-id",
       fixture.scanId,
     ]);
-    expect(
-      (unavailable["scan"] as Record<string, unknown>)["coverage"],
-    ).toBeUndefined();
-    expect(await readFile(coveragePath, "utf8")).toBe(`${sealed}\n`);
+    expect(history["scan"]).toMatchObject({
+      coverage: {
+        mode: "scoped_path",
+        completeness: "complete",
+        includePaths: ["src"],
+        excludePaths: [],
+      },
+    });
   });
 
   test.each(["deferred", "surface"] as const)(

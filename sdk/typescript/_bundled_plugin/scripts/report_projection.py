@@ -996,7 +996,7 @@ def build_report_markdown(
                     if no_source_review
                     else (
                         "No findings were validated before the scan reached its cost limit. "
-                        "Review the deferred candidates in Open Questions And Follow Up."
+                        "Review the deferred candidates in Incomplete Requested Work."
                         if budget_exhausted
                         else "No reportable findings survived the canonical discovery, validation, "
                         "and reportability gates."
