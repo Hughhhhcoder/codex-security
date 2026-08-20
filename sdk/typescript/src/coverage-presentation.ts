@@ -6,12 +6,24 @@ export type CoverageSummary = Pick<
 > &
   Partial<Pick<CoverageDocument, "explicitExclusions">>;
 
+export function formatScopePath(path: string): string {
+  if (path.length > 0 && !/[\s,;'"\\\u0000-\u001f\u007f-\u009f]/u.test(path)) {
+    return path;
+  }
+  return JSON.stringify(path).replace(
+    /[\u007f-\u009f\u2028\u2029]/gu,
+    (character) =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 export function formatScopePathParts(
   paths: readonly string[],
   finalSuffix = "",
 ): string[] {
   return paths.map(
-    (path, index) => `${path}${index < paths.length - 1 ? "," : finalSuffix}`,
+    (path, index) =>
+      `${formatScopePath(path)}${index < paths.length - 1 ? "," : finalSuffix}`,
   );
 }
 

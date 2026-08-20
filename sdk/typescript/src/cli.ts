@@ -76,6 +76,7 @@ import { formatUsd, type ScanCost } from "./cost.js";
 import {
   formatCoverageCompleteness,
   formatCoverageScope,
+  formatScopePath,
 } from "./coverage-presentation.js";
 import {
   CodexSecurityError,
@@ -5759,7 +5760,7 @@ function scanScope(arguments_: ScanArguments): string | null {
         portable.startsWith("//")
           ? basename(portable) || portable
           : portable;
-      return errorMessage(scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "));
+      return errorMessage(formatScopePath(scoped));
     });
     return `${displayed.join(", ")}${arguments_.paths.length > displayed.length ? `, +${arguments_.paths.length - displayed.length} more` : ""}`;
   }
@@ -5905,7 +5906,7 @@ function printScanSummary(
   errorOutput.write(
     `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
       `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("SCOPE", 1)}     ${stripVTControlCharacters(formatCoverageScope(result.coverage)).replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")}\n` +
+      `  ${paint("SCOPE", 1)}     ${stripVTControlCharacters(formatCoverageScope(result.coverage)).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ")}\n` +
       `  ${paint("COVERAGE", 1)}  ${formatCoverageCompleteness(result.coverage.completeness)}\n` +
       (deepScanStop === undefined
         ? ""

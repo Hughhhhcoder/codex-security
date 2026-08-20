@@ -51,7 +51,7 @@ const KNOWN_SINCE_DATE = new Intl.DateTimeFormat("en-US", {
 function clean(value: unknown): string {
   return String(value)
     .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ");
 }
 
 function findingSeverity(finding: JsonObject): string {
@@ -221,15 +221,17 @@ export function renderScanHistory(
           `    ${started}${multipleRepositories ? `  ${accent("·")}  ${clean(scanRepository)}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
         );
       }
-      const scopePaths = scan["scopePaths"] as string[] | undefined;
-      const recordedScope = scan["scope"];
-      const scope = scopePaths?.length
-        ? formatScopePathParts(scopePaths)
-        : typeof recordedScope === "string"
-          ? [recordedScope]
-          : undefined;
-      if (scope) {
-        wrap(scope, 11, `    ${strong("SCOPE")}  `);
+      if (scan["mode"] !== "diff") {
+        const scopePaths = scan["scopePaths"] as string[] | undefined;
+        const recordedScope = scan["scope"];
+        const scope = scopePaths?.length
+          ? formatScopePathParts(scopePaths)
+          : typeof recordedScope === "string"
+            ? formatScopePathParts([recordedScope])
+            : undefined;
+        if (scope) {
+          wrap(scope, 11, `    ${strong("SCOPE")}  `);
+        }
       }
     }
   } else if (command === "findings") {
@@ -263,17 +265,19 @@ export function renderScanHistory(
         `  ${strong("COVERAGE")}  ${formatCoverageCompleteness(canonicalCoverage.completeness)}`,
       );
     } else {
-      const contract = result["contract"] as JsonObject | undefined;
-      const scope = contract?.["scope"] as JsonObject | undefined;
-      const paths = scope?.["requiredIncludePaths"] as string[] | undefined;
-      const recordedScope = result["scope"];
-      const scopeParts = paths?.length
-        ? formatScopePathParts(paths)
-        : typeof recordedScope === "string"
-          ? [recordedScope]
-          : undefined;
-      if (scopeParts) {
-        wrap(scopeParts, 11, `  ${strong("SCOPE")}  `);
+      if (result["mode"] !== "diff") {
+        const contract = result["contract"] as JsonObject | undefined;
+        const scope = contract?.["scope"] as JsonObject | undefined;
+        const paths = scope?.["requiredIncludePaths"] as string[] | undefined;
+        const recordedScope = result["scope"];
+        const scopeParts = paths?.length
+          ? formatScopePathParts(paths)
+          : typeof recordedScope === "string"
+            ? formatScopePathParts([recordedScope])
+            : undefined;
+        if (scopeParts) {
+          wrap(scopeParts, 11, `  ${strong("SCOPE")}  `);
+        }
       }
       if (status === "complete") {
         lines.push(`  ${strong("COVERAGE")}  not available`);

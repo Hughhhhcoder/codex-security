@@ -277,8 +277,10 @@ findings or failed scans. Set `--fail-on-severity` to change the threshold.
 
 `--path` defines the requested scope using one or more files or directories.
 A finished review of those paths is a complete scoped scan; it does not imply
-that the rest of the repository was reviewed. `--diff` scans committed changes,
-and `--working-tree` scans staged and unstaged changes. Deep scans support
+that the rest of the repository was reviewed. Human-readable scope summaries
+JSON-quote paths containing whitespace, delimiters, or control characters;
+machine-readable results retain the original path strings. `--diff` scans
+committed changes, and `--working-tree` scans staged and unstaged changes. Deep scans support
 repository and path targets. The output directory must be outside the scanned
 directory and any enclosing Git worktree. When SARIF is produced, it is written
 to

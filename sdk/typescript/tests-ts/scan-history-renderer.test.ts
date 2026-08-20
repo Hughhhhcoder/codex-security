@@ -204,6 +204,79 @@ describe("scan history renderer", () => {
     expect(text).toContain("complete for requested scope");
   });
 
+  test("does not invent repository scope for legacy diff scans", () => {
+    const scan = {
+      targetPath: "/demo/repository",
+      scanId: "scan-diff",
+      mode: "diff",
+      scope: ".",
+      progress: { status: "complete" },
+      findingCount: 0,
+      startedAt: "2026-08-01T00:00:00Z",
+      findings: [],
+    };
+    const options = { color: false };
+    expect(renderScanHistory({ scans: [scan] }, "list", options)).not.toContain(
+      "SCOPE",
+    );
+    const legacy = renderScanHistory(scan, "show", options);
+    expect(legacy).not.toContain("SCOPE");
+    expect(legacy).toContain("COVERAGE  not available");
+    expect(
+      renderScanHistory(
+        {
+          ...scan,
+          coverage: {
+            mode: "branch_diff",
+            completeness: "complete",
+            includePaths: ["src/parser.ts"],
+            excludePaths: [],
+          },
+        },
+        "show",
+        options,
+      ),
+    ).toContain("branch diff: src/parser.ts");
+  });
+
+  test("escapes scope delimiters and Unicode separators in history", () => {
+    const path = "src; excluding tests\u2028COVERAGE forged";
+    const scan = {
+      targetPath: "/demo/repository",
+      scanId: "scan-1",
+      mode: "standard",
+      scope: path,
+      scopePaths: [path],
+      progress: { status: "complete" },
+      findingCount: 0,
+      startedAt: "2026-08-01T00:00:00Z",
+      findings: [],
+    };
+    const options = { color: false, columns: 120 };
+    const outputs = [
+      renderScanHistory({ scans: [scan] }, "list", options),
+      renderScanHistory(scan, "show", options),
+      renderScanHistory(
+        {
+          ...scan,
+          coverage: {
+            mode: "scoped_path",
+            completeness: "complete",
+            includePaths: [path],
+            excludePaths: ["vendor\u2029forged"],
+          },
+        },
+        "show",
+        options,
+      ),
+    ];
+    for (const output of outputs) {
+      expect(output).not.toMatch(/[\u0085\u2028\u2029]/u);
+      expect(output).toContain('"src; excluding tests\\u2028COVERAGE forged"');
+    }
+    expect(outputs[2]).toContain('"vendor\\u2029forged"');
+  });
+
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {

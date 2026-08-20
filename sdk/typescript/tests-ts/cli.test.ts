@@ -5170,6 +5170,34 @@ describe("CLI", () => {
     expect(stderr.text()).toContain("complete for requested scope");
   });
 
+  test("quotes and escapes untrusted paths in human scope summaries", async () => {
+    const path = "src; excluding tests\u2028COVERAGE forged";
+    const result = fakeResult();
+    result.manifest.scan.scope.includePaths = [path];
+    Object.assign(result.coverage, {
+      mode: "scoped_path",
+      inventoryStrategy: "scoped_path",
+      includePaths: [path],
+      excludePaths: ["vendor\u0085\u2029forged"],
+    });
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "--path", path, "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).not.toMatch(/[\u0085\u2028\u2029]/u);
+    expect(stderr.text()).toContain(
+      '"src; excluding tests\\u2028COVERAGE forged"',
+    );
+    expect(stderr.text()).toContain('"vendor\\u0085\\u2029forged"');
+  });
+
   test("does not promote incomplete coverage merely because paths were selected", async () => {
     for (const completeness of ["partial", "unknown"] as const) {
       const result = fakeResult(["high"], completeness);
