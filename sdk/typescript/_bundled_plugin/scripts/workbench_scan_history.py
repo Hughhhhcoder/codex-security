@@ -416,21 +416,7 @@ def compare_scans(
     occurrences = {
         row["id"]: row for row in chain(before_findings.values(), after_findings.values())
     }
-    aliases = _finding_aliases(
-        chain(
-            _confirmed_finding_aliases(connection, occurrences).items(),
-            (
-                (
-                    occurrences[match["beforeOccurrenceIds"][0]]["finding_id"],
-                    occurrences[occurrence_id]["finding_id"],
-                )
-                for match in saved_matches
-                for occurrence_id in chain(
-                    match["beforeOccurrenceIds"], match["afterOccurrenceIds"]
-                )
-            ),
-        )
-    )
+    aliases = _confirmed_finding_aliases(connection, occurrences)
     groups = _finding_groups(before_findings, after_findings, saved_matches, aliases)
     uncertain = (
         {

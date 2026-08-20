@@ -144,12 +144,14 @@ for value in invalid:
     else:
         raise AssertionError('Invalid comparison was accepted')
     assert snapshot() == original
-print(json.dumps({'related': [(item['beforeOccurrenceId'], item['afterOccurrenceId']) for item in accepted['related']],
+print(json.dumps({'summary': accepted['summary'],
+                  'related': [(item['beforeOccurrenceId'], item['afterOccurrenceId']) for item in accepted['related']],
                   'savedPairs': len(original[1]), 'rejected': len(invalid)}))
 `;
   expect(
     runPythonProbe(probe, join(tmpdir(), "codex-security-validation-fixture")),
   ).toEqual({
+    summary: { new: 1, persisting: 2, reopened: 0, resolved: 1, unknown: 0 },
     related: [
       ["a2", "y"],
       ["c", "z"],
