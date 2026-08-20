@@ -320,7 +320,7 @@ describe("publish scan", () => {
       ),
     ).toBe(2);
     expect(stderr.text()).toContain(
-      "--knowledge-base requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY",
+      "--knowledge-base requires a Linear API key from --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY",
     );
     expect(stderr.text()).not.toContain("publisher must not run");
   });

@@ -646,12 +646,11 @@ added to successful publication results, scan history, or sealed scan artifacts.
 Publication errors redact the selected API key. Without a publication knowledge
 base, `--dry-run` never contacts Linear in either mode.
 
-Without a publication knowledge base, publication preserves its existing
-severity mapping: Critical, High, Medium, and Low findings become Urgent, High,
-Medium, and Low Linear priorities, respectively; Informational findings leave
-priority unset. Use repeatable `--knowledge-base PATH` options to replace that
-mapping with organization-defined publication policy from Markdown, text, PDF,
-or DOCX documents:
+Without `--knowledge-base`, the CLI maps Critical, High, Medium, and Low
+findings to Urgent, High, Medium, and Low Linear priorities, respectively.
+Informational findings leave priority unset. To replace this mapping with your
+organization's publication rules, pass Markdown, text, PDF, or DOCX documents
+with one or more `--knowledge-base PATH` options:
 
 ```bash
 cat > linear-publication-policy.md <<'EOF'
@@ -669,26 +668,29 @@ npx @openai/codex-security publish scan /path/to/completed-scan \
   --knowledge-base ./linear-publication-policy.md
 ```
 
-These mappings are only synthetic examples; when a knowledge base is supplied,
-the CLI applies only the rules written in your documents. If no explicit rule
-matches a finding, its priority and labels remain unset rather than falling back
-to the default severity mapping. Knowledge-based publication starts one
-ephemeral, read-only Codex turn using your normal Codex authentication and the
-default Codex model. User configuration is not loaded for this turn. The turn
-disables approval prompts, network access, search, and executable tool features,
-and does not persist a Codex session. The Linear API key is used separately to
-validate the exact team and project, read the team's label catalog, and create
-issues; it is removed from the Codex turn's environment. Labels named by policy
-must already exist in the selected team. V1 policy output can
-set only native priority and existing labels, never routing, title,
-description, assignee, state, cycle, estimate, or due date.
+The example rules above are not built into the CLI. When you supply a knowledge
+base, the CLI applies only the rules in those documents. If no rule matches a
+finding, the CLI leaves its priority and labels unset instead of using the
+default severity mapping.
 
-`--knowledge-base` requires a Linear API key, so connected-app-only publication
-rejects it. `--dry-run --knowledge-base` makes only read-only Linear requests,
-runs the same enrichment and validation as publication, and returns the exact
-resolved fields in `issues` plus a minimal `appliedMetadata` array. Policy,
-paths, prompts, and credentials are never stored in the sealed scan, Codex
-session state, or private publication receipt.
+The CLI starts one ephemeral, read-only Codex turn for the policy documents and
+findings. It uses your existing Codex sign-in and the default Codex model. The
+turn does not load user configuration, ask for approval, access the network,
+use web search, or enable executable tool features. It does not persist a Codex
+session.
+
+The CLI uses the Linear API key to validate the selected team and project, read
+the available team and workspace labels, and create issues. The Codex turn does
+not receive the Linear API key. A policy may set only Linear priority and
+existing labels. It cannot change the team, project, issue title or description,
+assignee, state, cycle, estimate, or due date.
+
+`--knowledge-base` requires a Linear API key, so connected-app publication
+cannot use it. During `--dry-run --knowledge-base`, the CLI only reads from
+Linear. It runs the same policy evaluation and validation as publication, then
+returns the resolved fields in `issues` and `appliedMetadata`. The CLI does not
+store policy contents, policy file paths, model prompts, or credentials in the
+sealed scan or private publication receipt.
 
 Each finding creates a separate new issue titled
 `[Codex Security][HIGH] Finding title`. The issue includes the scan ID,
@@ -743,11 +745,10 @@ const directPublication = await publishScan("/path/to/completed-scan", {
 });
 ```
 
-Add `knowledgeBasePaths: ["./linear-publication-policy.md"]` to direct
-publication to resolve priority and existing team labels before creating any
-issues. This also requires normal Codex authentication. Inspect
-`directPublication.appliedMetadata` to see the numeric Linear priority and
-resolved label IDs and names applied to each finding.
+Add `knowledgeBasePaths: ["./linear-publication-policy.md"]` to make direct
+publication apply the policy before it creates any issues. This also requires
+your existing Codex sign-in. `directPublication.appliedMetadata` contains the
+numeric Linear priority and resolved label IDs and names for each finding.
 
 ### Scan history and reruns
 

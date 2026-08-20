@@ -1872,7 +1872,7 @@ export async function main(
         .array(optionValue("--knowledge-base"))
         .default([])
         .describe(
-          "Apply publication policy files; repeat for multiple paths (requires a Linear API key).",
+          "Apply publication rules from a file; repeat for multiple files. Requires a Linear API key.",
         ),
       dryRun: z
         .boolean()
@@ -1908,7 +1908,7 @@ export async function main(
         }
         if (options.knowledgeBase.length > 0 && linearApiKey === undefined) {
           throw new CodexSecurityError(
-            "--knowledge-base requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY for publication.",
+            "--knowledge-base requires a Linear API key from --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY.",
           );
         }
         const teamId =

@@ -120,11 +120,14 @@ the optional `CODEX_SECURITY_LINEAR_PROJECT` instead of passing the destination
 flags. Add `--dry-run` to preview the issues or `--json` to return
 machine-readable results.
 
-By default, publication preserves the existing severity mapping: Critical,
-High, Medium, and Low findings become Urgent, High, Medium, and Low Linear
-priorities, respectively. To replace that mapping and apply your organization's
-own publication rules, pass one or more Markdown, text, PDF, or DOCX policy
-documents with repeatable `--knowledge-base` flags:
+By default, publishing uses your existing Codex sign-in and connected Linear
+app without a separate Linear token. To publish through the Linear API instead,
+set `CODEX_SECURITY_LINEAR_API_KEY` to a Linear personal API key.
+
+Without `--knowledge-base`, the CLI maps Critical, High, Medium, and Low
+findings to Urgent, High, Medium, and Low Linear priorities, respectively. To
+let your organization choose priorities and labels, pass Markdown, text, PDF,
+or DOCX policy documents with one or more `--knowledge-base` flags:
 
 ```bash
 export CODEX_SECURITY_LINEAR_API_KEY=YOUR_LINEAR_PERSONAL_API_KEY
@@ -134,22 +137,20 @@ npx @openai/codex-security publish scan /path/to/scan \
   --knowledge-base ./linear-publication-policy.md
 ```
 
-For example, a company-authored policy can say that P0 findings use Linear's
-Urgent priority and internet-facing findings receive an existing `Internet
-exposed` label. In knowledge-based publication, that mapping is policy content,
-not built-in CLI behavior. When no explicit policy rule matches, priority and
-labels are left unset rather than falling back to the default severity mapping.
-Knowledge-based publication can set only native Linear priority and existing
-labels in the selected team; it cannot create labels or change routing,
-content, assignee, state, cycle, estimate, or due date. It requires both normal
-Codex authentication and a Linear API key. A knowledge-based `--dry-run`
-performs read-only destination and label validation, runs the policy
-enrichment, and returns the exact metadata that would be uploaded.
+For example, your policy can say that P0 findings use Linear's Urgent priority
+and internet-facing findings receive an existing `Internet exposed` label.
+These rules come from the policy document; they are not built into the CLI. If
+no rule matches a finding, the CLI leaves its priority and labels unset instead
+of using the default severity mapping.
 
-By default, publishing uses your existing Codex sign-in and connected Linear
-app without a separate Linear token. To publish directly through the Linear API
-instead, set `CODEX_SECURITY_LINEAR_API_KEY` to a Linear personal API key.
-Direct publication leaves issues unassigned by default; pass
+A policy may set only Linear priority and labels that already exist in the
+selected team or workspace. It cannot create labels or change the Linear team,
+project, issue title or description, assignee, state, cycle, estimate, or due
+date. `--knowledge-base` requires your existing Codex sign-in and a Linear API
+key. With `--dry-run`, the CLI validates the destination and labels, evaluates
+the policy, and returns the resulting metadata without creating issues.
+
+Linear API publication leaves issues unassigned by default; pass
 `--linear-assignee EMAIL_OR_USER_ID` to select a Linear user:
 
 ```bash
