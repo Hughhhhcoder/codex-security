@@ -29,7 +29,7 @@ import {
 } from "node:path";
 import { promisify } from "node:util";
 import { brotliDecompressSync } from "node:zlib";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import {
   BUNDLED_PLUGIN_VERSION,
@@ -61,6 +61,7 @@ import {
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
+  preserveCodexSecurityPluginRegistration,
   requirePrivateCredentialHome,
   requirePrivateCredentialFile,
   requirePrivateOutputDirectory,
@@ -104,6 +105,49 @@ async function plugin(root: string, version = "1.2.3"): Promise<string> {
   await mkdir(join(path, "scripts"));
   await writeFile(join(path, "scripts", "helper.py"), "print('ok')\n");
   return path;
+}
+
+interface McpServerResponse {
+  id: number;
+  result: {
+    capabilities?: Record<string, unknown>;
+    tools?: Array<{
+      name: string;
+      inputSchema: {
+        properties: { userContext?: { maxLength?: number } };
+      };
+    }>;
+  };
+}
+
+async function inspectMcpServer(): Promise<McpServerResponse[]> {
+  const messages = [
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "codex-security-test", version: "1.0.0" },
+      },
+    },
+    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+  ];
+  const execution = promisify(execFile)(
+    "node",
+    [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
+    { encoding: "utf8", timeout: 10_000, windowsHide: true },
+  );
+  execution.child.stdin?.end(
+    `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
+  );
+  const { stdout } = await execution;
+  return stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as McpServerResponse);
 }
 
 describe("plugin runtime preparation", () => {
@@ -460,21 +504,17 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
-  test("bounds preserved context before starting a headless scan", async () => {
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-      ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
-    const schema =
-      /var startHeadlessStandardScanSchema = \{[\s\S]*?\n\};/u.exec(
-        runtime,
-      )?.[0];
+  test("accepts preserved context before starting a headless scan", async () => {
+    const responses = await inspectMcpServer();
+    const tool = responses
+      .find((response) => response.id === 2)
+      ?.result.tools?.find(
+        (candidate) => candidate.name === "start_codex_security_standard_scan",
+      );
+    const userContext = "Assess the HTTP boundary. ".repeat(320);
 
-    expect(schema).toContain(
-      "userContext: editableUserContextSchema.max(2400).optional()",
-    );
+    expect(userContext.length).toBeGreaterThan(2400);
+    expect(tool?.inputSchema.properties.userContext?.maxLength).toBeUndefined();
   });
 
   test("keeps native scan tools without the obsolete setup widget", async () => {
@@ -484,43 +524,7 @@ describe("plugin runtime preparation", () => {
     expect(contract.shippedExact).not.toContain("mcp/mcp-app.html.br");
     expect(existsSync(join(PLUGIN_ROOT, "mcp", "mcp-app.html.br"))).toBe(false);
 
-    const messages = [
-      {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: { name: "codex-security-test", version: "1.0.0" },
-        },
-      },
-      { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
-      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
-    ];
-    const server = spawnSync(
-      process.execPath,
-      [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
-      {
-        input: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
-        encoding: "utf8",
-        timeout: 10_000,
-      },
-    );
-    expect(server.status, server.stderr).toBe(0);
-    const responses = server.stdout
-      .trim()
-      .split("\n")
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            id: number;
-            result: {
-              capabilities?: Record<string, unknown>;
-              tools?: Array<{ name: string }>;
-            };
-          },
-      );
+    const responses = await inspectMcpServer();
     expect(
       responses.find((response) => response.id === 1)?.result.capabilities,
     ).not.toHaveProperty("resources");
@@ -1498,6 +1502,51 @@ describe("plugin runtime preparation", () => {
     ]);
   });
 
+  test("does not preserve a different marketplace when numeric identities collide", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    const differentSource = join(home, "different-marketplace");
+    await mkdir(marketplace, { recursive: true });
+    await mkdir(differentSource);
+    await writeFile(
+      join(home, "config.toml"),
+      `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(differentSource)}\n[plugins."codex-security@codex-security-sdk"]\nenabled = true\n`,
+    );
+    const originalStat = fsPromises.stat;
+    const firstExactIdentity = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    const inspectMarketplaces = spyOn(fsPromises, "stat").mockImplementation(
+      async (path, options) => {
+        const stats = await originalStat(path, options as never);
+        const value = String(path);
+        if (value !== marketplace && value !== differentSource) {
+          return stats as never;
+        }
+        const exactIdentity =
+          firstExactIdentity + (value === marketplace ? 1n : 0n);
+        return Object.assign(
+          Object.create(Object.getPrototypeOf(stats)),
+          stats,
+          {
+            ino:
+              typeof stats.ino === "bigint"
+                ? exactIdentity
+                : Number(exactIdentity),
+          },
+        ) as never;
+      },
+    );
+    const config = { model: "comparison-model" };
+
+    try {
+      expect(await preserveCodexSecurityPluginRegistration(home, config)).toBe(
+        config,
+      );
+    } finally {
+      inspectMarketplaces.mockRestore();
+    }
+  });
+
   test("refreshes cached plugins before forwarding delegated scan attribution", async () => {
     const root = await temporaryDirectory();
     const previous = await plugin(join(root, "previous"), "0.1.19");
@@ -2043,7 +2092,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const home = await prepareCodexSecurityCredentialHome({
         CODEX_SECURITY_STATE_DIR: join(root, "state"),
       });
-      const stale = await lstat(home);
+      const stale = await lstat(home, { bigint: true });
       await rename(home, join(root, "original-home"));
       await mkdir(home, { mode: 0o700 });
 
@@ -2985,6 +3034,47 @@ describe("runtime directories and plugin Python boundary", () => {
         "token=sk-proj-SYNTHETIC_WINDOWS_ACL_SECRET_123",
       );
       expect((error as Error).cause).toBe(underlying);
+    }
+  });
+
+  test("rejects replacement credential homes when numeric identities collide", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    const canonicalHome = await realpath(home);
+    const originalLstat = fsPromises.lstat;
+    const firstExactIdentity = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    let homeInspections = 0;
+    const inspectHome = spyOn(fsPromises, "lstat").mockImplementation(
+      async (path, options) => {
+        const stats = await originalLstat(path, options as never);
+        if (String(path) !== home && String(path) !== canonicalHome) {
+          return stats as never;
+        }
+        const exactIdentity =
+          firstExactIdentity + (homeInspections++ === 0 ? 0n : 1n);
+        return Object.assign(
+          Object.create(Object.getPrototypeOf(stats)),
+          stats,
+          {
+            ino:
+              typeof stats.ino === "bigint"
+                ? exactIdentity
+                : Number(exactIdentity),
+          },
+        ) as never;
+      },
+    );
+
+    try {
+      await expect(
+        requireSecureCredentialHome(home, {
+          platform: "win32",
+          secureWindowsHome: async () => {},
+        }),
+      ).rejects.toThrow("credential home was replaced");
+    } finally {
+      inspectHome.mockRestore();
     }
   });
 

@@ -1828,6 +1828,58 @@ describe("multiscan", () => {
     expect(await readdir(external)).toEqual(["attempt-1"]);
   });
 
+  test("rejects an output directory replaced during preparation when numeric identities collide", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "output-identity-race");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrace,${source.path},${source.revision}\n`,
+    );
+    await mkdir(paths.output, { mode: 0o700 });
+    const originalLstat = filesystem.lstat;
+    const canonicalOutput = await realpath(paths.output);
+    const firstExactIdentity = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    let outputInspections = 0;
+    const inspectOutput = spyOn(filesystem, "lstat").mockImplementation(
+      async (path, options) => {
+        const stats = await originalLstat(path, options as never);
+        if (String(path) !== paths.output && String(path) !== canonicalOutput) {
+          return stats as never;
+        }
+        const exactIdentity =
+          firstExactIdentity + (outputInspections++ === 0 ? 0n : 1n);
+        return Object.assign(
+          Object.create(Object.getPrototypeOf(stats)),
+          stats,
+          {
+            ino:
+              typeof stats.ino === "bigint"
+                ? exactIdentity
+                : Number(exactIdentity),
+          },
+        ) as never;
+      },
+    );
+    let scans = 0;
+
+    try {
+      await expect(
+        runMultiscan(
+          options(
+            paths,
+            client(async (_repository, scanOptions = {}) => {
+              scans += 1;
+              return await completedScan(scanOptions.outputDir!);
+            }),
+          ),
+        ),
+      ).rejects.toThrow("changed during preparation");
+      expect(scans).toBe(0);
+    } finally {
+      inspectOutput.mockRestore();
+    }
+  });
+
   testPosix(
     "rejects other-user-writable campaigns while preserving readable existing campaigns",
     async () => {
