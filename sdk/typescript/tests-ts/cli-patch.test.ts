@@ -483,9 +483,9 @@ describe("scan and patch workflow", () => {
         const repeated = await runWorkflow(
           [
             "patch",
-            "--resume-pr",
-            branch,
-            ...(draft ? ["--create-draft-pr"] : []),
+            ...(draft
+              ? [`--resume-pr=${branch}`, "--create-draft-pr=true"]
+              : ["--resume-pr", branch]),
           ],
           fixtures,
         );
@@ -528,22 +528,24 @@ describe("scan and patch workflow", () => {
       ["--scan", "scan-1"],
       ["--linear-issue", "SEC-123"],
       ["--create-pr"],
+      ["--create-pr=true"],
       ["occ_1"],
     ]) {
       let commandStarted = false;
-      const outcome = await runWorkflow(
-        ["patch", "--resume-pr", "codex-security/patch-scan-1", ...input],
-        {
-          onCodex: () => {
-            commandStarted = true;
-            return 0;
-          },
-          onRepositoryCommand: () => {
-            commandStarted = true;
-            return "";
-          },
+      const resume =
+        input[0] === "--create-pr=true"
+          ? ["--resume-pr=codex-security/patch-scan-1"]
+          : ["--resume-pr", "codex-security/patch-scan-1"];
+      const outcome = await runWorkflow(["patch", ...resume, ...input], {
+        onCodex: () => {
+          commandStarted = true;
+          return 0;
         },
-      );
+        onRepositoryCommand: () => {
+          commandStarted = true;
+          return "";
+        },
+      });
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stderr).toContain("--resume-pr cannot be combined");
       expect(commandStarted).toBe(false);
@@ -1113,6 +1115,89 @@ describe("scan and patch workflow", () => {
       expect(literal.stderr).toContain(
         `${pullRequestOption} requires a saved finding identifier or --scan`,
       );
+    },
+  );
+
+  test.each([
+    ["scan", ["scan", "--patch"], ["--create-pr", "--create-draft-pr"]],
+    [
+      "scan",
+      ["scan", "--patch"],
+      ["--create-pr=true", "--create-draft-pr=true"],
+    ],
+    [
+      "patch",
+      ["patch", "--scan", "scan-1"],
+      ["--create-pr", "--create-draft-pr"],
+    ],
+    [
+      "patch",
+      ["patch", "--scan", "scan-1"],
+      ["--create-pr=true", "--create-draft-pr=true"],
+    ],
+  ] as const)(
+    "rejects creating both a ready and draft pull request from %s",
+    async (_name, command, pullRequestOptions) => {
+      let started = false;
+      const outcome = await runWorkflow([...command, ...pullRequestOptions], {
+        onCodex: () => {
+          started = true;
+          return 0;
+        },
+        onRepositoryCommand: () => {
+          started = true;
+          return "";
+        },
+        onWorkbench: () => {
+          started = true;
+          return savedScan(resultWithFindings(["high"]));
+        },
+      });
+
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain(
+        "--create-pr and --create-draft-pr are mutually exclusive",
+      );
+      expect(started).toBe(false);
+    },
+  );
+
+  test.each([
+    [
+      "ready creation is explicitly disabled",
+      ["--create-pr=false", "--create-draft-pr=true"],
+    ],
+    [
+      "draft creation is explicitly disabled",
+      ["--create-pr=true", "--create-draft-pr=false"],
+    ],
+    [
+      "ready creation is negated",
+      ["--create-pr", "--no-create-pr", "--create-draft-pr"],
+    ],
+    [
+      "draft creation is negated",
+      ["--create-pr", "--create-draft-pr", "--no-create-draft-pr"],
+    ],
+    [
+      "the final ready-creation value wins",
+      ["--create-pr", "--create-pr=false", "--create-draft-pr=true"],
+    ],
+    [
+      "the final draft-creation value wins",
+      ["--create-pr=true", "--create-draft-pr", "--create-draft-pr=false"],
+    ],
+  ] as const)(
+    "accepts pull request options when %s",
+    async (_description, pullRequestOptions) => {
+      const outcome = await runWorkflow([
+        "scan",
+        "--patch",
+        ...pullRequestOptions,
+      ]);
+
+      expect(outcome.exitCode).toBe(0);
+      expect(outcome.stderr).not.toContain("mutually exclusive");
     },
   );
 });

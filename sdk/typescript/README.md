@@ -361,7 +361,7 @@ own saved Codex desktop task. Add `--create-pr` to `scan --patch` or a
 saved-finding `patch` command to commit only verified patch files and open a
 pull request with `gh`. Use `--create-draft-pr` instead to open a draft pull
 request, review and update the verified patches, and send it for review when
-ready. If publication fails, run the printed
+ready. The flags are mutually exclusive. If publication fails, run the printed
 `patch --resume-pr BRANCH` command from the same repository; add
 `--create-draft-pr` when resuming a draft. It uses the saved commit without
 running Codex again and refuses to publish if the branch changed.

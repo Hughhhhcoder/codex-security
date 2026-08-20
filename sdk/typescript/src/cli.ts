@@ -264,6 +264,20 @@ const CREATE_DRAFT_PR_OPTION = CREATE_PR_OPTION.describe(
   "Create a draft GitHub pull request after verified patches.",
 );
 
+function pullRequestOptionConflict(options: {
+  createPr: boolean;
+  createDraftPr: boolean;
+  resumePr?: string;
+}): string | undefined {
+  if (options.createPr && options.createDraftPr) {
+    return "--create-pr and --create-draft-pr are mutually exclusive.";
+  }
+  if (options.resumePr !== undefined && options.createPr) {
+    return "--resume-pr cannot be combined with patch inputs or options.";
+  }
+  return undefined;
+}
+
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
 }
@@ -2326,6 +2340,12 @@ export async function main(
         .refine((options) => !options.createDraftPr || options.patch, {
           message: "--create-draft-pr requires --patch.",
         })
+        .superRefine((options, context) => {
+          const conflict = pullRequestOptionConflict(options);
+          if (conflict !== undefined) {
+            context.addIssue({ code: "custom", message: conflict });
+          }
+        })
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
         })
@@ -3053,6 +3073,10 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options }) {
         try {
+          const conflict = pullRequestOptionConflict(options);
+          if (conflict !== undefined) {
+            throw new CodexSecurityError(conflict);
+          }
           const linear =
             options.linearIssue.length > 0 || !!options.linearProject;
           if (options.resumePr !== undefined) {
@@ -3060,7 +3084,6 @@ export async function main(
               positionals.length > 0 ||
               options.scan !== undefined ||
               options.severity !== undefined ||
-              options.createPr ||
               linear ||
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||

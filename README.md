@@ -38,7 +38,8 @@ Use `--patch --patch-severity high` to fix high and critical findings. Add
 `--create-pr`, or enable the pull request option during review, to commit the
 verified files and open a GitHub pull request. Use `--create-draft-pr` instead to
 open a draft pull request, review and update its verified patches, and request
-review when they are ready. Ordinary scans do not change repository files.
+review when they are ready. The two pull request flags cannot be combined.
+Ordinary scans do not change repository files.
 
 Deep-scan discovery stops after 96 hours by default. Set `--max-time-hours` to
 any positive number of hours, including fractional hours, up to 96. Completed
