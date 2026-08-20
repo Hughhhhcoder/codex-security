@@ -137,6 +137,7 @@ describe("publication knowledge-base enrichment", () => {
     expect(invocations[0]!.input).toBe("publication prompt");
     const args = invocations[0]!.args;
     expect(args[0]).toBe("exec");
+    expect(args).toContain("--ignore-user-config");
     expect(args).toContain("--ephemeral");
     expect(args[args.indexOf("--sandbox") + 1]).toBe("read-only");
     expect(args).toContain("--output-schema");

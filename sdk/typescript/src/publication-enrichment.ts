@@ -144,6 +144,7 @@ export async function runPublicationEnrichmentCodex(
     command,
     [
       "exec",
+      "--ignore-user-config",
       "-c",
       'approval_policy="never"',
       "-c",
