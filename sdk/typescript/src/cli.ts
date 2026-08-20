@@ -5501,6 +5501,16 @@ async function executeScan(
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
   const incomplete = result.coverage.completeness !== "complete";
+  let deepScanStop: DeepScanStop | undefined;
+  if (arguments_.mode === "deep") {
+    deepScanStop = (await readDeepScanStop(
+      result,
+      arguments_.maxCostUsd,
+      dependencies.runWorkbench,
+    ).catch(() => undefined)) ?? {
+      reason: "Stop reason unavailable. See the report for details.",
+    };
+  }
   progress?.stage(`Scan finished · ${result.manifest.scan.id.slice(0, 8)}`);
   printScanSummary(
     result,
@@ -5509,6 +5519,7 @@ async function executeScan(
     progress?.interactive === true &&
       dependencies.environment["NO_COLOR"] === undefined &&
       dependencies.environment["TERM"] !== "dumb",
+    deepScanStop,
   );
   const completedScan = (exitCode: number): ScanOutcome => {
     diagnostic("scan.completed", {
@@ -5770,11 +5781,81 @@ function scanPhase(value: ScanWorkerPhase | ScanPhase): string {
   }[value];
 }
 
+interface DeepScanStop {
+  reason: string;
+  nextStep?: string;
+}
+
+async function readDeepScanStop(
+  result: ScanResult,
+  maxCostUsd: number | undefined,
+  runWorkbench: CliDependencies["runWorkbench"],
+): Promise<DeepScanStop | undefined> {
+  if (
+    maxCostUsd !== undefined &&
+    result.cost !== null &&
+    result.cost.estimatedUsd > maxCostUsd
+  ) {
+    return {
+      reason: `Reached the ${formatUsd(maxCostUsd)} cost limit. More issues may remain.`,
+      nextStep: "To scan further, rerun with a higher --max-cost.",
+    };
+  }
+  const response = await runWorkbench([
+    "get-deep-scan",
+    "--scan-id",
+    result.manifest.scan.id,
+    "--thread-id",
+    result.threadId,
+  ]);
+  const state = response["deepScan"] as
+    | {
+        terminalReason: string;
+        dispatchedCount: number;
+        completionSequence: number;
+        noNewStreak: number;
+        config: Required<DeepScanOptions>;
+        createdAt: string;
+        completedAt: string;
+      }
+    | undefined;
+  if (state?.terminalReason === "saturated") {
+    return {
+      reason: `The last ${state.noNewStreak} review rounds found no new issues. More issues may remain.`,
+    };
+  }
+  if (state?.terminalReason !== "capped") return undefined;
+  const { maxDiscoveryRuns, maxTimeHours } = state.config;
+  if (state.dispatchedCount >= maxDiscoveryRuns) {
+    const stillFindingIssues =
+      state.completionSequence > 0 && state.noNewStreak === 0;
+    return {
+      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${stillFindingIssues ? "The latest review still found new issues." : "More issues may remain."}`,
+      nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
+    };
+  }
+  const elapsedHours =
+    (Date.parse(state.completedAt) - Date.parse(state.createdAt)) / 3_600_000;
+  if (elapsedHours >= maxTimeHours) {
+    return {
+      reason: `Reached the ${maxTimeHours}-hour time limit. More issues may remain.`,
+      nextStep:
+        maxTimeHours < 96
+          ? "To scan further, rerun with a higher --max-time-hours."
+          : "To scan a smaller part of the repository, rerun with --path.",
+    };
+  }
+  return {
+    reason: "Stopped before the review finished. See the report for details.",
+  };
+}
+
 function printScanSummary(
   result: ScanResult,
   progress: Progress | null,
   errorOutput: Writable,
   color: boolean,
+  deepScanStop?: DeepScanStop,
 ): void {
   const paint = (value: string, code: number | string): string =>
     color ? `\u001B[${code}m${value}\u001B[0m` : value;
@@ -5826,6 +5907,9 @@ function printScanSummary(
       `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
       `  ${paint("SCOPE", 1)}     ${stripVTControlCharacters(formatCoverageScope(result.coverage)).replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")}\n` +
       `  ${paint("COVERAGE", 1)}  ${formatCoverageCompleteness(result.coverage.completeness)}\n` +
+      (deepScanStop === undefined
+        ? ""
+        : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +
       `  ${paint("ELAPSED", 1)}   ${duration}\n`,
   );
 
@@ -5841,6 +5925,9 @@ function printScanSummary(
   errorOutput.write(
     `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
   );
+  if (deepScanStop?.nextStep !== undefined) {
+    errorOutput.write(`\n  ${deepScanStop.nextStep}\n`);
+  }
 }
 
 function formatTokenUsage(usage: unknown): string | null {
