@@ -3,6 +3,72 @@ import { describe, expect, test } from "bun:test";
 import { renderScanHistory } from "../src/scan-history-renderer.js";
 
 describe("scan history renderer", () => {
+  test("separates finished execution from canonical requested-scope coverage", () => {
+    for (const completeness of ["complete", "partial", "unknown"] as const) {
+      const text = renderScanHistory(
+        {
+          targetPath: "/demo/repository",
+          scanId: "scan-1",
+          mode: "standard",
+          progress: { status: "complete" },
+          coverage: {
+            mode: "scoped_path",
+            completeness,
+            includePaths: ["src/parser"],
+            excludePaths: [],
+          },
+          findings: [],
+        },
+        "show",
+        { color: false },
+      );
+      expect(text).toContain("FINISHED");
+      expect(text).toContain("scoped paths: src/parser");
+      expect(text).toContain(`${completeness} for requested scope`);
+    }
+    const legacy = renderScanHistory(
+      {
+        targetPath: "/demo/repository",
+        scanId: "scan-old",
+        mode: "standard",
+        scope: "src/parser",
+        progress: { status: "complete" },
+        findings: [],
+      },
+      "show",
+      { color: false },
+    );
+    expect(legacy).toContain("FINISHED");
+    expect(legacy).toContain("src/parser");
+    expect(legacy).toContain("COVERAGE  not available");
+    expect(legacy).not.toContain("complete for requested scope");
+  });
+
+  test("shows exact recorded paths for a multi-path history entry", () => {
+    const text = renderScanHistory(
+      {
+        scans: [
+          {
+            scanId: "scan-1",
+            targetPath: "/demo/repository",
+            mode: "standard",
+            scope: ".",
+            scopePaths: ["src/parser", "tests/parser"],
+            progress: { status: "complete" },
+            findingCount: 0,
+            startedAt: "2026-08-01T00:00:00Z",
+          },
+        ],
+      },
+      "list",
+      { color: false },
+    );
+    expect(text).toContain("EXECUTION");
+    expect(text).toContain("FINISHED");
+    expect(text).toContain("src/parser, tests/parser");
+    expect(text).not.toContain("SCOPE  .");
+  });
+
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {
@@ -284,7 +350,7 @@ describe("scan history renderer", () => {
       ),
     );
 
-    expect(output).toContain("COMPLETE");
+    expect(output).toContain("FINISHED");
     expect(output).toContain("WARNING");
     expect(output).toContain(
       "Repository HEAD changed while the scan was running",

@@ -1,5 +1,10 @@
 import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
+import {
+  formatCoverageCompleteness,
+  formatCoverageScope,
+  type CoverageSummary,
+} from "./coverage-presentation.js";
 
 export type HistoryCommand =
   | "list"
@@ -184,7 +189,7 @@ export function renderScanHistory(
     );
     if (wide) {
       lines.push(
-        `  ${strong("SCAN".padEnd(36))} ${strong("DATE".padEnd(10))} ${strong("MODE".padEnd(8))}${multipleRepositories ? ` ${strong("REPOSITORY".padEnd(18))}` : ""} ${strong("FINDINGS")} ${strong("STATUS")}`,
+        `  ${strong("SCAN".padEnd(36))} ${strong("DATE".padEnd(10))} ${strong("MODE".padEnd(8))}${multipleRepositories ? ` ${strong("REPOSITORY".padEnd(18))}` : ""} ${strong("FINDINGS")} ${strong("EXECUTION")}`,
       );
     }
     for (const scan of scans) {
@@ -192,7 +197,7 @@ export function renderScanHistory(
       const complete = status === "complete";
       const statusColor = complete ? 32 : status === "running" ? 36 : 31;
       const statusLabel = paint(
-        `${complete ? "✓" : "●"} ${status.toUpperCase()}`,
+        complete ? "✓ FINISHED" : `● ${status.toUpperCase()}`,
         statusColor,
       );
       const started = clean(scan["startedAt"]).slice(0, 10);
@@ -207,6 +212,11 @@ export function renderScanHistory(
           `  ${clean(scan["scanId"])}`,
           `    ${started}${multipleRepositories ? `  ${accent("·")}  ${clean(scanRepository)}` : ""}  ${accent("·")}  ${findings} findings  ${accent("·")}  ${statusLabel}`,
         );
+      }
+      const scopePaths = scan["scopePaths"] as string[] | undefined;
+      const scope = scopePaths?.length ? scopePaths.join(", ") : scan["scope"];
+      if (typeof scope === "string") {
+        lines.push(`    ${strong("SCOPE")}  ${clean(scope)}`);
       }
     }
   } else if (command === "findings") {
@@ -227,8 +237,30 @@ export function renderScanHistory(
       status === "complete" ? 32 : status === "running" ? 36 : 31;
     lines.push(
       `  ${strong(clean(basename(result["targetPath"] as string)))}  ${accent("·")}  ${clean(result["scanId"])}`,
-      `  ${paint(`${status === "complete" ? "✓" : "●"} ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
+      `  ${paint(status === "complete" ? "✓ FINISHED" : `● ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
     );
+    const canonicalCoverage = result["coverage"] as CoverageSummary | undefined;
+    if (canonicalCoverage) {
+      wrap(
+        formatCoverageScope(canonicalCoverage),
+        11,
+        `  ${strong("SCOPE")}  `,
+      );
+      lines.push(
+        `  ${strong("COVERAGE")}  ${formatCoverageCompleteness(canonicalCoverage.completeness)}`,
+      );
+    } else {
+      const contract = result["contract"] as JsonObject | undefined;
+      const scope = contract?.["scope"] as JsonObject | undefined;
+      const paths = scope?.["requiredIncludePaths"] as string[] | undefined;
+      const recordedScope = paths?.length ? paths.join(", ") : result["scope"];
+      if (typeof recordedScope === "string") {
+        wrap(recordedScope, 11, `  ${strong("SCOPE")}  `);
+      }
+      if (status === "complete") {
+        lines.push(`  ${strong("COVERAGE")}  not available`);
+      }
+    }
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);
     }
@@ -289,7 +321,7 @@ export function renderScanHistory(
       ];
       if (parts.length > 0) {
         lines.push(
-          `  ${strong("COVERAGE")}  ${parts.join(`  ${accent("·")}  `)}`,
+          `  ${strong("REVIEW PROGRESS")}  ${parts.join(`  ${accent("·")}  `)}`,
         );
       }
     }

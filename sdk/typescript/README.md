@@ -275,7 +275,9 @@ overrides, without starting Codex or contacting the network.
 `core.hooksPath`, does not replace an existing hook, and blocks high-severity
 findings or failed scans. Set `--fail-on-severity` to change the threshold.
 
-`--path` scopes a scan to one or more paths, `--diff` scans committed changes,
+`--path` defines the requested scope using one or more files or directories.
+A finished review of those paths is a complete scoped scan; it does not imply
+that the rest of the repository was reviewed. `--diff` scans committed changes,
 and `--working-tree` scans staged and unstaged changes. Deep scans support
 repository and path targets. The output directory must be outside the scanned
 directory and any enclosing Git worktree. When SARIF is produced, it is written
@@ -340,10 +342,19 @@ the destination without moving files.
 
 Scans are report-only by default. Use `--fail-on-severity` in CI to exit 1 when
 a completed scan contains a finding at or above the selected severity.
-Incomplete coverage and CLI/runtime errors exit 2 so they cannot be mistaken
-for a passing policy. Incomplete scans still write the available human or JSON
-result to stdout and a coverage warning to stderr, including in report-only
-mode.
+Incomplete or unknown coverage of the requested scope and CLI/runtime errors
+exit 2 so they cannot be mistaken for a passing policy. For example, a completed
+`scan . --path src/parser` exits 0 in report-only mode even though other paths
+were not selected. Optional additional assurance is recorded in
+`coverage.openQuestions`; genuinely unfinished requested work remains in
+`coverage.deferred` and keeps the scan partial. An agreed static-only review does
+not require live reproduction merely to be complete.
+
+Exit 2 can still accompany a valid, completed partial report. Incomplete scans
+write the available human or JSON result to stdout and a coverage warning to
+stderr, including in report-only mode. Automation should inspect the manifest
+status together with `coverage.mode`, `coverage.completeness`, scope paths, and
+deferred work rather than interpreting exit 2 as proof that no report exists.
 
 Use `--patch` to fix and verify confirmed findings after a complete scan.
 `--patch-severity high` selects high and critical findings; the default is low

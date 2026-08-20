@@ -780,6 +780,19 @@ def _linked_finding_section(number: int, finding: dict[str, Any], report_path: s
     return lines
 
 
+def _append_questions(lines: list[str], heading: str, questions: list[Any]) -> None:
+    if not questions:
+        return
+    lines.extend(["", heading, ""])
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        lines.append(f"- {_text(question.get('question'), 'Unspecified open question.')}")
+        prompt = _text(question.get("followUpPrompt"), "")
+        if prompt:
+            lines.append(f"  - Follow-up prompt: {prompt}")
+
+
 def build_report_markdown(
     manifest: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any]
 ) -> str:
@@ -866,7 +879,7 @@ def build_report_markdown(
             "| Field | Value |",
             "| --- | --- |",
             *summary_count_lines,
-            f"| Coverage | {coverage['completeness']} |",
+            f"| Coverage | {coverage['completeness']} for requested scope |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
             "Canonical artifacts: `scan-manifest.json`, `findings.json`, and `coverage.json`. This report is a deterministic projection of those files.",
@@ -1003,6 +1016,7 @@ def build_report_markdown(
             ]
         )
     surfaces = coverage.get("surfaces", [])
+    surfaces = surfaces if isinstance(surfaces, list) else []
     if surfaces:
         lines.extend(
             [
@@ -1032,13 +1046,17 @@ def build_report_markdown(
                 )
                 + " |"
             )
-    open_questions = coverage.get("openQuestions", [])
-    questions = list(open_questions) if isinstance(open_questions, list) else []
     deferred = coverage.get("deferred", [])
-    if isinstance(deferred, list):
-        questions.extend(
+    deferred = deferred if isinstance(deferred, list) else []
+    blockers = []
+    deferred_surface_ids = set()
+    for item in deferred:
+        if not isinstance(item, dict):
+            continue
+        deferred_surface_ids.update(item.get("surfaceIds", []))
+        blockers.append(
             {
-                "question": item.get("reason", "Deferred review requires follow-up."),
+                "question": item.get("reason", "Requested review work remains unfinished."),
                 "followUpPrompt": " ".join(
                     (
                         f"Review deferred unit {item.get('id', 'unknown')} and close its stated proof gap.",
@@ -1051,18 +1069,33 @@ def build_report_markdown(
                     )
                 ).strip(),
             }
-            for item in deferred
-            if isinstance(item, dict)
         )
-    if questions:
-        lines.extend(["", "## Open Questions And Follow Up", ""])
-        for question in questions:
-            if not isinstance(question, dict):
-                continue
-            lines.append(f"- {_text(question.get('question'), 'Unspecified open question.')}")
-            prompt = _text(question.get("followUpPrompt"), "")
-            if prompt:
-                lines.append(f"  - Follow-up prompt: {prompt}")
+    for surface in surfaces:
+        if (
+            isinstance(surface, dict)
+            and surface.get("disposition") == "needs_follow_up"
+            and surface.get("id") not in deferred_surface_ids
+        ):
+            blockers.append(
+                {
+                    "question": f"{surface.get('label', 'Unresolved surface')}: "
+                    f"{surface.get('notes') or 'Essential in-scope review remains unfinished.'}"
+                }
+            )
+    if not blockers and coverage["completeness"] != "complete":
+        blockers.append(
+            {
+                "question": f"Requested-scope coverage is {coverage['completeness']}; "
+                "no specific remaining work was recorded."
+            }
+        )
+    _append_questions(lines, "## Incomplete Requested Work", blockers)
+    open_questions = coverage.get("openQuestions", [])
+    _append_questions(
+        lines,
+        "## Open Questions And Follow Up",
+        open_questions if isinstance(open_questions, list) else [],
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 

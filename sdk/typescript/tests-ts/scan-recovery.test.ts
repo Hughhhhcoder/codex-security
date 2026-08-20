@@ -63,7 +63,14 @@ type ScanSummary = {
 
 type SarifDocument = {
   runs: Array<{
-    properties: { codexSecurityCoverageCompleteness?: string };
+    automationDetails: { id: string };
+    properties: {
+      codexSecurityCoverageCompleteness?: string;
+      codexSecurityCoverageMode?: string;
+      codexSecurityIncludePaths?: string[];
+      codexSecurityExcludePaths?: string[];
+      codexSecurityExplicitExclusions?: unknown[];
+    };
     results: Array<{ properties: { severity: string } }>;
     invocations?: Array<{
       executionSuccessful: boolean;
@@ -118,6 +125,7 @@ async function workbench(fixture: ScanFixture, args: readonly string[]) {
 
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
+  paths?: readonly string[],
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
@@ -185,7 +193,7 @@ async function startDraftScan(
       config: {},
       mode: "standard",
       repository: target,
-      target: { kind: "repository", paths: [] },
+      target: { kind: paths ? "paths" : "repository", paths: paths ?? [] },
     }),
   ]);
   fixture.scanId = String(registration["scanId"]);
@@ -234,6 +242,150 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
+  test("seals complete scoped reviews with optional follow-up and exports their scope", async () => {
+    const fixture = await startDraftScan("directory", [
+      "src",
+      "src/extract.py",
+    ]);
+    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
+    const manifest = await readJson<{
+      scan: { scope: Record<string, unknown> };
+    }>(manifestPath);
+    Object.assign(manifest.scan.scope, {
+      validationMode: "static source review",
+      runtimeStatus: "not requested",
+      limitations: ["Live testing was outside the requested review."],
+    });
+    await writeJson(manifestPath, manifest);
+    const coveragePath = join(fixture.scanDir, "coverage.json");
+    const coverage = await readJson<CoverageDocument>(coveragePath);
+    coverage["openQuestions"] = [
+      { question: "Consider a separate deployment review." },
+    ];
+    coverage.explicitExclusions = [
+      {
+        pattern: "src/generated/**",
+        reason: "Generated source was excluded by policy.",
+      },
+    ];
+    await writeJson(coveragePath, coverage);
+
+    const completed = await completeScan(fixture);
+    expect(completed.progress.status).toBe("complete");
+    expect(await readJson<CoverageDocument>(coveragePath)).toMatchObject({
+      completeness: "complete",
+      mode: "scoped_path",
+      includePaths: ["src", "src/extract.py"],
+      openQuestions: coverage["openQuestions"],
+    });
+    const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
+    expect(report).toContain("complete for requested scope");
+    expect(report).toContain("Consider a separate deployment review.");
+    expect(report).not.toContain("## Incomplete Requested Work");
+    const sarif = await readJson<SarifDocument>(
+      join(fixture.scanDir, "exports", "results.sarif"),
+    );
+    expect(sarif.runs[0]).toMatchObject({
+      automationDetails: { id: fixture.scanId },
+      properties: {
+        codexSecurityCoverageMode: "scoped_path",
+        codexSecurityCoverageCompleteness: "complete",
+        codexSecurityIncludePaths: ["src", "src/extract.py"],
+        codexSecurityExcludePaths: [],
+        codexSecurityExplicitExclusions: coverage.explicitExclusions,
+      },
+    });
+    expect(sarif.runs[0]?.invocations).toBeUndefined();
+
+    const history = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect(history["scan"]).toMatchObject({
+      coverage: {
+        mode: "scoped_path",
+        completeness: "complete",
+        includePaths: ["src", "src/extract.py"],
+        excludePaths: [],
+      },
+    });
+    const listed = await workbench(fixture, ["list-scans"]);
+    expect(listed["scans"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          scanId: fixture.scanId,
+          scopePaths: ["src", "src/extract.py"],
+        }),
+      ]),
+    );
+    const sealed = await readFile(coveragePath, "utf8");
+    await writeFile(coveragePath, `${sealed}\n`);
+    const unavailable = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
+    ]);
+    expect(
+      (unavailable["scan"] as Record<string, unknown>)["coverage"],
+    ).toBeUndefined();
+    expect(await readFile(coveragePath, "utf8")).toBe(`${sealed}\n`);
+  });
+
+  test.each(["deferred", "surface"] as const)(
+    "keeps an in-scope %s blocker separate from optional follow-up",
+    async (kind) => {
+      const fixture = await startDraftScan("directory", ["src"]);
+      const coveragePath = join(fixture.scanDir, "coverage.json");
+      const coverage = await readJson<CoverageDocument>(coveragePath);
+      const blocker =
+        "An essential in-scope source question remains unresolved.";
+      coverage["openQuestions"] = [
+        { question: "Consider a separate deployment review." },
+      ];
+      if (kind === "deferred") {
+        coverage.deferred = [
+          {
+            id: "source-review",
+            reason: blocker,
+            paths: ["src/extract.py"],
+          },
+        ];
+      } else {
+        Object.assign((coverage.surfaces as CoverageSurface[])[0]!, {
+          disposition: "needs_follow_up",
+          notes: blocker,
+        });
+      }
+      await writeJson(coveragePath, coverage);
+      await completeScan(fixture);
+
+      expect(
+        (await readJson<CoverageDocument>(coveragePath)).completeness,
+      ).toBe("partial");
+      const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
+      const incomplete = report.indexOf("## Incomplete Requested Work");
+      const optional = report.indexOf("## Open Questions And Follow Up");
+      expect(incomplete).toBeGreaterThan(0);
+      expect(optional).toBeGreaterThan(incomplete);
+      expect(report.slice(incomplete, optional)).toContain(blocker);
+      expect(report.slice(incomplete, optional)).not.toContain(
+        "Consider a separate deployment review.",
+      );
+      expect(report.slice(optional)).toContain(
+        "Consider a separate deployment review.",
+      );
+      const history = await workbench(fixture, [
+        "get-scan",
+        "--scan-id",
+        fixture.scanId,
+      ]);
+      expect(history["scan"]).toMatchObject({
+        coverage: { completeness: "partial" },
+      });
+    },
+  );
+
   test("rejoins a headless scan after its running context changes", async () => {
     const fixture = await startDraftScan();
     const threadId = "context-rejoin-regression";
@@ -925,7 +1077,7 @@ describe("malformed scan artifact recovery", () => {
       { id: "discarded-finding-1", reason: completed.warnings[0] },
     ]);
     const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
-    expect(report).toContain("| Coverage | partial |");
+    expect(report).toContain("| Coverage | partial for requested scope |");
     expect(report).toContain("Skipped malformed finding 1");
     const sarif = await readJson<SarifDocument>(
       join(fixture.scanDir, "exports", "results.sarif"),

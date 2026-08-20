@@ -74,6 +74,10 @@ import {
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
 import {
+  formatCoverageCompleteness,
+  formatCoverageScope,
+} from "./coverage-presentation.js";
+import {
   CodexSecurityError,
   ConfigurationError,
   InvalidTargetError,
@@ -5497,7 +5501,7 @@ async function executeScan(
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
   const incomplete = result.coverage.completeness !== "complete";
-  progress?.stage(`Scan complete · ${result.manifest.scan.id.slice(0, 8)}`);
+  progress?.stage(`Scan finished · ${result.manifest.scan.id.slice(0, 8)}`);
   printScanSummary(
     result,
     progress,
@@ -5526,8 +5530,8 @@ async function executeScan(
   if (incomplete) {
     errorOutput.write(
       threshold === undefined
-        ? `codex-security: Scan coverage is ${result.coverage.completeness}; results may be incomplete.\n`
-        : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.\n`,
+        ? `codex-security: Scan coverage is ${result.coverage.completeness} for the requested scope; see the report for unfinished work.\n`
+        : `codex-security: Cannot evaluate the failure policy: coverage is ${result.coverage.completeness} for the requested scope.\n`,
     );
     return completedScan(2);
   }
@@ -5820,7 +5824,8 @@ function printScanSummary(
   errorOutput.write(
     `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
       `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
+      `  ${paint("SCOPE", 1)}     ${stripVTControlCharacters(formatCoverageScope(result.coverage)).replace(/[\u0000-\u001F\u007F-\u009F]/g, " ")}\n` +
+      `  ${paint("COVERAGE", 1)}  ${formatCoverageCompleteness(result.coverage.completeness)}\n` +
       `  ${paint("ELAPSED", 1)}   ${duration}\n`,
   );
 

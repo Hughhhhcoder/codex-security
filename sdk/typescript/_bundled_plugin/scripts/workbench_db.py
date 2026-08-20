@@ -3875,10 +3875,21 @@ def main() -> None:
             result = deep_scan.fail_deep_scan(connection, args)
         elif args.command == "get-scan":
             result = scan_context(connection, args.scan_id, args.occurrence_id)
+            scan = require_scan(connection, args.scan_id)
+            if scan["status"] == "complete":
+                try:
+                    coverage = coverage_for_comparison(scan)
+                except (OSError, SystemExit):
+                    pass  # Historical artifacts may no longer be available or verifiable.
+                else:
+                    result["scan"]["coverage"] = {
+                        key: coverage[key]
+                        for key in ("mode", "completeness", "includePaths", "excludePaths")
+                    }
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":
-            result = scan_history.list_scans(connection, args)
+            result = scan_history.list_scans(connection, args, scope_paths=requested_scan_paths)
         elif args.command == "list-unmatched-scan-pairs":
             result = scan_history.list_unmatched_scan_pairs(
                 connection,
