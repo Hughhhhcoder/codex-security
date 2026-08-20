@@ -111,24 +111,48 @@ describe("shared security-policy inputs", () => {
     );
   });
 
-  test("rejects outside, dangling outside, cyclic, and hard-linked evidence", async () => {
-    for (const kind of ["outside", "missing", "cycle", "hard-link"]) {
+  test("reads hard-linked policies but rejects a hard-linked destination", async () => {
+    const { repository } = await fixture();
+    await mkdir(join(repository, "component", "child"), { recursive: true });
+    const shared = join(repository, "guidance.md");
+    await writeFile(shared, "# Shared guidance\n");
+    await link(shared, join(repository, "SECURITY.md"));
+    await link(shared, join(repository, "component", "child", "SECURITY.md"));
+
+    const resolved = run(repository, "--scope", "component");
+    expect(resolved.status, resolved.stderr).toBe(0);
+    expect(resolved.stdout).toContain("# Shared guidance");
+    const evidence = inspect(repository, "component");
+    expect(evidence.guidance).toBe(resolved.stdout);
+    expect(evidence.policyPaths).toEqual([
+      "SECURITY.md",
+      "component/child/SECURITY.md",
+    ]);
+
+    const selected = run(repository, "--inspect", "--scope", ".");
+    expect(selected.status).toBe(2);
+    expect(selected.stdout).toBe("");
+    expect(selected.stderr).toContain(
+      "selected SECURITY.md must not be hard-linked",
+    );
+  });
+
+  test("rejects outside, dangling outside, and cyclic policy links", async () => {
+    for (const kind of ["outside", "missing", "cycle"]) {
       const { root, repository } = await fixture();
       await mkdir(join(repository, "component"));
       const outside = join(root, "outside.md");
       const policy = join(repository, "component", "SECURITY.md");
       await writeFile(outside, "synthetic private text\n");
-      if (kind === "hard-link") await link(outside, policy);
-      else
-        await symlink(
-          kind === "outside"
-            ? outside
-            : kind === "missing"
-              ? join(root, "missing.md")
-              : policy,
-          policy,
-          "file",
-        );
+      await symlink(
+        kind === "outside"
+          ? outside
+          : kind === "missing"
+            ? join(root, "missing.md")
+            : policy,
+        policy,
+        "file",
+      );
       const result = run(repository, "--inspect", "--scope", ".");
       expect(result.status, kind).toBe(2);
       expect(result.stdout).toBe("");
@@ -140,44 +164,45 @@ describe("shared security-policy inputs", () => {
     const { root, repository } = await fixture();
     const outside = join(root, "outside");
     const metadata = join(repository, "git-data");
+    const commonMetadata = join(repository, "git-common");
+    const gitArgs = ["--git-dir", metadata, "--git-dir", commonMetadata];
     await mkdir(outside);
     await mkdir(join(repository, ".git"));
     await mkdir(metadata);
+    await mkdir(commonMetadata);
     await writeFile(join(outside, "SECURITY.md"), "# Outside\n");
     await writeFile(
       join(repository, ".git", "SECURITY.md"),
       "# Git metadata\n",
     );
     await writeFile(join(metadata, "SECURITY.md"), "# Separate Git metadata\n");
+    await writeFile(
+      join(commonMetadata, "SECURITY.md"),
+      "# Common Git metadata\n",
+    );
     await symlink(
       outside,
       join(repository, "linked-directory"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    expect(inspect(repository, ".", "--git-dir", metadata).policyPaths).toEqual(
-      [],
-    );
+    expect(inspect(repository, ".", ...gitArgs).policyPaths).toEqual([]);
+    const inventory = run(repository, "--list", ...gitArgs);
+    expect(inventory.status, inventory.stderr).toBe(0);
+    expect(JSON.parse(inventory.stdout)).toEqual([]);
     await mkdir(join(repository, "component"));
     await symlink(
       join(metadata, "SECURITY.md"),
       join(repository, "component", "SECURITY.md"),
       "file",
     );
-    const result = run(
-      repository,
-      "--inspect",
-      "--scope",
-      ".",
-      "--git-dir",
-      metadata,
-    );
+    const result = run(repository, "--inspect", "--scope", ".", ...gitArgs);
     expect(result.status).toBe(2);
     expect(result.stderr).toContain("Git metadata");
     const nestedMetadata = join(metadata, "hooks");
     await mkdir(nestedMetadata);
     await writeFile(join(nestedMetadata, "SECURITY.md"), "# Metadata\n");
     for (const mode of [["--list"], ["--inspect", "--scope", "."]]) {
-      const nested = run(nestedMetadata, ...mode, "--git-dir", metadata);
+      const nested = run(nestedMetadata, ...mode, ...gitArgs);
       expect(nested.status).toBe(2);
       expect(nested.stdout).toBe("");
     }
@@ -190,12 +215,16 @@ describe("shared security-policy inputs", () => {
     await mkdir(metadata);
     await mkdir(join(repository, "component"));
     await writeFile(join(metadata, "private.md"), "synthetic metadata\n");
+    await writeFile(join(metadata, "SECURITY.md"), "# Git metadata\n");
     if ((await stat(alias).catch(() => null)) === null)
       await symlink(
         metadata,
         alias,
         process.platform === "win32" ? "junction" : "dir",
       );
+    const inventory = run(repository, "--list", "--git-dir", alias);
+    expect(inventory.status, inventory.stderr).toBe(0);
+    expect(JSON.parse(inventory.stdout)).toEqual([]);
     await symlink(
       join(alias, "private.md"),
       join(repository, "SECURITY.md"),
@@ -231,6 +260,8 @@ root = CaseSensitivePath("C:/repo")
 metadata = root / "GitData"
 assert not guard(root / "gitdata" / "SECURITY.md", root, (metadata,))
 assert guard(metadata / "SECURITY.md", root, (metadata,))
+assert not guard(root / ".GIT" / "SECURITY.md", root, ())
+assert guard(root / ".git" / "SECURITY.md", root, ())
 try:
     module["_inside"](CaseSensitivePath("C:/Repo/SECURITY.md"), root, "scope")
 except module["ResolutionError"]:
@@ -259,22 +290,40 @@ else:
     }
   });
 
-  test("requires a directory scope and never writes the repository", async () => {
+  test("requires a directory scope and writes only the requested output", async () => {
     const { root, repository } = await fixture();
     const source = join(repository, "source.ts");
     await writeFile(source, "export const value = 1;\n");
     expect(run(repository, "--inspect", "--scope", source).status).toBe(2);
+    expect(run(repository, "--list", "--scope", source).status).toBe(2);
+    expect(run(repository, "--inspect").status).toBe(2);
+    expect(run(repository, "--inspect", "--list", "--scope", ".").status).toBe(
+      2,
+    );
     expect(run(repository, "--inspect", "--scope", root).status).toBe(2);
     const loop = join(root, "git-loop");
     await symlink(loop, loop, "file");
     const invalidMetadata = run(repository, "--list", "--git-dir", loop);
     expect(invalidMetadata.status).toBe(2);
     expect(invalidMetadata.stderr).not.toContain("Traceback");
-    expect(inspect(repository)).toEqual({
+    const expected = {
       previousContent: null,
       guidance: "",
       policyPaths: [],
-    });
+    };
+    expect(inspect(repository)).toEqual(expected);
+    const output = join(root, "inspection.json");
+    const result = run(
+      repository,
+      "--inspect",
+      "--scope",
+      ".",
+      "--out",
+      output,
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(await readFile(output, "utf8"))).toEqual(expected);
     expect(await readFile(source, "utf8")).toBe("export const value = 1;\n");
   });
 });
