@@ -324,8 +324,23 @@ describe("semantic scan comparison", () => {
     });
     expect(calls.turnOptions).toMatchObject({ signal: controller.signal });
     expect(calls.turnOptions?.outputSchema).toMatchObject({
-      required: ["matches", "uncertain"],
+      required: ["matches", "uncertain", "related", "request"],
     });
+    const strictObjects = (schema: unknown): void => {
+      if (schema === null || typeof schema !== "object") return;
+      const object = schema as Record<string, unknown>;
+      if (object["type"] === "object") {
+        expect(object["required"]).toEqual(
+          Object.keys(object["properties"] as object),
+        );
+        expect(object["additionalProperties"]).toBe(false);
+      }
+      for (const value of Object.values(object)) strictObjects(value);
+    };
+    strictObjects(calls.turnOptions?.outputSchema);
+    expect(JSON.stringify(calls.turnOptions?.outputSchema)).toContain(
+      '"type":"null"',
+    );
     expect(calls.prompt).toContain(
       "same underlying root cause and remediation",
     );
@@ -382,7 +397,7 @@ describe("semantic scan comparison", () => {
             CODEX_SECURITY_SCAN_ID: "current",
           },
         });
-        return {
+        const response = {
           matches: [
             {
               beforeOccurrenceIds: ["old-dismissed"],
@@ -399,6 +414,10 @@ describe("semantic scan comparison", () => {
             },
           ],
         };
+        return await matchScanFindings(value, {
+          ...options,
+          codex: fakeCodex(response).codex,
+        });
       },
     });
     expect(input).toEqual({ before: [open, dismissed], after: [after] });
@@ -433,7 +452,7 @@ describe("semantic scan comparison", () => {
         occurrenceId: "new",
       };
       let calls = 0;
-      let modelCalled = false;
+      const model = fakeCodex({ matches: [], uncertain: [] });
       await matchCompletedScan({
         scanId: "current",
         repository: "/repository",
@@ -456,21 +475,227 @@ describe("semantic scan comparison", () => {
               }
             : {};
         },
-        async matchFindings() {
-          modelCalled = true;
-          return { matches: [], uncertain: [] };
-        },
+        matchFindings: (input, options) =>
+          matchScanFindings(input, { ...options, codex: model.codex }),
       });
       expect(calls).toBe(expectedCalls);
-      expect(modelCalled).toBe(expectedModel);
+      expect(model.calls.prompt !== undefined).toBe(expectedModel);
+    },
+  );
+
+  test.each(["split", "combined", "confirmed alias"] as const)(
+    "retains known identities when a later finding is %s",
+    async (scenario) => {
+      const oldA = { findingId: "identity-a", occurrenceId: "old-a" };
+      const oldB = { findingId: "identity-b", occurrenceId: "old-b" };
+      const newA = { findingId: "identity-a", occurrenceId: "new-a" };
+      const newB = { findingId: "identity-b", occurrenceId: "new-b" };
+      const before = scenario === "combined" ? [oldA, oldB] : [oldA];
+      const after =
+        scenario === "split"
+          ? [newA, newB]
+          : scenario === "combined"
+            ? [newA]
+            : [newB];
+      const knownFindingGroups =
+        scenario === "confirmed alias"
+          ? [["identity-a", "identity-b"]]
+          : undefined;
+      const model = fakeCodex({
+        matches: [
+          {
+            beforeOccurrenceIds: before.map(({ occurrenceId }) => occurrenceId),
+            afterOccurrenceIds: after.map(({ occurrenceId }) => occurrenceId),
+            confidence: "high",
+            reason: "The scan split or combined the same defective control.",
+          },
+        ],
+        uncertain: [],
+      });
+      const saved: ScanComparisonResult[] = [];
+      await matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: before,
+        falsePositives: [],
+        findings: after,
+        async workbench(args) {
+          if (args[0] === "list-unmatched-scan-pairs") {
+            return {
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: after,
+                  beforeScans: [{ scanId: "prior", findings: before }],
+                  knownFindingGroups,
+                },
+              ],
+            };
+          }
+          saved.push(JSON.parse(args.at(-1)!) as ScanComparisonResult);
+          return {};
+        },
+        async matchFindings(input, options) {
+          expect(input).toEqual({
+            before,
+            after,
+            ...(knownFindingGroups === undefined ? {} : { knownFindingGroups }),
+          });
+          return await matchScanFindings(input, {
+            ...options,
+            codex: model.codex,
+          });
+        },
+      });
+      expect(model.calls.prompt !== undefined).toBe(
+        scenario !== "confirmed alias",
+      );
+      expect(saved).toEqual([
+        {
+          matches: [
+            expect.objectContaining({
+              beforeOccurrenceIds: before.map(
+                ({ occurrenceId }) => occurrenceId,
+              ),
+              afterOccurrenceIds: after.map(({ occurrenceId }) => occurrenceId),
+            }),
+          ],
+          uncertain: [],
+        },
+      ]);
+    },
+  );
+
+  test.each(["new", "resolved", "split", "combined"] as const)(
+    "preserves deterministic matches while reconciling a %s issue",
+    async (scenario) => {
+      const oldA = { findingId: "identity-a", occurrenceId: "old-a" };
+      const oldB = { findingId: "identity-b", occurrenceId: "old-b" };
+      const newA = { findingId: "identity-a", occurrenceId: "new-a" };
+      const newB = { findingId: "identity-b", occurrenceId: "new-b" };
+      const before =
+        scenario === "resolved" || scenario === "combined"
+          ? [oldA, oldB]
+          : [oldA];
+      const after =
+        scenario === "new" || scenario === "split" ? [newA, newB] : [newA];
+      const extendsKnown = scenario === "split" || scenario === "combined";
+      const saved: ScanComparisonResult[] = [];
+      await matchCompletedScan({
+        scanId: "current",
+        repository: "/repository",
+        previousFindings: before,
+        falsePositives: [],
+        findings: after,
+        async workbench(args) {
+          if (args[0] === "list-unmatched-scan-pairs")
+            return {
+              batches: [
+                {
+                  afterScanId: "current",
+                  afterFindings: after,
+                  beforeScans: [{ scanId: "prior", findings: before }],
+                },
+              ],
+            };
+          saved.push(JSON.parse(args.at(-1)!) as ScanComparisonResult);
+          return {};
+        },
+        async matchFindings(input, options) {
+          const response = {
+            matches: extendsKnown
+              ? [
+                  {
+                    beforeOccurrenceIds: [
+                      scenario === "split"
+                        ? oldA.occurrenceId
+                        : oldB.occurrenceId,
+                    ],
+                    afterOccurrenceIds: [
+                      scenario === "split"
+                        ? newB.occurrenceId
+                        : newA.occurrenceId,
+                    ],
+                    confidence: "high",
+                    reason: "The same control was split or combined.",
+                  },
+                ]
+              : [],
+            uncertain: extendsKnown
+              ? []
+              : [
+                  {
+                    beforeOccurrenceId: oldA.occurrenceId,
+                    afterOccurrenceId: newA.occurrenceId,
+                    reason: "The model omitted the proven identity.",
+                  },
+                ],
+            related:
+              scenario === "resolved"
+                ? []
+                : [
+                    {
+                      beforeOccurrenceId: oldA.occurrenceId,
+                      afterOccurrenceId:
+                        scenario === "new"
+                          ? newB.occurrenceId
+                          : newA.occurrenceId,
+                      reason: "A related control.",
+                    },
+                  ],
+          };
+          return await matchScanFindings(input, {
+            ...options,
+            codex: fakeCodex(response).codex,
+          });
+        },
+      });
+      expect(saved).toHaveLength(1);
+      expect(saved[0]!.matches).toHaveLength(1);
+      expect(new Set(saved[0]!.matches[0]!.beforeOccurrenceIds)).toEqual(
+        new Set(
+          (extendsKnown ? before : [oldA]).map(
+            ({ occurrenceId }) => occurrenceId,
+          ),
+        ),
+      );
+      expect(new Set(saved[0]!.matches[0]!.afterOccurrenceIds)).toEqual(
+        new Set(
+          (extendsKnown ? after : [newA]).map(
+            ({ occurrenceId }) => occurrenceId,
+          ),
+        ),
+      );
+      expect(saved[0]!.uncertain).toEqual([]);
+      expect(saved[0]!.related).toHaveLength(scenario === "new" ? 1 : 0);
     },
   );
 
   test("rejects malformed model JSON", async () => {
     const { codex } = fakeCodex("not-json");
     await expect(
-      matchScanFindings({ before: [], after: [] }, { codex }),
+      matchScanFindings(
+        { before: [finding("before")], after: [finding("after")] },
+        { codex },
+      ),
     ).rejects.toThrow("invalid JSON");
+  });
+
+  test("does not start Codex when either scan has no findings", async () => {
+    const codex: NonNullable<ScanComparisonOptions["codex"]> = {
+      startThread() {
+        throw new Error("No model is needed.");
+      },
+    };
+    for (const input of [
+      { before: [], after: [finding("after")] },
+      { before: [finding("before")], after: [] },
+    ]) {
+      expect(await matchScanFindings(input, { codex })).toEqual({
+        matches: [],
+        uncertain: [],
+      });
+    }
   });
 
   test("allows cross-history uncertainty without relaxing two-scan matching", async () => {
@@ -523,6 +748,25 @@ describe("semantic scan comparison", () => {
     {
       label: "missing arrays",
       result: {},
+      error: "invalid match result",
+    },
+    {
+      label: "unexpected result fields",
+      result: { matches: [], uncertain: [], unexpected: true },
+      error: "invalid match result",
+    },
+    {
+      label: "blank match reasons",
+      result: { matches: [{ ...match(), reason: " " }], uncertain: [] },
+      error: "invalid match result",
+    },
+    {
+      label: "malformed related pairs",
+      result: {
+        matches: [],
+        uncertain: [],
+        related: [{ ...uncertain(), beforeOccurrenceId: 1 }],
+      },
       error: "invalid match result",
     },
     {

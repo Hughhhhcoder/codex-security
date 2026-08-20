@@ -198,7 +198,10 @@ export function dependencies(
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
     bulkScan?: MainDependencies["bulkScan"];
-    onWorkbench?: (args: readonly string[]) => JsonObject | Promise<JsonObject>;
+    onWorkbench?: (
+      args: readonly string[],
+      signal?: AbortSignal,
+    ) => JsonObject | Promise<JsonObject>;
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
@@ -266,10 +269,13 @@ export function dependencies(
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
-    runWorkbench: async (args) =>
-      (await options.onWorkbench?.(args)) ?? { scans: [] },
-    matchFindings: async (input) =>
-      (await options.onMatch?.(input)) ?? { matches: [], uncertain: [] },
+    runWorkbench: async (args, signal) =>
+      (await options.onWorkbench?.(args, signal)) ?? { scans: [] },
+    matchFindings: async (input, comparisonOptions) =>
+      (await options.onMatch?.(input, comparisonOptions)) ?? {
+        matches: [],
+        uncertain: [],
+      },
     exportFindings: async (arguments_) =>
       new TextEncoder().encode(
         arguments_.format === "csv"
