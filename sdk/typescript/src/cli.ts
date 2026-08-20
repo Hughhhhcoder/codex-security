@@ -5742,7 +5742,7 @@ function scanScope(arguments_: ScanArguments): string | null {
         isAbsolute(path) ||
         /^[A-Za-z]:\//u.test(portable) ||
         portable.startsWith("//")
-          ? portable.split("/").at(-1) ?? portable
+          ? basename(portable) || portable
           : portable;
       return errorMessage(scoped.replaceAll(/[\u0000-\u001F\u007F]/gu, " "));
     });
