@@ -252,98 +252,117 @@ describe("scan and patch workflow", () => {
     );
   });
 
-  test("publishes only verified patch files and preserves unrelated staged changes", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-pr-"));
-    const repository = join(directory, "repository");
-    const remote = join(directory, "remote.git");
-    const url = "https://github.example.test/example/repository/pull/15";
-    const result = resultWithFindings(["high", "medium"]);
-    result.findings.findings[0]!.title = "Synthetic private finding";
-    let pullRequestArguments: readonly string[] = [];
-    await mkdir(join(repository, "src"), { recursive: true });
-    const git = (...args: string[]) =>
-      execFileSync("git", args, {
-        cwd: repository,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
+  test.each(["--create-pr", "--create-draft-pr"] as const)(
+    "publishes only verified patch files with %s and preserves unrelated staged changes",
+    async (pullRequestOption) => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "codex-security-patch-pr-"),
+      );
+      const repository = join(directory, "repository");
+      const remote = join(directory, "remote.git");
+      const url = "https://github.example.test/example/repository/pull/15";
+      const result = resultWithFindings(["high", "medium"]);
+      result.findings.findings[0]!.title = "Synthetic private finding";
+      let pullRequestArguments: readonly string[] = [];
+      await mkdir(join(repository, "src"), { recursive: true });
+      const git = (...args: string[]) =>
+        execFileSync("git", args, {
+          cwd: repository,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim();
 
-    try {
-      git("init", "--initial-branch=main");
-      git("config", "user.name", "Synthetic User");
-      git("config", "user.email", "synthetic@example.test");
-      git("config", "commit.gpgsign", "false");
-      await writeFile(join(repository, "src", "finding-1.ts"), "unsafe\n");
-      await writeFile(join(repository, "unrelated.ts"), "original\n");
-      git("add", "--", ".");
-      git("commit", "-m", "Initial synthetic checkout");
-      git("init", "--bare", remote);
-      git("remote", "add", "origin", remote);
-      git("push", "--set-upstream", "origin", "main");
-      await writeFile(join(repository, "unrelated.ts"), "staged separately\n");
-      git("add", "--", "unrelated.ts");
+      try {
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git("config", "commit.gpgsign", "false");
+        await writeFile(join(repository, "src", "finding-1.ts"), "unsafe\n");
+        await writeFile(join(repository, "unrelated.ts"), "original\n");
+        git("add", "--", ".");
+        git("commit", "-m", "Initial synthetic checkout");
+        git("init", "--bare", remote);
+        git("remote", "add", "origin", remote);
+        git("push", "--set-upstream", "origin", "main");
+        await writeFile(
+          join(repository, "unrelated.ts"),
+          "staged separately\n",
+        );
+        git("add", "--", "unrelated.ts");
 
-      const outcome = await runWorkflow(
-        [
-          "scan",
-          "--patch",
-          "--patch-severity",
-          "high",
-          "--create-pr",
-          "--json",
-        ],
-        {
-          currentDirectory: repository,
-          result,
-          onCodex: async (args, output) => {
-            await writeFile(join(repository, "src", "finding-1.ts"), "fixed\n");
-            completePatches(args, output);
-            return 0;
+        const outcome = await runWorkflow(
+          [
+            "scan",
+            "--patch",
+            "--patch-severity",
+            "high",
+            pullRequestOption,
+            "--json",
+          ],
+          {
+            currentDirectory: repository,
+            result,
+            onCodex: async (args, output) => {
+              await writeFile(
+                join(repository, "src", "finding-1.ts"),
+                "fixed\n",
+              );
+              completePatches(args, output);
+              return 0;
+            },
+            onRepositoryCommand: (command, args, workingDirectory) => {
+              expect(workingDirectory).toBe(repository);
+              if (command === "git") return git(...args);
+              if (args[1] === "list") return "";
+              pullRequestArguments = args;
+              return url;
+            },
           },
-          onRepositoryCommand: (command, args, workingDirectory) => {
-            expect(workingDirectory).toBe(repository);
-            if (command === "git") return git(...args);
-            if (args[1] === "list") return "";
-            pullRequestArguments = args;
-            return url;
-          },
-        },
-      );
+        );
 
-      expect(outcome.exitCode).toBe(0);
-      expect(git("branch", "--show-current")).toBe("codex-security/patch-scan");
-      expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
-        "src/finding-1.ts",
-      );
-      expect(git("diff", "--cached", "--name-only")).toBe("unrelated.ts");
-      expect(git("rev-parse", "HEAD")).toBe(
-        git("rev-parse", "origin/codex-security/patch-scan"),
-      );
-      expect(pullRequestArguments).toEqual([
-        "pr",
-        "create",
-        "--head",
-        "codex-security/patch-scan",
-        "--title",
-        "fix: patch verified security findings",
-        "--body",
-        "Applies verified security fixes from a completed scan.",
-      ]);
-      expect(JSON.stringify(pullRequestArguments)).not.toContain(
-        "Synthetic private finding",
-      );
-      expect(JSON.parse(outcome.stdout)).toMatchObject({
-        patchSeverity: "high",
-        pullRequest: { branch: "codex-security/patch-scan", url },
-      });
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
+        expect(outcome.exitCode).toBe(0);
+        expect(git("branch", "--show-current")).toBe(
+          "codex-security/patch-scan",
+        );
+        expect(git("show", "--format=", "--name-only", "HEAD")).toBe(
+          "src/finding-1.ts",
+        );
+        expect(git("diff", "--cached", "--name-only")).toBe("unrelated.ts");
+        expect(git("rev-parse", "HEAD")).toBe(
+          git("rev-parse", "origin/codex-security/patch-scan"),
+        );
+        expect(pullRequestArguments).toEqual([
+          "pr",
+          "create",
+          "--head",
+          "codex-security/patch-scan",
+          "--title",
+          "fix: patch verified security findings",
+          "--body",
+          "Applies verified security fixes from a completed scan.",
+          ...(pullRequestOption === "--create-draft-pr" ? ["--draft"] : []),
+        ]);
+        expect(JSON.stringify(pullRequestArguments)).not.toContain(
+          "Synthetic private finding",
+        );
+        expect(JSON.parse(outcome.stdout)).toMatchObject({
+          patchSeverity: "high",
+          pullRequest: { branch: "codex-security/patch-scan", url },
+        });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
-  test.each(["push", "create"])(
-    "resumes publication after %s fails without patching again",
-    async (failure) => {
+  test.each([
+    ["push", false],
+    ["create", false],
+    ["push", true],
+    ["create", true],
+  ] as const)(
+    "resumes publication after %s fails (draft: %s) without patching again",
+    async (failure, draft) => {
       const directory = await mkdtemp(
         join(tmpdir(), "codex-security-pr-retry-"),
       );
@@ -406,6 +425,7 @@ describe("scan and patch workflow", () => {
             }
             if (args[1] === "list") return publishedUrl;
             expect(args[1]).toBe("create");
+            expect(args.includes("--draft")).toBe(draft);
             if (failure === "create" && failOnce) {
               failOnce = false;
               throw new Error("Synthetic PR service failure");
@@ -417,11 +437,19 @@ describe("scan and patch workflow", () => {
         };
 
         const first = await runWorkflow(
-          ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+          [
+            "patch",
+            "--scan",
+            "scan-1",
+            draft ? "--create-draft-pr" : "--create-pr",
+            "--json",
+          ],
           fixtures,
         );
         expect(first.exitCode).toBe(2);
-        expect(first.stderr).toContain(`patch --resume-pr ${branch}`);
+        expect(first.stderr).toContain(
+          `patch --resume-pr ${branch}${draft ? " --create-draft-pr" : ""}`,
+        );
         const commit = git("rev-parse", "HEAD");
         expect(
           git("config", "--get", `branch.${branch}.codexSecurityPatchCommit`),
@@ -432,7 +460,13 @@ describe("scan and patch workflow", () => {
         await writeFile(join(repository, "unrelated.ts"), "later local work\n");
 
         const retry = await runWorkflow(
-          ["patch", "--resume-pr", branch, "--json"],
+          [
+            "patch",
+            "--resume-pr",
+            branch,
+            ...(draft ? ["--create-draft-pr"] : []),
+            "--json",
+          ],
           fixtures,
         );
         expect(retry.exitCode).toBe(0);
@@ -447,7 +481,12 @@ describe("scan and patch workflow", () => {
 
         const pushes = pushCalls;
         const repeated = await runWorkflow(
-          ["patch", "--resume-pr", branch],
+          [
+            "patch",
+            "--resume-pr",
+            branch,
+            ...(draft ? ["--create-draft-pr"] : []),
+          ],
           fixtures,
         );
         expect(repeated.exitCode).toBe(0);
@@ -896,28 +935,40 @@ describe("scan and patch workflow", () => {
     });
   });
 
-  test("creates a pull request for verified saved-finding patches", async () => {
-    const result = resultWithFindings(["high"]);
-    const url = "https://github.example.test/example/repository/pull/14";
-    let repository = "";
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        onWorkbench: () => savedScan(result),
-        onRepositoryCommand: (command, args, target) => {
-          repository = target;
-          return command === "gh" && args[1] === "create" ? url : "";
+  test.each([
+    ["--create-pr", false],
+    ["--create-draft-pr", true],
+  ] as const)(
+    "creates a pull request for verified saved-finding patches with %s",
+    async (pullRequestOption, draft) => {
+      const result = resultWithFindings(["high"]);
+      const url = "https://github.example.test/example/repository/pull/14";
+      let repository = "";
+      let pullRequestArguments: readonly string[] = [];
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", pullRequestOption, "--json"],
+        {
+          onWorkbench: () => savedScan(result),
+          onRepositoryCommand: (command, args, target) => {
+            repository = target;
+            if (command === "gh" && args[1] === "create") {
+              pullRequestArguments = args;
+              return url;
+            }
+            return "";
+          },
         },
-      },
-    );
+      );
 
-    expect(outcome.exitCode).toBe(0);
-    expect(repository).toBe(SAVED_REPOSITORY);
-    expect(JSON.parse(outcome.stdout)).toMatchObject({
-      scanId: "scan-1",
-      pullRequest: { branch: "codex-security/patch-scan-1", url },
-    });
-  });
+      expect(outcome.exitCode).toBe(0);
+      expect(repository).toBe(SAVED_REPOSITORY);
+      expect(pullRequestArguments.includes("--draft")).toBe(draft);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        scanId: "scan-1",
+        pullRequest: { branch: "codex-security/patch-scan-1", url },
+      });
+    },
+  );
 
   test("redacts credentials when saved-finding pull request creation fails", async () => {
     const result = resultWithFindings(["high"]);
@@ -1046,19 +1097,22 @@ describe("scan and patch workflow", () => {
     expect(outcome.stderr).toContain("--patch-severity requires --patch");
   });
 
-  test("requires verified patching before creating a pull request", async () => {
-    const scan = await runWorkflow(["scan", "--create-pr"]);
-    expect(scan.exitCode).toBe(2);
-    expect(scan.stderr).toContain("--create-pr requires --patch");
+  test.each(["--create-pr", "--create-draft-pr"] as const)(
+    "requires verified patching before creating a pull request with %s",
+    async (pullRequestOption) => {
+      const scan = await runWorkflow(["scan", pullRequestOption]);
+      expect(scan.exitCode).toBe(2);
+      expect(scan.stderr).toContain(`${pullRequestOption} requires --patch`);
 
-    const literal = await runWorkflow([
-      "patch",
-      "Synthetic security issue",
-      "--create-pr",
-    ]);
-    expect(literal.exitCode).toBe(2);
-    expect(literal.stderr).toContain(
-      "--create-pr requires a saved finding identifier or --scan",
-    );
-  });
+      const literal = await runWorkflow([
+        "patch",
+        "Synthetic security issue",
+        pullRequestOption,
+      ]);
+      expect(literal.exitCode).toBe(2);
+      expect(literal.stderr).toContain(
+        `${pullRequestOption} requires a saved finding identifier or --scan`,
+      );
+    },
+  );
 });

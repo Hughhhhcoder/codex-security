@@ -260,6 +260,9 @@ const CREATE_PR_OPTION = z
   .boolean()
   .default(false)
   .describe("Create a GitHub pull request after verified patches.");
+const CREATE_DRAFT_PR_OPTION = CREATE_PR_OPTION.describe(
+  "Create a draft GitHub pull request after verified patches.",
+);
 
 function optionValue(flag: string) {
   return z.string().min(1, `${flag} must not be empty.`);
@@ -848,6 +851,7 @@ interface ScanArguments extends DeepScanOptions {
   patch?: boolean;
   patchSeverity?: FailureSeverity;
   createPr?: boolean;
+  createDraftPr?: boolean;
   maxCostUsd?: number;
   headless?: boolean;
   dryRun: boolean;
@@ -2267,6 +2271,7 @@ export async function main(
             .optional()
             .describe("Patch findings at or above LEVEL; requires --patch."),
           createPr: CREATE_PR_OPTION,
+          createDraftPr: CREATE_DRAFT_PR_OPTION,
           maxCost: z
             .number()
             .positive()
@@ -2317,6 +2322,9 @@ export async function main(
         )
         .refine((options) => !options.createPr || options.patch, {
           message: "--create-pr requires --patch.",
+        })
+        .refine((options) => !options.createDraftPr || options.patch, {
+          message: "--create-draft-pr requires --patch.",
         })
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
@@ -2389,6 +2397,7 @@ export async function main(
             patch: options.patch,
             patchSeverity: options.patchSeverity,
             createPr: options.createPr,
+            createDraftPr: options.createDraftPr,
             maxCostUsd: options.maxCost,
             headless: options.headless,
             dryRun: options.dryRun,
@@ -3028,6 +3037,7 @@ export async function main(
           .describe("JSON Linear issue filter for --linear-project."),
         linearApiKey: linearApiKeyOption(),
         createPr: CREATE_PR_OPTION,
+        createDraftPr: CREATE_DRAFT_PR_OPTION,
         resumePr: optionValue("--resume-pr")
           .optional()
           .describe(
@@ -3066,6 +3076,7 @@ export async function main(
               options.resumePr,
               errorOutput,
               dependencies,
+              options.createDraftPr,
             );
             if (format === "json" || format === "jsonl") {
               return { pullRequest };
@@ -3111,12 +3122,13 @@ export async function main(
             );
             exitCode = patchExitCode(patches);
             const pullRequest =
-              options.createPr && exitCode === 0
+              (options.createPr || options.createDraftPr) && exitCode === 0
                 ? await createPatchPullRequest(
                     selected,
                     patches,
                     errorOutput,
                     dependencies,
+                    options.createDraftPr,
                   )
                 : undefined;
             if (format === "json" || format === "jsonl") {
@@ -3139,9 +3151,12 @@ export async function main(
               "--severity requires a saved finding identifier or --scan.",
             );
           }
-          if (options.createPr) {
+          if (options.createPr || options.createDraftPr) {
+            const option = options.createDraftPr
+              ? "--create-draft-pr"
+              : "--create-pr";
             throw new CodexSecurityError(
-              "--create-pr requires a saved finding identifier or --scan.",
+              `${option} requires a saved finding identifier or --scan.`,
             );
           }
           if (format === "json" || format === "jsonl") {
@@ -3983,6 +3998,7 @@ async function publishPatchBranch(
   branch: string,
   stderr: Writable,
   dependencies: CliDependencies,
+  draft = false,
 ): Promise<{ branch: string; url: string }> {
   const run = (command: "git" | "gh", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
@@ -4010,13 +4026,14 @@ async function publishPatchBranch(
         PATCH_PR_TITLE,
         "--body",
         PATCH_PR_BODY,
+        ...(draft ? ["--draft"] : []),
       ]);
     }
     stderr.write(`Pull request: ${safePatchText(url)}\n`);
     return { branch, url };
   } catch (error) {
     stderr.write(
-      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch)}\n`,
+      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch)}${draft ? " --create-draft-pr" : ""}\n`,
     );
     throw error;
   }
@@ -4027,6 +4044,7 @@ async function resumePatchPullRequest(
   branch: string,
   stderr: Writable,
   dependencies: CliDependencies,
+  draft = false,
 ): Promise<{ branch: string; url: string }> {
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
@@ -4049,7 +4067,7 @@ async function resumePatchPullRequest(
       "The patch branch has changed since verification. Review it before publishing.",
     );
   }
-  return publishPatchBranch(repository, branch, stderr, dependencies);
+  return publishPatchBranch(repository, branch, stderr, dependencies, draft);
 }
 
 async function createPatchPullRequest(
@@ -4057,6 +4075,7 @@ async function createPatchPullRequest(
   patches: readonly FindingPatch[],
   stderr: Writable,
   dependencies: CliDependencies,
+  draft = false,
 ): Promise<{ branch: string; url: string } | undefined> {
   const files = [
     ...new Set(
@@ -4084,7 +4103,9 @@ async function createPatchPullRequest(
   const branch = `codex-security/patch-${selected.scanId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const run = (command: "git" | "gh", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, selected.repository);
-  stderr.write("Creating a GitHub pull request for verified patches...\n");
+  stderr.write(
+    `Creating a${draft ? " draft" : ""} GitHub pull request for verified patches...\n`,
+  );
   await run("git", ["switch", "-c", branch]);
   await run("git", ["--literal-pathspecs", "add", "--", ...files]);
   await run("git", [
@@ -4098,7 +4119,13 @@ async function createPatchPullRequest(
   ]);
   const commit = await run("git", ["rev-parse", "HEAD"]);
   await run("git", ["config", "--local", patchCommitKey(branch), commit]);
-  return publishPatchBranch(selected.repository, branch, stderr, dependencies);
+  return publishPatchBranch(
+    selected.repository,
+    branch,
+    stderr,
+    dependencies,
+    draft,
+  );
 }
 
 function safePatchText(value: string): string {
@@ -5607,7 +5634,9 @@ async function executeScan(
       );
       scanData = { ...scanData, patchSeverity: patchThreshold, patches };
       if (
-        (arguments_.createPr || patchSelection?.createPullRequest) &&
+        (arguments_.createPr ||
+          arguments_.createDraftPr ||
+          patchSelection?.createPullRequest) &&
         patchExitCode(patches) === 0
       ) {
         const pullRequest = await createPatchPullRequest(
@@ -5615,6 +5644,7 @@ async function executeScan(
           patches,
           errorOutput,
           dependencies,
+          arguments_.createDraftPr,
         );
         if (pullRequest !== undefined) {
           scanData = { ...scanData, pullRequest };

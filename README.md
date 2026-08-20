@@ -20,6 +20,7 @@ npx @openai/codex-security scan .
 npx @openai/codex-security scan . --patch
 npx @openai/codex-security scan . --patch --patch-severity high --json
 npx @openai/codex-security scan . --patch --patch-severity high --create-pr
+npx @openai/codex-security scan . --patch --patch-severity high --create-draft-pr
 npx @openai/codex-security scan . --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan . --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scan . --mode deep --workers 2 --subagents 0 --stop-after-no-new 3 --max-discovery-runs 10 --max-time-hours 1.5
@@ -35,8 +36,9 @@ threshold, select individual findings, and add patch instructions for each one.
 Each selected finding runs in its own saved Codex desktop task.
 Use `--patch --patch-severity high` to fix high and critical findings. Add
 `--create-pr`, or enable the pull request option during review, to commit the
-verified files and open a GitHub pull request. Ordinary scans do not change
-repository files.
+verified files and open a GitHub pull request. Use `--create-draft-pr` instead to
+open a draft pull request, review and update its verified patches, and request
+review when they are ready. Ordinary scans do not change repository files.
 
 Deep-scan discovery stops after 96 hours by default. Set `--max-time-hours` to
 any positive number of hours, including fractional hours, up to 96. Completed
@@ -88,9 +90,11 @@ and identifies findings not confirmed in its latest scan.
 
 Use `patch OCCURRENCE_ID` to fix one saved finding, or
 `patch --scan SCAN_ID --severity high` to fix selected findings from a saved
-scan. Add `--json` for structured results or `--create-pr` to open a GitHub pull
-request after verification. If publication fails, use the printed
-`patch --resume-pr BRANCH` command to retry without running Codex again.
+scan. Add `--json` for structured results, `--create-pr` to open a GitHub pull
+request after verification, or `--create-draft-pr` to open a draft pull request
+for review and further changes. If publication fails, use the printed
+`patch --resume-pr BRANCH` command to retry without running Codex again; add
+`--create-draft-pr` when resuming a draft pull request.
 
 Use `patch --linear-issue SEC-123` to import and fix a Linear issue, or
 `patch --linear-project "Security backlog" --linear-filter '{"labels":{"name":{"eq":"security"}}}'`

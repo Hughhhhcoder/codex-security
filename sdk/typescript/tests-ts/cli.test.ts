@@ -135,6 +135,7 @@ describe("CLI", () => {
           patch: { type: "boolean" },
           patchSeverity: { enum: ["critical", "high", "medium", "low"] },
           createPr: { type: "boolean" },
+          createDraftPr: { type: "boolean" },
           headless: { type: "boolean" },
         },
       },
