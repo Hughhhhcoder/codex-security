@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from collections import Counter
 from typing import Any
@@ -19,6 +20,13 @@ DISPOSITION_LABELS = {
     "needs_follow_up": "Needs follow-up",
 }
 WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
+
+SCOPE_PATH_QUOTING_RE = re.compile(
+    r"""[\s\ufeff,;'"\\\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"""
+)
+SCOPE_PATH_CONTROLS_RE = re.compile(
+    r"[\x7f-\x9f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+)
 
 
 class ReportProjectionError(ValueError):
@@ -57,6 +65,30 @@ def _strings(value: Any) -> list[str]:
         if text:
             normalized.append(text)
     return normalized
+
+
+def _scope_path(value: Any, fallback: str = "unspecified") -> str:
+    path = value if isinstance(value, str) else fallback
+    rendered = path
+    if not path or SCOPE_PATH_QUOTING_RE.search(path):
+        rendered = SCOPE_PATH_CONTROLS_RE.sub(
+            lambda match: f"\\u{ord(match.group(0)):04x}",
+            json.dumps(path, ensure_ascii=False),
+        )
+    longest_run = max(
+        (len(match.group(0)) for match in re.finditer(r"`+", rendered)), default=0
+    )
+    fence = "`" * (longest_run + 1)
+    padding = " " if rendered.startswith("`") or rendered.endswith("`") else ""
+    return f"{fence}{padding}{rendered}{padding}{fence}"
+
+
+def _scope_paths(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [_scope_path(item) for item in value if isinstance(item, str)]
 
 
 def _cell(value: Any) -> str:
@@ -791,6 +823,9 @@ def _append_questions(lines: list[str], heading: str, questions: list[Any]) -> N
         prompt = _text(question.get("followUpPrompt"), "")
         if prompt:
             lines.append(f"  - Follow-up prompt: {prompt}")
+        paths = _scope_paths(question.get("paths"))
+        if paths:
+            lines.append("  - Paths: " + ", ".join(paths))
 
 
 def build_report_markdown(
@@ -822,8 +857,8 @@ def build_report_markdown(
     deep_presentation = _uses_deep_presentation(coverage, findings)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
-    include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))
-    exclude_paths = _strings(coverage.get("excludePaths", scope.get("excludePaths", [])))
+    include_paths = _scope_paths(coverage.get("includePaths", scope.get("includePaths", [])))
+    exclude_paths = _scope_paths(coverage.get("excludePaths", scope.get("excludePaths", [])))
     limitations = _strings(scope.get("limitations"))
     explicit_exclusions = coverage.get("explicitExclusions", [])
     lines = [
@@ -843,7 +878,7 @@ def build_report_markdown(
         f"- Excluded paths: {', '.join(exclude_paths) or 'none'}",
         f"- Runtime or test status: {_text(scope.get('runtimeStatus'), 'not recorded')}",
     ]
-    artifacts_reviewed = _strings(scope.get("artifactsReviewed"))
+    artifacts_reviewed = _scope_paths(scope.get("artifactsReviewed"))
     if artifacts_reviewed:
         lines.extend(["- Artifacts reviewed: " + ", ".join(artifacts_reviewed)])
     context = _text(scope.get("context"), "")
@@ -852,7 +887,7 @@ def build_report_markdown(
     for exclusion in explicit_exclusions:
         if isinstance(exclusion, dict):
             limitations.append(
-                f"Excluded {_text(exclusion.get('pattern'), 'unspecified')}: "
+                f"Excluded {_scope_path(exclusion.get('pattern'))}: "
                 f"{_text(exclusion.get('reason'), 'reason not recorded')}"
             )
     if limitations:
@@ -1057,10 +1092,10 @@ def build_report_markdown(
         blockers.append(
             {
                 "question": item.get("reason", "Requested review work remains unfinished."),
+                "paths": item.get("paths", []),
                 "followUpPrompt": " ".join(
                     (
                         f"Review deferred unit {item.get('id', 'unknown')} and close its stated proof gap.",
-                        f"Paths: {', '.join(item.get('paths', []))}." if item.get("paths") else "",
                         (
                             f"Surfaces: {', '.join(item.get('surfaceIds', []))}."
                             if item.get("surfaceIds")

@@ -7,11 +7,14 @@ export type CoverageSummary = Pick<
   Partial<Pick<CoverageDocument, "explicitExclusions">>;
 
 export function formatScopePath(path: string): string {
-  if (path.length > 0 && !/[\s,;'"\\\u0000-\u001f\u007f-\u009f]/u.test(path)) {
+  if (
+    path.length > 0 &&
+    !/[\s,;'"\\\u0000-\u001f\u007f-\u009f\p{Bidi_Control}]/u.test(path)
+  ) {
     return path;
   }
   return JSON.stringify(path).replace(
-    /[\u007f-\u009f\u2028\u2029]/gu,
+    /[\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu,
     (character) =>
       `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
