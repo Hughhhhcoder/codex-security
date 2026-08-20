@@ -1512,8 +1512,9 @@ export async function main(
           options.signal,
         );
       if (matchingCached && !force) return comparison;
+      const input = matchingInputs as JsonObject & ScanComparisonInput;
       const matching = await dependencies.matchFindings(
-        matchingInputs as JsonObject & ScanComparisonInput,
+        force ? { ...input, knownFindingGroups: [] } : input,
         options,
       );
       options.signal?.throwIfAborted();

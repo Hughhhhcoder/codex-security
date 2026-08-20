@@ -462,7 +462,7 @@ export async function matchCompletedScan(
   ) {
     return;
   }
-  const openOccurrences = new Set(
+  const previousOccurrences = new Set(
     options.previousFindings.map(({ occurrenceId }) => occurrenceId),
   );
   const falsePositiveScans = new Map(
@@ -483,23 +483,19 @@ export async function matchCompletedScan(
   );
   if (batch === undefined) return;
 
-  const historical = new Map<string, { scanId: string; finding: Finding }>();
-  for (const { scanId, findings } of batch.beforeScans) {
-    for (const finding of findings) {
-      const findingId = finding["findingId"] as string;
-      if (
-        openOccurrences.has(finding.occurrenceId) ||
-        falsePositiveScans.get(findingId) === scanId
-      ) {
-        historical.set(findingId, { scanId, finding });
-      }
-    }
-  }
-  if (historical.size === 0) return;
+  // A saved comparison covers the whole pair. Let the catalogue group repeated
+  // occurrences instead of dropping findings from the selected scans.
+  const beforeScans = batch.beforeScans.filter(({ scanId, findings }) =>
+    findings.some(
+      (finding) =>
+        previousOccurrences.has(finding.occurrenceId) ||
+        falsePositiveScans.get(finding["findingId"]) === scanId,
+    ),
+  );
+  if (beforeScans.length === 0) return;
 
-  const groups = Map.groupBy(historical.values(), ({ scanId }) => scanId);
   const input: ScanComparisonInput = {
-    before: [...historical.values()].map(({ finding }) => finding),
+    before: beforeScans.flatMap(({ findings }) => findings),
     after: batch.afterFindings,
     ...(batch.knownFindingGroups === undefined
       ? {}
@@ -513,12 +509,9 @@ export async function matchCompletedScan(
     workingDirectory: options.repository,
   });
 
-  for (const [scanId, previous] of groups) {
+  for (const { scanId, findings } of beforeScans) {
     options.signal?.throwIfAborted();
-    const projected = comparisonForScan(
-      comparison,
-      previous.map(({ finding }) => finding),
-    );
+    const projected = comparisonForScan(comparison, findings);
     await options.workbench([
       "save-scan-comparison",
       "--before-scan-id",

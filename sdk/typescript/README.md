@@ -754,8 +754,9 @@ original scope.
 `scans match --all` matches all completed scans of the current repository,
 including other worktrees and clones. Saved matches appear in `scans show` and
 are reused unless `--force` is passed. Use `scans match --all --force` to rebuild
-saved comparisons in chronological order. Ctrl-C stops matching and keeps
-comparisons that have already been saved.
+saved comparisons in chronological order. Forced matching recomputes model
+decisions for the selected pairs while retaining stable finding identities.
+Ctrl-C stops matching and keeps comparisons that have already been saved.
 
 Only high-confidence duplicates are grouped. Possible duplicates remain
 uncertain. Findings with related but independent root causes are shown as

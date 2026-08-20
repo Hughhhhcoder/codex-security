@@ -432,6 +432,78 @@ describe("semantic scan comparison", () => {
     expect(saved.uncertain).toEqual([]);
   });
 
+  test("compares complete selected scans before caching automatic matches", async () => {
+    const firstShared = { findingId: "shared", occurrenceId: "first-shared" };
+    const firstOther = { findingId: "other", occurrenceId: "first-other" };
+    const latestShared = { findingId: "shared", occurrenceId: "latest-shared" };
+    const unselected = { findingId: "unselected", occurrenceId: "unselected" };
+    const after = { findingId: "renamed", occurrenceId: "current-renamed" };
+    const saved = new Map<string, ScanComparisonResult>();
+    let observed: ScanComparisonInput | undefined;
+    const model = fakeCodex({
+      matches: [],
+      uncertain: [
+        {
+          beforeOccurrenceId: latestShared.occurrenceId,
+          afterOccurrenceId: after.occurrenceId,
+          reason: "The synthetic control may have moved.",
+        },
+      ],
+    });
+
+    await matchCompletedScan({
+      scanId: "current",
+      repository: "/repository",
+      previousFindings: [firstOther, latestShared],
+      falsePositives: [],
+      findings: [after],
+      async workbench(args) {
+        if (args[0] === "list-unmatched-scan-pairs") {
+          return {
+            batches: [
+              {
+                afterScanId: "current",
+                afterFindings: [after],
+                beforeScans: [
+                  { scanId: "unselected", findings: [unselected] },
+                  { scanId: "first", findings: [firstShared, firstOther] },
+                  { scanId: "latest", findings: [latestShared] },
+                ],
+              },
+            ],
+          };
+        }
+        saved.set(args[2]!, JSON.parse(args.at(-1)!) as ScanComparisonResult);
+        return {};
+      },
+      matchFindings(input, options) {
+        observed = input;
+        return matchScanFindings(input, { ...options, codex: model.codex });
+      },
+    });
+
+    expect(observed).toEqual({
+      before: [firstShared, firstOther, latestShared],
+      after: [after],
+    });
+    expect([...saved.keys()]).toEqual(["first", "latest"]);
+    for (const [scanId, occurrenceId] of [
+      ["first", firstShared.occurrenceId],
+      ["latest", latestShared.occurrenceId],
+    ] as const) {
+      expect(saved.get(scanId)).toEqual({
+        matches: [],
+        uncertain: [
+          {
+            beforeOccurrenceId: occurrenceId,
+            afterOccurrenceId: after.occurrenceId,
+            reason: "The synthetic control may have moved.",
+          },
+        ],
+      });
+    }
+  });
+
   test.each([
     ["no history", false, false, false, 0, false],
     ["a stable identity", true, false, true, 2, false],

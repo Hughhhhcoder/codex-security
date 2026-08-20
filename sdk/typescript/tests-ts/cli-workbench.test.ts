@@ -983,31 +983,70 @@ describe("CLI workbench", () => {
     });
   });
 
-  test("force recomputes saved matches", async () => {
-    const calls: Array<readonly string[]> = [];
-    expect(
-      await main(
-        ["scans", "match", "before", "after", "--force"],
-        capture().stream,
-        capture().stream,
-        dependencies({
-          onWorkbench: (args): JsonObject => {
-            calls.push(args);
-            return args[0] === "compare-scans"
-              ? {
-                  matchingCached: true,
-                  matchingInputs: { before: [], after: [] },
-                }
-              : {};
-          },
-        }),
-      ),
-    ).toBe(0);
-    expect(calls.map((args) => args[0])).toEqual([
-      "compare-scans",
-      "save-scan-comparison",
-    ]);
-  });
+  test.each([false, true])(
+    "reuses indirect matches unless force is requested (%s)",
+    async (force) => {
+      const before = [{ occurrenceId: "old", findingId: "identity-old" }];
+      const after = [{ occurrenceId: "new", findingId: "identity-new" }];
+      const calls: Array<readonly string[]> = [];
+      let modelCalls = 0;
+      let saved: unknown;
+      expect(
+        await main(
+          ["scans", "match", "before", "after", ...(force ? ["--force"] : [])],
+          capture().stream,
+          capture().stream,
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              if (args[0] === "compare-scans") {
+                return {
+                  matchingCached: force,
+                  matchingInputs: {
+                    before,
+                    after,
+                    knownFindingGroups: [
+                      ["identity-old", "identity-bridge", "identity-new"],
+                    ],
+                  },
+                };
+              }
+              saved = JSON.parse(args.at(-1)!);
+              return {};
+            },
+            onMatch: (input, options) =>
+              matchScanFindings(input, {
+                ...options,
+                codex: {
+                  startThread: () => ({
+                    async run() {
+                      modelCalls += 1;
+                      return {
+                        finalResponse: JSON.stringify({
+                          matches: [],
+                          uncertain: [],
+                        }),
+                      };
+                    },
+                  }),
+                },
+              }),
+          }),
+        ),
+      ).toBe(0);
+      expect(modelCalls).toBe(force ? 1 : 0);
+      expect(saved).toMatchObject({
+        matches: force
+          ? []
+          : [{ beforeOccurrenceIds: ["old"], afterOccurrenceIds: ["new"] }],
+        uncertain: [],
+      });
+      expect(calls.map((args) => args[0])).toEqual([
+        "compare-scans",
+        "save-scan-comparison",
+      ]);
+    },
+  );
 
   test("rejects invalid matching arguments before loading history", async () => {
     for (const args of [
