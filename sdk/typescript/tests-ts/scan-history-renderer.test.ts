@@ -44,6 +44,38 @@ describe("scan history renderer", () => {
     expect(legacy).not.toContain("complete for requested scope");
   });
 
+  test("shows both canonical exclusion sources in completed history", () => {
+    const text = renderScanHistory(
+      {
+        targetPath: "/demo/repository",
+        scanId: "scan-1",
+        mode: "standard",
+        progress: { status: "complete" },
+        coverage: {
+          mode: "scoped_path",
+          completeness: "complete",
+          includePaths: ["src"],
+          excludePaths: ["src/vendor"],
+          explicitExclusions: [
+            { pattern: "src/vendor", reason: "Excluded dependency source." },
+            {
+              pattern: "src/generated/**",
+              reason: "Excluded generated source.",
+            },
+          ],
+        },
+        findings: [],
+      },
+      "show",
+      { color: false, columns: 120 },
+    );
+    expect(text.replace(/\s+/g, " ")).toContain(
+      "scoped paths: src; excluding src/vendor, src/generated/**",
+    );
+    expect(text.split("src/vendor")).toHaveLength(2);
+    expect(text).toContain("complete for requested scope");
+  });
+
   test("shows exact recorded paths for a multi-path history entry", () => {
     const text = renderScanHistory(
       {
@@ -67,6 +99,39 @@ describe("scan history renderer", () => {
     expect(text).toContain("FINISHED");
     expect(text).toContain("src/parser, tests/parser");
     expect(text).not.toContain("SCOPE  .");
+  });
+
+  test("wraps multi-path scopes in narrow scan history", () => {
+    const paths = Array.from(
+      { length: 8 },
+      (_, index) => `src/component-${index}`,
+    );
+    const text = renderScanHistory(
+      {
+        scans: [
+          {
+            scanId: "scan-1",
+            targetPath: "/demo/repository",
+            mode: "standard",
+            scopePaths: paths,
+            progress: { status: "complete" },
+            findingCount: 0,
+            startedAt: "2026-08-01T00:00:00Z",
+          },
+        ],
+      },
+      "list",
+      { color: false, columns: 48 },
+    );
+    const lines = text.split("\n");
+    const first = lines.findIndex((line) => line.includes("SCOPE"));
+    expect(first).toBeGreaterThanOrEqual(0);
+    const scopeLines = lines.slice(first).filter((line) => line.trim() !== "");
+    expect(scopeLines.length).toBeGreaterThan(1);
+    expect(scopeLines.every((line) => line.length <= 48)).toBe(true);
+    expect(scopeLines.join(" ").replace(/\s+/g, " ")).toContain(
+      paths.join(", "),
+    );
   });
 
   test("separates current repository findings from earlier observations", () => {

@@ -308,6 +308,7 @@ describe("malformed scan artifact recovery", () => {
         completeness: "complete",
         includePaths: ["src", "src/extract.py"],
         excludePaths: [],
+        explicitExclusions: coverage.explicitExclusions,
       },
     });
     const listed = await workbench(fixture, ["list-scans"]);

@@ -1832,7 +1832,13 @@ def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
         raise SystemExit(str(exc)) from exc
     return {
         key: coverage[key]
-        for key in ("mode", "completeness", "includePaths", "excludePaths")
+        for key in (
+            "mode",
+            "completeness",
+            "includePaths",
+            "excludePaths",
+            "explicitExclusions",
+        )
     }
 
 

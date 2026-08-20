@@ -216,7 +216,7 @@ export function renderScanHistory(
       const scopePaths = scan["scopePaths"] as string[] | undefined;
       const scope = scopePaths?.length ? scopePaths.join(", ") : scan["scope"];
       if (typeof scope === "string") {
-        lines.push(`    ${strong("SCOPE")}  ${clean(scope)}`);
+        wrap(scope, 11, `    ${strong("SCOPE")}  `);
       }
     }
   } else if (command === "findings") {

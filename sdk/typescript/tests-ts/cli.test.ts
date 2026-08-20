@@ -5137,6 +5137,39 @@ describe("CLI", () => {
     }
   });
 
+  test("includes canonical exclusions in a complete scan summary", async () => {
+    const result = fakeResult();
+    Object.assign(result.manifest.scan.scope, {
+      includePaths: ["src"],
+      excludePaths: ["src/vendor"],
+    });
+    Object.assign(result.coverage, {
+      mode: "scoped_path",
+      inventoryStrategy: "scoped_path",
+      includePaths: ["src"],
+      excludePaths: ["src/vendor"],
+      explicitExclusions: [
+        { pattern: "src/vendor", reason: "Excluded dependency source." },
+        { pattern: "src/generated/**", reason: "Excluded generated source." },
+      ],
+    });
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["scan", "--path", "src", "--json"],
+        stdout.stream,
+        stderr.stream,
+        dependencies({ result }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
+    expect(stderr.text()).toContain(
+      "scoped paths: src; excluding src/vendor, src/generated/**",
+    );
+    expect(stderr.text()).toContain("complete for requested scope");
+  });
+
   test("does not promote incomplete coverage merely because paths were selected", async () => {
     for (const completeness of ["partial", "unknown"] as const) {
       const result = fakeResult(["high"], completeness);
