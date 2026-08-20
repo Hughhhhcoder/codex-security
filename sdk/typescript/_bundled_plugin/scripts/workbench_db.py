@@ -1824,8 +1824,8 @@ def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
             None,
         )
         if (
-            coverage["scanId"] != scan["id"]
-            or hashlib.sha256(coverage_bytes).hexdigest() != expected
+            hashlib.sha256(coverage_bytes).hexdigest() != expected
+            or coverage.get("scanId") != scan["id"]
         ):
             raise ContractError("The sealed coverage changed after completion.")
     except ContractError as exc:
@@ -3228,6 +3228,17 @@ def scan_context(
     return context
 
 
+def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
+    result = scan_context(connection, args.scan_id, args.occurrence_id)
+    if result["scan"]["progress"]["status"] == "complete":
+        scan = require_scan(connection, args.scan_id)
+        try:
+            result["scan"]["coverage"] = coverage_summary_for_history(scan)
+        except (OSError, SystemExit):
+            pass  # Historical artifacts may no longer be available or verifiable.
+    return result
+
+
 def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
     backfill_legacy_finding_details(connection, scan)
@@ -3925,13 +3936,7 @@ def main() -> None:
         elif args.command == "fail-deep-scan":
             result = deep_scan.fail_deep_scan(connection, args)
         elif args.command == "get-scan":
-            result = scan_context(connection, args.scan_id, args.occurrence_id)
-            scan = require_scan(connection, args.scan_id)
-            if scan["status"] == "complete":
-                try:
-                    result["scan"]["coverage"] = coverage_summary_for_history(scan)
-                except (OSError, SystemExit):
-                    pass  # Historical artifacts may no longer be available or verifiable.
+            result = get_scan(connection, args)
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":

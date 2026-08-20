@@ -103,7 +103,7 @@ function projectFindingDetails(details: JsonObject): string {
     "manifest, findings, coverage = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json', 'coverage.json')]",
     "findings['findings'][0].update(json.loads(sys.argv[2]))",
     "projection = runpy.run_path(str(plugin / 'scripts' / 'report_projection.py'))",
-    "sys.stdout.write(projection['build_report_markdown'](manifest, findings, coverage))",
+    "sys.stdout.buffer.write(projection['generate_report_markdown'](manifest, findings, coverage))",
   ].join("\n");
   const result = Bun.spawnSync(
     [python!, "-I", "-B", "-c", script, PLUGIN_ROOT, JSON.stringify(details)],

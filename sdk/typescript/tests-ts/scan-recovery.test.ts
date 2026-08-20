@@ -321,19 +321,21 @@ describe("malformed scan artifact recovery", () => {
     );
     for (const artifactPath of [coveragePath, manifestPath]) {
       const sealed = await readFile(artifactPath, "utf8");
-      await writeFile(artifactPath, `${sealed}\n`);
-      try {
-        const unavailable = await workbench(fixture, [
-          "get-scan",
-          "--scan-id",
-          fixture.scanId,
-        ]);
-        expect(
-          (unavailable["scan"] as Record<string, unknown>)["coverage"],
-        ).toBeUndefined();
-        expect(await readFile(artifactPath, "utf8")).toBe(`${sealed}\n`);
-      } finally {
-        await writeFile(artifactPath, sealed);
+      for (const modified of [`${sealed}\n`, "{}\n"]) {
+        await writeFile(artifactPath, modified);
+        try {
+          const unavailable = await workbench(fixture, [
+            "get-scan",
+            "--scan-id",
+            fixture.scanId,
+          ]);
+          expect(
+            (unavailable["scan"] as Record<string, unknown>)["coverage"],
+          ).toBeUndefined();
+          expect(await readFile(artifactPath, "utf8")).toBe(modified);
+        } finally {
+          await writeFile(artifactPath, sealed);
+        }
       }
     }
   });
@@ -355,6 +357,37 @@ describe("malformed scan artifact recovery", () => {
         excludePaths: [],
       },
     });
+  });
+
+  test("does not attach completed coverage to an earlier running status", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import argparse, json, pathlib, runpy, sys",
+      "from unittest import mock",
+      "namespace = runpy.run_path(str(pathlib.Path(sys.argv[1]) / 'scripts' / 'workbench_db.py'))",
+      "get_scan = namespace['get_scan']",
+      "args = argparse.Namespace(scan_id='scan-1', occurrence_id=None)",
+      "coverage = {'completeness': 'complete'}",
+      "def read_status(status):",
+      "    context = {'scan': {'progress': {'status': status}}}",
+      "    with mock.patch.dict(get_scan.__globals__, {'scan_context': lambda *_: context, 'require_scan': lambda *_: {'status': 'complete'}, 'coverage_summary_for_history': lambda _: coverage}):",
+      "        return get_scan(None, args)",
+      "print(json.dumps([read_status('running'), read_status('complete')]))",
+    ].join("\n");
+    const result = spawnSync(python!, ["-I", "-B", "-c", script, PLUGIN_ROOT], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([
+      { scan: { progress: { status: "running" } } },
+      {
+        scan: {
+          progress: { status: "complete" },
+          coverage: { completeness: "complete" },
+        },
+      },
+    ]);
   });
 
   test.each(["deferred", "surface"] as const)(
