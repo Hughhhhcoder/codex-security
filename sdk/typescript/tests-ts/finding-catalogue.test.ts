@@ -34,7 +34,10 @@ const finding = (
 ): ComparisonFinding => ({ occurrenceId, ...details });
 const data = <T>(prompt: string): T =>
   JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as T;
-type CatalogueData = { findings: ScanComparisonInput };
+type CatalogueData = {
+  page: number;
+  findings: ScanComparisonInput;
+};
 type EvidenceData = {
   beforeOccurrenceIds: string[];
   afterOccurrenceIds: string[];
@@ -469,27 +472,36 @@ describe("finding catalogue", () => {
     },
   );
 
-  test("delivers every oversized catalogue page before accepting a result", async () => {
-    const input = {
-      before: [
-        finding("a", { rootCause: "a".repeat(600_000) }),
-        finding("b", { rootCause: "b".repeat(600_000) }),
-      ],
-      after: [finding("c", { rootCause: "c".repeat(600_000) })],
-    };
-    const observed = conversation(() => empty);
-    expect(await matchScanFindings(input, { codex: observed.codex })).toEqual(
-      empty,
-    );
-    expect(observed.threads()).toBe(1);
-    expect(observed.prompts.length).toBeGreaterThan(1);
-    const seen = observed.prompts.flatMap((prompt) => {
-      expect(characters(prompt)).toBeLessThanOrEqual(1 << 20);
-      const page = data<CatalogueData>(prompt).findings;
-      return [...page.before, ...page.after].map((item) => item.occurrenceId);
-    });
-    expect(seen).toEqual(["a", "b", "c"]);
-  });
+  test.each(["in order", "out of order"] as const)(
+    "delivers every oversized catalogue page %s before accepting a result",
+    async (order) => {
+      const input = {
+        before: [
+          finding("a", { rootCause: "a".repeat(600_000) }),
+          finding("b", { rootCause: "b".repeat(600_000) }),
+        ],
+        after: [finding("c", { rootCause: "c".repeat(600_000) })],
+      };
+      const observed = conversation((_prompt, index) =>
+        order === "out of order" && index === 0
+          ? { ...empty, request: { kind: "catalogue", page: 2 } }
+          : empty,
+      );
+      expect(await matchScanFindings(input, { codex: observed.codex })).toEqual(
+        empty,
+      );
+      expect(observed.threads()).toBe(1);
+      expect(
+        observed.prompts.map((prompt) => data<CatalogueData>(prompt).page),
+      ).toEqual(order === "in order" ? [0, 1, 2] : [0, 2, 1]);
+      const seen = observed.prompts.flatMap((prompt) => {
+        expect(characters(prompt)).toBeLessThanOrEqual(1 << 20);
+        const page = data<CatalogueData>(prompt).findings;
+        return [...page.before, ...page.after].map((item) => item.occurrenceId);
+      });
+      expect(seen.toSorted()).toEqual(["a", "b", "c"]);
+    },
+  );
 
   test("supplies omitted evidence before accepting a proposed match", async () => {
     const input = {

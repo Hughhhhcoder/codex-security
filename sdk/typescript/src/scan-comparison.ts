@@ -248,7 +248,9 @@ export async function matchScanFindingsInternal(
     workingDirectory: options.workingDirectory ?? process.cwd(),
     skipGitRepoCheck: true,
   });
-  const seenPages = new Set([0]);
+  const remainingPages = new Set(pages.keys());
+  remainingPages.delete(0);
+  const pageIterator = remainingPages.values();
   const evidenceCursors = new Map<string, EvidenceCursor>();
   const requestedEvidence = {
     before: new Map<string, EvidenceCursor>(),
@@ -298,8 +300,8 @@ export async function matchScanFindingsInternal(
     const { request: modelRequest, ...result } = parsed.data;
     let request = modelRequest;
     if (request == null) {
-      const unseenPage = pages.findIndex((_, index) => !seenPages.has(index));
-      if (unseenPage !== -1) {
+      const unseenPage = pageIterator.next().value;
+      if (unseenPage !== undefined) {
         request = { kind: "catalogue", page: unseenPage };
       } else {
         validateComparison(
@@ -334,12 +336,11 @@ export async function matchScanFindingsInternal(
             "Scan comparison requested an unknown catalogue page.",
           );
         }
-        if (seenPages.has(request.page)) {
+        if (!remainingPages.delete(request.page)) {
           throw new CodexSecurityError(
             "Scan comparison repeated a request without making progress.",
           );
         }
-        seenPages.add(request.page);
         prompt = comparisonPrompt(page, request.page, pages.length);
         progress("catalogue", request.page + 1);
       } else {
