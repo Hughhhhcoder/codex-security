@@ -5184,9 +5184,9 @@ function scanFailureMessage(
   ) {
     return (
       "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
-      "Codex may need it to load workspace-managed policies, even when an API key is selected. " +
-      "Check 'npx @openai/codex-security login status' and retry if the sign-in has changed. " +
-      "To replace a stale ChatGPT sign-in, run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
+      "Codex may still need it to load workspace-managed policies when an API key is selected for model authentication. " +
+      "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. " +
+      "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
     );
   }
   switch (classifyConnectionFailure(error)) {
