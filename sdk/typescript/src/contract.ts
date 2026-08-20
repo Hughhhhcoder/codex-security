@@ -64,15 +64,24 @@ export interface LoadedContract {
   coverage: CoverageDocument;
 }
 
+type LoadContractOptions = {
+  pluginRoot: string;
+  expectation?: ScanExpectation;
+  workbenchValidated?: boolean;
+  signal?: AbortSignal;
+};
+
 export async function loadContract(
   scanDirectory: string,
-  options: {
-    pluginRoot: string;
-    expectation?: ScanExpectation;
-    workbenchValidated?: boolean;
-    signal?: AbortSignal;
-  },
+  options: LoadContractOptions,
 ): Promise<LoadedContract> {
+  return (await loadContractWithScanDirectory(scanDirectory, options)).contract;
+}
+
+export async function loadContractWithScanDirectory(
+  scanDirectory: string,
+  options: LoadContractOptions,
+): Promise<{ contract: LoadedContract; scanDirectory: string }> {
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
@@ -184,7 +193,17 @@ export async function loadContract(
     );
   }
   await verifyScanRoot(scanRoot, options.signal);
-  return { manifest, findings, coverage };
+  return {
+    contract: { manifest, findings, coverage },
+    scanDirectory: scanRoot.path,
+  };
+}
+
+export async function requireCanonicalScanDirectory(
+  scanDirectory: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return (await requireScanRoot(scanDirectory, signal)).path;
 }
 
 type JsonRecord = Record<string, unknown>;
