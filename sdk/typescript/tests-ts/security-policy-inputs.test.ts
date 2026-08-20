@@ -13,7 +13,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { resolvePluginPython } from "../src/runtime.js";
+import { bootstrapPlugin, resolvePluginPython } from "../src/runtime.js";
+import { BUNDLED_PLUGIN_VERSION } from "../src/version.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const python = await resolvePluginPython();
@@ -58,6 +59,68 @@ function inspect(repository: string, scope = ".", ...args: string[]) {
 }
 
 describe("shared security-policy inputs", () => {
+  test("refreshes cached plugins before exposing checked policy inputs", async () => {
+    const { root, repository } = await fixture();
+    const home = join(root, "home");
+    const marketplace = join(home, "sdk-marketplace");
+    const cachedPlugin = join(marketplace, "plugins", "codex-security");
+    const manifestPath = join(cachedPlugin, ".codex-plugin", "plugin.json");
+    await mkdir(join(cachedPlugin, ".codex-plugin"), { recursive: true });
+    await mkdir(join(cachedPlugin, "scripts"));
+    await writeFile(
+      manifestPath,
+      JSON.stringify({ name: "codex-security", version: "0.1.22" }),
+    );
+    await writeFile(
+      join(cachedPlugin, "scripts", "resolve_security_md.py"),
+      "raise SystemExit('stale resolver')\n",
+    );
+    await writeFile(
+      join(home, "config.toml"),
+      `[marketplaces.codex-security-sdk]\nsource_type = "local"\nsource = ${JSON.stringify(marketplace)}\n`,
+    );
+
+    const installed = await bootstrapPlugin(home, PLUGIN_ROOT, {
+      codexCommand: { command: join(root, "codex") },
+      runCodex: async (_command, args) => {
+        expect(args).toEqual([
+          "plugin",
+          "add",
+          "--json",
+          "codex-security@codex-security-sdk",
+        ]);
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+          version: string;
+        };
+        return JSON.stringify({
+          installedPath: cachedPlugin,
+          version: manifest.version,
+        });
+      },
+    });
+    expect(installed.version).toBe(BUNDLED_PLUGIN_VERSION);
+    expect(installed.version).not.toBe("0.1.22");
+    const result = spawnSync(
+      python,
+      [
+        "-I",
+        join(installed.installedRoot, "scripts", "resolve_security_md.py"),
+        "--repo",
+        repository,
+        "--inspect",
+        "--scope",
+        ".",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      previousContent: null,
+      guidance: "",
+      policyPaths: [],
+    });
+  });
+
   test("returns scoped policy evidence and keeps reporting policies separate", async () => {
     const { repository } = await fixture();
     for (const path of [
@@ -94,6 +157,36 @@ describe("shared security-policy inputs", () => {
     expect(
       JSON.parse(run(repository, "--list", "--scope", "services/api").stdout),
     ).toEqual(["services/api/.hidden/SECURITY.md", "services/api/SECURITY.md"]);
+  });
+
+  test("ignores absent reporting policies behind external directory links", async () => {
+    for (const directory of [".github", "docs"]) {
+      const { root, repository } = await fixture();
+      const outside = join(root, "external-reporting");
+      const policy = join(outside, "SECURITY.md");
+      await mkdir(outside);
+      await mkdir(join(repository, "component"));
+      await symlink(
+        outside,
+        join(repository, directory),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      expect(inspect(repository, "component")).toEqual({
+        previousContent: null,
+        guidance: "",
+        policyPaths: [],
+      });
+
+      await symlink(join(outside, "missing.md"), policy, "file");
+      const dangling = run(repository, "--inspect", "--scope", "component");
+      expect(dangling.status, dangling.stderr).toBe(2);
+      expect(dangling.stdout).toBe("");
+      await rm(policy);
+      await writeFile(policy, "# External reporting policy\n");
+      const existing = run(repository, "--inspect", "--scope", "component");
+      expect(existing.status, existing.stderr).toBe(2);
+      expect(existing.stdout).toBe("");
+    }
   });
 
   test("reads safe inherited links but rejects a linked destination", async () => {

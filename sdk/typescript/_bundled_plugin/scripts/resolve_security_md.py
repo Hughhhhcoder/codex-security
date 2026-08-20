@@ -202,7 +202,11 @@ def inspect_security_policy(
     contents = {selected: _read_policy(root / selected, root, git_dirs, editable=True)}
     paths = set(list_security_md(root, directory, git_dirs))
     paths.update(chain)
-    paths.update((".github/SECURITY.md", "docs/SECURITY.md"))
+    for path in (".github/SECURITY.md", "docs/SECURITY.md"):
+        policy = root / path
+        # Missing reporting policies are optional; dangling leaf links still need validation.
+        if policy.exists() or policy.is_symlink():
+            paths.add(path)
     for path in sorted(paths - {selected}):
         contents[path] = _read_policy(root / path, root, git_dirs)
     return {
