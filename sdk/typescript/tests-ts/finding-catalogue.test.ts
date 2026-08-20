@@ -503,49 +503,62 @@ describe("finding catalogue", () => {
     },
   );
 
-  test("supplies omitted evidence before accepting a proposed match", async () => {
-    const input = {
-      before: [finding("old", { rootCause: "a".repeat(1_100_000) })],
-      after: [finding("new", { rootCause: "b".repeat(1_100_000) })],
-    };
-    const proposed = confirmedPair("old", "new");
-    const revised: ScanComparisonResult = {
-      ...empty,
-      related: [
-        {
-          beforeOccurrenceId: "old",
-          afterOccurrenceId: "new",
-          reason: "The complete evidence identifies separate controls.",
-        },
-      ],
-    };
-    const pieces: string[] = [];
-    let offset = 0;
-    const observed = conversation((prompt, index) => {
-      if (index === 0) {
-        const cards = data<CatalogueData>(prompt).findings;
-        expect(cards.before).toEqual([
-          { occurrenceId: "old", detailsOmitted: true },
-        ]);
-        expect(cards.after).toEqual([
-          { occurrenceId: "new", detailsOmitted: true },
-        ]);
-        return proposed;
-      }
-      const page = data<EvidenceData>(prompt);
-      expect(page.beforeOccurrenceIds).toEqual(["old"]);
-      expect(page.afterOccurrenceIds).toEqual(["new"]);
-      expect(page.offset).toBe(offset);
-      pieces.push(page.content);
-      offset += characters(page.content);
-      return page.nextOffset === null ? revised : proposed;
-    });
-    expect(await matchScanFindings(input, { codex: observed.codex })).toEqual(
-      revised,
-    );
-    expect(pieces.length).toBeGreaterThan(1);
-    expect(JSON.parse(pieces.join(""))).toEqual(input);
-  });
+  test.each(["match", "no match", "uncertain", "related"] as const)(
+    "supplies omitted evidence before accepting a proposed %s decision",
+    async (decision) => {
+      const input = {
+        before: [finding("old", { rootCause: "a".repeat(1_100_000) })],
+        after: [finding("new", { rootCause: "b".repeat(1_100_000) })],
+      };
+      const pair = {
+        beforeOccurrenceId: "old",
+        afterOccurrenceId: "new",
+        reason: "A synthetic decision made before reading the full evidence.",
+      };
+      const proposed: ScanComparisonResult = {
+        matches:
+          decision === "match" ? confirmedPair("old", "new").matches : [],
+        uncertain: decision === "uncertain" ? [pair] : [],
+        ...(decision === "related" ? { related: [pair] } : {}),
+      };
+      const revised: ScanComparisonResult = {
+        ...empty,
+        related: [
+          {
+            beforeOccurrenceId: "old",
+            afterOccurrenceId: "new",
+            reason: "The complete evidence identifies separate controls.",
+          },
+        ],
+      };
+      const pieces: string[] = [];
+      let offset = 0;
+      const observed = conversation((prompt, index) => {
+        if (index === 0) {
+          const cards = data<CatalogueData>(prompt).findings;
+          expect(cards.before).toEqual([
+            { occurrenceId: "old", detailsOmitted: true },
+          ]);
+          expect(cards.after).toEqual([
+            { occurrenceId: "new", detailsOmitted: true },
+          ]);
+          return proposed;
+        }
+        const page = data<EvidenceData>(prompt);
+        expect(page.beforeOccurrenceIds).toEqual(["old"]);
+        expect(page.afterOccurrenceIds).toEqual(["new"]);
+        expect(page.offset).toBe(offset);
+        pieces.push(page.content);
+        offset += characters(page.content);
+        return page.nextOffset === null ? revised : proposed;
+      });
+      expect(await matchScanFindings(input, { codex: observed.codex })).toEqual(
+        revised,
+      );
+      expect(pieces.length).toBeGreaterThan(1);
+      expect(JSON.parse(pieces.join(""))).toEqual(input);
+    },
+  );
 
   test("finishes requested evidence before accepting a proposed match", async () => {
     const original = finding("old", {
