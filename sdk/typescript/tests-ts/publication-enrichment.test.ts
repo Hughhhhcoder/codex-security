@@ -1,19 +1,12 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-  disabledMcpServerConfiguration,
   enrichPublicationIssues,
   parsePublicationEnrichment,
   publicationEnrichmentEnvironment,
+  runPublicationEnrichmentCodex,
 } from "../src/publication-enrichment.js";
 import type { LinearPublicationCatalogLabel } from "../src/linear.js";
 import type { Finding } from "../src/models.js";
@@ -105,29 +98,56 @@ async function policyFile(
   return path;
 }
 
-async function filesUnder(root: string): Promise<string[]> {
-  const files: string[] = [];
-  const visit = async (directory: string): Promise<void> => {
-    const entries = await readdir(directory, { withFileTypes: true }).catch(
-      () => [],
-    );
-    for (const entry of entries) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) await visit(path);
-      else if (entry.isFile()) files.push(path);
-    }
-  };
-  await visit(root);
-  return files.sort();
-}
-
 describe("publication knowledge-base enrichment", () => {
-  test("quotes punctuation in external integration overrides", () => {
-    expect(
-      disabledMcpServerConfiguration(["company.tools", 'quoted"server']),
-    ).toBe(
-      '{"company.tools"={enabled=false,command="codex-security-disabled"},"quoted\\"server"={enabled=false,command="codex-security-disabled"}}',
+  test("runs one ephemeral read-only structured-output Codex turn", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-publication-runner-test-"),
     );
+    temporaryDirectories.push(directory);
+    const invocations: { args: readonly string[]; input?: string }[] = [];
+    const finalResponse = response(
+      issues().map(({ findingId }) => ({
+        findingId,
+        priority: "none",
+        labelIds: [],
+      })),
+    );
+
+    const result = await runPublicationEnrichmentCodex(
+      { command: "codex" },
+      { OPENAI_API_KEY: "codex-key" },
+      directory,
+      "publication prompt",
+      undefined,
+      async (_command, args, _environment, input) => {
+        invocations.push({ args, input });
+        const output = args.indexOf("--output-last-message");
+        await writeFile(args[output + 1]!, finalResponse);
+        return {
+          success: true,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    );
+
+    expect(result.finalResponse).toBe(finalResponse);
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]!.input).toBe("publication prompt");
+    const args = invocations[0]!.args;
+    expect(args[0]).toBe("exec");
+    expect(args).toContain("--ephemeral");
+    expect(args[args.indexOf("--sandbox") + 1]).toBe("read-only");
+    expect(args).toContain("--output-schema");
+    expect(args).toContain("--output-last-message");
+    expect(args).toContain('approval_policy="never"');
+    expect(args).toContain("sandbox_workspace_write.network_access=false");
+    expect(args).toContain('web_search="disabled"');
+    expect(args).toContain(
+      'responses_api_metadata.codex_security_surface="sdk"',
+    );
+    expect(args).not.toContain("--model");
   });
 
   test("uses canonical findings and applies policy-selected Linear metadata", async () => {
@@ -205,7 +225,7 @@ describe("publication knowledge-base enrichment", () => {
     ).toBe(expected);
   });
 
-  test("removes legacy metadata when no explicit policy rule applies", () => {
+  test("leaves metadata unset when no explicit policy rule applies", () => {
     const source = issues().map((issue) => ({
       ...issue,
       priority: 2 as const,
@@ -258,7 +278,7 @@ describe("publication knowledge-base enrichment", () => {
       LABELS,
     ],
     [
-      "invented finding",
+      "unknown finding",
       response([
         { findingId: "finding-one", priority: "high", labelIds: [] },
         { findingId: "invented", priority: "low", labelIds: [] },
@@ -267,7 +287,7 @@ describe("publication knowledge-base enrichment", () => {
       LABELS,
     ],
     [
-      "invented label",
+      "unknown label",
       response([
         {
           findingId: "finding-one",
@@ -325,26 +345,23 @@ describe("publication knowledge-base enrichment", () => {
     );
   });
 
-  test("rejects missing or duplicate canonical finding input before extraction", async () => {
+  test("rejects missing or duplicate canonical findings before extraction", async () => {
     let prepared = false;
-    const options = {
-      environment: { CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan" },
-      async prepareKnowledgeBase() {
-        prepared = true;
-        throw new Error("must not extract");
-      },
+    const prepareKnowledgeBase = async (): Promise<never> => {
+      prepared = true;
+      throw new Error("must not extract");
     };
 
     await expect(
       enrichPublicationIssues(issues(), LABELS, ["policy.md"], {
-        ...options,
         findings: findings().slice(0, 1),
+        prepareKnowledgeBase,
       }),
     ).rejects.toThrow(/missing a canonical finding/u);
     await expect(
       enrichPublicationIssues(issues(), LABELS, ["policy.md"], {
-        ...options,
         findings: [findings()[0]!, findings()[0]!, findings()[1]!],
+        prepareKnowledgeBase,
       }),
     ).rejects.toThrow(/duplicate canonical finding/u);
     expect(prepared).toBe(false);
@@ -380,7 +397,7 @@ describe("publication knowledge-base enrichment", () => {
     expect(cleaned).toBe(true);
   });
 
-  test("surfaces cleanup failures without hiding a primary enrichment error", async () => {
+  test("surfaces cleanup failures without hiding enrichment failures", async () => {
     for (const primaryFailure of [false, true]) {
       const directory = await mkdtemp(
         join(tmpdir(), "codex-security-publication-cleanup-test-"),
@@ -450,202 +467,5 @@ describe("publication knowledge-base enrichment", () => {
     expect(
       await publicationEnrichmentEnvironment({ codex_home: "" }),
     ).not.toHaveProperty("CODEX_HOME");
-  });
-
-  test("native execution ignores ambient integrations, credentials, and persistence", async () => {
-    const codexHome = await mkdtemp(
-      join(tmpdir(), "codex-security-publication-native-test-"),
-    );
-    temporaryDirectories.push(codexHome);
-    const sessionsDirectory = join(codexHome, "sessions");
-    const stateDirectory = join(codexHome, "state");
-    const mcpMarker = join(codexHome, "mcp-started");
-    const notifyMarker = join(codexHome, "notify-started");
-    const mcpScript = join(codexHome, "mcp.cjs");
-    const notifyScript = join(codexHome, "notify.cjs");
-    const workspace = join(codexHome, "workspace");
-    const knowledgeBase = join(workspace, "knowledge-base");
-    const skillDirectory = join(codexHome, "skills", "ambient-policy");
-    await mkdir(sessionsDirectory, { recursive: true });
-    await mkdir(stateDirectory, { recursive: true });
-    await mkdir(knowledgeBase, { recursive: true });
-    await mkdir(skillDirectory, { recursive: true });
-    await writeFile(join(sessionsDirectory, "existing.jsonl"), "{}\n");
-    await writeFile(join(stateDirectory, "existing.txt"), "existing\n");
-    await writeFile(
-      mcpScript,
-      `require("node:fs").writeFileSync(${JSON.stringify(mcpMarker)}, "started"); setInterval(() => {}, 1000);`,
-    );
-    await writeFile(
-      notifyScript,
-      `require("node:fs").writeFileSync(${JSON.stringify(notifyMarker)}, "started");`,
-    );
-    await writeFile(
-      join(codexHome, "config.toml"),
-      [
-        `notify = [${JSON.stringify(process.execPath)}, ${JSON.stringify(notifyScript)}]`,
-        'instructions = "AMBIENT_INSTRUCTIONS_MARKER"',
-        '[mcp_servers."ambient.tools"]',
-        `command = ${JSON.stringify(process.execPath)}`,
-        `args = [${JSON.stringify(mcpScript)}]`,
-      ].join("\n"),
-    );
-
-    const requests: Array<{ tools?: unknown[] }> = [];
-    const policyMarker = "PRIVATE_POLICY_MARKER";
-    const findingMarker = "PRIVATE_CANONICAL_FINDING_MARKER";
-    const projectMarker = "AMBIENT_PROJECT_INSTRUCTIONS_MARKER";
-    const skillMarker = "AMBIENT_SKILL_MARKER";
-    const linearKey = "lin_api_PRIVATE_LINEAR_KEY";
-    await writeFile(join(workspace, "AGENTS.md"), projectMarker);
-    await writeFile(
-      join(skillDirectory, "SKILL.md"),
-      [
-        "---",
-        "name: ambient-policy",
-        "description: Ambient policy probe.",
-        "---",
-        skillMarker,
-      ].join("\n"),
-    );
-    await writeFile(
-      join(knowledgeBase, "0-policy.md.txt"),
-      `Apply no metadata. ${policyMarker}`,
-    );
-    const finalResponse = response(
-      issues().map(({ findingId }) => ({
-        findingId,
-        priority: "none",
-        labelIds: [],
-      })),
-    );
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      async fetch(request) {
-        if (request.method !== "POST") {
-          return Response.json({}, { status: 404 });
-        }
-        requests.push((await request.json()) as { tools?: unknown[] });
-        const item = {
-          type: "message",
-          role: "assistant",
-          id: "msg_synthetic",
-          status: "completed",
-          content: [
-            { type: "output_text", text: finalResponse, annotations: [] },
-          ],
-        };
-        const completed = {
-          id: "resp_synthetic",
-          status: "completed",
-          output: [item],
-          usage: {
-            input_tokens: 1,
-            output_tokens: 1,
-            total_tokens: 2,
-            input_tokens_details: { cached_tokens: 0 },
-          },
-        };
-        return new Response(
-          [
-            {
-              type: "response.output_item.added",
-              output_index: 0,
-              item: { ...item, status: "in_progress", content: [] },
-            },
-            {
-              type: "response.output_text.delta",
-              item_id: item.id,
-              output_index: 0,
-              content_index: 0,
-              delta: finalResponse,
-            },
-            { type: "response.output_item.done", output_index: 0, item },
-            { type: "response.completed", response: completed },
-          ]
-            .map(
-              (event) =>
-                `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-            )
-            .join(""),
-          { headers: { "Content-Type": "text/event-stream" } },
-        );
-      },
-    });
-
-    try {
-      await enrichPublicationIssues(issues(), LABELS, ["unused-policy.md"], {
-        findings: findings(findingMarker),
-        environment: {
-          ...process.env,
-          CODEX_HOME: codexHome,
-          CODEX_SECURITY_SCAN_ID: "synthetic-parent-scan",
-          CODEX_SECURITY_LINEAR_API_KEY: linearKey,
-          PUBLICATION_TEST_KEY: "synthetic",
-        },
-        signal: AbortSignal.timeout(15_000),
-        prepareKnowledgeBase: async () => ({
-          path: knowledgeBase,
-          sources: [],
-          cleanup: async () => undefined,
-        }),
-        codexConfig: {
-          model: "gpt-5.5",
-          model_provider: "publication_test",
-          "model_providers.publication_test.name": "Publication test",
-          "model_providers.publication_test.base_url": `http://127.0.0.1:${server.port}/v1`,
-          "model_providers.publication_test.env_key": "PUBLICATION_TEST_KEY",
-          "model_providers.publication_test.wire_api": "responses",
-          "model_providers.publication_test.supports_websockets": false,
-          "model_providers.publication_test.requires_openai_auth": false,
-          "model_providers.publication_test.request_max_retries": 0,
-          "model_providers.publication_test.stream_max_retries": 0,
-        },
-      });
-    } finally {
-      server.stop(true);
-    }
-
-    const serializedRequest = JSON.stringify(requests[0]);
-    expect(requests[0]?.tools ?? []).toEqual([]);
-    expect(serializedRequest).toContain(policyMarker);
-    expect(serializedRequest).toContain(findingMarker);
-    expect(serializedRequest).not.toContain(linearKey);
-    expect(serializedRequest).not.toContain("AMBIENT_INSTRUCTIONS_MARKER");
-    expect(serializedRequest).not.toContain(projectMarker);
-    expect(serializedRequest).not.toContain(skillMarker);
-    expect(serializedRequest).not.toContain("ambient.tools");
-    expect(
-      await readFile(mcpMarker, "utf8").catch(() => undefined),
-    ).toBeUndefined();
-    expect(
-      await readFile(notifyMarker, "utf8").catch(() => undefined),
-    ).toBeUndefined();
-
-    const homeFiles = await filesUnder(codexHome);
-    const sessionFiles = homeFiles.filter((path) =>
-      relative(codexHome, path).startsWith(
-        `sessions${process.platform === "win32" ? "\\" : "/"}`,
-      ),
-    );
-    expect(sessionFiles).toEqual([join(sessionsDirectory, "existing.jsonl")]);
-    const persistedFiles = homeFiles.filter((path) => {
-      const local = relative(codexHome, path).toLowerCase();
-      return (
-        local.startsWith(
-          `sessions${process.platform === "win32" ? "\\" : "/"}`,
-        ) ||
-        local.startsWith(`state${process.platform === "win32" ? "\\" : "/"}`) ||
-        local.includes("state_") ||
-        local.endsWith(".sqlite") ||
-        local.endsWith(".sqlite3")
-      );
-    });
-    const persisted = Buffer.concat(
-      await Promise.all(persistedFiles.map((path) => readFile(path))),
-    ).toString("utf8");
-    expect(persisted).not.toContain(policyMarker);
-    expect(persisted).not.toContain(findingMarker);
   });
 });

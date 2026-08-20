@@ -674,11 +674,11 @@ the CLI applies only the rules written in your documents. If no explicit rule
 matches a finding, its priority and labels remain unset rather than falling back
 to the default severity mapping. Knowledge-based publication starts one
 ephemeral, read-only Codex turn using your normal Codex authentication. The
-turn ignores user configuration and exec rules, disables built-in request
-tools, configured external integrations, network access, and search, and does
-not persist a Codex session. The Linear API key is used separately to validate
-the exact team and project, read the team's label catalog, and create issues;
-it is not supplied to the Codex turn. Labels
+turn uses your normal Codex model configuration, disables approval prompts,
+network access, search, and executable tool features, and does not persist a
+Codex session. The Linear API key is used separately to validate the exact team
+and project, read the team's label catalog, and create issues; it is removed
+from the Codex turn's environment. Labels
 named by policy must already exist in the selected team. V1 policy output can
 set only native priority and existing labels, never routing, title,
 description, assignee, state, cycle, estimate, or due date.
