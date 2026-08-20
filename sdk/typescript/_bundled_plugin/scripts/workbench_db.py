@@ -3240,7 +3240,7 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
         scan = require_scan(connection, args.scan_id)
         try:
             result["scan"]["coverage"] = coverage_summary_for_history(scan)
-        except (OSError, SystemExit):
+        except (OSError, RuntimeError, SystemExit):
             pass  # Historical artifacts may no longer be available or verifiable.
     return result
 

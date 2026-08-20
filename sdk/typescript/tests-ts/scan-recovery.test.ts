@@ -360,6 +360,32 @@ describe("malformed scan artifact recovery", () => {
     });
   });
 
+  test("keeps saved history when scan directory resolution finds a symlink loop", () => {
+    const python = Bun.which("python3") ?? Bun.which("python");
+    expect(python).not.toBeNull();
+    const script = [
+      "import argparse, json, pathlib, runpy, sys",
+      "from unittest import mock",
+      "namespace = runpy.run_path(str(pathlib.Path(sys.argv[1]) / 'scripts' / 'workbench_db.py'))",
+      "get_scan = namespace['get_scan']",
+      "args = argparse.Namespace(scan_id='scan-1', occurrence_id=None)",
+      "context = {'scan': {'progress': {'status': 'complete'}, 'findingCount': 2}}",
+      "scan = {'seal_manifest_digest': 'sealed', 'scan_dir': 'scan'}",
+      "resolve = mock.Mock(side_effect=RuntimeError('Symlink loop'))",
+      "with mock.patch.dict(get_scan.__globals__, {'scan_context': lambda *_: context, 'require_scan': lambda *_: scan, 'require_canonical_scan_directory': resolve}):",
+      "    result = get_scan(None, args)",
+      "resolve.assert_called_once_with(pathlib.Path('scan'))",
+      "print(json.dumps(result))",
+    ].join("\n");
+    const result = spawnSync(python!, ["-I", "-B", "-c", script, PLUGIN_ROOT], {
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      scan: { progress: { status: "complete" }, findingCount: 2 },
+    });
+  });
+
   test("does not attach completed coverage to an earlier running status", () => {
     const python = Bun.which("python3") ?? Bun.which("python");
     expect(python).not.toBeNull();

@@ -134,6 +134,76 @@ describe("scan history renderer", () => {
     );
   });
 
+  test("keeps whitespace inside recorded scope paths while wrapping", () => {
+    const paths = ["src/a  b.ts", "src/a b.ts", "src/trailing "];
+    const scan = {
+      targetPath: "/demo/repository",
+      scanId: "scan-1",
+      mode: "standard",
+      scope: ".",
+      scopePaths: paths,
+      progress: { status: "complete" },
+      findingCount: 0,
+      startedAt: "2026-08-01T00:00:00Z",
+      findings: [],
+    };
+    const options = { color: false, columns: 48 };
+    const outputs = [
+      renderScanHistory({ scans: [scan] }, "list", options),
+      renderScanHistory(
+        { ...scan, contract: { scope: { requiredIncludePaths: paths } } },
+        "show",
+        options,
+      ),
+    ];
+    for (const output of outputs) {
+      for (const path of paths) expect(output).toContain(path);
+      const lines = output.split("\n");
+      const first = lines.findIndex((line) => line.includes("SCOPE"));
+      expect(first).toBeGreaterThanOrEqual(0);
+      expect(lines[first]?.length).toBeLessThanOrEqual(48);
+    }
+    expect(
+      renderScanHistory(
+        { ...scan, scope: "src/legacy  path " },
+        "show",
+        options,
+      ),
+    ).toContain("src/legacy  path ");
+  });
+
+  test("keeps canonical include and exclusion path whitespace intact", () => {
+    const text = renderScanHistory(
+      {
+        targetPath: "/demo/repository",
+        scanId: "scan-1",
+        mode: "standard",
+        progress: { status: "complete" },
+        coverage: {
+          mode: "scoped_path",
+          completeness: "complete",
+          includePaths: ["src/a  b.ts", "src/trailing "],
+          excludePaths: ["vendor/a  b"],
+          explicitExclusions: [
+            { pattern: "generated/trailing ", reason: "Generated source." },
+          ],
+        },
+        findings: [],
+      },
+      "show",
+      { color: false, columns: 48 },
+    );
+    for (const path of [
+      "src/a  b.ts",
+      "src/trailing ",
+      "vendor/a  b",
+      "generated/trailing ",
+    ]) {
+      expect(text).toContain(path);
+    }
+    expect(text).toContain("complete for requested scope");
+  });
+
   test("separates current repository findings from earlier observations", () => {
     const text = renderScanHistory(
       {

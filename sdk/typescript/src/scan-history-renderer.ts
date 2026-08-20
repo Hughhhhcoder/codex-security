@@ -2,7 +2,8 @@ import { basename, relative } from "node:path";
 import type { JsonObject } from "./config.js";
 import {
   formatCoverageCompleteness,
-  formatCoverageScope,
+  formatCoverageScopeParts,
+  formatScopePathParts,
   type CoverageSummary,
 } from "./coverage-presentation.js";
 
@@ -85,11 +86,18 @@ export function renderScanHistory(
     `  ${accent("━".repeat(width - 4))}`,
   ];
 
-  const wrap = (value: string, indent: number, prefix?: string): void => {
+  const wrap = (
+    value: string | readonly string[],
+    indent: number,
+    prefix?: string,
+  ): void => {
     const available = width - indent - 2;
     let line = "";
     let first = true;
-    for (const word of clean(value).split(/\s+/)) {
+    // Scope paths arrive as whole entries because whitespace can be part of a filename.
+    const words =
+      typeof value === "string" ? clean(value).split(/\s+/) : value.map(clean);
+    for (const word of words) {
       if (line.length > 0 && line.length + word.length + 1 > available) {
         lines.push(`${first && prefix ? prefix : " ".repeat(indent)}${line}`);
         first = false;
@@ -214,8 +222,13 @@ export function renderScanHistory(
         );
       }
       const scopePaths = scan["scopePaths"] as string[] | undefined;
-      const scope = scopePaths?.length ? scopePaths.join(", ") : scan["scope"];
-      if (typeof scope === "string") {
+      const recordedScope = scan["scope"];
+      const scope = scopePaths?.length
+        ? formatScopePathParts(scopePaths)
+        : typeof recordedScope === "string"
+          ? [recordedScope]
+          : undefined;
+      if (scope) {
         wrap(scope, 11, `    ${strong("SCOPE")}  `);
       }
     }
@@ -242,7 +255,7 @@ export function renderScanHistory(
     const canonicalCoverage = result["coverage"] as CoverageSummary | undefined;
     if (canonicalCoverage) {
       wrap(
-        formatCoverageScope(canonicalCoverage),
+        formatCoverageScopeParts(canonicalCoverage),
         11,
         `  ${strong("SCOPE")}  `,
       );
@@ -253,9 +266,14 @@ export function renderScanHistory(
       const contract = result["contract"] as JsonObject | undefined;
       const scope = contract?.["scope"] as JsonObject | undefined;
       const paths = scope?.["requiredIncludePaths"] as string[] | undefined;
-      const recordedScope = paths?.length ? paths.join(", ") : result["scope"];
-      if (typeof recordedScope === "string") {
-        wrap(recordedScope, 11, `  ${strong("SCOPE")}  `);
+      const recordedScope = result["scope"];
+      const scopeParts = paths?.length
+        ? formatScopePathParts(paths)
+        : typeof recordedScope === "string"
+          ? [recordedScope]
+          : undefined;
+      if (scopeParts) {
+        wrap(scopeParts, 11, `  ${strong("SCOPE")}  `);
       }
       if (status === "complete") {
         lines.push(`  ${strong("COVERAGE")}  not available`);
