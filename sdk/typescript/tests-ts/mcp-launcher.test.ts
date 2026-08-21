@@ -44,7 +44,7 @@ test("starts the packaged MCP server with managed Node and an empty PATH", async
     const result = spawnSync(
       windows ? process.env["ComSpec"] ?? "cmd.exe" : launcher,
       windows
-        ? ["/d", "/s", "/c", `"${launcher}.cmd" ${config.args.join(" ")}`]
+        ? ["/d", "/s", "/c", `""${launcher}.cmd" ${config.args.join(" ")}"`]
         : config.args,
       {
         cwd: PLUGIN_ROOT,
@@ -62,6 +62,7 @@ test("starts the packaged MCP server with managed Node and an empty PATH", async
         encoding: "utf8",
         timeout: 10_000,
         windowsHide: true,
+        windowsVerbatimArguments: windows,
         input:
           JSON.stringify({
             jsonrpc: "2.0",
