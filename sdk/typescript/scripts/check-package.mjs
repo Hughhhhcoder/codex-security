@@ -168,6 +168,8 @@ const distFiles = new Set(
     "config",
     "contract",
     "cost",
+    "custom-validation",
+    "custom-validation-prompt",
     "errors",
     "index",
     "knowledge-base",
