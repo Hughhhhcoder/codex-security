@@ -46,6 +46,7 @@ import {
   CodexSecurity,
   createSecurityInternal,
   listRepositoryFindings,
+  SCAN_AUTH_MODES,
   scanAuthentication,
   type DeepScanOptions,
   type ScanAuthMode,
@@ -106,6 +107,7 @@ import {
 import type { ScanResult } from "./result.js";
 import {
   bundledPluginRoot,
+  canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
   expandHome,
@@ -1393,13 +1395,13 @@ export async function main(
     args: readonly string[],
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
-  ): Promise<JsonObject | undefined> => {
+  ): Promise<JsonObject> => {
     try {
       return await select(await dependencies.runWorkbench(args));
     } catch (error) {
       errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
       exitCode = 2;
-      return undefined;
+      throw error;
     }
   };
   const latestScans = async (
@@ -1590,7 +1592,11 @@ export async function main(
         const scanRoot =
           options.scanRoot === undefined
             ? undefined
-            : resolveCliPath(directory, options.scanRoot);
+            : process.platform === "win32"
+              ? await canonicalizeModelSafePath(
+                  resolveCliPath(directory, options.scanRoot),
+                )
+              : resolveCliPath(directory, options.scanRoot);
         const repository =
           scanRoot !== undefined && args.repository === undefined
             ? undefined
@@ -1790,7 +1796,7 @@ export async function main(
         } catch (error) {
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
           exitCode = 2;
-          return undefined;
+          throw error;
         }
       },
     })
@@ -2188,7 +2194,7 @@ export async function main(
       options: z
         .object({
           auth: z
-            .enum(["auto", "chatgpt", "api-key"])
+            .enum(SCAN_AUTH_MODES)
             .default("auto")
             .describe(
               "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
