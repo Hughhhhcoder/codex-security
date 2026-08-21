@@ -259,23 +259,6 @@ describe("malformed scan artifact recovery", () => {
     const fixture = await startDraftScan();
     const threadId = "context-rejoin-regression";
     const originalContext = "original security focus".repeat(3_000);
-    const workbenchStdin = (args: string[], input: string) => {
-      const result = spawnSync(
-        fixture.python,
-        ["-I", "-B", join(PLUGIN_ROOT, "scripts", "workbench_db.py"), ...args],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: fixture.stateDir,
-          },
-          input,
-          windowsHide: true,
-        },
-      );
-      expect(result.status, result.stderr).toBe(0);
-      return JSON.parse(result.stdout) as Record<string, unknown>;
-    };
     const startArguments = [
       "start-headless-standard-scan",
       "--thread-id",
@@ -286,7 +269,7 @@ describe("malformed scan artifact recovery", () => {
       ".",
       "--user-context-stdin",
     ];
-    const created = workbenchStdin(startArguments, originalContext);
+    const created = await workbench(fixture, startArguments, originalContext);
     const scan = created["scan"] as {
       scanId: string;
       handoffClaimToken: string;
@@ -295,7 +278,8 @@ describe("malformed scan artifact recovery", () => {
 
     expect(scan.userContext).toBe(originalContext);
 
-    const updated = workbenchStdin(
+    const updated = await workbench(
+      fixture,
       [
         "update-scan-context",
         "--scan-id",
@@ -316,7 +300,7 @@ describe("malformed scan artifact recovery", () => {
       userContext: null,
     });
 
-    const retried = workbenchStdin(startArguments, originalContext);
+    const retried = await workbench(fixture, startArguments, originalContext);
     expect(retried["startDisposition"]).toBe("joined");
     expect(retried["scan"]).toMatchObject({
       scanId: scan.scanId,
