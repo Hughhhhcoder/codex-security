@@ -1934,6 +1934,10 @@ describe("CodexSecurity orchestration", () => {
       "Codex_Home",
     );
     expect(prompt).toContain("$codex-security:security-scan");
+    expect(prompt).not.toContain("SDK-owned discovery workflow");
+    expect(
+      (codexOptions as CodexOptions | null)?.config?.["mcp_servers"],
+    ).toBeUndefined();
     expect(prompt).toContain("The SDK has already registered this scan.");
     expect(prompt).toContain("never call a scan-start or completion tool");
     expect(prompt).toContain("do not finalize or seal them");
