@@ -204,6 +204,39 @@ describe("shared security-policy inputs", () => {
     );
   });
 
+  test("rejects dangling repository-local policy links during inspection", async () => {
+    for (const path of [
+      "SECURITY.md",
+      "component/child/SECURITY.md",
+      ".github/SECURITY.md",
+      "docs/SECURITY.md",
+    ]) {
+      const { repository } = await fixture();
+      for (const directory of ["component/child", ".github", "docs"])
+        await mkdir(join(repository, directory), { recursive: true });
+      expect(inspect(repository, "component")).toEqual({
+        previousContent: null,
+        guidance: "",
+        policyPaths: [],
+      });
+      await symlink(
+        join(repository, "missing.md"),
+        join(repository, path),
+        "file",
+      );
+
+      const result = run(repository, "--inspect", "--scope", "component");
+      expect(result.status, path).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(
+        "SECURITY.md symbolic link target does not exist",
+      );
+      const resolved = run(repository, "--scope", "component");
+      expect(resolved.status, resolved.stderr).toBe(0);
+      expect(resolved.stdout).toBe("");
+    }
+  });
+
   test("reads hard-linked policies but rejects a hard-linked destination", async () => {
     const { repository } = await fixture();
     await mkdir(join(repository, "component", "child"), { recursive: true });

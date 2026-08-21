@@ -208,7 +208,11 @@ def inspect_security_policy(
         if policy.exists() or policy.is_symlink():
             paths.add(path)
     for path in sorted(paths - {selected}):
-        contents[path] = _read_policy(root / path, root, git_dirs)
+        policy = root / path
+        content = _read_policy(policy, root, git_dirs)
+        if content is None and policy.is_symlink():
+            raise ResolutionError(f"SECURITY.md symbolic link target does not exist: {policy}")
+        contents[path] = content
     return {
         "previousContent": contents[selected],
         "guidance": _format_guidance((path, contents[path]) for path in chain),
