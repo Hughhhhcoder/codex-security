@@ -231,9 +231,37 @@ describe("shared security-policy inputs", () => {
       expect(result.stderr).toContain(
         "SECURITY.md symbolic link target does not exist",
       );
+    }
+  });
+
+  test("preserves read-only handling of non-file policy paths", async () => {
+    for (const kind of [
+      "directory",
+      "missing-inside",
+      "missing-outside",
+      "cycle",
+    ]) {
+      const { root, repository } = await fixture();
+      const policy = join(repository, "SECURITY.md");
+      await mkdir(join(repository, "component"));
+      if (kind === "directory") {
+        await mkdir(policy);
+      } else {
+        await symlink(
+          kind === "cycle"
+            ? policy
+            : join(kind === "missing-inside" ? repository : root, "missing.md"),
+          policy,
+          "file",
+        );
+      }
+
       const resolved = run(repository, "--scope", "component");
-      expect(resolved.status, resolved.stderr).toBe(0);
+      expect(resolved.status, kind).toBe(0);
       expect(resolved.stdout).toBe("");
+      const checked = run(repository, "--inspect", "--scope", "component");
+      expect(checked.status, kind).toBe(2);
+      expect(checked.stdout).toBe("");
     }
   });
 

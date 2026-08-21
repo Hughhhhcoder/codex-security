@@ -33,7 +33,7 @@ Compile the full `SECURITY.md` policy for a file or directory with:
 
 The resolver concatenates each nonempty `SECURITY.md` from the scan root through the target's directory, in root-to-leaf order. A `SECURITY.md` applies to the directory that contains it and all descendant directories. If policies conflict, the policy located closest to the target takes precedence.
 
-Policy contents must be regular UTF-8 files no larger than 1 MiB. Read-only resolution accepts hard-linked files and symbolic links that resolve inside the repository and outside Git metadata. If no nonempty policy applies, the output is empty.
+Policy contents must be regular UTF-8 files no larger than 1 MiB. Read-only resolution accepts hard-linked files and symbolic links that resolve inside the repository and outside Git metadata. It skips missing policies, broken links, and non-file entries. If no nonempty policy applies, the output is empty.
 
 ## Inspect Drafting Inputs
 

@@ -188,6 +188,7 @@ def resolve_security_md(repo: Path, scope: Path, git_dirs: tuple[Path, ...] = ()
     return _format_guidance(
         (path, _read_policy(root / path, root, git_dirs))
         for path in _policy_chain(root, directory)
+        if (root / path).is_file()
     )
 
 
