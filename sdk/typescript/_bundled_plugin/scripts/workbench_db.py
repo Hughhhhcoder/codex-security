@@ -127,7 +127,7 @@ from workbench_validation import (
     require_occurrence,
     require_uuid,
     sqlite_busy,
-    user_context_argument,
+    user_text,
 )
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
@@ -716,7 +716,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 optional_text(args.target_summary, maximum=2400),
                 default_scope,
                 args.mode,
-                user_context_argument(args),
+                user_text(args.user_context),
                 diff_target_kind,
                 diff_base_revision,
                 diff_head_revision,
@@ -775,7 +775,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 target_summary,
                 scope,
                 args.mode,
-                user_context_argument(args),
+                user_text(args.user_context),
                 diff_target["kind"] if diff_target else None,
                 diff_target["baseRevision"] if diff_target else None,
                 diff_target["headRevision"] if diff_target else None,
@@ -940,7 +940,7 @@ def _start_prompt_driven_scan(
     target_path = str(target)
     scope = inspected["scope"]
     diff_target = inspected["diffTarget"]
-    user_context = user_context_argument(args)
+    user_context = user_text(args.user_context)
     target_summary = optional_text(args.target_summary, maximum=2400)
     if diff_target is not None and not target_summary:
         target_summary = diff_target_summary(diff_target)
@@ -1606,8 +1606,7 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
     if next(scan_dir.iterdir(), None) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
 
-    recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
-    recipe = parse_scan_recipe(recipe_json, repository)
+    recipe = parse_scan_recipe(args.recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
     scope = paths[0] if len(paths) == 1 else "."

@@ -341,7 +341,7 @@ describe("semantic scan comparison", () => {
     const open = { findingId: "open", occurrenceId: "old-open" };
     const dismissed = { findingId: "dismissed", occurrenceId: "old-dismissed" };
     const after = { findingId: "renamed", occurrenceId: "new-renamed" };
-    const commands: Array<{ args: readonly string[]; input?: string }> = [];
+    const commands: (readonly string[])[] = [];
     let input: ScanComparisonInput | undefined;
     await matchCompletedScan({
       scanId: "current",
@@ -354,8 +354,8 @@ describe("semantic scan comparison", () => {
         CODEX_SECURITY_SCAN_ID: "current",
         FIREWORKS_API_KEY: "synthetic-provider-key",
       },
-      async workbench(args, commandInput) {
-        commands.push({ args, input: commandInput });
+      async workbench(args) {
+        commands.push(args);
         return args[0] === "list-unmatched-scan-pairs"
           ? {
               batches: [
@@ -402,12 +402,11 @@ describe("semantic scan comparison", () => {
       },
     });
     expect(input).toEqual({ before: [open, dismissed], after: [after] });
-    expect(commands.map(({ args: [command] }) => command)).toEqual([
+    expect(commands.map(([command]) => command)).toEqual([
       "list-unmatched-scan-pairs",
       "save-scan-comparison",
     ]);
-    expect(commands[1]!.args.at(-1)).toBe("--matches-json-stdin");
-    const saved = JSON.parse(commands[1]!.input!) as ScanComparisonResult;
+    const saved = JSON.parse(commands[1]!.at(-1)!) as ScanComparisonResult;
     expect(
       saved.matches.map(({ beforeOccurrenceIds }) => beforeOccurrenceIds),
     ).toEqual([["old-dismissed"]]);

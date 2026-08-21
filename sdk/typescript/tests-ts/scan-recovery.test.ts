@@ -102,11 +102,7 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value)}\n`);
 }
 
-async function workbench(
-  fixture: ScanFixture,
-  args: readonly string[],
-  input?: string,
-) {
+async function workbench(fixture: ScanFixture, args: readonly string[]) {
   return runWorkbench(
     {
       python: fixture.python,
@@ -117,20 +113,17 @@ async function workbench(
       },
     },
     args,
-    input,
   );
 }
 
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
-  recipeFromStdin = false,
 ): Promise<ScanFixture> {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "codex-security-scan-recovery-")),
   );
   temporaryDirectories.push(root);
-  const python =
-    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+  const python = Bun.which("python3") ?? Bun.which("python");
   expect(python).not.toBeNull();
 
   const target = join(root, "repository");
@@ -181,26 +174,20 @@ async function startDraftScan(
     scanId: "",
     registration: {},
   };
-  const recipe = JSON.stringify({
-    config: {},
-    mode: "standard",
-    repository: target,
-    target: { kind: "repository", paths: [] },
-  });
-  const registration = await workbench(
-    fixture,
-    [
-      "register-cli-scan",
-      "--repository",
-      target,
-      "--scan-dir",
-      scanDir,
-      ...(recipeFromStdin
-        ? ["--recipe-json-stdin"]
-        : ["--recipe-json", recipe]),
-    ],
-    recipeFromStdin ? recipe : undefined,
-  );
+  const registration = await workbench(fixture, [
+    "register-cli-scan",
+    "--repository",
+    target,
+    "--scan-dir",
+    scanDir,
+    "--recipe-json",
+    JSON.stringify({
+      config: {},
+      mode: "standard",
+      repository: target,
+      target: { kind: "repository", paths: [] },
+    }),
+  ]);
   fixture.scanId = String(registration["scanId"]);
   fixture.registration = registration;
 
@@ -247,35 +234,9 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("malformed scan artifact recovery", () => {
-  test("registers a scan recipe delivered through stdin", async () => {
-    const fixture = await startDraftScan("directory", true);
-    expect(fixture.registration).toMatchObject({
-      scanDir: fixture.scanDir,
-      targetRevision: "unversioned",
-    });
-  });
-
-  test("rejoins a headless scan after its stdin context is cleared", async () => {
+  test("rejoins a headless scan after its running context changes", async () => {
     const fixture = await startDraftScan();
     const threadId = "context-rejoin-regression";
-    const originalContext = "original security focus".repeat(3_000);
-    const workbenchStdin = (args: string[], input: string) => {
-      const result = spawnSync(
-        fixture.python,
-        ["-I", "-B", join(PLUGIN_ROOT, "scripts", "workbench_db.py"), ...args],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: fixture.stateDir,
-          },
-          input,
-          windowsHide: true,
-        },
-      );
-      expect(result.status, result.stderr).toBe(0);
-      return JSON.parse(result.stdout) as Record<string, unknown>;
-    };
     const startArguments = [
       "start-headless-standard-scan",
       "--thread-id",
@@ -284,45 +245,42 @@ describe("malformed scan artifact recovery", () => {
       fixture.repository,
       "--scope",
       ".",
-      "--user-context-stdin",
+      "--user-context",
+      "original security focus",
     ];
-    const created = workbenchStdin(startArguments, originalContext);
+    const created = await workbench(fixture, startArguments);
     const scan = created["scan"] as {
       scanId: string;
       handoffClaimToken: string;
       userContext: string;
     };
 
-    expect(scan.userContext).toBe(originalContext);
-
-    const updated = workbenchStdin(
-      [
-        "update-scan-context",
-        "--scan-id",
-        scan.scanId,
-        "--user-context-stdin",
-        "--thread-id",
-        threadId,
-        "--claim-token",
-        scan.handoffClaimToken,
-      ],
-      "",
-    );
+    const updated = await workbench(fixture, [
+      "update-scan-context",
+      "--scan-id",
+      scan.scanId,
+      "--user-context",
+      "updated security focus",
+      "--thread-id",
+      threadId,
+      "--claim-token",
+      scan.handoffClaimToken,
+    ]);
     expect(updated["scan"]).toMatchObject({
       scanId: scan.scanId,
-      userContext: null,
+      userContext: "updated security focus",
     });
     expect(updated["workspace"]).toMatchObject({
-      userContext: null,
+      userContext: "updated security focus",
     });
 
-    const retried = workbenchStdin(startArguments, originalContext);
+    const retried = await workbench(fixture, startArguments);
     expect(retried["startDisposition"]).toBe("joined");
     expect(retried["scan"]).toMatchObject({
       scanId: scan.scanId,
-      userContext: null,
+      userContext: "updated security focus",
     });
-  }, 30_000);
+  });
 
   test("returns the authoritative directory snapshot contract at registration", async () => {
     const fixture = await startDraftScan();
