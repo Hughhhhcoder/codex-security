@@ -783,7 +783,7 @@ export class CodexSecurity {
           repo,
           "--scan-dir",
           scanDir,
-          "--recipe-json-stdin",
+          "--registration-json-stdin",
           ...(options.archiveExisting === true ? ["--archive-existing"] : []),
           ...(archivedScanDir === null
             ? []
@@ -792,7 +792,7 @@ export class CodexSecurity {
             ? []
             : ["--parent-scan-id", options.parentScanId]),
         ],
-        JSON.stringify(recipe),
+        JSON.stringify({ recipe, userContext: options.scanPrompt }),
       );
       const scanId = registration["scanId"];
       const targetId = registration["targetId"];
