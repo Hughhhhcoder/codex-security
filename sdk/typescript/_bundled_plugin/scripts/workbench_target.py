@@ -135,7 +135,15 @@ def git_command(
         environment.pop(name, None)
     environment["GIT_LITERAL_PATHSPECS"] = "1"
     # Repository-local config is untrusted; fsmonitor may name an executable hook.
-    command = ["git", "-c", "core.fsmonitor=false", "-C", str(target)]
+    command = [
+        "git",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "i18n.logOutputEncoding=UTF-8",
+        "-C",
+        str(target),
+    ]
     if git_dir is not None and work_tree is not None:
         command.extend(["--git-dir", str(git_dir), "--work-tree", str(work_tree)])
     full_command = [*command, *args]
@@ -548,9 +556,10 @@ def git_target_metadata(target: Path) -> dict[str, Any]:
     branch = git_output(target, "symbolic-ref", "--quiet", "--short", "HEAD")
     metadata.update({"branch": branch, "detachedHead": revision is not None and branch is None})
     if revision is not None:
+        subject = git_bytes(target, "show", "-s", "--format=%s", "HEAD")
         metadata.update(
             {
-                "commitSubject": git_output(target, "show", "-s", "--format=%s", "HEAD"),
+                "commitSubject": (subject or b"").decode("utf-8").strip() or None,
                 "revision": revision,
                 "shortRevision": revision[:7],
             }
