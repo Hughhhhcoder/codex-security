@@ -1360,33 +1360,39 @@ export async function preparePersistentOutputRoot(
 export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
+  input?: string,
 ): Promise<JsonObject> {
   let stdout: string;
   try {
-    ({ stdout } = await execFile(
-      options.python,
+    const environment = Object.fromEntries(
+      Object.entries(options.environment).filter(
+        ([name]) =>
+          name.toUpperCase() !== "OPENAI_API_KEY" &&
+          name.toUpperCase() !== "CODEX_API_KEY" &&
+          name.toUpperCase() !== "OPENROUTER_API_KEY" &&
+          name.toUpperCase() !== "FIREWORKS_API_KEY",
+      ),
+    );
+    const result = await runCodexCommand(
+      { command: options.python },
       [
         "-I",
         "-B",
         join(options.pluginRoot, "scripts", "workbench_db.py"),
         ...args,
       ],
-      {
-        env: Object.fromEntries(
-          Object.entries(options.environment).filter(
-            ([name]) =>
-              name.toUpperCase() !== "OPENAI_API_KEY" &&
-              name.toUpperCase() !== "CODEX_API_KEY" &&
-              name.toUpperCase() !== "OPENROUTER_API_KEY" &&
-              name.toUpperCase() !== "FIREWORKS_API_KEY",
-          ),
-        ),
-        encoding: "utf8",
-        maxBuffer: Infinity,
-        windowsHide: true,
-        signal: options.signal,
-      },
-    ));
+      environment,
+      input,
+      options.signal,
+    );
+    if (!result.success) {
+      throw new Error(
+        result.stderr.trim() ||
+          result.stdout.trim() ||
+          `Workbench exited with status ${result.exitCode}.`,
+      );
+    }
+    stdout = result.stdout;
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
