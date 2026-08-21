@@ -311,6 +311,7 @@ describe("malformed scan artifact recovery", () => {
         explicitExclusions: coverage.explicitExclusions,
       },
     });
+    expect(history["workspace"]).not.toHaveProperty("results.coverage");
     for (const artifactPath of [coveragePath, manifestPath]) {
       const sealed = await readFile(artifactPath, "utf8");
       for (const modified of [`${sealed}\n`, "{}\n"]) {
