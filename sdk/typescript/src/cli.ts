@@ -5912,7 +5912,7 @@ function printScanSummary(
   errorOutput.write(
     `\n  ${paint("REPORT", "1;36")}    ${paint(errorMessage(result.reportPath), 4)}\n\n` +
       `  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("SCOPE", 1)}     ${stripVTControlCharacters(formatCoverageScope(result.coverage)).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ")}\n` +
+      `  ${paint("SCOPE", 1)}     ${formatCoverageScope(result.coverage)}\n` +
       `  ${paint("COVERAGE", 1)}  ${formatCoverageCompleteness(result.coverage.completeness)}\n` +
       (deepScanStop === undefined
         ? ""

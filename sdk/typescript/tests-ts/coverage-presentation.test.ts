@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import {
   formatCoverageScope,
   formatScopePath,
-  formatScopePathParts,
 } from "../src/coverage-presentation.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
@@ -50,10 +49,13 @@ describe("coverage scope presentation", () => {
     expect(included).toBe('scoped paths: "src; excluding tests"');
     expect(excluded).toBe("scoped paths: src; excluding tests");
     expect(included).not.toBe(excluded);
-    expect(formatScopePathParts(["src, tests", "src/parser.ts"])).toEqual([
-      '"src, tests",',
-      "src/parser.ts",
-    ]);
+    expect(
+      formatCoverageScope({
+        mode: "scoped_path",
+        includePaths: ["src, tests", "src/parser.ts"],
+        excludePaths: [],
+      }),
+    ).toBe('scoped paths: "src, tests", src/parser.ts');
   });
 
   test("round-trips ambiguous paths without emitting terminal controls", () => {
@@ -66,16 +68,17 @@ describe("coverage scope presentation", () => {
       "src/\u001b[31m",
       "src/\u009b31m",
       "src/\u0085\u2028\u2029COVERAGE forged",
+      "src/\ufeffname",
     ];
-    const parts = formatScopePathParts(paths);
-    for (const [index, part] of parts.entries()) {
-      const encoded = index < parts.length - 1 ? part.slice(0, -1) : part;
-      expect(encoded).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u);
-      expect(JSON.parse(encoded)).toBe(paths[index]);
+    for (const path of paths) {
+      const encoded = formatScopePath(path);
+      expect(encoded).not.toMatch(
+        /[\u0000-\u001f\u007f-\u009f\u2028\u2029\ufeff]/u,
+      );
+      expect(JSON.parse(encoded)).toBe(path);
     }
-    expect(formatScopePathParts(["src/parser.ts", "src/generated/**"])).toEqual(
-      ["src/parser.ts,", "src/generated/**"],
-    );
+    expect(formatScopePath("src/parser.ts")).toBe("src/parser.ts");
+    expect(formatScopePath("src/generated/**")).toBe("src/generated/**");
   });
 
   test("escapes every bidi control in quoted and otherwise plain paths", () => {
@@ -97,6 +100,7 @@ describe("coverage scope presentation", () => {
       ["src,tests", '`"src,tests"`'],
       ["src/line\nfeed", '`"src/line\\nfeed"`'],
       ["src/\u202eforged", '`"src/\\u202eforged"`'],
+      ["src/\ufeffname", '`"src/\\ufeffname"`'],
       ["src/\u2028\u2029next", '`"src/\\u2028\\u2029next"`'],
       ["src/[name]*_<tag>.ts", "`src/[name]*_<tag>.ts`"],
       ["src/a`b.ts", "``src/a`b.ts``"],
@@ -125,6 +129,8 @@ describe("coverage scope presentation", () => {
     expect(report).toContain(
       'Excluded ``"generated/\\u2066[omitted]*`"``: Synthetic exclusion.',
     );
-    expect(report).not.toMatch(/[\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/u);
+    expect(report).not.toMatch(
+      /[\u007f-\u009f\u2028\u2029\ufeff\p{Bidi_Control}]/u,
+    );
   });
 });

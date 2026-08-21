@@ -311,15 +311,6 @@ describe("malformed scan artifact recovery", () => {
         explicitExclusions: coverage.explicitExclusions,
       },
     });
-    const listed = await workbench(fixture, ["list-scans"]);
-    expect(listed["scans"]).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          scanId: fixture.scanId,
-          scopePaths: ["src", "src/extract.py"],
-        }),
-      ]),
-    );
     for (const artifactPath of [coveragePath, manifestPath]) {
       const sealed = await readFile(artifactPath, "utf8");
       for (const modified of [`${sealed}\n`, "{}\n"]) {

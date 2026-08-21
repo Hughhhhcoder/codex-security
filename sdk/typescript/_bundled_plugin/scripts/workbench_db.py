@@ -1093,18 +1093,11 @@ def published_manifest_digest(scan_dir: Path, manifest: dict[str, Any]) -> str:
     return expected
 
 
-def require_recorded_manifest_digest(
-    scan: sqlite3.Row, scan_dir: Path, *, manifest_bytes: bytes | None = None
-) -> None:
+def require_recorded_manifest_digest(scan: sqlite3.Row, scan_dir: Path) -> None:
     expected = scan["seal_manifest_digest"]
     if expected is None:
         return
-    actual = (
-        f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-        if manifest_bytes is not None
-        else scan_local_file_digest(scan_dir, ARTIFACTS["manifest"])
-    )
-    if actual != expected:
+    if scan_local_file_digest(scan_dir, ARTIFACTS["manifest"]) != expected:
         raise SystemExit("The sealed scan manifest changed after completion.")
 
 
@@ -1804,7 +1797,8 @@ def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
         manifest, manifest_bytes = _read_scan_local_json_bytes(
             scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
         )
-        require_recorded_manifest_digest(scan, scan_dir, manifest_bytes=manifest_bytes)
+        if f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}" != scan["seal_manifest_digest"]:
+            raise ContractError("The sealed scan manifest changed after completion.")
         sealed_scan = manifest["scan"]
         if (
             sealed_scan["id"] != scan["id"]
@@ -3946,7 +3940,7 @@ def main() -> None:
         elif args.command == "get-scan-feedback":
             result = get_scan_feedback(connection, require_scan(connection, args.scan_id))
         elif args.command == "list-scans":
-            result = scan_history.list_scans(connection, args, scope_paths=requested_scan_paths)
+            result = scan_history.list_scans(connection, args)
         elif args.command == "list-unmatched-scan-pairs":
             result = scan_history.list_unmatched_scan_pairs(
                 connection,

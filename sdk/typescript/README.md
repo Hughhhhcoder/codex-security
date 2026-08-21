@@ -275,15 +275,13 @@ overrides, without starting Codex or contacting the network.
 `core.hooksPath`, does not replace an existing hook, and blocks high-severity
 findings or failed scans. Set `--fail-on-severity` to change the threshold.
 
-`--path` defines the requested scope using one or more files or directories.
-A finished review of those paths is a complete scoped scan; it does not imply
-that the rest of the repository was reviewed. Human-readable scope summaries
-JSON-quote paths containing whitespace, delimiters, or control characters;
-machine-readable results retain the original path strings. `--diff` scans
-committed changes, and `--working-tree` scans staged and unstaged changes. Deep scans support
-repository and path targets. The output directory must be outside the scanned
-directory and any enclosing Git worktree. When SARIF is produced, it is written
-to
+`--path` selects one or more files or directories. A completed scoped scan
+covers those paths, not the rest of the repository. Human-readable output
+JSON-quotes ambiguous path names; JSON results retain the original strings.
+`--diff` scans committed changes, and `--working-tree` scans staged and
+unstaged changes. Deep scans support repository and path targets. The output
+directory must be outside the scanned directory and any enclosing Git worktree.
+When SARIF is produced, it is written to
 `<scan-dir>/exports/results.sarif`.
 
 Working-tree snapshots include files from untracked nested Git repositories.
@@ -345,18 +343,16 @@ the destination without moving files.
 Scans are report-only by default. Use `--fail-on-severity` in CI to exit 1 when
 a completed scan contains a finding at or above the selected severity.
 Incomplete or unknown coverage of the requested scope and CLI/runtime errors
-exit 2 so they cannot be mistaken for a passing policy. For example, a completed
-`scan . --path src/parser` exits 0 in report-only mode even though other paths
-were not selected. Optional additional assurance is recorded in
-`coverage.openQuestions`; genuinely unfinished requested work remains in
-`coverage.deferred` and keeps the scan partial. An agreed static-only review does
-not require live reproduction merely to be complete.
+exit 2. A completed `scan . --path src/parser` exits 0 in report-only mode,
+even if other paths were not selected. `coverage.deferred` records unfinished
+requested work; `coverage.openQuestions` records optional follow-up. A
+static-only review can be complete without live reproduction.
 
-Exit 2 can still accompany a valid, completed partial report. Incomplete scans
-write the available human or JSON result to stdout and a coverage warning to
-stderr, including in report-only mode. Automation should inspect the manifest
-status together with `coverage.mode`, `coverage.completeness`, scope paths, and
-deferred work rather than interpreting exit 2 as proof that no report exists.
+Exit 2 can still include a valid partial report. Incomplete scans write the
+available human or JSON result to stdout and a coverage warning to stderr,
+including in report-only mode. Automation should check the manifest status,
+`coverage.mode`, `coverage.completeness`, scope paths, and deferred work
+instead of treating every exit 2 as a missing report.
 
 Use `--patch` to fix and verify confirmed findings after a complete scan.
 `--patch-severity high` selects high and critical findings; the default is low

@@ -14,16 +14,13 @@ export function formatScopePath(path: string): string {
     return path;
   }
   return JSON.stringify(path).replace(
-    /[\u007f-\u009f\u2028\u2029\p{Bidi_Control}]/gu,
+    /[\u007f-\u009f\u2028\u2029\ufeff\p{Bidi_Control}]/gu,
     (character) =>
       `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
 }
 
-export function formatScopePathParts(
-  paths: readonly string[],
-  finalSuffix = "",
-): string[] {
+function scopePathParts(paths: readonly string[], finalSuffix = ""): string[] {
   return paths.map(
     (path, index) =>
       `${formatScopePath(path)}${index < paths.length - 1 ? "," : finalSuffix}`,
@@ -47,10 +44,10 @@ export function formatCoverageScopeParts(
   return [
     `${mode}:`,
     ...(coverage.includePaths.length > 0
-      ? formatScopePathParts(coverage.includePaths, suffix)
+      ? scopePathParts(coverage.includePaths, suffix)
       : [`(no included paths)${suffix}`]),
     ...(exclusions.length > 0
-      ? ["excluding", ...formatScopePathParts(exclusions)]
+      ? ["excluding", ...scopePathParts(exclusions)]
       : []),
   ];
 }

@@ -80,10 +80,7 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
 
 
 def list_scans(
-    connection: sqlite3.Connection,
-    args: argparse.Namespace | None = None,
-    *,
-    scope_paths: Callable[[sqlite3.Row], list[str]] | None = None,
+    connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
     if os.name == "nt":
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
@@ -210,11 +207,6 @@ def list_scans(
                 "scanDir": row["scan_dir"],
                 "scanId": row["id"],
                 "scope": row["scope"],
-                **(
-                    {"scopePaths": scope_paths(row)}
-                    if scope_paths is not None and row["mode"] != "diff"
-                    else {}
-                ),
                 "startedAt": row["started_at"],
                 "targetId": row["target_id"],
                 "targetPath": row["target_path"],
