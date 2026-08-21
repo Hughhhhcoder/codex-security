@@ -176,6 +176,24 @@ def worktree_content_digest(target: Path) -> str:
     return worktree_content_digest_for_context(repository, pathspec)
 
 
+def remediation_checkout_snapshot(
+    scan: sqlite3.Row, *, expected_revision: str | None = None
+) -> tuple[str, str | None]:
+    target = require_scan_target_identity(scan)
+    revision = git_revision(target)
+    required_revision = expected_revision or scan["target_revision"]
+    if revision != required_revision:
+        raise SystemExit(
+            "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
+        )
+    content_digest = (
+        worktree_content_digest(target)
+        if revision != "unversioned"
+        else directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
+    )
+    return revision, content_digest
+
+
 def worktree_content_digest_for_context(
     repository: Path,
     pathspec: str,
