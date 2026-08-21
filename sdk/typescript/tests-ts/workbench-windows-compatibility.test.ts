@@ -65,7 +65,7 @@ test("verifies LF and CRLF patches with Git line-ending conversion enabled", asy
       "root = Path(sys.argv[2])",
       "for index, ending in enumerate((b'\\n', b'\\r\\n')):",
       "    target, scan_dir = root / f'target-{index}', root / f'scan-{index}'",
-      "    target.mkdir(); scan_dir.mkdir()",
+      "    target.mkdir(); scan_dir.mkdir(mode=0o700)",
       "    source = target / 'source.txt'",
       "    source.write_bytes(b'vulnerable' + ending)",
       "    base = workbench.directory_content_digest(target)",
