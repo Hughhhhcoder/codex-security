@@ -76,6 +76,7 @@ const CREDENTIAL_LOCK_NAME = ".codex-security-scan.lock";
 const CREDENTIAL_LOGOUT_MARKER = ".codex-security-logged-out";
 const CREDENTIAL_LOCK_POLL_MILLISECONDS = 25;
 const INCOMPLETE_CREDENTIAL_LOCK_MILLISECONDS = 30_000;
+const MAX_PROCESS_ID = 2_147_483_647;
 const MAX_WINDOWS_CREDENTIAL_ACL_STDERR = 64 * 1024;
 
 export interface PluginInstall {
@@ -1140,9 +1141,17 @@ async function recoverStaleCredentialHomeLock(lock: string): Promise<boolean> {
     }
   }
 
-  if (isRecord(owner) && typeof owner["pid"] === "number") {
+  // Only positive signed-32-bit PIDs identify an owner. Other values can name
+  // process groups or fail argument validation, so use the stale-age check.
+  const ownerPid = isRecord(owner) ? owner["pid"] : undefined;
+  if (
+    typeof ownerPid === "number" &&
+    Number.isInteger(ownerPid) &&
+    ownerPid > 0 &&
+    ownerPid <= MAX_PROCESS_ID
+  ) {
     try {
-      process.kill(owner["pid"], 0);
+      process.kill(ownerPid, 0);
       return false;
     } catch (error) {
       if (nodeErrorCode(error) !== "ESRCH") {
@@ -1362,6 +1371,7 @@ const workbenchComparisonStdinSupport = new Map<string, boolean>();
 export async function runWorkbench(
   options: WorkbenchCommandOptions,
   args: readonly string[],
+  input?: string,
 ): Promise<JsonObject> {
   const script = join(options.pluginRoot, "scripts", "workbench_db.py");
   const environment = Object.fromEntries(
@@ -1388,7 +1398,7 @@ export async function runWorkbench(
       throw new Error(
         result.stderr.trim() ||
           result.stdout.trim() ||
-          `Python exited with status ${result.exitCode}.`,
+          `Workbench exited with status ${result.exitCode}.`,
       );
     }
     return result.stdout;
@@ -1396,7 +1406,6 @@ export async function runWorkbench(
   let stdout: string;
   try {
     const arguments_ = [...args];
-    let input: string | undefined;
     const matchesIndex = arguments_.indexOf("--matches-json");
     const matches =
       matchesIndex === -1 ? undefined : arguments_[matchesIndex + 1];

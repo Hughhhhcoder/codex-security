@@ -30,10 +30,12 @@ def _same_repository(
     *,
     after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
 ) -> bool:
-    if before["target_id"] == after["target_id"]:
+    if before["target_id"] is not None and before["target_id"] == after["target_id"]:
         return True
     before_target = Path(before["target_path"])
     after_target = Path(after["target_path"])
+    if before_target.resolve() == after_target.resolve():
+        return True
     before_git_dir = git_output(
         before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
     )
@@ -351,24 +353,20 @@ def _saved_finding_links(
 
 def _finding_aliases(links: Iterable[tuple[str, str]]) -> dict[str, str]:
     parents: dict[str, str] = {}
-    finding_ids: set[str] = set()
 
     def root(value: str) -> str:
-        path = []
-        while value in parents:
-            path.append(value)
+        parents.setdefault(value, value)
+        while parents[value] != value:
+            parents[value] = parents[parents[value]]
             value = parents[value]
-        for item in path:
-            parents[item] = value
         return value
 
     for before_id, after_id in links:
-        finding_ids.update((before_id, after_id))
         before = root(before_id)
         after = root(after_id)
         if before != after:
             parents[after] = before
-    return {finding_id: root(finding_id) for finding_id in finding_ids}
+    return {finding_id: root(finding_id) for finding_id in parents}
 
 
 def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[list[str]]:
