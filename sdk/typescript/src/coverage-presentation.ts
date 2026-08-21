@@ -9,14 +9,19 @@ export type CoverageSummary = Pick<
 export function formatScopePath(path: string): string {
   if (
     path.length > 0 &&
-    !/[\s,;'"\\\u0000-\u001f\u007f-\u009f\p{Bidi_Control}]/u.test(path)
+    !/[\s,;'"\\\u0000-\u001f\u007f-\u009f\p{Default_Ignorable_Code_Point}]/u.test(
+      path,
+    )
   ) {
     return path;
   }
   return JSON.stringify(path).replace(
-    /[\u007f-\u009f\u2028\u2029\ufeff\p{Bidi_Control}]/gu,
+    /[\u007f-\u009f\u2028\u2029\p{Default_Ignorable_Code_Point}]/gu,
     (character) =>
-      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      character
+        .split("")
+        .map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`)
+        .join(""),
   );
 }
 

@@ -21,11 +21,13 @@ DISPOSITION_LABELS = {
 }
 WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 
-SCOPE_PATH_QUOTING_RE = re.compile(
-    r"""[\s\ufeff,;'"\\\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"""
-)
+SCOPE_PATH_QUOTING_RE = re.compile(r"""[\s,;'"\\\x00-\x1f]""")
+# Default_Ignorable_Code_Point, C1 controls, and line separators.
 SCOPE_PATH_CONTROLS_RE = re.compile(
-    r"[\x7f-\x9f\u2028\u2029\ufeff\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+    r"[\x7f-\x9f\u2028\u2029\u00ad\u034f\u061c\u115f-\u1160\u17b4-\u17b5"
+    r"\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f"
+    r"\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a"
+    r"\U000e0000-\U000e0fff]"
 )
 
 
@@ -70,9 +72,9 @@ def _strings(value: Any) -> list[str]:
 def _scope_path(value: Any, fallback: str = "unspecified") -> str:
     path = value if isinstance(value, str) else fallback
     rendered = path
-    if not path or SCOPE_PATH_QUOTING_RE.search(path):
+    if not path or SCOPE_PATH_QUOTING_RE.search(path) or SCOPE_PATH_CONTROLS_RE.search(path):
         rendered = SCOPE_PATH_CONTROLS_RE.sub(
-            lambda match: f"\\u{ord(match.group(0)):04x}",
+            lambda match: json.dumps(match.group(0))[1:-1],
             json.dumps(path, ensure_ascii=False),
         )
     longest_run = max(
