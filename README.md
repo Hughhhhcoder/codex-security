@@ -48,6 +48,19 @@ Deep-scan discovery stops after 96 hours by default. Set `--max-time-hours` to
 any positive number of hours, including fractional hours, up to 96. Completed
 findings are preserved and returned when the limit is reached.
 
+For a monorepo, run separate standard scans and combine their results by root
+cause:
+
+```bash
+npx @openai/codex-security scan-components . \
+  --component apps/api --component apps/web \
+  --output-dir /path/outside/repository/results
+```
+
+Use `--auto` to let Codex choose the components, or `--auto --plan-only` to
+review the split first. See [component scans](sdk/typescript/README.md#scan-project-components)
+for reusable plans, combined reports, and coverage details.
+
 To use another inference provider, set its API key and select a model:
 
 ```bash

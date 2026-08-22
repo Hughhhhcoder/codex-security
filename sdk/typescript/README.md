@@ -54,6 +54,11 @@ Use `security.preflight()` to validate local inputs, `onWorkerStatus` and
 `onReconnect` to observe long-running scans, and an `AbortSignal` to cancel a
 scan.
 
+For separate standard scans under one project, the SDK also exports
+`runComponentScans({ repository, outputDir, components })`. Each component has
+a `name` and `paths` array. Use `auto: true` instead of `components` for
+model-assisted planning, and `planOnly: true` to save the plan without scanning.
+
 Successful results include open repository findings in `repositoryFindings`,
 when available; `findings` remains the current scan. Matching earlier findings
 can make one additional model call, including with a scan cost limit.
@@ -249,6 +254,8 @@ npx @openai/codex-security scan /path/to/repository --patch --patch-severity hig
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra
 npx @openai/codex-security scan /path/to/repository --model gpt-5.6-terra --effort high
 npx @openai/codex-security scan /path/to/repository --path src --path tests
+npx @openai/codex-security scan-components /path/to/repository --component apps/api --component apps/web --output-dir /path/outside/repository/results
+npx @openai/codex-security scan-components /path/to/repository --auto --output-dir /path/outside/repository/results
 npx @openai/codex-security scan /path/to/repository --knowledge-base /path/to/threat-models --knowledge-base /path/to/architecture.pdf
 npx @openai/codex-security scan /path/to/repository --scan-prompt-file scan.md --post-scan-prompt-file follow-up.md
 npx @openai/codex-security scan /path/to/repository --diff origin/main --json
@@ -327,6 +334,75 @@ the parent repository.
 Repeat `--knowledge-base PATH` for multiple files or directories; `bulk-scan`
 shares them with every repository. Directories are searched recursively for
 Markdown, text, PDF, and Word (`.docx`) files.
+
+### Scan project components
+
+`scan --path` runs one scan across the selected paths. Use `scan-components`
+to run a separate standard scan for each component of one local project:
+
+```bash
+npx @openai/codex-security scan-components /path/to/project \
+  --component apps/api --component apps/web --component packages/shared \
+  --workers 4 --output-dir /path/outside/project/results
+```
+
+Use `--auth chatgpt` or `--auth api-key` to select credentials for planning,
+component scans, and matching. The default is `--auth auto`, as with `scan`.
+The SDK accepts the same choice through `scanOptions.auth`.
+
+Use `--auto` instead of `--component` to let Codex propose the split. To review
+or edit it first, save a plan, then run that plan into a new output directory:
+
+```bash
+npx @openai/codex-security scan-components /path/to/project \
+  --auto --plan-only --output-dir /path/outside/project/plan
+npx @openai/codex-security scan-components /path/to/project \
+  --components-file /path/outside/project/plan/components.json \
+  --output-dir /path/outside/project/results
+```
+
+A component can contain several repository-relative paths:
+
+```json
+{
+  "components": [
+    { "name": "API", "paths": ["apps/api", "packages/auth"] },
+    { "name": "Web", "paths": ["apps/web"] }
+  ]
+}
+```
+
+Automatic planning uses a local file inventory. In Git repositories it follows
+Git's ignore rules. Each automatic path must cover at least one inventoried file.
+Explicit `--component` and `--components-file` selections keep their existing behavior.
+Inventoried files omitted by the model are added to an
+`Other files` component. No source files are changed during planning.
+
+In an interactive terminal, one dashboard shows all components and their scan
+progress. Use the arrow keys to select a component, Enter to view its activity,
+and Esc to return. Other scans continue while you inspect one. Finding counts
+are preliminary until cross-component matching finishes. Use `--headless` for
+plain status lines; CI and redirected output use those automatically.
+Failed or incomplete components are also saved in `retry-components.json`.
+Pass that file to `--components-file` with a new output directory to retry them.
+
+Each component keeps its normal scan artifacts under `component-N/`.
+The combined `findings.json` uses the same root-cause matcher as `scans match`.
+It merges high-confidence matches even when their titles, locations, or
+fingerprints differ. Each group keeps its highest-severity finding and all
+original scan and occurrence IDs. Match reasons and uncertain pairs are saved;
+uncertain findings stay separate. `summary.json` records scan coverage and
+whether matching finished. `report.md` links to the component reports.
+These combined files are a project summary, not a new sealed scan. Use the
+individual scan folders with `export` and `publish`.
+
+The output directory must be empty and outside the project. Failed components
+do not stop the others. The command saves the available results and exits with
+code `2` if a component fails, coverage is incomplete, or cross-component
+matching fails. `--max-cost` applies to each component scan, not planning,
+cross-component matching, or the whole project. `--model` and `--effort` also
+apply to matching. `--knowledge-base`,
+`--scan-prompt-file`, and `--post-scan-prompt-file` work as they do for bulk scans.
 
 ### Configure deep scans
 

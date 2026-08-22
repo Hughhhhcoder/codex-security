@@ -1,4 +1,17 @@
 export { CodexSecurity, createSecurity } from "./api.js";
+export { runComponentScans } from "./component-scan.js";
+export type {
+  ComponentDeduplicationSummary,
+  ComponentReceipt,
+  ComponentScanOptions,
+  ComponentScanEvent,
+  ComponentScanResult,
+} from "./component-scan.js";
+export { normalizeComponentPlan, planComponents } from "./component-plan.js";
+export type {
+  ComponentPlan,
+  ComponentPlanningOptions,
+} from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent } from "./cost.js";
 export type { CustomValidationResult } from "./custom-validation.js";

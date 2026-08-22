@@ -3095,7 +3095,8 @@ async function runtimeScanAuthentication(
   return authentication;
 }
 
-function selectedScanEnvironment(
+/** @internal */
+export function selectedScanEnvironment(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
