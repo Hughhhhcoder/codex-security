@@ -828,12 +828,13 @@ describe("publish scan to Cloud", () => {
   });
 
   test("rejects Linear-specific options before uploading to Cloud", async () => {
-    for (const flag of [
-      "--linear-team",
-      "--linear-project",
-      "--project",
-      "--linear-assignee",
-      "--linear-api-key",
+    for (const linearOptions of [
+      ["--linear-team", "synthetic-value"],
+      ["--linear-project", "synthetic-value"],
+      ["--project", "synthetic-value"],
+      ["--linear-assignee", "synthetic-value"],
+      ["--linear-api-key", "synthetic-value"],
+      ["--skip-existing"],
     ]) {
       const deps = dependencies();
       let calls = 0;
@@ -851,8 +852,7 @@ describe("publish scan to Cloud", () => {
             "completed-scan",
             "--to",
             "cloud",
-            flag,
-            "synthetic-value",
+            ...linearOptions,
           ],
           stdout.stream,
           stderr.stream,

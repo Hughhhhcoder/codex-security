@@ -101,7 +101,9 @@ import { runMultiscan } from "./multiscan.js";
 import { componentPlanSchema, planComponents } from "./component-plan.js";
 import { runComponentScans } from "./component-scan.js";
 import {
+  checkScanPublication,
   publishScan,
+  type CheckScanPublicationOptions,
   type PublishScanProgress,
   type PublishScanResult,
 } from "./publish.js";
@@ -289,6 +291,79 @@ function linearApiKeyOption() {
     );
 }
 
+const PUBLICATION_DESTINATION_OPTIONS = z.object({
+  to: z.literal("linear").describe("Publication destination."),
+  linearTeam: optionValue("--linear-team")
+    .optional()
+    .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
+  linearApiKey: linearApiKeyOption(),
+  linearProject: optionValue("--linear-project")
+    .optional()
+    .describe(
+      "Optional Linear project ID; defaults to CODEX_SECURITY_LINEAR_PROJECT.",
+    ),
+  project: optionValue("--project")
+    .optional()
+    .describe("Alias for --linear-project.")
+    .meta({ deprecated: true }),
+  linearAssignee: optionValue("--linear-assignee")
+    .optional()
+    .describe(
+      "Linear assignee email or user ID; omit to leave issues unassigned.",
+    ),
+});
+
+function publicationDestination(
+  options: z.infer<typeof PUBLICATION_DESTINATION_OPTIONS>,
+  environment: NodeJS.ProcessEnv,
+): CheckScanPublicationOptions {
+  const linearApiKey = resolveLinearApiKey(environment, options.linearApiKey);
+  const assigneeId = options.linearAssignee?.trim();
+  if (options.linearAssignee !== undefined && !assigneeId) {
+    throw new CodexSecurityError("--linear-assignee must not be empty.");
+  }
+  if (assigneeId !== undefined && linearApiKey === undefined) {
+    throw new CodexSecurityError(
+      "--linear-assignee requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY.",
+    );
+  }
+  const teamId =
+    options.linearTeam?.trim() ||
+    environment["CODEX_SECURITY_LINEAR_TEAM"]?.trim();
+  if (!teamId) {
+    throw new CodexSecurityError(
+      "--linear-team or CODEX_SECURITY_LINEAR_TEAM is required.",
+    );
+  }
+  if (
+    options.linearProject !== undefined &&
+    options.project !== undefined &&
+    options.linearProject.trim() !== options.project.trim()
+  ) {
+    throw new CodexSecurityError(
+      "--linear-project and --project must select the same project.",
+    );
+  }
+  const projectOption = options.linearProject ?? options.project;
+  const selectedProject = projectOption?.trim();
+  if (projectOption !== undefined && !selectedProject) {
+    throw new CodexSecurityError(
+      `${options.linearProject === undefined ? "--project" : "--linear-project"} must not be empty.`,
+    );
+  }
+  const projectId =
+    selectedProject ||
+    environment["CODEX_SECURITY_LINEAR_PROJECT"]?.trim() ||
+    undefined;
+  return {
+    destination: options.to,
+    teamId,
+    ...(projectId === undefined ? {} : { projectId }),
+    ...(linearApiKey === undefined ? {} : { linearApiKey }),
+    ...(assigneeId === undefined ? {} : { assigneeId }),
+  };
+}
+
 function publicationScanAge(timestamp: string, now: number): string {
   const completedAt = Date.parse(timestamp);
   if (!Number.isFinite(completedAt)) return "unknown";
@@ -400,6 +475,12 @@ function renderPublicationSummary(
     `${created} total issue${created === 1 ? "" : "s"} created`,
     `${failed} total issue${failed === 1 ? "" : "s"} failed`,
   );
+  if (result.skipped !== undefined) {
+    const skipped = result.skipped.length;
+    lines.push(
+      `${skipped} previously recorded issue${skipped === 1 ? "" : "s"} skipped`,
+    );
+  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -977,6 +1058,7 @@ interface CliDependencies {
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
+  checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
   publishScanToCloud?: typeof publishScanToCloud;
   confirmPatchReview?: (question: string) => Promise<boolean>;
@@ -1897,6 +1979,21 @@ export async function main(
         );
       },
     });
+  const reportPublicationError = (error: unknown, signal: unknown): void => {
+    if (signal === "SIGINT" || signal === "SIGTERM") {
+      const reason =
+        signal === "SIGINT"
+          ? "Publication canceled by Ctrl-C."
+          : "Publication terminated by SIGTERM.";
+      const recovery =
+        error === signal ? "" : ` ${diagnosticValue(safeErrorMessage(error))}`;
+      errorOutput.write(`codex-security: ${reason}${recovery}\n`);
+      exitCode = signal === "SIGINT" ? 130 : 143;
+    } else {
+      errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+      exitCode = 2;
+    }
+  };
   const publication = Cli.create("publish", {
     description: "Publish completed Codex Security scan findings.",
   }).command("scan", {
@@ -1909,7 +2006,7 @@ export async function main(
         .optional()
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
-    options: z.object({
+    options: PUBLICATION_DESTINATION_OPTIONS.extend({
       scan: z
         .array(optionValue("--scan"))
         .default([])
@@ -1929,28 +2026,16 @@ export async function main(
           message: "Unsupported publication destination. Use --to linear.",
         })
         .describe("Publication destination (linear)."),
-      linearTeam: optionValue("--linear-team")
-        .optional()
-        .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
-      linearApiKey: linearApiKeyOption(),
-      linearProject: optionValue("--linear-project")
-        .optional()
-        .describe(
-          "Optional Linear project ID; defaults to CODEX_SECURITY_LINEAR_PROJECT.",
-        ),
-      project: optionValue("--project")
-        .optional()
-        .describe("Alias for --linear-project.")
-        .meta({ deprecated: true }),
-      linearAssignee: optionValue("--linear-assignee")
-        .optional()
-        .describe(
-          "Linear assignee email or user ID; omit to leave issues unassigned.",
-        ),
       dryRun: z
         .boolean()
         .default(false)
         .describe("Preview the findings without creating Linear issues."),
+      skipExisting: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Skip findings already recorded for this exact Linear destination.",
+        ),
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format, formatExplicit, options }) {
@@ -2039,64 +2124,28 @@ export async function main(
         }
         if (
           options.to === "cloud" &&
-          [
-            options.linearTeam,
-            options.linearApiKey,
-            options.linearProject,
-            options.project,
-            options.linearAssignee,
-          ].some((value) => value !== undefined)
+          (options.skipExisting ||
+            [
+              options.linearTeam,
+              options.linearApiKey,
+              options.linearProject,
+              options.project,
+              options.linearAssignee,
+            ].some((value) => value !== undefined))
         ) {
           throw new CodexSecurityError(
             "Cloud publication cannot be combined with Linear options.",
           );
         }
-        const linearApiKey =
+        const destination =
           options.to === "linear"
-            ? resolveLinearApiKey(
+            ? publicationDestination(
+                { ...options, to: "linear" },
                 dependencies.environment,
-                options.linearApiKey,
               )
             : undefined;
-        directApiPublication = linearApiKey !== undefined;
-        const assigneeId = options.linearAssignee?.trim();
-        if (options.linearAssignee !== undefined && !assigneeId) {
-          throw new CodexSecurityError("--linear-assignee must not be empty.");
-        }
-        if (assigneeId !== undefined && linearApiKey === undefined) {
-          throw new CodexSecurityError(
-            "--linear-assignee requires --linear-api-key or CODEX_SECURITY_LINEAR_API_KEY.",
-          );
-        }
-        const teamId =
-          options.linearTeam?.trim() ||
-          dependencies.environment["CODEX_SECURITY_LINEAR_TEAM"]?.trim() ||
-          "";
-        if (options.to === "linear" && !teamId) {
-          throw new CodexSecurityError(
-            "--linear-team or CODEX_SECURITY_LINEAR_TEAM is required.",
-          );
-        }
-        if (
-          options.linearProject !== undefined &&
-          options.project !== undefined &&
-          options.linearProject.trim() !== options.project.trim()
-        ) {
-          throw new CodexSecurityError(
-            "--linear-project and --project must select the same project.",
-          );
-        }
-        const projectOption = options.linearProject ?? options.project;
-        const selectedProject = projectOption?.trim();
-        if (projectOption !== undefined && !selectedProject) {
-          throw new CodexSecurityError(
-            `${options.linearProject === undefined ? "--project" : "--linear-project"} must not be empty.`,
-          );
-        }
-        const projectId =
-          selectedProject ||
-          dependencies.environment["CODEX_SECURITY_LINEAR_PROJECT"]?.trim() ||
-          undefined;
+        directApiPublication =
+          !options.dryRun && destination?.linearApiKey !== undefined;
 
         if (options.to === "cloud") {
           dependencies.addSignalListener("SIGINT", onInterrupt);
@@ -2389,10 +2438,10 @@ export async function main(
           publicationRepository,
         );
         presentation = progress;
+        dependencies.addSignalListener("SIGINT", onInterrupt);
+        dependencies.addSignalListener("SIGTERM", onTerminate);
+        observingSignals = true;
         if (!options.dryRun) {
-          dependencies.addSignalListener("SIGINT", onInterrupt);
-          dependencies.addSignalListener("SIGTERM", onTerminate);
-          observingSignals = true;
           progress.start();
         }
         let result;
@@ -2400,19 +2449,16 @@ export async function main(
           result = await (dependencies.publishScan ?? publishScan)(
             resolveCliPath(currentDirectory, scanDir),
             {
-              destination: "linear",
+              ...destination!,
               ...(selectedScans[0]?.scanId === undefined
                 ? {}
                 : { expectedScanId: selectedScans[0].scanId }),
-              teamId,
-              ...(projectId === undefined ? {} : { projectId }),
               dryRun: options.dryRun,
-              ...(linearApiKey === undefined ? {} : { linearApiKey }),
-              ...(assigneeId === undefined ? {} : { assigneeId }),
+              signal: controller.signal,
+              ...(options.skipExisting ? { skipExisting: true } : {}),
               ...(options.dryRun
                 ? {}
                 : {
-                    signal: controller.signal,
                     onProgress: (event: PublishScanProgress) =>
                       progress.observe(event),
                   }),
@@ -2455,6 +2501,39 @@ export async function main(
         return cloudBatch;
       } finally {
         removeSignalListeners();
+      }
+    },
+  });
+  publication.command("check", {
+    description:
+      "Check saved scan history and Linear access without creating issues.",
+    mcp: false,
+    args: z.object({
+      scanDir: z.string().describe("Completed scan directory."),
+    }),
+    options: PUBLICATION_DESTINATION_OPTIONS,
+    output: z.record(z.string(), z.unknown()).optional(),
+    async run({ args, options }) {
+      const controller = new AbortController();
+      const onInterrupt = (): void => controller.abort("SIGINT");
+      const onTerminate = (): void => controller.abort("SIGTERM");
+      dependencies.addSignalListener("SIGINT", onInterrupt);
+      dependencies.addSignalListener("SIGTERM", onTerminate);
+      try {
+        const result = await (
+          dependencies.checkScanPublication ?? checkScanPublication
+        )(resolve(dependencies.currentDirectory(), args.scanDir), {
+          ...publicationDestination(options, dependencies.environment),
+          signal: controller.signal,
+        });
+        controller.signal.throwIfAborted();
+        return { ...result };
+      } catch (error) {
+        reportPublicationError(error, controller.signal.reason);
+        return undefined;
+      } finally {
+        dependencies.removeSignalListener("SIGINT", onInterrupt);
+        dependencies.removeSignalListener("SIGTERM", onTerminate);
       }
     },
   });

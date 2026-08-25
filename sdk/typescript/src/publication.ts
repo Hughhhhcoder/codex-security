@@ -22,6 +22,7 @@ export interface PrepareScanPublicationOptions {
   teamId: string;
   projectId?: string;
   uploadedAt?: string;
+  signal?: AbortSignal;
   expectedScanId?: string;
 }
 
@@ -74,6 +75,7 @@ export async function prepareScanPublication(
   const { contract, scanDirectory: canonicalScanDirectory } =
     await loadContractWithScanDirectory(scanDirectory, {
       pluginRoot: await bundledPluginRoot(),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
       expectedScanId: options.expectedScanId,
     });
   const uploadedAt = options.uploadedAt ?? new Date().toISOString();
