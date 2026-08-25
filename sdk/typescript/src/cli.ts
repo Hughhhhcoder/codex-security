@@ -130,6 +130,10 @@ import {
   type ScanComparisonInput,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
+import {
+  CODEX_SECURITY_THREAD_SOURCES,
+  type CodexSecurityThreadSource,
+} from "./thread-source.js";
 import { readScanLogs } from "./scan-logs.js";
 import {
   renderScanHistory,
@@ -1002,6 +1006,12 @@ type MatchingPlan = JsonObject & {
   batches: (JsonObject & MatchingBatch)[];
 };
 
+type SkillThreadSource = Extract<
+  CodexSecurityThreadSource,
+  | typeof CODEX_SECURITY_THREAD_SOURCES.remediation
+  | typeof CODEX_SECURITY_THREAD_SOURCES.validation
+>;
+
 interface SkillCommandOutput {
   readonly command: "validate" | "patch" | "verify-fix";
   readonly stdout: Writable;
@@ -1009,6 +1019,7 @@ interface SkillCommandOutput {
   readonly appServer?: {
     readonly directory: string;
     readonly prompt: string;
+    readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
@@ -1349,6 +1360,7 @@ export async function runCodexSkillCommand(
                 : {
                     directory: output.appServer.directory,
                     prompt: output.appServer.prompt,
+                    threadSource: output.appServer.threadSource,
                     input: invocation.stdin!,
                     sandbox: output.appServer.sandbox,
                     onEvent: output.appServer.onEvent,
@@ -5100,9 +5112,14 @@ async function runSkill(
   ].join("\n");
   const patch = skill === "fix-finding";
   const appServer = patch || verify;
+  const threadSource = patch
+    ? CODEX_SECURITY_THREAD_SOURCES.remediation
+    : CODEX_SECURITY_THREAD_SOURCES.validation;
   return dependencies.runCodex(
     [
-      ...(appServer ? ["app-server"] : ["exec", "--ignore-user-config"]),
+      ...(appServer
+        ? ["app-server"]
+        : ["exec", "--ignore-user-config", "--thread-source", threadSource]),
       "--disable",
       "plugins",
       ...(appServer ? [] : ["--ephemeral", "--color", "never", "--json"]),
@@ -5150,6 +5167,7 @@ async function runSkill(
             appServer: {
               directory,
               prompt,
+              threadSource,
               ...(verify ? { sandbox: "read-only" as const } : {}),
               ...(options.onEvent === undefined
                 ? {}
@@ -5168,6 +5186,7 @@ export async function readSkillCommandOutput(
   appServer?: {
     readonly directory?: string;
     readonly prompt: string;
+    readonly threadSource: SkillThreadSource;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
@@ -5188,12 +5207,14 @@ export async function readSkillCommandOutput(
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
   const startThread = (config?: JsonObject): void => {
+    if (appServer === undefined) return;
     send({
       id: 2,
       method: "thread/start",
       // An explicit cwd makes Codex persist trust for a new project.
       // Inherit the child process cwd and preserve the user's decision.
       params: {
+        threadSource: appServer.threadSource,
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
         sandbox: appServer?.sandbox ?? "workspace-write",
