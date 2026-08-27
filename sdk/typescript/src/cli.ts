@@ -2107,6 +2107,13 @@ export async function main(
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format, formatExplicit, options }) {
       const controller = new AbortController();
+      const publishingToCloud = options.to === "cloud" && !options.dryRun;
+      const publicationErrorMessage = (error: unknown): string =>
+        publishingToCloud &&
+        controller.signal.aborted &&
+        error === controller.signal.reason
+          ? "Any upload already in flight may have been accepted. Check Cloud before retrying."
+          : safeErrorMessage(error);
       let presentation: PublicationProgressPresenter | undefined;
       let firstSignalAt = 0;
       let observingSignals = false;
@@ -2150,9 +2157,9 @@ export async function main(
             ? "Publication canceled by Ctrl-C."
             : "Publication terminated by SIGTERM.";
         const recovery =
-          error === undefined || error === signal
+          error === undefined || (error === signal && !publishingToCloud)
             ? ""
-            : ` ${diagnosticValue(safeErrorMessage(error))}`;
+            : ` ${diagnosticValue(publicationErrorMessage(error))}`;
         errorOutput.write(`codex-security: ${reason}${recovery}\n`);
         exitCode = signal === "SIGINT" ? 130 : 143;
         return true;
@@ -2492,7 +2499,7 @@ export async function main(
                 });
                 cloudBatch.results.push({ scanDir: directory, ...result });
               } catch (error) {
-                const message = safeErrorMessage(error);
+                const message = publicationErrorMessage(error);
                 cloudBatch.failed.push({
                   scanDir: directory,
                   ...(scanId === undefined ? {} : { scanId }),

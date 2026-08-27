@@ -696,11 +696,9 @@ describe("Cloud publication", () => {
         fetch: async (_url, options) => {
           const signal = options.signal as AbortSignal;
           return await new Promise<Response>((_resolve, reject) => {
-            signal.addEventListener(
-              "abort",
-              () => reject(signal.reason),
-              { once: true },
-            );
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
             controller.abort(cancellation);
           });
         },

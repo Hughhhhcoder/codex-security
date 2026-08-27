@@ -1,8 +1,18 @@
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { publishScanToCloud } from "../src/cloud-publish.js";
 import type { JsonObject } from "../src/index.js";
 import {
   capture,
@@ -10,6 +20,7 @@ import {
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
 } from "./cli-fixtures.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const receipt = {
   scanId: "scan-1",
@@ -631,6 +642,136 @@ describe("publish scan to Cloud", () => {
     },
   );
 
+  test.each([
+    ["single request", "request", false],
+    ["single receipt", "receipt", false],
+    ["batch request", "request", true],
+    ["batch receipt", "receipt", true],
+  ] as const)(
+    "keeps recovery guidance from the real Cloud publisher: %s",
+    async (_scenario, stage, batch) => {
+      for (const [signal, code] of [
+        ["SIGINT", 130],
+        ["SIGTERM", 143],
+      ] as const) {
+        const root = await realpath(
+          await mkdtemp(join(tmpdir(), "cloud-publication-cancel-")),
+        );
+        temporaryDirectories.push(root);
+        const credentialHome = join(root, "credentials");
+        await mkdir(credentialHome, { mode: 0o700 });
+        await writeFile(
+          join(credentialHome, "auth.json"),
+          JSON.stringify({
+            auth_mode: "chatgpt",
+            tokens: {
+              access_token: "synthetic-access-token",
+              account_id: "synthetic-account",
+            },
+          }),
+          { mode: 0o600 },
+        );
+        await writeFile(
+          join(credentialHome, "config.toml"),
+          'cli_auth_credentials_store = "file"\n',
+        );
+        const scanDirectories = await Promise.all(
+          ["scan-one", "scan-two"].map(async (name) => {
+            const directory = join(root, name);
+            await cp(
+              join(PLUGIN_ROOT, "examples", "completed-scan"),
+              directory,
+              {
+                recursive: true,
+              },
+            );
+            if (process.platform !== "win32") await chmod(directory, 0o700);
+            return directory;
+          }),
+        );
+        const directories = batch
+          ? [...scanDirectories, join(root, "not-attempted")]
+          : [scanDirectories[0]!];
+        const signals = new FakeSignals();
+        const deps = dependencies({
+          signals,
+          currentDirectory: root,
+          environment: {
+            CODEX_HOME: credentialHome,
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          },
+        });
+        let requests = 0;
+        deps.publishScanToCloud = (directory, options) =>
+          publishScanToCloud(directory, {
+            ...options,
+            fetch: async (_url, request) => {
+              requests++;
+              if (batch && requests === 1) {
+                return Response.json({
+                  status: "accepted",
+                  finding_ids: ["accepted-finding"],
+                  finding_count: 1,
+                });
+              }
+              expect(request.signal).toBeInstanceOf(AbortSignal);
+              if (stage === "request") {
+                signals.emit(signal);
+                throw request.signal!.reason;
+              }
+              return new Response(
+                new ReadableStream({
+                  pull(body) {
+                    signals.emit(signal);
+                    body.error(request.signal!.reason);
+                  },
+                }),
+                { status: 201 },
+              );
+            },
+          });
+        const stdout = capture();
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              "publish",
+              "scan",
+              ...directories.flatMap((directory) => ["--scan-dir", directory]),
+              "--to",
+              "cloud",
+              "--json",
+            ],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(code);
+        expect(requests).toBe(batch ? 2 : 1);
+        if (batch) {
+          expect(JSON.parse(stdout.text())).toEqual({
+            results: [
+              expect.objectContaining({
+                scanDir: directories[0],
+                findingIds: ["accepted-finding"],
+              }),
+            ],
+            failed: [
+              {
+                scanDir: directories[1],
+                error: expect.stringMatching(/accepted.*check.*retry/i),
+              },
+            ],
+            notAttempted: [directories[2]],
+          });
+        } else {
+          expect(stdout.text()).toBe("");
+        }
+        expect(stderr.text()).toMatch(/accepted.*check.*retry/i);
+      }
+    },
+  );
+
   test("rejects multiple scans for Linear before publishing any findings", async () => {
     const deps = dependencies();
     let calls = 0;
@@ -1032,6 +1173,27 @@ describe("publish scan to Cloud", () => {
         (listeners) => listeners.size === 0,
       ),
     ).toBe(true);
+  });
+
+  test("does not suggest retrying an upload when a Cloud dry run is canceled", async () => {
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
+    deps.publishScanToCloud = async (_directory, options) => {
+      signals.emit("SIGINT");
+      throw options!.signal!.reason;
+    };
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["publish", "scan", "completed-scan", "--to", "cloud", "--dry-run"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(130);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).not.toMatch(/accepted|retry/i);
   });
 
   test("aborts Cloud publication without activating Linear recovery signal handling", async () => {
