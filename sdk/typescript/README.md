@@ -844,11 +844,21 @@ Use the SDK loop for a disposition per alert.
 files or literal text and work in the current directory. Pass a saved finding
 or occurrence ID to `patch` to use its original repository.
 
+Add `--assess-patch-risk` to a `patch` command to run the bundled patch-risk
+assessment skill once on the completed patch. The assessment is advisory and
+does not change the patch or its merge state. Human-readable commands print the
+report after the patch results; saved-finding JSON output returns it as
+`patchRisk.report` in the same result object. When combined with `--create-pr`,
+the draft pull request body includes only the concise Markdown summary from the
+assessment; the validated JSON remains in the command result.
+
 ```bash
 npx @openai/codex-security validate "Possible SQL injection" --effort high
 npx @openai/codex-security patch OCCURRENCE_ID
 npx @openai/codex-security patch --scan SCAN_ID --severity high --json
 npx @openai/codex-security patch --scan SCAN_ID --severity high --create-pr
+npx @openai/codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
+npx @openai/codex-security patch --linear-issue SEC-123 --assess-patch-risk --create-pr
 ```
 
 `--scan latest` selects the current repository's latest scan. Saved-finding
@@ -862,10 +872,11 @@ to select findings and add patch instructions. Results include a `patches`
 entry per finding with status `verified`, `no_change`, `blocked`, or `failed`.
 Verified and already-fixed findings no longer fail `--fail-on-severity`.
 
-`--create-pr` commits verified patch files and opens a draft PR with `gh`.
-If publication fails, run the printed `patch --resume-pr BRANCH` command in
-the same repository. It reuses the saved commit without rerunning Codex,
-but refuses to publish if the branch changed.
+`--create-pr` commits generated patch files and opens a draft PR with `gh`.
+Supplied-issue pull requests require a clean working tree before patching so
+existing work is never included. If publication fails, run the printed
+`patch --resume-pr BRANCH` command in the same repository. It reuses the saved
+commit without rerunning Codex, but refuses to publish if the branch changed.
 
 To patch Linear issues, repeat `--linear-issue ISSUE` (ID or URL), or use
 `--linear-project "PROJECT"` with an optional native JSON `--linear-filter`.
