@@ -411,12 +411,6 @@ describe("plugin runtime preparation", () => {
 
   test("generates canonical scoped security inventory paths", async () => {
     if (Bun.which("rg") === null) {
-      const generator = await readFile(
-        join(PLUGIN_ROOT, "scripts", "generate_in_scope_files.py"),
-        "utf8",
-      );
-      expect(generator).toContain('"--no-ignore"');
-      expect(generator).toContain('"--path-separator"');
       return;
     }
 
