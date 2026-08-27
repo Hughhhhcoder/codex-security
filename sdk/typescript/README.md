@@ -771,11 +771,19 @@ or excludes their original scope. With one ID, `scans compare` compares it
 to the latest completed scan.
 
 History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
-`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. Keep this directory
-writable and outside the scanned repository. Scan configurations don't store
-credentials; session logs and live details can contain them. Press `d` during
-a scan for details, then `a` for all sources, `m` for the main scan, or
-`1` through `9` for a worker.
+`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. The CLI and
+workbench maintain the database and its journal files as the current user.
+Keep state private, writable, and outside the scanned repository.
+
+On Windows, an older sandboxed run can leave an invalid credential-home ancestor
+ACL. Preserve that state and its reports, and select a **new**, private
+`CODEX_SECURITY_STATE_DIR` outside both the old state and the repository.
+Sign in again if needed and keep using the new setting; it starts separate scan
+history. Existing ancestor ACLs are not rewritten.
+
+Scan configurations don't store credentials; session logs and live details can
+contain them. Press `d` during a scan for details, then `a` for all sources,
+`m` for the main scan, or `1` through `9` for a worker.
 
 ### Exports and CI
 
@@ -934,8 +942,8 @@ repositories you trust and are authorized to assess. Local tools and scans
 under the same account aren't separate security principals.
 
 The `codex_security_scan` profile allows reads across the local filesystem and
-writes to workspace roots and the scan state directory. Execution approvals
-are reviewed automatically and may grant extra permissions for one operation. Set
+writes to workspace roots. Execution approvals are reviewed automatically and
+may grant extra permissions for one operation. Set
 `--codex 'approval_policy="never"'`, directly or in a selected profile, to deny
 requests. Other overrides can't replace the reviewer or filesystem profile.
 Saved scans keep their approval policy; older scans stay deny-all on rerun.
