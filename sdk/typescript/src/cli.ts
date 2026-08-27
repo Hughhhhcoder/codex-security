@@ -2108,8 +2108,10 @@ export async function main(
     async run({ args, format, formatExplicit, options }) {
       const controller = new AbortController();
       const publishingToCloud = options.to === "cloud" && !options.dryRun;
+      let cloudUploadStarted = false;
       const publicationErrorMessage = (error: unknown): string =>
         publishingToCloud &&
+        cloudUploadStarted &&
         controller.signal.aborted &&
         error === controller.signal.reason
           ? "Any upload already in flight may have been accepted. Check Cloud before retrying."
@@ -2244,6 +2246,7 @@ export async function main(
           observingSignals = true;
         }
         if (csvPath !== undefined) {
+          if (publishingToCloud) cloudUploadStarted = true;
           const result = await (
             dependencies.publishFindingsCsvToCloud ?? publishFindingsCsvToCloud
           )(csvPath, {
@@ -2489,6 +2492,7 @@ export async function main(
               }
               cloudBatch.notAttempted.shift();
               try {
+                if (publishingToCloud) cloudUploadStarted = true;
                 const result = await (
                   dependencies.publishScanToCloud ?? publishScanToCloud
                 )(directory, {
@@ -2514,6 +2518,7 @@ export async function main(
             }
             return cloudBatch;
           }
+          if (publishingToCloud) cloudUploadStarted = true;
           const result = await (
             dependencies.publishScanToCloud ?? publishScanToCloud
           )(resolveCliPath(currentDirectory, scanDir), {

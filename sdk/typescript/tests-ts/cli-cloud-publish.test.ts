@@ -353,15 +353,18 @@ describe("publish scan to Cloud", () => {
       uploads++;
       return receipt;
     };
+    const stderr = capture();
     expect(
       await main(
         ["publish", "scan", "--to", "cloud"],
         capture().stream,
-        capture().stream,
+        stderr.stream,
         deps,
       ),
     ).toBe(130);
     expect(uploads).toBe(0);
+    expect(stderr.text()).toContain("Publication canceled by Ctrl-C.");
+    expect(stderr.text()).not.toContain("Any upload already in flight");
     expect(
       [...signals.listeners.values()].every(
         (listeners) => listeners.size === 0,
