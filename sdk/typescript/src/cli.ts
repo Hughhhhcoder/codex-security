@@ -3032,6 +3032,13 @@ export async function main(
         );
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
+          if (format === "json" || format === "jsonl") {
+            return {
+              status: "failed",
+              code: "SCAN_FAILED",
+              message: safeErrorMessage(outcome.error),
+            };
+          }
           return incurError({
             code: "SCAN_FAILED",
             message: outcome.error,
