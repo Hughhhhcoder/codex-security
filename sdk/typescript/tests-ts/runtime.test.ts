@@ -2832,6 +2832,100 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test
+    .skipIf(process.platform !== "win32")
+    .each([
+      "transient missing descendant",
+      "persistent missing descendant",
+      "access denied",
+      "unexpected error",
+      "missing home",
+    ] as const)("replays Windows credential ACL %s", async (kind) => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        `replays Windows credential ACL ${kind}`,
+      )
+    ) {
+      return;
+    }
+    const root = await temporaryDirectory();
+    const home = join(root, "home");
+    await mkdir(home);
+    await requireSecureCredentialHome(home);
+    const descendant = join(home, ".auth-replay.tmp");
+    await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
+    const missing = kind.includes("missing");
+    const exception = missing
+      ? "System.IO.FileNotFoundException"
+      : kind === "access denied"
+        ? "System.UnauthorizedAccessException"
+        : "System.InvalidOperationException";
+    const errorId = missing
+      ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
+      : kind === "access denied"
+        ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
+        : "SyntheticCredentialAclFailure";
+    const category =
+      kind === "access denied"
+        ? "PermissionDenied"
+        : missing
+          ? "NotSpecified"
+          : "ObjectNotFound";
+    const failurePath = kind === "missing home" ? home : descendant;
+    // Replay the native error without relying on racing a filesystem deletion.
+    const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
+    const marker = "function Write-CredentialAcl($path) {";
+    const originalSpawn = childProcess.spawn;
+    let attempts = 0;
+    mock.module("node:child_process", () => ({
+      ...childProcess,
+      spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
+        const [command, args, options] = spawnArgs;
+        if (
+          options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
+          !Array.isArray(args)
+        ) {
+          return originalSpawn(...spawnArgs);
+        }
+        const scriptIndex = args.indexOf("-Command") + 1;
+        const script = args[scriptIndex];
+        if (typeof script !== "string" || !script.includes(marker)) {
+          return originalSpawn(...spawnArgs);
+        }
+        attempts += 1;
+        if (kind === "transient missing descendant" && attempts > 1) {
+          return originalSpawn(...spawnArgs);
+        }
+        expect(script.split(marker)).toHaveLength(2);
+        const replayArgs = [...args];
+        replayArgs[scriptIndex] = script.replace(
+          marker,
+          `${marker} ${injection}`,
+        );
+        return originalSpawn(command, replayArgs, options);
+      },
+    }));
+    try {
+      if (kind === "transient missing descendant") {
+        await requireSecureCredentialHome(home);
+        expect(attempts).toBe(2);
+      } else {
+        await expect(requireSecureCredentialHome(home)).rejects.toThrow(
+          kind === "persistent missing descendant"
+            ? "Windows credential descendants could not be verified"
+            : "synthetic credential ACL error",
+        );
+        expect(attempts).toBe(kind === "persistent missing descendant" ? 3 : 1);
+      }
+    } finally {
+      mock.module("node:child_process", () => ({
+        ...childProcess,
+        spawn: originalSpawn,
+      }));
+    }
+  });
+
   test("retries interrupted Windows credential ACL enumeration", async () => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
