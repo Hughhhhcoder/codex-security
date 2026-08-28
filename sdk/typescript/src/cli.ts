@@ -51,6 +51,7 @@ import {
   classifyConnectionFailure,
   CodexSecurity,
   createSecurityInternal,
+  environmentValue,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -1342,7 +1343,10 @@ export async function runCodexSkillCommand(
   processEnvironment: NodeJS.ProcessEnv = process.env,
   input?: string,
 ): Promise<number> {
-  const configuredHome = processEnvironment["CODEX_HOME"];
+  const configuredHome =
+    process.platform === "win32"
+      ? environmentValue(processEnvironment, "CODEX_HOME")
+      : processEnvironment["CODEX_HOME"];
   const environment = { ...processEnvironment };
   for (const name of Object.keys(environment)) {
     if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
