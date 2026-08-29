@@ -1723,17 +1723,25 @@ export class CodexSecurity {
             reason: safeErrorMessage(failure),
           }).catch(() => undefined);
         }
+        const canceled =
+          failure instanceof ScanInterruptedError &&
+          (options.signal?.aborted || this.#abortController.signal.aborted) &&
+          !(failure instanceof ScanCostLimitExceededError);
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [
-            "fail-scan",
+            canceled ? "cancel-scan" : "fail-scan",
             "--scan-id",
             activeScan.id,
-            // Scan history can be shared; never persist credential-bearing failures.
-            "--message",
-            safeErrorMessage(failure).slice(0, 2400),
-            ...(snapshot?.cost
-              ? ["--cost-json", JSON.stringify(snapshot.cost)]
-              : []),
+            ...(canceled
+              ? []
+              : [
+                  // Scan history can be shared; never persist credential-bearing failures.
+                  "--message",
+                  safeErrorMessage(failure).slice(0, 2400),
+                  ...(snapshot?.cost
+                    ? ["--cost-json", JSON.stringify(snapshot.cost)]
+                    : []),
+                ]),
           ]);
         } catch {}
       }

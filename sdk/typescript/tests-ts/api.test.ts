@@ -3028,6 +3028,88 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("records a caller-canceled scan as canceled instead of failed", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    const started = Promise.withResolvers<void>();
+    const controller = new AbortController();
+
+    const client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args, input);
+          }
+          if (args[0] === "get-scan-feedback") {
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed(
+              _input: string,
+              options: { signal: AbortSignal },
+            ) {
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                started.resolve();
+                await new Promise<void>((resolve) => {
+                  if (options.signal.aborted) resolve();
+                  else
+                    options.signal.addEventListener("abort", () => resolve(), {
+                      once: true,
+                    });
+                });
+                throw new DOMException("aborted", "AbortError");
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      },
+    );
+
+    const pending = client.run(repository, { signal: controller.signal });
+    await started.promise;
+    controller.abort("caller canceled");
+    await expect(pending).rejects.toBeInstanceOf(ScanInterruptedError);
+    expect(commands.map(([command]) => command)).toEqual([
+      "register-cli-scan",
+      "get-scan-feedback",
+      "set-scan-thread",
+      "cancel-scan",
+    ]);
+    expect(commands.at(-1)).toEqual([
+      "cancel-scan",
+      "--scan-id",
+      "scan_example_001",
+    ]);
+    await client.close();
+  });
+
   test("reports a Deep Scan terminal failure instead of a completion-state error", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
