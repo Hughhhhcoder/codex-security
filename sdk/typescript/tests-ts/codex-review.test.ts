@@ -2,10 +2,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, mock, test } from "bun:test";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
+import { resolveCodexCommand } from "../src/runtime.js";
 import { environmentEntry } from "../src/scan-comparison.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
@@ -83,7 +84,13 @@ for (const {
           [ghName]: ghConfig,
           ...extraEnvironment,
         },
-        (_command, commandArgs, options) => {
+        (command, commandArgs, options) => {
+          const selected = resolveCodexCommand({}).command;
+          expect(command).toBe(
+            process.platform === "win32"
+              ? win32.toNamespacedPath(selected)
+              : selected,
+          );
           args = commandArgs;
           directory = options.env!["CODEX_SQLITE_HOME"];
           expect(options.cwd).toBe(checkout);

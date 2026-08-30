@@ -15,6 +15,7 @@ import {
 import {
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   expandHome,
   resolveCodexCommand,
 } from "../runtime.js";
@@ -118,13 +119,17 @@ export class CodexReviewRunner {
       if (apiKey)
         args.push("--config", 'cli_auth_credentials_store="ephemeral"');
       this.signal?.throwIfAborted();
-      const child = this.startCodex(command.command, args, {
-        cwd: this.workingDirectory,
-        env: { ...environment, CODEX_SQLITE_HOME: directory },
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-        signal: this.signal,
-      });
+      const child = this.startCodex(
+        executablePathForSpawn(command.command),
+        args,
+        {
+          cwd: this.workingDirectory,
+          env: { ...environment, CODEX_SQLITE_HOME: directory },
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+          signal: this.signal,
+        },
+      );
       const closed = new Promise<void>((resolve) =>
         child.once("close", () => resolve()),
       );
