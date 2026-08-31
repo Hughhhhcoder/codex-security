@@ -1725,6 +1725,8 @@ export class CodexSecurity {
         }
         const canceled =
           signal.aborted &&
+          (options.signal?.aborted === true ||
+            this.#abortController.signal.aborted) &&
           !(signal.reason instanceof ScanCostLimitExceededError) &&
           !(failure instanceof ScanCostLimitExceededError);
         try {
