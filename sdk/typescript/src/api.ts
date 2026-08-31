@@ -1724,8 +1724,8 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         const canceled =
-          failure instanceof ScanInterruptedError &&
-          (options.signal?.aborted || this.#abortController.signal.aborted) &&
+          signal.aborted &&
+          !(signal.reason instanceof ScanCostLimitExceededError) &&
           !(failure instanceof ScanCostLimitExceededError);
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [
