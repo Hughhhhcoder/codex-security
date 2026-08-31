@@ -1612,6 +1612,7 @@ export class CodexSecurity {
               ((input, comparisonOptions) =>
                 matchScanFindingsInternal(input, comparisonOptions, {
                   surface: this.#surface,
+                  allowBatching: false,
                 })),
             environment,
             model,
