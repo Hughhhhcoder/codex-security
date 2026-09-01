@@ -757,7 +757,8 @@ describe("CodexSecurity orchestration", () => {
     const repository = join(root, "repository");
     const source = join(repository, "src");
     const output = join(root, "scan");
-    await mkdir(source, { recursive: true });
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(source, { mode: 0o700 });
     let runtimeStarted = false;
     const client = new TestClient(
       { pythonPath: "/definitely/missing/python" },
@@ -2033,7 +2034,7 @@ describe("CodexSecurity orchestration", () => {
     const root = await temporaryDirectory();
     const normal = join(root, "normal");
     const linked = join(root, "linked");
-    await mkdir(normal);
+    await mkdir(normal, { mode: 0o700 });
     execFileSync("git", ["init", "-q", normal]);
     await writeFile(join(normal, "tracked.txt"), "tracked\n");
     execFileSync("git", ["-C", normal, "add", "."]);
@@ -2058,6 +2059,7 @@ describe("CodexSecurity orchestration", () => {
       "linked",
       linked,
     ]);
+    if (process.platform !== "win32") await fsPromises.chmod(linked, 0o700);
 
     for (const worktree of [normal, linked]) {
       const repository = join(worktree, "packages", "service");
