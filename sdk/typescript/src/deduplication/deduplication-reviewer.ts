@@ -26,10 +26,13 @@ const findingIds = z.tuple([z.string(), z.string()]);
 const screeningSchema = z
   .object({
     decisions: z.array(
-      z.discriminatedUnion("decision", [
-        sameSchema.extend({ findingIds }).strict(),
-        distinctSchema.extend({ findingIds }).strict(),
-      ]),
+      z
+        .object({
+          decision: z.enum(["SAME", "DISTINCT"]),
+          rationale,
+          findingIds,
+        })
+        .strict(),
     ),
   })
   .strict();
@@ -101,20 +104,11 @@ export function validateScreening(
   );
   const seen = new Set<string>();
   for (const recommendation of result.decisions) {
-    requireMergedFinding(recommendation);
     const pair = recommendation.findingIds;
     const key = pairKey(pair);
     if (pair[0] === pair[1] || !required.has(key) || seen.has(key)) {
       throw new Error(
         "Submit each assigned anchor-neighbor pair exactly once.",
-      );
-    }
-    if (
-      recommendation.decision === "SAME" &&
-      !pair.includes(recommendation.canonicalFindingId)
-    ) {
-      throw new Error(
-        "The canonical finding must belong to its assigned pair.",
       );
     }
     seen.add(key);
