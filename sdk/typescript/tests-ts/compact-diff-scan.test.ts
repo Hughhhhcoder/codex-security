@@ -1,6 +1,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/index.js";
@@ -34,6 +35,23 @@ function createRepository(): { root: string; repository: string } {
   mkdirSync(repository);
   git(repository, "init", "-q");
   return { root, repository };
+}
+
+function privateFixtureDirectory(root: string, path: string): void {
+  const relativePath = relative(root, path);
+  if (
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    throw new Error("Fixture directory escapes its temporary root");
+  }
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") return;
+  for (let current = path; ; current = dirname(current)) {
+    chmodSync(current, 0o700);
+    if (current === root) return;
+  }
 }
 
 function git(repository: string, ...args: string[]): string {
@@ -420,8 +438,8 @@ describe("compact diff scan", () => {
   test("streams maximum-size preflight checks through the MCP workbench", async () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
-    mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
+    privateFixtureDirectory(root, join(root, "scans"));
+    privateFixtureDirectory(root, join(root, "state"));
     const client = await startMcp(root);
     const owner = "preflight-stdin-owner";
 
@@ -455,8 +473,8 @@ describe("compact diff scan", () => {
   test("streams oversized option-like user context through the MCP workbench", async () => {
     const { root, repository } = createRepository();
     writeSource(repository, "src/handler.py", "value = 1\n");
-    mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
+    privateFixtureDirectory(root, join(root, "scans"));
+    privateFixtureDirectory(root, join(root, "state"));
     const client = await startMcp(root);
     const userContext = `--${"é".repeat(64 * 1_024)}`;
 
@@ -515,8 +533,8 @@ describe("compact diff scan", () => {
     git(repository, "add", ".");
     git(repository, "commit", "-qm", "changed");
     const headRevision = git(repository, "rev-parse", "HEAD");
-    mkdirSync(join(root, "scans"));
-    mkdirSync(join(root, "state"));
+    privateFixtureDirectory(root, join(root, "scans"));
+    privateFixtureDirectory(root, join(root, "state"));
     const client = await startMcp(root);
     const owner = "compact-diff-owner";
     const call = (name: string, args: JsonObject) =>
@@ -567,6 +585,7 @@ describe("compact diff scan", () => {
         handoffClaimToken,
       });
       const scanDir = (context["scan"] as JsonObject)["scanDir"] as string;
+      privateFixtureDirectory(join(root, "scans"), join(scanDir, "artifacts"));
 
       const inventory = await call("prepare_codex_security_review_items", {
         scanId,

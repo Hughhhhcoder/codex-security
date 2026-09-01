@@ -1,4 +1,5 @@
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -7,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { runWorkbench } from "../src/runtime.js";
 import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
@@ -23,6 +24,26 @@ afterEach(async () => {
       .map((path) => rm(path, { recursive: true, force: true })),
   );
 });
+
+async function privateFixtureDirectory(
+  root: string,
+  path: string,
+): Promise<void> {
+  const relativePath = relative(root, path);
+  if (
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    throw new Error("Fixture directory escapes its temporary root");
+  }
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") return;
+  for (let current = path; ; current = dirname(current)) {
+    await chmod(current, 0o700);
+    if (current === root) return;
+  }
+}
 
 const deepScanOwnershipProbe = [
   "import argparse, json, sqlite3, sys",
@@ -1073,6 +1094,11 @@ describe("deep scan workbench ownership", () => {
     const stateDir = join(root, "state");
     const codexHome = join(root, "codex-home");
     await mkdir(repository);
+    await Promise.all(
+      [stateDir, codexHome, join(root, "scans")].map((directory) =>
+        privateFixtureDirectory(root, directory),
+      ),
+    );
     await writeFile(join(repository, "source.py"), "# source fixture\n");
 
     const python = Bun.which("python3") ?? Bun.which("python");
@@ -1162,7 +1188,7 @@ describe("deep scan workbench ownership", () => {
         workerId,
       );
       const promptPath = join(artifactDir, "prompt.md");
-      await mkdir(artifactDir, { recursive: true });
+      await privateFixtureDirectory(join(root, "scans"), artifactDir);
       await writeFile(promptPath, "Review the source.\n");
       const workerArgs = [
         "upsert-deep-scan-worker",
@@ -1462,7 +1488,11 @@ describe("deep scan workbench ownership", () => {
     const codexHome = join(root, "codex-home");
     const configDir = join(codexHome, "codex-security");
     await mkdir(repository);
-    await mkdir(configDir, { recursive: true });
+    await Promise.all(
+      [stateDir, configDir, join(root, "scans")].map((directory) =>
+        privateFixtureDirectory(root, directory),
+      ),
+    );
     await writeFile(join(repository, "source.py"), "# source fixture\n");
     await writeFile(
       join(configDir, "config.toml"),
@@ -1522,7 +1552,7 @@ describe("deep scan workbench ownership", () => {
     const discoveryDir = join(scanDir, "artifacts", "02_discovery");
     const ledgerPath = join(discoveryDir, "candidate_ledger.jsonl");
     const existingFinding = '{"candidate":"previously committed"}\n';
-    await mkdir(discoveryDir, { recursive: true });
+    await privateFixtureDirectory(join(root, "scans"), discoveryDir);
     await writeFile(join(discoveryDir, "in_scope_files.txt"), "source.py\n");
     await writeFile(ledgerPath, existingFinding);
 
@@ -1535,7 +1565,7 @@ describe("deep scan workbench ownership", () => {
       );
       const promptPath = join(artifactDir, "prompt.md");
       const resultPath = join(artifactDir, "result.json");
-      await mkdir(artifactDir, { recursive: true });
+      await privateFixtureDirectory(join(root, "scans"), artifactDir);
       await writeFile(promptPath, "Review the source.\n");
       return { artifactDir, promptPath, resultPath };
     };
