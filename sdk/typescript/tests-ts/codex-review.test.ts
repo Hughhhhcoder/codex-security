@@ -29,6 +29,8 @@ const failureReasons: Record<string, string> = {
     "Required review check could not be completed: Required source revision could not be read.",
   "required-source-error-after-verdict":
     "Required review check could not be completed: Required source revision could not be read.",
+  "required-source-error-after-text":
+    "Required review check could not be completed: Required source revision could not be read.",
   "invalid-review-error":
     "Required review check could not be completed: Required source revision could not be read.",
   exit: "Codex exited before completing the review",
@@ -52,6 +54,10 @@ const transportCases: {
     name: "command auth with ambient API key and relative home",
     commandAuth: "ambient",
   },
+  { scenario: "retry-correction" },
+  { scenario: "text-only-correction" },
+  { scenario: "cancel-continuation" },
+  { scenario: "accepted-no-replay" },
   ...[
     "correction",
     "incomplete-content",
@@ -101,6 +107,7 @@ for (const {
     const ghConfig = await mkdtemp(join(tmpdir(), "codex-review-gh-"));
     const transcript = join(modelHome, "messages.jsonl");
     let child: ChildProcessWithoutNullStreams | undefined;
+    let starts = 0;
     let directory: string | undefined;
     let args: readonly string[] = [];
     const controller = new AbortController();
@@ -148,6 +155,7 @@ for (const {
           ...extraEnvironment,
         },
         (command, commandArgs, options) => {
+          starts++;
           const selected = resolveCodexCommand({}).command;
           expect(command).toBe(
             process.platform === "win32"
@@ -165,6 +173,10 @@ for (const {
           );
           if (scenario === "cancel")
             child.once("spawn", () =>
+              controller.abort("synthetic cancellation"),
+            );
+          if (scenario === "cancel-continuation")
+            child.stderr.once("data", () =>
               controller.abort("synthetic cancellation"),
             );
           return child;
@@ -188,6 +200,7 @@ for (const {
           )
         : runner;
       const result = reviewRunner.run({
+        stage: "pair-review",
         model: "gpt-5.6-sol",
         effort: "ultra",
         prompt: "Review the supplied synthetic reports.",
@@ -210,9 +223,20 @@ for (const {
           return { decision: value.decision };
         },
       });
-      if (scenario === "correction") {
+      if (
+        [
+          "correction",
+          "retry-correction",
+          "text-only-correction",
+          "accepted-no-replay",
+        ].includes(scenario)
+      ) {
         expect(await result).toEqual({ decision: "SAME" });
-        expect(validations).toBe(2);
+        expect(validations).toBe(
+          ["text-only-correction", "accepted-no-replay"].includes(scenario)
+            ? 1
+            : 2,
+        );
       } else if (
         ["incomplete-content", "optional-lookup-failure"].includes(scenario)
       ) {
@@ -220,24 +244,74 @@ for (const {
           decision: scenario === "incomplete-content" ? "DISTINCT" : "SAME",
         });
         expect(validations).toBe(1);
-      } else if (scenario === "cancel") {
+      } else if (["cancel", "cancel-continuation"].includes(scenario)) {
         await expect(result).rejects.toBe("synthetic cancellation");
       } else {
-        await expect(result).rejects.toMatchObject({
-          name: "CodexSecurityError",
+        const failure = await result.catch((error: unknown) => error);
+        expect(failure).toMatchObject({
+          name: "DeduplicationReviewError",
           message: `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${failureReasons[scenario]}`,
         });
-        expect(validations).toBe(
-          [
-            "failed-turn",
+        const reviewFailure = failure as Error & {
+          cause?: unknown;
+          metadata: {
+            stage: string;
+            model: string;
+            category: string;
+            attempts: number;
+            reason: string;
+          };
+        };
+        expect(reviewFailure.cause).toBeUndefined();
+        expect(reviewFailure.metadata).toEqual({
+          stage: "pair-review",
+          model: "gpt-5.6-sol",
+          category:
+            scenario === "invalid-submission"
+              ? "validation"
+              : scenario === "text-only"
+                ? "no-submission"
+                : scenario === "failed-turn" || reportsBlocker
+                  ? "model"
+                  : "transport",
+          attempts: [
             "invalid-submission",
-            "required-source-error-after-verdict",
+            "text-only",
+            "required-source-error-after-text",
           ].includes(scenario)
-            ? 1
-            : 0,
+            ? 2
+            : 1,
+          reason:
+            scenario === "credential-error"
+              ? "[redacted]"
+              : scenario === "invalid-submission"
+                ? "The submitted review failed semantic validation."
+                : scenario === "text-only"
+                  ? "Codex did not submit a validated review."
+                  : scenario === "failed-turn"
+                    ? "Codex review turn failed."
+                    : reportsBlocker
+                      ? "A required review check could not be completed."
+                      : scenario === "request-error"
+                        ? "Codex rejected the review request."
+                        : "Codex review transport failed.",
+        });
+        const supportBundle = JSON.stringify(reviewFailure.metadata);
+        expect(supportBundle).not.toContain("synthetic-review-key");
+        expect(supportBundle).not.toContain(checkout);
+        expect(supportBundle).not.toContain("review-thread");
+        expect(validations).toBe(
+          scenario === "invalid-submission"
+            ? 2
+            : ["failed-turn", "required-source-error-after-verdict"].includes(
+                  scenario,
+                )
+              ? 1
+              : 0,
         );
         if (reportsBlocker) expect(checkpoints.saved).toHaveLength(0);
       }
+      expect(starts).toBe(1);
       if (commandAuth) {
         expect(args).not.toContain('cli_auth_credentials_store="ephemeral"');
         const providers = parse(
@@ -262,7 +336,7 @@ for (const {
         `${JSON.stringify(resolve(ghConfig))}="deny"`,
       );
       if (scenario !== "cancel") {
-        const loginRequest = (await readFile(transcript, "utf8"))
+        const messages = (await readFile(transcript, "utf8"))
           .trim()
           .split("\n")
           .map(
@@ -271,8 +345,29 @@ for (const {
                 method?: string;
                 params?: { apiKey?: string };
               },
-          )
-          .find((message) => message.method === "account/login/start");
+          );
+        const loginRequest = messages.find(
+          (message) => message.method === "account/login/start",
+        );
+        expect(
+          messages.filter((message) => message.method === "thread/start"),
+        ).toHaveLength(1);
+        expect(
+          messages.filter((message) => message.method === "turn/start"),
+        ).toHaveLength(
+          [
+            "invalid-submission",
+            "text-only",
+            "retry-correction",
+            "text-only-correction",
+            "cancel-continuation",
+            "required-source-error-after-text",
+          ].includes(scenario)
+            ? 2
+            : ["request-error", "credential-error"].includes(scenario)
+              ? 0
+              : 1,
+        );
         expect(loginRequest?.params?.apiKey).toBe(
           commandAuth ? undefined : "synthetic-review-key",
         );
@@ -332,6 +427,7 @@ test("empty credential paths use default directories without denying cwd", async
       );
       await expect(
         runner.run({
+          stage: "pair-review",
           model: "gpt-5.6-sol",
           effort: "ultra",
           prompt: "Review the supplied synthetic reports.",

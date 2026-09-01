@@ -1324,11 +1324,15 @@ using the service's existing idempotent upsert.
 
 Each validated screening and pair review is checkpointed locally,
 including DISTINCT decisions. Screening checkpoints retain pair recommendations
-and rationales only. Every SAME pair-review checkpoint retains its required
-`canonicalFindingId` and generated `mergedFinding`; the merged record must satisfy
-the Finding schema and preserve the canonical finding ID. Validation still happens
-through `review_validator.submit_decisions`; invalid submissions are corrected in
-the same review conversation, and invalid or unfinished reviews are not cached.
+and rationales under host-assigned pair slots bound to the original records.
+Every SAME pair-review checkpoint retains its
+required `canonicalFindingId` and generated `mergedFinding`; the merged record
+must satisfy the Finding schema and preserve the canonical finding ID. Validation
+still happens through `review_validator.submit_decisions`; invalid submissions
+are corrected in the same review conversation. A completed turn without an
+accepted submission receives one corrective turn in that same conversation.
+Transport, model, cancellation, and accepted `submit_error` failures are terminal.
+Invalid or unfinished reviews are not cached.
 
 Checkpoints bind to the exact original records and ordering, approved source path,
 Git revision and current file contents (including ignored files), repository scope,
@@ -1391,13 +1395,35 @@ optional lookup does not force failure or `DISTINCT` when other evidence suffice
 
 Decisions must arrive through the direct `review_validator.submit_decisions`
 tool; invalid submissions can be corrected in the same session. A final text
-answer alone is insufficient. Luna screening returns pair IDs, `SAME` or
-`DISTINCT`, and a rationale; it does not select a canonical or generate a merged
-finding. Every Sol `SAME` decision requires an assigned `canonicalFindingId` and
+answer alone is insufficient. Luna screening returns a `SAME` or `DISTINCT`
+decision and rationale under each required host-assigned slot (`pair-1`,
+`pair-2`, and so on). The host binds each slot to its corresponding
+anchor-neighbor pair, so the model does not submit finding IDs. Luna does not
+select a canonical or generate a merged finding. Every
+Sol `SAME` decision requires an assigned `canonicalFindingId` and
 a generated, inclusive `mergedFinding`; missing or null values are rejected.
 Sol reviews use only the complete originals, never earlier model rationales or
 merged findings. These review fields do not change the command's ID-only result
 or stored findings.
+
+Non-cancellation review failures throw `DeduplicationReviewError`. Its `metadata`
+contains only the review stage, model, failure category, attempt count, and a
+sanitized reason for diagnostics or an external support bundle; it does not
+contain findings, prompts, paths, thread IDs, or credentials.
+
+If a completed turn has no accepted submission, whether it ended with text only
+or after rejected submissions, the runner sends one corrective instruction in
+the same conversation. This preserves the original assignment, source work, and
+tool feedback. Reviews are limited to two turns; `metadata.attempts` counts
+those turns (or the initial attempt if setup fails). Accepted results are not
+replayed. Cancellation, accepted `submit_error` reports, and model or transport
+failures remain terminal.
+
+The SDK does not retain private review transcripts, subprocess stderr, or full
+provider/RPC error payloads, and ephemeral review state is removed after the
+session. The public metadata is a limited diagnostic summary, not a complete
+troubleshooting trace; it intentionally omits the original error cause. Private
+diagnostic retention is not currently implemented.
 
 Model calls run sequentially on the SDK/CLI host using its Codex sign-in or
 `OPENAI_API_KEY`/`CODEX_API_KEY`, with access to the configured models. Model

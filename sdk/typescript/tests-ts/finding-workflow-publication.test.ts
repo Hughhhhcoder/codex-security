@@ -357,12 +357,7 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
         reviews++;
         expect(findings).toEqual(originals);
         return {
-          decisions: [
-            {
-              ...screeningDecision,
-              findingIds: [originals[0]!.findingId, originals[1]!.findingId],
-            },
-          ],
+          decisions: { "pair-1": { ...screeningDecision } },
         };
       },
       async reviewPair(findings) {

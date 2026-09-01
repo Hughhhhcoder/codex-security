@@ -22,7 +22,12 @@ import {
 } from "../runtime.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
 import { VERSION } from "../version.js";
-import { CodexSecurityError, safeErrorMessage } from "../errors.js";
+import {
+  DeduplicationReviewError,
+  type DeduplicationReviewFailureCategory,
+  type DeduplicationReviewStage,
+  safeErrorMessage,
+} from "../errors.js";
 import { configuredCodexHome, readCodexHomeConfig } from "../auth.js";
 import {
   hasCommandAuth,
@@ -40,11 +45,22 @@ const reviewErrorSchema = z
   .strict();
 
 export interface CodexReview<T> {
+  stage: DeduplicationReviewStage;
   model: string;
   effort: string;
   prompt: string;
   schema: unknown;
   validate(value: unknown): T;
+}
+
+class ReviewAttemptError extends Error {
+  public constructor(
+    public readonly category: DeduplicationReviewFailureCategory,
+    message: string,
+    public readonly supportReason: string,
+  ) {
+    super(message);
+  }
 }
 
 type StartCodex = (
@@ -80,6 +96,35 @@ export class CodexReviewRunner {
   ) {}
 
   async run<T>(review: CodexReview<T>): Promise<T> {
+    const state = { attempts: 1 };
+    try {
+      return await this.runSession(review, state);
+    } catch (error) {
+      this.signal?.throwIfAborted();
+      const category =
+        error instanceof ReviewAttemptError ? error.category : "transport";
+      const supportReason =
+        error instanceof ReviewAttemptError
+          ? error.supportReason
+          : "Codex review transport failed.";
+      const displayReason = safeErrorMessage(error);
+      throw new DeduplicationReviewError(
+        {
+          stage: review.stage,
+          model: review.model,
+          category,
+          attempts: state.attempts,
+          reason: displayReason === "[redacted]" ? "[redacted]" : supportReason,
+        },
+        displayReason,
+      );
+    }
+  }
+
+  private async runSession<T>(
+    review: CodexReview<T>,
+    state: { attempts: number },
+  ): Promise<T> {
     this.signal?.throwIfAborted();
     const workingDirectory = resolve(this.workingDirectory);
     const directory = await mkdtemp(join(tmpdir(), "codex-security-dedupe-"));
@@ -233,6 +278,21 @@ export class CodexReviewRunner {
       let turnId: string | undefined;
       let accepted: T | undefined;
       let validationFailure: string | undefined;
+      const startTurn = (prompt: string) => {
+        this.signal?.throwIfAborted();
+        turnId = undefined;
+        validationFailure = undefined;
+        send({
+          id: 3 + state.attempts,
+          method: "turn/start",
+          params: {
+            threadId,
+            model: review.model,
+            effort: review.effort,
+            input: [{ type: "text", text: prompt, text_elements: [] }],
+          },
+        });
+      };
       try {
         send({
           id: 1,
@@ -275,12 +335,11 @@ export class CodexReviewRunner {
                     params.arguments,
                   ).reason;
                   accepted = undefined;
-                } else {
+                } else if (accepted === undefined) {
                   accepted = review.validate(params.arguments);
                 }
                 success = true;
               } catch (error) {
-                accepted = undefined;
                 if (error instanceof Error) rejection = error.message;
                 validationFailure = rejection;
               }
@@ -301,8 +360,10 @@ export class CodexReviewRunner {
                 },
               });
               if (reportedFailure !== undefined)
-                throw new Error(
+                throw new ReviewAttemptError(
+                  "model",
                   `Required review check could not be completed: ${reportedFailure}`,
+                  "A required review check could not be completed.",
                 );
             } else {
               send({
@@ -311,8 +372,10 @@ export class CodexReviewRunner {
               });
             }
           } else if (message.error !== undefined) {
-            throw new Error(
+            throw new ReviewAttemptError(
+              "transport",
               message.error?.message ?? "Codex rejected the review request",
+              "Codex rejected the review request.",
             );
           } else if (message.id === 1) {
             send({ method: "initialized" });
@@ -333,19 +396,8 @@ export class CodexReviewRunner {
               );
             }
             threadId = thread.id;
-            send({
-              id: 4,
-              method: "turn/start",
-              params: {
-                threadId,
-                model: review.model,
-                effort: review.effort,
-                input: [
-                  { type: "text", text: review.prompt, text_elements: [] },
-                ],
-              },
-            });
-          } else if (message.id === 4) {
+            startTurn(review.prompt);
+          } else if (message.id === 3 + state.attempts) {
             turnId = message.result?.turn?.id ?? turnId;
           } else if (
             message.method === "turn/started" &&
@@ -362,16 +414,32 @@ export class CodexReviewRunner {
             params.turn?.id === turnId
           ) {
             if (params.turn.status !== "completed") {
-              throw new Error(
+              throw new ReviewAttemptError(
+                "model",
                 params.turn.error?.message ??
                   `Codex review turn ${params.turn.status}`,
+                "Codex review turn failed.",
               );
             }
             if (accepted === undefined) {
-              throw new Error(
-                validationFailure
-                  ? `Review validation failed: ${validationFailure}`
-                  : "Codex did not submit a validated review",
+              if (state.attempts === 1) {
+                state.attempts++;
+                startTurn(
+                  `Continue the original assigned review in this conversation. No submission was accepted.${validationFailure ? ` The last submission was rejected: ${validationFailure}` : ""} ${reviewSubmissionInstructions}`,
+                );
+                continue;
+              }
+              if (validationFailure) {
+                throw new ReviewAttemptError(
+                  "validation",
+                  `Review validation failed: ${validationFailure}`,
+                  "The submitted review failed semantic validation.",
+                );
+              }
+              throw new ReviewAttemptError(
+                "no-submission",
+                "Codex did not submit a validated review",
+                "Codex did not submit a validated review.",
               );
             }
             return accepted;
@@ -383,11 +451,6 @@ export class CodexReviewRunner {
         if (child.exitCode === null) child.kill();
         await closed;
       }
-    } catch (error) {
-      this.signal?.throwIfAborted();
-      throw new CodexSecurityError(
-        `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${safeErrorMessage(error)}`,
-      );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
