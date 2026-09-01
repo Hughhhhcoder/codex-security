@@ -158,7 +158,9 @@ describe("TypeScript package skeleton", () => {
     expect(packageJson.scripts.test).toBe(
       "node --run build:plugin && bun test --timeout 30000 ./tests-ts",
     );
-    expect(bunConfig).toMatchObject({ test: { randomize: true } });
+    expect(bunConfig).toMatchObject({
+      test: { randomize: true, preload: ["./tests-ts/setup.ts"] },
+    });
     expect(packageJson.scripts["test:ci"]).toContain("pnpm run test ");
     expect(jobs["windows-test"]?.steps).toContainEqual(
       expect.objectContaining({

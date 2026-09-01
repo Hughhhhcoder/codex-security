@@ -1,4 +1,5 @@
 [test]
 randomize = true
+preload = ["./tests-ts/setup.ts"]
 coverageSkipTestFiles = true
 coveragePathIgnorePatterns = ["tests-ts/**", "**/node_modules/**", "dist/**"]
