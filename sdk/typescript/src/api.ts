@@ -36,6 +36,7 @@ import {
 import { z } from "incur";
 import {
   accountStatus,
+  configuredCodexHome,
   CodexLoginHandle,
   loginApiKey as persistApiKey,
   logout as codexLogout,
@@ -49,7 +50,10 @@ import {
 import {
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
+  hasCommandAuth,
   mergedCodexConfig,
+  modelProviderConfigOverride,
+  resolveCommandAuthConfig,
   scanApprovalPolicy,
   scanModelConfiguration,
   scanModelProvider,
@@ -299,6 +303,7 @@ export const SCAN_AUTH_MODES = ["auto", "chatgpt", "api-key"] as const;
 export type ScanAuthMode = (typeof SCAN_AUTH_MODES)[number];
 
 export type ScanAuthentication =
+  | { method: "command"; verified: false }
   | {
       method: "api_key";
       source:
@@ -741,6 +746,7 @@ export class CodexSecurity {
         this.#dependencies.environment,
         options.auth,
         modelProvider,
+        hasCommandAuth(configuration),
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -2098,11 +2104,18 @@ export class CodexSecurity {
       apiKey,
       sessionConfig,
     } = session;
+    const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
       ...pluginExecutionEnvironment(
         python,
         withoutCodexHome(
-          selectedScanEnvironment(runtime.environment, auth, modelProvider),
+          selectedScanEnvironment(
+            commandAuth
+              ? withoutOpenAiApiKeys(runtime.environment)
+              : runtime.environment,
+            auth,
+            modelProvider,
+          ),
         ),
       ),
       ...(externalProvider === null
@@ -2123,6 +2136,7 @@ export class CodexSecurity {
     // cannot safely encode their path and selector keys as dotted overrides.
     delete sdkCodexConfig["projects"];
     delete sdkCodexConfig["permissions"];
+    if (commandAuth) delete sdkCodexConfig["model_providers"];
     const configuredResponsesMetadata = isRecord(
       sdkCodexConfig["responses_api_metadata"],
     )
@@ -2133,9 +2147,7 @@ export class CodexSecurity {
       undefined
         ? undefined
         : this.#codexCommand().command;
-    let sdkEnvironment = definedEnvironment(
-      selectedScanEnvironment(environment, "chatgpt"),
-    );
+    let sdkEnvironment = definedEnvironment(withoutOpenAiApiKeys(environment));
     if (process.platform === "win32" && codexPathOverride === undefined) {
       codexPathOverride = environment["CODEX_CLI_PATH"]!;
       sdkEnvironment = bundledCodexSdkEnvironment(
@@ -2148,6 +2160,9 @@ export class CodexSecurity {
         ? {}
         : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
       ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
+      ...(commandAuth
+        ? { configOverrides: modelProviderConfigOverride(sessionConfig) }
+        : {}),
       env: sdkEnvironment,
       config: {
         ...(sdkCodexConfig as NonNullable<CodexOptions["config"]>),
@@ -2181,15 +2196,21 @@ export class CodexSecurity {
       throwIfAborted(signal);
     };
     try {
-      const requestedConfig = await mergedCodexConfig(this.config);
+      const requestedConfig = resolveCommandAuthConfig(
+        await mergedCodexConfig(this.config),
+        configuredCodexHome(this.#dependencies.environment),
+      );
+      const commandAuth = hasCommandAuth(requestedConfig);
       const modelProvider = scanModelProvider(requestedConfig);
-      const externalProvider = isExternalModelProvider(modelProvider)
-        ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
-        : null;
+      const externalProvider =
+        !commandAuth && isExternalModelProvider(modelProvider)
+          ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+          : null;
       let authentication = scanAuthentication(
         this.#dependencies.environment,
         options.auth,
         modelProvider,
+        commandAuth,
       );
       const apiKey =
         authentication.method === "api_key"
@@ -2201,7 +2222,9 @@ export class CodexSecurity {
         );
       }
       const scanEnvironment = selectedScanEnvironment(
-        this.#dependencies.environment,
+        commandAuth
+          ? withoutOpenAiApiKeys(this.#dependencies.environment)
+          : this.#dependencies.environment,
         options.auth,
         modelProvider,
       );
@@ -2296,6 +2319,7 @@ export class CodexSecurity {
       if (
         !runtime.credentialsAvailable &&
         apiKey === null &&
+        !commandAuth &&
         authentication.method !== "aws_credentials"
       ) {
         throw new AuthenticationRequiredError(
@@ -2304,12 +2328,13 @@ export class CodexSecurity {
             "OPENAI_API_KEY or CODEX_API_KEY for CI.",
         );
       }
-      authentication = await runtimeScanAuthentication(
-        this.#dependencies.environment,
-        runtime.codexHome,
-        options.auth,
-        modelProvider,
-      );
+      if (!commandAuth)
+        authentication = await runtimeScanAuthentication(
+          this.#dependencies.environment,
+          runtime.codexHome,
+          options.auth,
+          modelProvider,
+        );
       if (
         options.safetyIdentifier !== undefined &&
         authentication.method !== "api_key" &&
@@ -2545,7 +2570,9 @@ export class CodexSecurity {
         ? undefined
         : scanModelProvider(requestedConfig);
     const processEnvironment = selectedScanEnvironment(
-      this.#dependencies.environment,
+      requestedConfig !== undefined && hasCommandAuth(requestedConfig)
+        ? withoutOpenAiApiKeys(this.#dependencies.environment)
+        : this.#dependencies.environment,
       auth,
       modelProvider,
     );
@@ -2591,6 +2618,7 @@ export class CodexSecurity {
         ? join(bootstrapWorkspace, "deep-scan-config.toml")
         : undefined;
       const credentialsAvailable =
+        hasCommandAuth(mergedConfig) ||
         isExternalModelProvider(modelProvider) ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -3359,12 +3387,14 @@ export function scanAuthentication(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = "auto",
   modelProvider?: unknown,
+  commandAuth = false,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
       "Scan authentication mode must be auto, chatgpt, or api-key.",
     );
   }
+  if (commandAuth) return { method: "command", verified: false };
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -3459,9 +3489,8 @@ export function selectedScanEnvironment(
     return environment;
   }
   return Object.fromEntries(
-    Object.entries(environment).filter(([name]) => {
+    Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
       const key = name.toUpperCase();
-      if (key === "OPENAI_API_KEY" || key === "CODEX_API_KEY") return false;
       if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
         return (
           !bedrockProvider &&
@@ -3470,6 +3499,17 @@ export function selectedScanEnvironment(
       }
       return true;
     }),
+  );
+}
+
+function withoutOpenAiApiKeys(
+  environment: ProcessEnvironment,
+): ProcessEnvironment {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()),
+    ),
   );
 }
 
@@ -3666,6 +3706,12 @@ function sharedCredentialCodexConfig(
     if (Object.hasOwn(config, key)) shared[key] = structuredClone(config[key]!);
   }
   const modelProvider = scanModelProvider(config);
+  if (hasCommandAuth(config)) {
+    for (const key of ["profile", "profiles"]) {
+      if (Object.hasOwn(config, key))
+        shared[key] = structuredClone(config[key]!);
+    }
+  }
   if (typeof modelProvider === "string" && modelProvider.length > 0) {
     shared["model_provider"] = modelProvider;
     const providers = config["model_providers"];
