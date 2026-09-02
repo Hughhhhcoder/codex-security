@@ -27,7 +27,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -51,6 +51,9 @@ import {
   classifyConnectionFailure,
   CodexSecurity,
   createSecurityInternal,
+  environmentValue,
+  formatEnvironmentVariableRemovalGuidance,
+  initialCredentialsAvailable,
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
@@ -133,6 +136,7 @@ import {
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
   codexSecurityStateDirectory,
+  executablePathForSpawn,
   expandHome,
   prepareCodexSecurityCredentialHome,
   pythonUtf8Environment,
@@ -143,9 +147,12 @@ import {
   type CodexCommand,
 } from "./runtime.js";
 import {
+  comparisonFindingGroups,
   matchScanFindingsInternal,
+  unionFindingGroups,
   type matchScanFindings,
   type ScanComparisonInput,
+  type ScanComparisonResult,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
 import {
@@ -239,6 +246,7 @@ const EXPORT_DEFAULT_OUTPUTS = {
   sarif: "results.sarif",
 } as const;
 const VALUE_OPTIONS = new Set([
+  "--port",
   "--workflow-id",
   "--auth",
   "--safety-identifier",
@@ -970,6 +978,7 @@ export function resolveCliPath(directory: string, value: string): string {
 }
 
 interface ScanArguments extends DeepScanOptions {
+  mock?: boolean;
   workflowId?: string;
   auth?: ScanAuthMode;
   safetyIdentifier?: string;
@@ -1034,6 +1043,7 @@ interface MatchingBatch {
   afterScanId: string;
   afterFindings: ScanComparisonInput["after"];
   beforeScans: { scanId: string; findings: ScanComparisonInput["before"] }[];
+  knownFindingGroups?: ScanComparisonInput["knownFindingGroups"];
 }
 
 type MatchingPlan = JsonObject & {
@@ -1134,6 +1144,7 @@ interface CliDependencies {
   ) => Promise<string>;
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
   scanAuthenticationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select">;
+  scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   checkScanPublication?: typeof checkScanPublication;
@@ -1353,7 +1364,10 @@ export async function runCodexSkillCommand(
   processEnvironment: NodeJS.ProcessEnv = process.env,
   input?: string,
 ): Promise<number> {
-  const configuredHome = processEnvironment["CODEX_HOME"];
+  const configuredHome =
+    process.platform === "win32"
+      ? environmentValue(processEnvironment, "CODEX_HOME")
+      : processEnvironment["CODEX_HOME"];
   const environment = { ...processEnvironment };
   for (const name of Object.keys(environment)) {
     if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
@@ -1363,7 +1377,7 @@ export async function runCodexSkillCommand(
       expandHome(configuredHome, processEnvironment),
     );
   }
-  const invocation = spawn(command.command, [...args], {
+  const invocation = spawn(executablePathForSpawn(command.command), [...args], {
     env: environment,
     cwd: output?.appServer?.directory ?? parse(process.execPath).root,
     stdio:
@@ -2912,7 +2926,9 @@ export async function main(
             .number()
             .positive()
             .optional()
-            .describe("Stop the scan if estimated USD cost exceeds AMOUNT."),
+            .describe(
+              "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
+            ),
           headless: z
             .boolean()
             .default(false)
@@ -2923,6 +2939,12 @@ export async function main(
             .boolean()
             .default(false)
             .describe("Validate local scan inputs without starting a scan."),
+          mock: z
+            .boolean()
+            .default(false)
+            .describe(
+              "Save synthetic Standard scan findings without calling an LLM.",
+            ),
         })
         .refine(
           (options) =>
@@ -2962,6 +2984,12 @@ export async function main(
         .refine((options) => !options.patch || !options.dryRun, {
           message: "--patch cannot be combined with --dry-run.",
         })
+        .refine(
+          (options) => !options.mock || (!options.dryRun && !options.patch),
+          {
+            message: "--mock cannot be combined with --dry-run or --patch.",
+          },
+        )
         .refine(
           (options) =>
             options.mode === "deep" ||
@@ -3036,6 +3064,7 @@ export async function main(
             maxCostUsd: options.maxCost,
             headless: options.headless,
             dryRun: options.dryRun,
+            mock: options.mock,
           },
           errorOutput,
           dependencies,
@@ -4278,6 +4307,16 @@ export async function main(
             : await prepareCodexSecurityCredentialHome(
                 dependencies.environment,
               );
+        if (args.action === "status" && existsSync(credentialHome)) {
+          const ambientHome =
+            environmentValue(dependencies.environment, "CODEX_HOME") ??
+            join(homedir(), ".codex");
+          await initialCredentialsAvailable(
+            dependencies.environment,
+            ambientHome,
+            credentialHome,
+          );
+        }
         const authenticationEnvironment = {
           ...dependencies.environment,
           CODEX_HOME: credentialHome,
@@ -4311,7 +4350,7 @@ export async function main(
               `Effective scan authentication: API key from ${authentication.source}.\n`,
             );
             errorOutput.write(
-              "To use a ChatGPT sign-in, unset OPENAI_API_KEY and CODEX_API_KEY.\n",
+              `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
             );
           }
         } else if (exitCode === 0 && !options.withApiKey) {
@@ -4336,8 +4375,8 @@ export async function main(
               : "your ChatGPT sign-in";
             errorOutput.write(
               loginWarning +
-                `To use ${storedCredentials}, pass '--auth chatgpt' or run ` +
-                `'unset ${configuredApiKeyVariables.join(" ")}'.\n`,
+                `To use ${storedCredentials}, pass '--auth chatgpt' or ` +
+                `${formatEnvironmentVariableRemovalGuidance(configuredApiKeyVariables)}.\n`,
             );
           }
         }
@@ -4370,6 +4409,37 @@ export async function main(
           dependencies.prepareAuthenticationHome !== undefined
         ) {
           await setCodexSecurityCredentialLogout(credentialHome, true);
+        }
+      },
+    })
+    .command("serve", {
+      description:
+        "Start the findings HTTP service (HOST=127.0.0.1, PORT=3000). CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint (default: https://api.openai.com/v1/embeddings).",
+      destructive: true,
+      mcp: false,
+      options: z.object({
+        port: z
+          .number()
+          .int()
+          .min(0)
+          .max(65535)
+          .optional()
+          .describe(
+            "Listen port (default: PORT or 3000; 0 picks a free port).",
+          ),
+      }),
+      async run({ options }) {
+        try {
+          const { serveFindings } = await import("./server/serve.js");
+          await serveFindings(
+            options.port === undefined
+              ? dependencies.environment
+              : { ...dependencies.environment, PORT: String(options.port) },
+            output,
+          );
+        } catch (error) {
+          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          exitCode = 1;
         }
       },
     })
@@ -4624,6 +4694,7 @@ function scanArgumentsFromRecipe(
     maxCostUsd,
     dryRun: false,
     parentScanId,
+    ...(recipe["mock"] === true ? { mock: true } : {}),
     expectedPluginVersion:
       typeof recipe["pluginVersion"] === "string"
         ? recipe["pluginVersion"]
@@ -4652,6 +4723,7 @@ function validateCliArguments(
       "patch",
       "login",
       "logout",
+      "serve",
       "info",
     ].includes(value),
   );
@@ -4670,7 +4742,7 @@ function validateCliArguments(
   );
   if (
     structuredOutput &&
-    ["validate", "login", "logout"].includes(command) &&
+    ["validate", "login", "logout", "serve"].includes(command) &&
     !argv.includes("--schema")
   ) {
     return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
@@ -4783,7 +4855,7 @@ function validateCliArguments(
     command !== "verify-fix" &&
     command !== "patch" &&
     positionals.length >
-      (command === "logout" || command === "info"
+      (command === "logout" || command === "info" || command === "serve"
         ? 0
         : subcommand === "compare" || subcommand === "match"
           ? 2
@@ -4808,15 +4880,29 @@ async function matchAllScans(
 
   let matchedPairs = 0;
   let findingMatches = 0;
-  for (const { afterScanId, afterFindings, beforeScans } of batches) {
+  const newlyMatchedGroups: string[][] = [];
+  for (const {
+    afterScanId,
+    afterFindings,
+    beforeScans,
+    knownFindingGroups = [],
+  } of batches) {
     const before = beforeScans.flatMap(({ findings }) => findings);
-    const matching =
+    const knownGroups = unionFindingGroups([
+      ...knownFindingGroups,
+      ...newlyMatchedGroups,
+    ]);
+    const input: ScanComparisonInput = {
+      before,
+      after: afterFindings,
+      ...(knownGroups.length === 0 ? {} : { knownFindingGroups: knownGroups }),
+    };
+    const matching: ScanComparisonResult =
       before.length === 0 || afterFindings.length === 0
         ? { matches: [], uncertain: [] }
-        : await dependencies.matchFindings(
-            { before, after: afterFindings },
-            { allowHistoricalUncertainty: true },
-          );
+        : await dependencies.matchFindings(input, {
+            allowHistoricalUncertainty: true,
+          });
     const comparisons = beforeScans.map(({ scanId, findings }) => {
       const beforeIds = new Set(
         findings.map(({ occurrenceId }) => occurrenceId),
@@ -4832,6 +4918,9 @@ async function matchAllScans(
       const uncertain = matching.uncertain.filter(({ beforeOccurrenceId }) =>
         beforeIds.has(beforeOccurrenceId),
       );
+      const related = matching.related?.filter(({ beforeOccurrenceId }) =>
+        beforeIds.has(beforeOccurrenceId),
+      );
       const matchedAfter = new Set(
         matches.flatMap(({ afterOccurrenceIds }) => afterOccurrenceIds),
       );
@@ -4844,9 +4933,9 @@ async function matchAllScans(
           "Scan matching returned conflicting confirmed and uncertain findings.",
         );
       }
-      return { scanId, matches, uncertain };
+      return { scanId, matches, uncertain, related };
     });
-    for (const { scanId, matches, uncertain } of comparisons) {
+    for (const { scanId, matches, uncertain, related } of comparisons) {
       await dependencies.runWorkbench(
         [
           "save-scan-comparison",
@@ -4856,7 +4945,7 @@ async function matchAllScans(
           afterScanId,
           "--matches-json-stdin",
         ],
-        JSON.stringify({ matches, uncertain }),
+        JSON.stringify({ matches, uncertain, related }),
       );
       matchedPairs += 1;
       findingMatches += matches.reduce(
@@ -4865,6 +4954,7 @@ async function matchAllScans(
         0,
       );
     }
+    newlyMatchedGroups.push(...comparisonFindingGroups(input, matching));
   }
   return {
     repository,
@@ -6275,6 +6365,7 @@ async function executeScan(
   interactive = true,
 ): Promise<ScanOutcome> {
   let scanDir: string | null = null;
+  const scanInput = dependencies.scanInput ?? process.stdin;
   let requestedSignal: SignalName | null = null;
   let firstSignalAt = 0;
   let progress: Progress | null = null;
@@ -6284,6 +6375,7 @@ async function executeScan(
   let workerCapacity: { planned: number; started: number } | null = null;
   let fileProgress: ScanProgress | null = null;
   let runningCost: Readonly<ScanCost> | null = null;
+  let maxCostUsd = arguments_.maxCostUsd;
   let phase: string | null = null;
   const targetWarnings: string[] = [];
   const configuredLogLevel =
@@ -6406,7 +6498,7 @@ async function executeScan(
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
     const auth =
-      !arguments_.dryRun && interactive
+      !arguments_.dryRun && !arguments_.mock && interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
@@ -6428,11 +6520,9 @@ async function executeScan(
         )?.[provider],
       };
     }
-    selectedAuthentication = scanAuthentication(
-      dependencies.environment,
-      auth,
-      provider,
-    );
+    selectedAuthentication = arguments_.mock
+      ? null
+      : scanAuthentication(dependencies.environment, auth, provider);
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
@@ -6450,6 +6540,7 @@ async function executeScan(
               : "repository",
       requested_auth: auth ?? "auto",
       dry_run: arguments_.dryRun,
+      mock: arguments_.mock,
       profile:
         typeof selectedProfileName === "string"
           ? selectedProfileName
@@ -6476,7 +6567,7 @@ async function executeScan(
         clock: dependencies,
         color: dependencies.environment["NO_COLOR"] === undefined,
         sanitize: safeErrorMessage,
-        input: process.stdin,
+        input: scanInput,
         onInterrupt,
       });
     }
@@ -6524,7 +6615,13 @@ async function executeScan(
       }
     }
     security = dependencies.createSecurity(config);
+    if (arguments_.mock) {
+      errorOutput.write(
+        "codex-security: Mock scan: generating synthetic findings; no security analysis or LLM calls.\n",
+      );
+    }
     const options: ScanOptions = {
+      ...(arguments_.mock ? { mock: true } : {}),
       ...(arguments_.workflowId === undefined
         ? {}
         : { workflowId: arguments_.workflowId }),
@@ -6545,7 +6642,11 @@ async function executeScan(
       expectedPluginVersion: arguments_.expectedPluginVersion,
       failureSeverity: arguments_.failOnSeverity,
       maxCostUsd: arguments_.maxCostUsd,
-      onCost: (cost) => {
+      onCost: (cost, limit = maxCostUsd) => {
+        if (limit !== maxCostUsd && limit !== undefined) {
+          dashboard?.note(`Total cost limit increased to ${formatUsd(limit)}.`);
+        }
+        maxCostUsd = limit;
         diagnostic("cost.updated", {
           model: cost.model,
           estimated_usd: cost.estimatedUsd,
@@ -6553,15 +6654,15 @@ async function executeScan(
           cached_input_tokens: cost.cachedInputTokens,
           cache_write_input_tokens: cost.cacheWriteInputTokens,
           output_tokens: cost.outputTokens,
-          max_cost_usd: arguments_.maxCostUsd,
+          max_cost_usd: maxCostUsd,
         });
         runningCost = cost;
         if (dashboard !== null) {
-          dashboard.setCost(cost);
+          dashboard.setCost(cost, maxCostUsd);
           return;
         }
         progress?.stopTimer();
-        if (arguments_.maxCostUsd === undefined) {
+        if (maxCostUsd === undefined) {
           const tokens = formatTokenUsage({
             input_tokens: cost.inputTokens,
             cached_input_tokens: cost.cachedInputTokens,
@@ -6572,16 +6673,17 @@ async function executeScan(
           );
         } else {
           progress?.stage(
-            `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(arguments_.maxCostUsd)} limit`,
+            `Estimated cost: ${formatUsd(cost.estimatedUsd)} of ${formatUsd(maxCostUsd)} limit`,
           );
         }
-        if (
-          arguments_.maxCostUsd === undefined ||
-          cost.estimatedUsd <= arguments_.maxCostUsd
-        ) {
+        if (maxCostUsd === undefined || cost.estimatedUsd <= maxCostUsd) {
           progress?.startTimer(runningMessage());
         }
       },
+      onBudgetApproaching:
+        scanInput.isTTY === true
+          ? dashboard?.requestBudgetIncrease.bind(dashboard)
+          : undefined,
       onOutputArchived: (archiveDir) => {
         diagnostic("scan.output_archived", { archive_dir: archiveDir });
         if (dashboard !== null) {
@@ -6606,9 +6708,7 @@ async function executeScan(
           requested: auth ?? "auto",
           method: authentication.method,
           source:
-            authentication.method !== "stored_credentials"
-              ? authentication.source
-              : undefined,
+            "source" in authentication ? authentication.source : undefined,
           verified: authentication.verified,
         });
         if (dashboard !== null) {
@@ -6617,7 +6717,9 @@ async function executeScan(
               ? `Using API key from ${authentication.source}`
               : authentication.method === "aws_credentials"
                 ? `Using AWS credentials from ${authentication.source}`
-                : "Using stored Codex credentials",
+                : authentication.method === "command"
+                  ? "Using native Codex command authentication"
+                  : "Using stored Codex credentials",
           );
           return;
         }
@@ -6633,6 +6735,8 @@ async function executeScan(
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
           );
+        } else if (authentication.method === "command") {
+          progress?.stage("Authentication: native Codex command.");
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
         }
@@ -6691,7 +6795,7 @@ async function executeScan(
         }
       },
       onSessionEvent:
-        process.stdin.isTTY === true
+        scanInput.isTTY === true
           ? dashboard?.recordDetails.bind(dashboard)
           : undefined,
       onProgress: (update) => {
@@ -6857,7 +6961,7 @@ async function executeScan(
       reasoning_effort: effectivePreflight.reasoningEffort,
       method: effectivePreflight.authentication.method,
       source:
-        effectivePreflight.authentication.method !== "stored_credentials"
+        "source" in effectivePreflight.authentication
           ? effectivePreflight.authentication.source
           : undefined,
       verified: effectivePreflight.authentication.verified,
@@ -6887,7 +6991,7 @@ async function executeScan(
   if (arguments_.mode === "deep") {
     deepScanStop = (await readDeepScanStop(
       result,
-      arguments_.maxCostUsd,
+      maxCostUsd,
       dependencies.runWorkbench,
     ).catch(() => undefined)) ?? {
       reason: "Stop reason unavailable. See the report for details.",
@@ -6934,6 +7038,7 @@ async function executeScan(
     : undefined;
   let patchSelection: PatchSelection | null = null;
   if (
+    !arguments_.mock &&
     actionableFindings.length > 0 &&
     arguments_.patchSeverity === undefined &&
     progress?.interactive === true &&
@@ -7117,6 +7222,9 @@ function scanFailureMessage(
   }
   switch (classifyConnectionFailure(error)) {
     case "unauthorized":
+      if (authentication?.method === "command") {
+        return "Native Codex command authentication failed. Check the configured provider auth command.";
+      }
       if (authentication?.method === "aws_credentials") {
         return (
           `Authentication failed using AWS credentials from ${authentication.source}. ` +
@@ -7129,6 +7237,9 @@ function scanFailureMessage(
         : "Authentication failed using stored ChatGPT credentials. " +
             "Sign in again with 'codex-security login' or provide a valid API key.";
     case "forbidden":
+      if (authentication?.method === "command") {
+        return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
+      }
       if (authentication?.method === "aws_credentials") {
         return (
           `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +

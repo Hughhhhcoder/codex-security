@@ -160,6 +160,10 @@ def parse_args(description: str) -> argparse.Namespace:
     set_scan_thread.add_argument("--scan-id", required=True)
     set_scan_thread.add_argument("--thread-id", required=True)
 
+    set_scan_cost_limit = subparsers.add_parser("set-scan-cost-limit")
+    set_scan_cost_limit.add_argument("--scan-id", required=True)
+    set_scan_cost_limit.add_argument("--max-cost-usd", required=True, type=float)
+
     get_scan_recipe = subparsers.add_parser("get-scan-recipe")
     get_scan_recipe.add_argument("--scan-id", required=True)
 
@@ -169,7 +173,10 @@ def parse_args(description: str) -> argparse.Namespace:
     compare_scans.add_argument("--include-matching-inputs", action="store_true")
     compare_scans.add_argument("--require-matches", action="store_true")
 
-    save_scan_comparison = subparsers.add_parser("save-scan-comparison")
+    save_scan_comparison = subparsers.add_parser(
+        "save-scan-comparison",
+        description="Comparison payload supports related findings.",
+    )
     save_scan_comparison.add_argument("--before-scan-id", required=True)
     save_scan_comparison.add_argument("--after-scan-id", required=True)
     matches = save_scan_comparison.add_mutually_exclusive_group(required=True)
@@ -246,6 +253,12 @@ def parse_args(description: str) -> argparse.Namespace:
     preserve_scan.add_argument("--thread-id")
     preserve_scan.add_argument("--claim-token")
     preserve_scan.add_argument("--coordinator-generation", type=positive_int)
+
+    recovery_help = "Validate and republish retained checkpoints for a failed, non-canceled scan."
+    recover_scan = subparsers.add_parser(
+        "recover-scan-results", help=recovery_help, description=recovery_help
+    )
+    recover_scan.add_argument("--scan-id", required=True, help="ID of the stopped scan to recover.")
 
     write_scan_draft = subparsers.add_parser("write-scan-draft")
     write_scan_draft.add_argument("--scan-id", required=True)
