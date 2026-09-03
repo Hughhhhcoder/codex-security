@@ -1727,8 +1727,7 @@ export class CodexSecurity {
           signal.aborted &&
           (options.signal?.aborted === true ||
             this.#abortController.signal.aborted) &&
-          !(signal.reason instanceof ScanCostLimitExceededError) &&
-          !(failure instanceof ScanCostLimitExceededError);
+          isCancellationDerivedFailure(failure, signal);
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [
             canceled ? "cancel-scan" : "fail-scan",
@@ -3704,6 +3703,26 @@ function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
     ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
+}
+
+function isCancellationDerivedFailure(
+  failure: unknown,
+  signal: AbortSignal,
+): boolean {
+  let current = failure;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (current instanceof ScanCostLimitExceededError) return false;
+    if (current instanceof ScanInterruptedError) {
+      if (current.cause === undefined) return true;
+      current = current.cause;
+      continue;
+    }
+    return (
+      current === signal.reason ||
+      (isRecord(current) && current["name"] === "AbortError")
+    );
+  }
+  return false;
 }
 
 function definedEnvironment(
