@@ -4157,25 +4157,24 @@ function isCancellationDerivedFailure(
   signal: AbortSignal,
 ): boolean {
   let current = failure;
-  for (let depth = 0; depth < 8; depth += 1) {
+  const seen = new Set<ScanInterruptedError>();
+  while (current instanceof ScanInterruptedError) {
     if (current instanceof ScanCostLimitExceededError) return false;
-    if (current instanceof ScanInterruptedError) {
-      if (current.cause === undefined) return true;
-      current = current.cause;
-      continue;
-    }
-    if (
-      current instanceof CodexSecurityError &&
-      current.message === "CodexSecurity is closed."
-    ) {
-      return true;
-    }
-    return (
-      current === signal.reason ||
-      (isRecord(current) && current["name"] === "AbortError")
-    );
+    if (current.cause === undefined) return true;
+    if (seen.has(current)) return false;
+    seen.add(current);
+    current = current.cause;
   }
-  return false;
+  if (
+    current instanceof CodexSecurityError &&
+    current.message === "CodexSecurity is closed."
+  ) {
+    return true;
+  }
+  return (
+    current === signal.reason ||
+    (isRecord(current) && current["name"] === "AbortError")
+  );
 }
 
 function bundledCodexSdkEnvironment(

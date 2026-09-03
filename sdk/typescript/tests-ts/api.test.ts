@@ -3049,7 +3049,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("records a caller-canceled scan as canceled instead of failed", async () => {
+  test("records deeply nested caller cancellation as canceled instead of failed", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3060,6 +3060,14 @@ describe("CodexSecurity orchestration", () => {
     const commands: Array<readonly string[]> = [];
     const started = Promise.withResolvers<void>();
     const controller = new AbortController();
+    let cancellationReason: unknown = new DOMException("aborted", "AbortError");
+    for (let depth = 0; depth < 10; depth += 1) {
+      cancellationReason = new ScanInterruptedError(
+        "nested cancellation",
+        scanDir,
+        { cause: cancellationReason },
+      );
+    }
 
     const client = new TestClient(
       {},
@@ -3104,7 +3112,7 @@ describe("CodexSecurity orchestration", () => {
                       once: true,
                     });
                 });
-                throw new DOMException("aborted", "AbortError");
+                throw cancellationReason;
               }
               return { events: events() };
             },
@@ -3115,7 +3123,7 @@ describe("CodexSecurity orchestration", () => {
 
     const pending = client.run(repository, { signal: controller.signal });
     await started.promise;
-    controller.abort("caller canceled");
+    controller.abort(cancellationReason);
     await expect(pending).rejects.toBeInstanceOf(ScanInterruptedError);
     expect(commands.map(([command]) => command)).toEqual([
       "register-cli-scan",
