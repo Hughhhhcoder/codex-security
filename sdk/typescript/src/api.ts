@@ -4158,6 +4158,12 @@ function isCancellationDerivedFailure(
       current = current.cause;
       continue;
     }
+    if (
+      current instanceof CodexSecurityError &&
+      current.message === "CodexSecurity is closed."
+    ) {
+      return true;
+    }
     return (
       current === signal.reason ||
       (isRecord(current) && current["name"] === "AbortError")

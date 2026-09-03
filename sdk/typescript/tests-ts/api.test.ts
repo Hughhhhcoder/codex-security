@@ -3262,6 +3262,71 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("records a client-close cancellation as canceled instead of failed", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: Array<readonly string[]> = [];
+    const feedbackStarted = Promise.withResolvers<void>();
+    const releaseFeedback = Promise.withResolvers<void>();
+    let client: TestClient;
+
+    client = new TestClient(
+      {},
+      {
+        environment: {},
+        prepareRuntime: async () => preparedRuntime(codexHome),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          commands.push(args);
+          if (args[0] === "register-cli-scan") {
+            return mockScanRegistration(args, input);
+          }
+          if (args[0] === "get-scan-feedback") {
+            feedbackStarted.resolve();
+            await releaseFeedback.promise;
+            return {
+              scanId: "scan_example_001",
+              targetId: "target_sha256_example",
+              falsePositives: [],
+            };
+          }
+          return {};
+        },
+        createCodex: () => {
+          throw new Error("Codex must not start after client close");
+        },
+      },
+    );
+
+    const pending = client.run(repository);
+    await feedbackStarted.promise;
+    const closing = client.close();
+    releaseFeedback.resolve();
+    await expect(pending).rejects.toThrow("CodexSecurity is closed.");
+    await closing;
+    expect(commands.map(([command]) => command)).toEqual([
+      "register-cli-scan",
+      "get-scan-feedback",
+      "cancel-scan",
+    ]);
+    expect(commands.at(-1)).toEqual([
+      "cancel-scan",
+      "--scan-id",
+      "scan_example_001",
+    ]);
+  });
+
   test("reports a Deep Scan terminal failure instead of a completion-state error", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
