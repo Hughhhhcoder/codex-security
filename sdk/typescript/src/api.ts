@@ -2707,12 +2707,18 @@ export class CodexSecurity {
       return result;
     } catch (error) {
       if (activeScan !== undefined) {
+        const canceled =
+          signal.aborted &&
+          (options.signal?.aborted === true ||
+            this.#abortController.signal.aborted) &&
+          isCancellationDerivedFailure(error, signal);
         await workbench({ ...activeScan.options, signal: undefined }, [
-          "fail-scan",
+          canceled ? "cancel-scan" : "fail-scan",
           "--scan-id",
           activeScan.id,
-          "--message",
-          safeErrorMessage(error).slice(0, 2400),
+          ...(canceled
+            ? []
+            : ["--message", safeErrorMessage(error).slice(0, 2400)]),
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();
