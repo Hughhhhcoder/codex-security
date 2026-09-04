@@ -440,7 +440,7 @@ def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
     if scan["target_snapshot_digest"] is None:
         return ["git_worktree", "git_revision"]
     if scan["target_snapshot_digest"] == clean_worktree_content_digest():
-        return ["git_revision"]
+        return ["git_revision", "git_worktree"]
     return ["git_worktree"]
 
 

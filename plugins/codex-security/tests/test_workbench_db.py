@@ -4097,7 +4097,10 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     saved = create_saved_git_workspace(state_dir, target)
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
-    assert started["results"]["contract"]["target"]["allowedKinds"] == ["git_revision"]
+    assert started["results"]["contract"]["target"]["allowedKinds"] == [
+        "git_revision",
+        "git_worktree",
+    ]
     assert "requiredSnapshotDigest" not in started["results"]["contract"]["target"]
     write_completed_contract(
         Path(str(started["results"]["scanDir"])),
