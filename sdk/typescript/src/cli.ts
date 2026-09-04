@@ -125,7 +125,10 @@ import {
 import type { Finding, SeverityLevel } from "./models.js";
 import { runMultiscan } from "./multiscan.js";
 import { componentPlanSchema, planComponents } from "./component-plan.js";
-import { runComponentScans } from "./component-scan.js";
+import {
+  runComponentScans,
+  type ComponentScanEvent,
+} from "./component-scan.js";
 import {
   checkScanPublication,
   forceTerminatePublicationProcesses as terminatePublishers,
@@ -3466,6 +3469,7 @@ export async function main(
       async run({ args, options }) {
         const controller = new AbortController();
         let dashboard: ScanDashboard | null = null;
+        const componentNames = new Map<string, string>();
         const stopDashboard = (): void => {
           try {
             dashboard?.stop();
@@ -3560,10 +3564,20 @@ export async function main(
             createSecurity: dependencies.createSecurity,
             planComponents: dependencies.planComponents,
             matchFindings: dependencies.matchFindings,
-            onPlan: (components) => dashboard?.setComponents(components),
+            onPlan: (components) => {
+              for (const component of components)
+                componentNames.set(component.id, component.name);
+              dashboard?.setComponents(components);
+            },
             onScanEvent:
               dashboard === null
-                ? undefined
+                ? (event) => {
+                    const componentName =
+                      componentNames.get(event.componentId) ??
+                      event.componentId;
+                    const line = componentScanEventLine(componentName, event);
+                    if (line !== null) errorOutput.write(line);
+                  }
                 : (event) => dashboard?.recordComponentEvent(event),
             onDeduplicationStarted: () => {
               if (dashboard !== null)
@@ -7584,6 +7598,24 @@ function formatTokenUsage(usage: unknown): string | null {
       .filter((value): value is string => value !== null)
       .join(", ") || null
   );
+}
+
+function componentScanEventLine(
+  componentName: string,
+  event: ComponentScanEvent,
+): string | null {
+  if (event.type === "progress") {
+    const progress = event.value;
+    return `codex-security: ${componentName} ${scanPhase(progress.phase)} | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}\n`;
+  }
+  if (event.type !== "cost") return null;
+  const cost = event.value;
+  const tokens = formatTokenUsage({
+    input_tokens: cost.inputTokens,
+    cached_input_tokens: cost.cachedInputTokens,
+    output_tokens: cost.outputTokens,
+  });
+  return `codex-security: ${componentName} | ${tokens === null ? "" : `Tokens: ${tokens} | `}Cost: ${formatUsd(cost.estimatedUsd)}\n`;
 }
 
 function protectedRootErrorMessage(
