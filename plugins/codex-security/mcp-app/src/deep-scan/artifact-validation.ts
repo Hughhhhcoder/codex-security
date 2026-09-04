@@ -1,8 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
 import {
   parsePersistedScanDraft,
+  parseScanDraft,
   preserveFindingDetails,
-  preserveScanCoverage,
   saveScanDraftCheckpoint,
   scanFindingIdentity,
   type ScanDraftInput,
@@ -10,13 +10,39 @@ import {
 import { readJsonObject, requireRegularFile, writeJsonAtomic } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
+export type DeepReductionInput = Omit<ScanDraftInput, "coverage">;
+
 export interface DeepReductionSources {
-  discoveries: { workerId: string; result: ScanDraftInput }[];
-  previous: ScanDraftInput | null;
+  discoveries: { workerId: string; result: DeepReductionInput }[];
+  previous: DeepReductionInput | null;
 }
 
 export interface ReducerArtifactValidation {
   newFindings: number;
+  result: DeepReductionInput;
+}
+
+/**
+ * Check reducer findings with the Standard scan validator.
+ * It requires coverage, so add an empty value and remove it after validation.
+ */
+export function parseDeepReduction(
+  input: Record<string, unknown>,
+  persisted = false,
+): DeepReductionInput {
+  const standard = {
+    ...input,
+    coverage: {
+      completeness: "complete",
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  };
+  const { coverage: _coverage, ...parsed } = persisted
+    ? parsePersistedScanDraft(standard)
+    : parseScanDraft(standard as unknown as ScanDraftInput);
+  return parsed;
 }
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
@@ -29,7 +55,8 @@ export async function validateDiscoveryArtifacts(
   const result = parseStoredScanDraft(
     await readJsonObject(resultPath),
     "Standard scan worker",
-    expectedScanId
+    expectedScanId,
+    parsePersistedScanDraft
   );
   if (result.complete === false) throw new Error("Standard scan worker wrote only a checkpoint; its audit is not complete.");
   return result;
@@ -56,7 +83,8 @@ export async function validateReducerArtifacts(input: {
   let result = parseStoredScanDraft(
     await readJsonObject(resultPath),
     reducerId,
-    expectedScanId
+    expectedScanId,
+    (value) => parseDeepReduction(value, true)
   );
   if (result.complete === false) throw new Error("Deep reduction wrote only a checkpoint; its audit is not complete.");
 
@@ -66,7 +94,8 @@ export async function validateReducerArtifacts(input: {
     previous = parseStoredScanDraft(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
-      result.scanId
+      result.scanId,
+      (value) => parseDeepReduction(value, true)
     );
   }
 
@@ -79,16 +108,17 @@ export async function validateReducerArtifacts(input: {
   }
   const retainedFindings = previousFindingAssignments(result, previous);
   return {
-    newFindings: result.findings.filter((finding) => !retainedFindings.has(finding)).length
+    result,
+    newFindings: result.findings.filter((finding) => !retainedFindings.has(finding)).length,
   };
 }
 
 /** Reconcile a reducer output against the immutable inputs captured before dispatch. */
 export function reconcileDeepReduction(
-  input: ScanDraftInput,
+  input: DeepReductionInput,
   discoveries: DeepReductionSources["discoveries"],
-  previous: ScanDraftInput | null,
-): ScanDraftInput {
+  previous: DeepReductionInput | null,
+): DeepReductionInput {
   const result = structuredClone(input);
   if (result.complete === false) throw new Error("Deep reduction is only a checkpoint, not a complete result.");
   for (const source of [...discoveries.map((discovery) => discovery.result), ...(previous ? [previous] : [])]) {
@@ -103,10 +133,6 @@ export function reconcileDeepReduction(
     }
   }
   retainSourceFindings(result, { discoveries, previous });
-  result.coverage = preserveScanCoverage(result.coverage, [
-    ...discoveries.map((discovery) => discovery.result.coverage),
-    ...(previous ? [previous.coverage] : []),
-  ]);
   if (result.threatModel === undefined) {
     const sourceModels = [
       ...discoveries.map((discovery) => discovery.result.threatModel),
@@ -154,7 +180,7 @@ function findingSourceIds(finding: Record<string, unknown>): string[] {
 }
 
 function retainSourceFindings(
-  result: ScanDraftInput,
+  result: DeepReductionInput,
   inputs: DeepReductionSources,
   requireComplete = true,
 ): void {
@@ -205,9 +231,9 @@ function retainSourceFindings(
 }
 
 function validateReductionHasFindings(
-  result: ScanDraftInput,
-  sources: ScanDraftInput[],
-  previous?: ScanDraftInput
+  result: DeepReductionInput,
+  sources: DeepReductionInput[],
+  previous?: DeepReductionInput
 ): void {
   if (
     result.findings.length === 0
@@ -219,10 +245,10 @@ function validateReductionHasFindings(
 }
 
 function previousFindingAssignments(
-  result: ScanDraftInput,
-  previous?: ScanDraftInput | null,
-): Map<ScanDraftInput["findings"][number], ScanDraftInput["findings"]> {
-  const assignments = new Map<ScanDraftInput["findings"][number], ScanDraftInput["findings"]>();
+  result: DeepReductionInput,
+  previous?: DeepReductionInput | null,
+): Map<DeepReductionInput["findings"][number], DeepReductionInput["findings"]> {
+  const assignments = new Map<DeepReductionInput["findings"][number], DeepReductionInput["findings"]>();
   for (const finding of previous?.findings ?? []) {
     const previousRefs = findingSourceIds(finding);
     const matches = previousRefs.length > 0
@@ -248,22 +274,23 @@ function previousFindingAssignments(
 
 /** Preserve previous source lineage (or legacy identity) and never discard every finding. */
 export function validateRetainedFindings(
-  result: ScanDraftInput,
-  sources: ScanDraftInput[],
-  previous?: ScanDraftInput
+  result: DeepReductionInput,
+  sources: DeepReductionInput[],
+  previous?: DeepReductionInput
 ): void {
   validateReductionHasFindings(result, sources, previous);
   previousFindingAssignments(result, previous);
 }
 
-function parseStoredScanDraft(
+function parseStoredScanDraft<Result extends DeepReductionInput>(
   value: Record<string, unknown>,
   label: string,
-  expectedScanId?: string
-): ScanDraftInput {
-  let parsed: ScanDraftInput;
+  expectedScanId: string | undefined,
+  parse: (input: Record<string, unknown>) => Result
+): Result {
+  let parsed: Result;
   try {
-    parsed = parsePersistedScanDraft(value);
+    parsed = parse(value);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(label + " returned an invalid Standard scan result: " + detail, {
