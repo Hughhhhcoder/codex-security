@@ -3212,7 +3212,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("records an ordinary failure as failed when cancellation races with it", async () => {
+  test("records an ordinary failure as failed when cancellation follows it", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -3241,8 +3241,10 @@ describe("CodexSecurity orchestration", () => {
             return mockScanRegistration(args, input);
           }
           if (args[0] === "get-scan-feedback") {
-            controller.abort("caller canceled");
-            throw new Error("underlying scan failure");
+            const failure = new Error("underlying scan failure");
+            return await Promise.reject<never>(failure).finally(() => {
+              controller.abort("caller canceled");
+            });
           }
           return {};
         },
