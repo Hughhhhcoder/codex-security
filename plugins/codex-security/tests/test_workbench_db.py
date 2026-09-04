@@ -4101,7 +4101,12 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
         "git_revision",
         "git_worktree",
     ]
-    assert "requiredSnapshotDigest" not in started["results"]["contract"]["target"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        (snapshot_digest,) = connection.execute(
+            "SELECT target_snapshot_digest FROM scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+    assert started["results"]["contract"]["target"]["requiredSnapshotDigest"] == snapshot_digest
     write_completed_contract(
         Path(str(started["results"]["scanDir"])),
         scan_id,
