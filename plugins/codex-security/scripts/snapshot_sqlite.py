@@ -15,6 +15,8 @@ def main() -> None:
     args = parser.parse_args()
     source = args.source.expanduser().resolve(strict=True)
     destination = args.destination.expanduser().absolute()
+    if destination.exists() and source.samefile(destination):
+        parser.error("source and destination must refer to different files")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True) as source_connection:
         with sqlite3.connect(destination) as destination_connection:
