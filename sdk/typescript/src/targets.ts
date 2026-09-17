@@ -16,6 +16,9 @@ import { InvalidTargetError } from "./errors.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { windowsUnsafePathComponent } from "./windows-path.js";
 
+import type { ScanMode } from "./scan-modes.js";
+export type { ScanMode } from "./scan-modes.js";
+
 const execFile = promisify(execFileCallback);
 const UNSUPPORTED_GIT_ENVIRONMENT = new Set([
   "GIT_DIR",
@@ -38,7 +41,6 @@ const GIT_REPOSITORY_ENVIRONMENT = new Set([
   "GIT_SHALLOW_FILE",
 ]);
 
-export type ScanMode = "standard" | "deep";
 export type DiffTargetKind = "refs" | "working_tree";
 
 export interface DiffTargetOptions {
@@ -101,10 +103,7 @@ export class DiffTarget {
 
 export type ScanTarget = "repository" | DiffTarget | readonly string[];
 export type NormalizedTargetKind =
-  | "repository"
-  | "paths"
-  | "refs"
-  | "working_tree";
+  "repository" | "paths" | "refs" | "working_tree";
 
 export interface NormalizedTarget {
   kind: NormalizedTargetKind;
@@ -276,12 +275,13 @@ export async function isGitMetadataDirectory(
   }
   if (!head.isFile() && !head.isSymbolicLink()) return false;
   try {
-    // This resolver validates Git directories without loading their configuration.
+    // Resolve from outside the candidate so Git does not load its configuration.
     const directory = await gitOutput(
       repository,
       ["rev-parse", "--resolve-git-dir", repository],
       signal,
       { LC_ALL: "C" },
+      dirname(repository),
     );
     return (
       relative(await realpath(directory), await realpath(repository)) === ""
@@ -320,7 +320,7 @@ function gitAlternatePaths(contents: Buffer): string[] {
   const text = contents.toString("latin1").split("\0", 1)[0]!;
   const paths: string[] = [];
   const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  for (let offset = 0; offset < text.length; ) {
+  for (let offset = 0; offset < text.length;) {
     const newline = text.indexOf("\n", offset);
     let end = newline === -1 ? text.length : newline;
     let path = text.slice(offset, end);
@@ -725,6 +725,7 @@ async function gitOutput(
   args: readonly string[],
   signal?: AbortSignal,
   environment: NodeJS.ProcessEnv = {},
+  workingDirectory = repository,
 ): Promise<string> {
   throwIfAborted(signal);
   const command = await resolveTrustedExecutable(
@@ -737,7 +738,7 @@ async function gitOutput(
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
-    ["-c", "core.fsmonitor=false", "-C", repository, ...args],
+    ["-c", "core.fsmonitor=false", "-C", workingDirectory, ...args],
     {
       encoding: "utf8",
       signal,

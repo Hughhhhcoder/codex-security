@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join, normalize } from "node:path";
+import { delimiter, join, normalize, resolve } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -160,6 +160,7 @@ describe("CLI", () => {
           maxTimeHours: { type: "number", maximum: 96 },
           model: { type: "string" },
           verbose: { type: "boolean" },
+          showCost: { type: "boolean", default: false },
           effort: {
             enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
           },
@@ -774,6 +775,8 @@ describe("CLI", () => {
 
   test("runs a bulk scan and keeps structured output on stdout", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-cli-multiscan-"));
+    const architecturePath = resolve(root, "/shared/architecture.pdf");
+    const threatModelsPath = resolve(root, "/shared/threat-models");
     try {
       await multiscanInventory(root);
       const stdout = capture();
@@ -794,8 +797,8 @@ describe("CLI", () => {
             "--effort",
             "high",
             "--knowledge-base",
-            "/shared/architecture.pdf",
-            "--knowledge-base=/shared/threat-models",
+            architecturePath,
+            `--knowledge-base=${threatModelsPath}`,
             "--codex",
             "features.goals=true",
             "--json",
@@ -825,10 +828,7 @@ describe("CLI", () => {
       });
       expect(scanOptions).toMatchObject({
         mode: "deep",
-        knowledgeBasePaths: [
-          "/shared/architecture.pdf",
-          "/shared/threat-models",
-        ],
+        knowledgeBasePaths: [architecturePath, threatModelsPath],
       });
       expect(stderr.text()).toContain("sample started (attempt 1)");
       expect(stderr.text()).toContain("sample completed (attempt 1)");
@@ -850,12 +850,12 @@ describe("CLI", () => {
       process.env["HOME"] = home;
       process.env["USERPROFILE"] = home;
 
-      expect(resolveCliPath(currentDirectory, "~/repositories.csv")).toBe(
-        join(home, "repositories.csv"),
-      );
-      expect(resolveCliPath(currentDirectory, "~person/repositories.csv")).toBe(
-        join(currentDirectory, "~person", "repositories.csv"),
-      );
+      expect<string>(
+        resolveCliPath(currentDirectory, "~/repositories.csv"),
+      ).toBe(join(home, "repositories.csv"));
+      expect<string>(
+        resolveCliPath(currentDirectory, "~person/repositories.csv"),
+      ).toBe(join(currentDirectory, "~person", "repositories.csv"));
 
       const stdout = capture();
       expect(
@@ -2014,8 +2014,10 @@ describe("CLI", () => {
         "Scan phase: reviewing files (2 workers).",
       );
       expect(stderr.text()).toContain(
-        "Running scan: reviewing files | Workers: 2/2 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488",
+        "Running scan: reviewing files | Workers: 2/2 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
       );
+      expect(stderr.text()).not.toContain("Cost:");
+      expect(stderr.text()).not.toContain("COST");
       expect(stderr.text()).not.toContain("CODEX SECURITY");
       expect(stderr.text()).not.toContain("\u001B");
       expect(stderr.text()).not.toContain("\r");
@@ -2273,7 +2275,7 @@ describe("CLI", () => {
     expect(text).not.toContain("0 / 1,258 reviewed");
     expect(text).toContain("worker 1 · read routes/login.ts");
     expect(text).toContain("TOKENS");
-    expect(text).toContain("COST");
+    expect(text).not.toContain("COST");
     expect(text).toContain("TIME");
   });
 
@@ -2381,6 +2383,7 @@ describe("CLI", () => {
     expect(help.text()).toContain("--verbose");
     expect(help.text()).toContain("--path <array>");
     expect(help.text()).toContain("--max-cost <number>");
+    expect(help.text()).toContain("--show-cost");
     expect(help.text()).toContain("--workers <number>");
     expect(help.text()).toContain("--subagents <number>");
     expect(help.text()).toContain("--stop-after-no-new <number>");
@@ -2626,7 +2629,10 @@ describe("CLI", () => {
     ).toBe(0);
     expect(pathOptions).toMatchObject({
       target: ["src", "--fixtures"],
-      knowledgeBasePaths: ["/shared/architecture.pdf", "/shared/threat-models"],
+      knowledgeBasePaths: [
+        resolve("/shared/architecture.pdf"),
+        resolve("/shared/threat-models"),
+      ],
       workers: 2,
       subagents: 0,
       stopAfterNoNew: 3,
@@ -2761,37 +2767,34 @@ describe("CLI", () => {
       [["scan", ".", "--base", "HEAD"], "--base requires --working-tree"],
       [["scan", ".", "--archive-existing"], "requires --output-dir"],
       [["scan", ".", "--max-cost=0"], "expected number to be >0"],
-      [
-        ["scan", ".", "--workers", "2"],
-        "Deep scan settings require --mode deep",
-      ],
+      [["scan", ".", "--workers", "2"], "Deep scan settings require deep mode"],
       [
         ["scan", ".", "--max-time-hours", "1.5"],
-        "Deep scan settings require --mode deep",
+        "Deep scan settings require deep mode",
       ],
       [
         ["scan", ".", "--mode", "deep", "--workers", "0"],
-        "expected number to be >0",
+        "must be a positive integer",
       ],
       [
         ["scan", ".", "--mode", "deep", "--subagents", "-1"],
-        "expected number to be >=0",
+        "must be a non-negative integer",
       ],
       [
         ["scan", ".", "--mode", "deep", "--stop-after-no-new", "0"],
-        "expected number to be >0",
+        "must be a positive integer",
       ],
       [
         ["scan", ".", "--mode", "deep", "--max-discovery-runs", "0"],
-        "expected number to be >0",
+        "must be a positive integer",
       ],
       [
         ["scan", ".", "--mode", "deep", "--max-time-hours", "0"],
-        "expected number to be >0",
+        "must be a positive number no greater than 96",
       ],
       [
         ["scan", ".", "--mode", "deep", "--max-time-hours", "96.5"],
-        "expected number to be <=96",
+        "must be a positive number no greater than 96",
       ],
       [["scan", ".", "--path="], "--path must not be empty"],
       [
@@ -4346,7 +4349,6 @@ describe("CLI", () => {
         "  COVERAGE  complete",
         "  ELAPSED   6m 37s",
         "  TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
-        "  COST      $0.00488 (standard, short context)",
         "  RESULTS   /tmp/scan",
       ].join("\n"),
     );
@@ -4771,7 +4773,7 @@ describe("CLI", () => {
     expect(stderr.text()).not.toContain("synthetic-parent");
   });
 
-  test("shows live stage, files, workers, tokens, and cost without a budget", async () => {
+  test("shows live stage, files, workers, tokens, and opt-in cost without a budget", async () => {
     const stdout = capture();
     const stderr = capture();
     const result = fakeResult([], "complete", {
@@ -4782,7 +4784,7 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json"],
+        ["scan", ".", "--show-cost", "--json"],
         stdout.stream,
         stderr.stream,
         dependencies({
@@ -4800,12 +4802,12 @@ describe("CLI", () => {
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain(
-      "Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total. Estimated cost: $0.00488 USD.",
+      "Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total. Estimated cost: $0.00488–$0.01156 (standard, context unknown, cache writes unknown).",
     );
     expect(stderr.text()).toContain("Scan phase: reviewing files (0/8 files).");
     expect(stderr.text()).toContain("Scan phase: reviewing files (3/8 files).");
     expect(stderr.text()).toContain(
-      "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488",
+      "Running scan: reviewing files | Workers: 4/6 | Files: 3/8 | Tokens: unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total | Cost: $0.00488–$0.01156",
     );
   });
 
@@ -4858,7 +4860,7 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json"],
+        ["scan", ".", "--show-cost", "--json"],
         stdout.stream,
         stderr.stream,
         dependencies({
@@ -4878,7 +4880,9 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
     );
-    expect(stderr.text()).toContain("COST      $0.00488");
+    expect(stderr.text()).toContain(
+      "COST      $0.00488–$0.01156 (standard, context unknown, cache writes unknown)",
+    );
     expect(stderr.text()).toContain(`REPORT    ${result.reportPath}`);
     expect(stderr.text()).toContain("RESULTS   /tmp/scan");
     expect(stderr.text()).not.toContain("Next:");
@@ -4921,7 +4925,7 @@ describe("CLI", () => {
     },
   );
 
-  test("reports the running cost against the scan budget", async () => {
+  test("reports a cost range while preserving the short-context scan budget", async () => {
     const stdout = capture();
     const stderr = capture();
     const result = fakeResult([], "complete", {
@@ -4932,14 +4936,20 @@ describe("CLI", () => {
 
     expect(
       await main(
-        ["scan", ".", "--json", "--max-cost", "0.01"],
+        ["scan", ".", "--verbose", "--json", "--max-cost", "0.01"],
         stdout.stream,
         stderr.stream,
         dependencies({ result, costUpdates: [result.cost!] }),
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-    expect(stderr.text()).toContain("Estimated cost: $0.00488 of $0.01 limit");
+    expect(stderr.text()).toContain("Estimated cost: $0.00488–$0.01156");
+    expect(stderr.text()).toContain(
+      "short-context budget baseline: $0.00488 of $0.01 limit",
+    );
+    expect(stderr.text()).toContain(
+      'estimated_usd=0.00488 cost_estimate="$0.00488–$0.01156 (standard, context unknown, cache writes unknown)"',
+    );
   });
 
   test("includes cache-write tokens in verbose cost diagnostics", async () => {
@@ -4964,6 +4974,8 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
     expect(stderr.text()).toContain("codex-security: debug: cost.updated");
     expect(stderr.text()).toContain("cache_write_input_tokens=200");
+    expect(stderr.text()).not.toContain("estimated_usd=");
+    expect(stderr.text()).not.toContain("cost_estimate=");
   });
 
   test("reports and classifies a scan stopped when its live cost exceeds the limit", async () => {
@@ -4994,7 +5006,7 @@ describe("CLI", () => {
       message: expect.stringContaining("Scan stopped: estimated cost"),
     });
     expect(stderr.text()).toContain(
-      "Scan stopped: estimated cost $0.00488 exceeded the $0.004 limit; partial output remains at /tmp/scan.",
+      "Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at /tmp/scan.",
     );
     expect(stderr.text()).toMatch(
       /scan\.configuration[^\n]*max_cost_usd=0\.004/u,
@@ -5209,7 +5221,7 @@ describe("CLI", () => {
         dependencies({
           onTurn: (_repository, options) => {
             expect(options).toMatchObject({
-              outputDir: "/tmp/results",
+              outputDir: resolve("/tmp/results"),
               archiveExisting: true,
             });
             (

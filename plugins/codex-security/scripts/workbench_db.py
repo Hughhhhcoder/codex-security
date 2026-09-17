@@ -60,6 +60,7 @@ from finalize_scan_contract import (
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
+from workbench.storage import resolve_scan_root, state_dir
 from workbench_cli import parse_args
 from workbench_constants import (
     ARTIFACTS,
@@ -149,7 +150,6 @@ from workbench_validation import (
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
-SCAN_RECIPE_MAX_BYTES = 256 * 1024
 
 
 def now() -> str:
@@ -160,14 +160,6 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
     return (
         (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
     )
-
-
-def state_dir() -> Path:
-    state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
-    if state_dir:
-        return Path(state_dir).expanduser().resolve()
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return (codex_home / "state" / "plugins" / "codex-security").resolve()
 
 
 def database_path() -> Path:
@@ -809,7 +801,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
 
 
 def scan_target_root(scan_root: str | None, target: Path) -> Path:
-    root = Path(scan_root).expanduser().resolve() if scan_root else state_dir() / "scans"
+    root = resolve_scan_root(scan_root)
     target_root = (root / safe_segment(target.name)).resolve()
     if target_root == target or target in target_root.parents:
         raise SystemExit("The scan artifact directory must be outside the selected target.")
@@ -1820,8 +1812,6 @@ def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace
 
 
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
-    if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
-        raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
     try:
         recipe = json.loads(value, parse_constant=reject_non_finite_json)
     except (TypeError, UnicodeError, ValueError) as exc:
@@ -2496,7 +2486,7 @@ def require_reviewed_patch_applied(
             checkout = checkout_root
             copy_directory_excluding(target, checkout, excluded)
         else:
-            checkout = copy_git_worktree_files(target, checkout_root, excluded)
+            copy_git_worktree_files(target, checkout_root, excluded)
         arguments = ["apply", "--reverse", "--whitespace=nowarn"]
         if unversioned:
             arguments.append("--no-index")
@@ -2849,6 +2839,8 @@ def scan_result(
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
+        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
+        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
         "failureMessage": scan["failure_message"],
         "findings": [
             finding_result(connection, scan, row, related=relations.get(row["id"], []))
@@ -3432,6 +3424,9 @@ def main() -> None:
             preserve_stopped_results=preserve_stopped_results_after_transition,
         )
     )
+    if args.command == "resolve-scan-root":
+        print(json.dumps({"scanRoot": str(resolve_scan_root(args.scan_root))}))
+        return
     if args.command == "inspect-target":
         result = inspect_target(args.target_path)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
@@ -3439,6 +3434,9 @@ def main() -> None:
     if args.command == "inspect-setup":
         result = inspect_setup(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
+    if args.command in {"save-artifact", "read-artifact"}:
+        print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
     if args.command == "read-severity-classification":
         result = severity.read_classification(database_path(), args.scan_id)
@@ -3567,6 +3565,8 @@ def main() -> None:
             result = recover_scan_results(connection, args)
         elif args.command == "write-scan-draft":
             result = write_scan_draft(connection, args)
+        elif args.command == "save-scan-artifact":
+            result = saved_results.save_scan_artifact(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "mark-handoff-delivered":
             result = handoff.mark_handoff_delivered(
                 connection,

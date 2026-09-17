@@ -28,8 +28,15 @@ import {
   ScanCostLimitExceededError,
 } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
+import { resolveScanPrompts } from "./prompt-files.js";
 import { requireSecureOutputAncestry, validateOutputDir } from "./runtime.js";
-import type { ScanMode } from "./targets.js";
+import { DiffTarget, type ScanMode } from "./targets.js";
+import {
+  meetsSeverity,
+  type ScanPromptSettings,
+  type ScanSettings,
+} from "./scan-settings.js";
+import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
@@ -62,9 +69,10 @@ interface MultiscanReceipt extends MultiscanTask {
   cost?: ScanCost;
   error?: string;
   warning?: string;
+  policyFailed?: boolean;
 }
 
-export interface MultiscanOptions {
+export interface MultiscanOptions extends ScanPromptSettings {
   inputPath: string;
   outputDir: string;
   githubHost?: string;
@@ -74,11 +82,13 @@ export interface MultiscanOptions {
   maxAttempts: number;
   recoverScan?(
     scanDir: string,
-  ): Promise<Pick<ScanResult, "coverage" | "cost"> | undefined>;
+    prompts: ScanPromptSettings,
+  ): Promise<Pick<ScanResult, "coverage" | "cost" | "findings"> | undefined>;
   maxCostUsd?: number;
-  scanPrompt?: string;
-  validationPrompt?: string;
-  postScanPrompt?: string;
+  // Prompts are shared across modes and prepared from the top-level options.
+  scanOptionsByMode?: Partial<
+    Record<ScanMode, Omit<ScanSettings, keyof ScanPromptSettings>>
+  >;
   config: CodexSecurityConfig;
   createSecurity(
     config: CodexSecurityConfig,
@@ -87,10 +97,7 @@ export interface MultiscanOptions {
   onProgress?(event: {
     repository: string;
     status:
-      | "started"
-      | "completed"
-      | "completed_with_incomplete_coverage"
-      | "failed";
+      "started" | "completed" | "completed_with_incomplete_coverage" | "failed";
     attempt: number;
     error?: string;
     warning?: string;
@@ -104,6 +111,7 @@ export interface MultiscanResult {
   failed: number;
   skipped: number;
   resultsPath: string;
+  policyFailed?: boolean;
 }
 
 export async function runMultiscan(
@@ -122,7 +130,53 @@ export async function runMultiscan(
     options.mode,
   );
   if (
-    options.validationPrompt !== undefined &&
+    tasks.some(
+      (task) =>
+        task.scope === undefined &&
+        options.scanOptionsByMode?.[task.mode]?.target instanceof DiffTarget,
+    )
+  ) {
+    throw new Error(
+      "Bulk scans do not support diff or working-tree scopes because their checkouts are clean, shallow snapshots. Use repository or path scopes instead.",
+    );
+  }
+  const repositories: string[] = [];
+  if (
+    [
+      [options.scanPrompt, options.scanPromptFile],
+      [options.validationPrompt, options.validationPromptFile],
+      [options.postScanPrompt, options.postScanPromptFile],
+    ].some(([inline, file]) => inline === undefined && file !== undefined)
+  ) {
+    for (const repository of new Set(tasks.map((task) => task.repository))) {
+      if (!isAbsolute(repository)) continue;
+      try {
+        repositories.push(await realpath(repository));
+      } catch (error) {
+        // Missing sources retain the campaign's per-repository failure behavior.
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      }
+    }
+  }
+  // Shared inputs use actual local CSV sources as directory-link boundaries,
+  // not the invocation directory, and are read once before any scan starts.
+  const prompts = await resolveScanPrompts(options, repositories);
+  const resolvedOptions: MultiscanOptions = {
+    ...options,
+    ...prompts,
+    ...(options.scanOptionsByMode === undefined
+      ? {}
+      : {
+          scanOptionsByMode: Object.fromEntries(
+            Object.entries(options.scanOptionsByMode).map(
+              ([mode, settings]) => [mode, { ...settings, ...prompts }],
+            ),
+          ),
+        }),
+  };
+  if (
+    resolvedOptions.validationPrompt !== undefined &&
     tasks.some((task) => task.mode === "deep")
   ) {
     throw new Error("Custom validation is not supported for Deep scans.");
@@ -142,7 +196,7 @@ export async function runMultiscan(
   await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   try {
-    const result = await runCampaign(options, tasks, output);
+    const result = await runCampaign(resolvedOptions, tasks, output);
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
       : result;
@@ -167,6 +221,10 @@ async function runCampaign(
   const pending: MultiscanTask[] = [];
   let completed = 0;
   let incomplete = 0;
+  let policyFailed = false;
+  const hasPolicy = Object.values(options.scanOptionsByMode ?? {}).some(
+    (settings) => settings.failureSeverity !== undefined,
+  );
   let untouched = 0;
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
@@ -202,17 +260,19 @@ async function runCampaign(
       (await hasArtifacts(artifactOutput))
     ) {
       if (receipt.status === "completed") {
+        policyFailed ||= receipt.policyFailed === true;
         completed += 1;
         continue;
       }
       const coverage =
         receipt.status === "completed_with_incomplete_coverage"
-          ? receipt.coverage ?? "unknown"
+          ? (receipt.coverage ?? "unknown")
           : await legacyIncompleteCoverage({
               ...receipt,
               outputDir: artifactOutput,
             });
       if (coverage !== undefined) {
+        policyFailed ||= receipt.policyFailed === true;
         incomplete += 1;
         notifyProgress(options, {
           repository: task.id,
@@ -236,6 +296,7 @@ async function runCampaign(
       failed: 0,
       skipped,
       resultsPath: ledger,
+      ...(hasPolicy ? { policyFailed } : {}),
     };
   }
 
@@ -266,13 +327,15 @@ async function runCampaign(
         let attemptedResume = false;
         let failure: string | undefined;
         let warning: string | undefined;
+        let attemptPolicyFailed: boolean | undefined;
         let coverage: CoverageDocument["completeness"] | undefined;
         let cost: Readonly<ScanCost> | null = null;
         let exhaustedBudget = false;
         let requiresRecovery = false;
         try {
           await ensureOutputDirectory(artifactRoot);
-          let result: Pick<ScanResult, "coverage" | "cost"> | undefined;
+          let result:
+            Pick<ScanResult, "coverage" | "cost" | "findings"> | undefined;
           if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
             const existing = await lstat(scanDir).catch(
               (error: NodeJS.ErrnoException) => {
@@ -288,10 +351,11 @@ async function runCampaign(
                 attempt,
                 status: "started",
               });
-              result = await options.recoverScan(scanDir);
+              result = await options.recoverScan(scanDir, options);
               attemptedResume = result !== undefined;
             }
           }
+          const scanSettings = options.scanOptionsByMode?.[task.mode];
           if (result === undefined) {
             if (options.recoverScan !== undefined) attempt += 1;
             scanDir = join(artifactRoot, `attempt-${attempt}`);
@@ -338,6 +402,7 @@ async function runCampaign(
               .filter(Boolean)
               .join("\n\n");
             result = await security.run(checkout, {
+              ...scanSettings,
               ...(task.scope === undefined ? {} : { target: [task.scope] }),
               ...(options.knowledgeBasePaths?.length
                 ? { knowledgeBasePaths: options.knowledgeBasePaths }
@@ -367,6 +432,12 @@ async function runCampaign(
             });
           }
           cost = result.cost;
+          const failureSeverity = scanSettings?.failureSeverity;
+          if (failureSeverity !== undefined) {
+            attemptPolicyFailed = result.findings.findings.some((finding) =>
+              meetsSeverity(finding, failureSeverity),
+            );
+          }
           coverage = result.coverage.completeness;
           if (coverage !== "complete") {
             if (!(await hasArtifacts(scanDir))) {
@@ -410,6 +481,9 @@ async function runCampaign(
             ...(cost === null ? {} : { cost }),
             ...(failure === undefined ? {} : { error: failure }),
             ...(warning === undefined ? {} : { warning }),
+            ...(attemptPolicyFailed === undefined
+              ? {}
+              : { policyFailed: attemptPolicyFailed }),
           })}\n`,
         );
         if (
@@ -427,6 +501,7 @@ async function runCampaign(
           ...(warning === undefined ? {} : { warning }),
         });
         if (failure === undefined) {
+          policyFailed ||= attemptPolicyFailed === true;
           if (warning === undefined) completed += 1;
           else incomplete += 1;
           break;
@@ -461,6 +536,7 @@ async function runCampaign(
     failed,
     skipped,
     resultsPath: ledger,
+    ...(hasPolicy ? { policyFailed } : {}),
   };
 }
 
@@ -732,7 +808,12 @@ async function ensureManifest(
   tasks: MultiscanTask[],
   options: Pick<
     MultiscanOptions,
-    "scanPrompt" | "validationPrompt" | "postScanPrompt" | "maxCostUsd"
+    | "scanPrompt"
+    | "validationPrompt"
+    | "postScanPrompt"
+    | "maxCostUsd"
+    | "scanOptionsByMode"
+    | "config"
   >,
 ): Promise<void> {
   const expected = `${JSON.stringify(
@@ -751,6 +832,14 @@ async function ensureManifest(
       ...(options.maxCostUsd === undefined
         ? {}
         : { maxCostUsd: options.maxCostUsd }),
+      ...(options.scanOptionsByMode === undefined
+        ? {}
+        : {
+            configurationDigest: workflowDigest({
+              scanOptions: options.scanOptionsByMode,
+              codex: options.config.codexOverrides,
+            }),
+          }),
     },
     null,
     2,

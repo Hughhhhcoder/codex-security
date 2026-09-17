@@ -14,6 +14,20 @@ import { join, parse } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
+async function removeTemporaryDirectory(path: string): Promise<void> {
+  // Bun 1.3.14 ignores fs.rm's retry options.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 10)
+        throw error;
+      await Bun.sleep(100 * (attempt + 1));
+    }
+  }
+}
+
 test.skipIf(process.platform !== "win32")(
   "launches the PATH Node executable independently of command extensions and the caller directory",
   async () => {
@@ -109,7 +123,7 @@ test.skipIf(process.platform !== "win32")(
       expect(missing.stderr).toContain("could not find a Node runtime");
       await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTemporaryDirectory(root);
     }
   },
 );
@@ -132,7 +146,7 @@ test.each(["server", "helper"] as const)(
         env_vars: string[];
       };
       expect(config.env_vars).toContain("CODEX_MCP_NODE_PATH");
-      let managedNode = node;
+      let managedNode: string;
       const marker = join(root, "managed-node-used");
       if (process.platform !== "win32") {
         managedNode = join(root, "managed node");
@@ -174,7 +188,7 @@ test.each(["server", "helper"] as const)(
         );
       }
       const result = spawnSync(
-        windows ? process.env["ComSpec"] ?? "cmd.exe" : launcher,
+        windows ? (process.env["ComSpec"] ?? "cmd.exe") : launcher,
         windows
           ? [
               "/d",
@@ -336,7 +350,7 @@ test.skipIf(process.platform !== "win32")(
         );
       }
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await removeTemporaryDirectory(root);
     }
   },
 );
