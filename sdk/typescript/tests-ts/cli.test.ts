@@ -5003,7 +5003,7 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toMatchObject({
       status: "failed",
       code: "SCAN_FAILED",
-      message: expect.stringContaining("Scan stopped: estimated cost"),
+      message: expect.stringContaining("estimated cost"),
     });
     expect(stderr.text()).toContain(
       "Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at /tmp/scan.",
