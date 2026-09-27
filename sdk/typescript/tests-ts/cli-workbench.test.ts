@@ -336,6 +336,8 @@ describe("CLI workbench", () => {
             scan: {
               scanId: "scan-1",
               continuationThreadId: "thread-1",
+              threadIds: ["thread-1"],
+              executionThreadIds: ["thread-1"],
               mode: "deep",
               progress: {
                 status: "complete",
@@ -524,7 +526,7 @@ describe("CLI workbench", () => {
   });
 
   test.each([false, true])(
-    "keeps matching progress on stderr with TTY=%s",
+    "keeps matching progress on stderr with TTY=%p",
     async (isTTY) => {
       const stdout = capture();
       const stderr = capture(isTTY);
@@ -1136,7 +1138,7 @@ describe("CLI workbench", () => {
   });
 
   test.each([false, true])(
-    "preserves surviving indirect matches during forced recomputation (%s)",
+    "preserves surviving indirect matches during forced recomputation (%p)",
     async (force) => {
       const before = [{ occurrenceId: "old", findingId: "identity-old" }];
       const after = [{ occurrenceId: "new", findingId: "identity-new" }];
@@ -1226,6 +1228,40 @@ describe("CLI workbench", () => {
     }
   });
 
+  test.each(["scan-original", undefined])(
+    "rejects Markdown rerun output before loading scan %p",
+    async (scanId) => {
+      const stdout = capture();
+      const stderr = capture();
+      let workbenchCalls = 0;
+
+      expect(
+        await main(
+          [
+            "scans",
+            "rerun",
+            ...(scanId === undefined ? [] : [scanId]),
+            "--format",
+            "md",
+          ],
+          stdout.stream,
+          stderr.stream,
+          dependencies({
+            onWorkbench: () => {
+              workbenchCalls += 1;
+              return {};
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(workbenchCalls).toBe(0);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        "Markdown output is not supported for scan results.",
+      );
+    },
+  );
+
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;
 
@@ -1259,6 +1295,7 @@ describe("CLI workbench", () => {
     let config: CodexSecurityConfig | undefined;
     let repository: string | undefined;
     let options: Record<string, unknown> | undefined;
+    const knowledgeBasePath = resolve("/original/security.md");
     const savedConfig = {
       approval_policy: "on-request",
       model: "gpt-original",
@@ -1286,7 +1323,7 @@ describe("CLI workbench", () => {
               mode: "deep",
               pluginVersion: "1.2.3",
               failOnSeverity: "high",
-              knowledgeBasePaths: ["/original/security.md"],
+              knowledgeBasePaths: [knowledgeBasePath],
               deepScan: {
                 workers: 2,
                 subagents: 0,
@@ -1308,7 +1345,7 @@ describe("CLI workbench", () => {
       parentScanId: "scan-original",
       expectedPluginVersion: "1.2.3",
       failureSeverity: "high",
-      knowledgeBasePaths: ["/original/security.md"],
+      knowledgeBasePaths: [knowledgeBasePath],
       workers: 2,
       subagents: 0,
       stopAfterNoNew: 3,
