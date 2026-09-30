@@ -1440,15 +1440,10 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         target_kind = db.manifest_target_kind(manifest)
         binding = db.workbench_completion_binding(scan, db.now(), target_kind=target_kind)
-        # Validate on copies: saved canonical documents remain ordinary unsealed drafts.
-        copied_manifest = copy.deepcopy(manifest)
-        copied_findings = copy.deepcopy(findings)
-        copied_coverage = copy.deepcopy(coverage)
-        _populate_unsealed_manifest_envelope(copied_manifest, copied_manifest["scan"], binding)
-        _populate_unsealed_artifact_envelope(
-            copied_manifest, copied_findings, copied_coverage, binding
-        )
-        _validate_completion_binding(copied_manifest, copied_findings, copied_coverage, binding)
+        # Save scan IDs without sealing the draft.
+        _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
+        _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
+        _validate_completion_binding(manifest, findings, coverage, binding)
         for filename, document in (
             ("findings.json", findings),
             ("coverage.json", coverage),

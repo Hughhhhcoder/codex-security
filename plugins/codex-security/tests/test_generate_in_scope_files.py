@@ -175,7 +175,10 @@ def test_inventory_rejects_line_breaks_before_serializing_paths(
     assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
 
 
-def test_diff_inventory_includes_power_shell_files(tmp_path: Path) -> None:
+def test_diff_inventory_includes_power_shell_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
     repository = tmp_path / "repository"
     repository.mkdir()
     subprocess.run(
@@ -458,6 +461,39 @@ def test_diff_inventory_includes_changed_objective_c(tmp_path: Path, mode: str) 
 
     assert result.returncode == 0, result.stderr
     assert output.read_text(encoding="utf-8").splitlines() == sorted(sources)
+
+
+@pytest.mark.parametrize("mode", ["revisions", "staged", "unstaged"])
+def test_diff_inventory_includes_changed_cpp_headers(tmp_path: Path, mode: str) -> None:
+    repository = make_repository(tmp_path)
+    names = [
+        "include/base.h",
+        "include/base.hpp",
+        "include/lower.hh",
+        "include/lower.hxx",
+        "include/upper.HH",
+        "include/upper.HXX",
+    ]
+    for name in names:
+        write_file(repository, name, b"inline int answer() { return 1; }\n")
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD")
+    for name in names:
+        write_file(repository, name, b"inline int answer() { return 2; }\n")
+    arguments = ["--diff-base", base, "--diff-mode", "local-patch"]
+    if mode in {"revisions", "staged"}:
+        git(repository, "add", ".")
+    if mode == "revisions":
+        git(repository, "commit", "-qm", "change")
+        arguments = ["--diff-base", base, "--diff-head", git(repository, "rev-parse", "HEAD")]
+        git(repository, "checkout", "-q", base)
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, ".", output, arguments=arguments)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8").splitlines() == sorted(names)
 
 
 @pytest.mark.parametrize("mode", ["revisions", "local-patch"])
