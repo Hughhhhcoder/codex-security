@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
 import os
 import re
+import sqlite3
 import stat
 import sys
 from collections.abc import Callable, Iterator
@@ -34,6 +36,8 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
+from workbench_constants import PHASES
+from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
 
 _PUBLISHED_OUTPUTS = (
@@ -46,6 +50,9 @@ _PUBLISHED_OUTPUTS = (
 )
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
+)
+_RESERVED_ARTIFACT_PATHS = json.loads(
+    Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
 
 
@@ -645,15 +652,9 @@ def merge_saved_results(
     target = {"kind": target_kind, **binding["target"]}
     if target["kind"] == "git_diff" and "snapshotDigest" not in target:
         diff_kind = {"commit": "commit", "branch_diff": "range"}[binding["coverageMode"]]
-        digest = hashlib.sha256(
-            b"codex-security-diff/v1\0"
-            + diff_kind.encode()
-            + b"\0"
-            + target["baseRevision"].encode()
-            + b"\0"
-            + target["headRevision"].encode()
-        ).hexdigest()
-        target["snapshotDigest"] = f"codex-security-snapshot/v1:sha256:{digest}"
+        target["snapshotDigest"] = committed_diff_snapshot_digest(
+            diff_kind, target["baseRevision"], target["headRevision"]
+        )
     manifest = (
         copy.deepcopy(parent_manifest)
         if parent_manifest
@@ -679,6 +680,11 @@ def merge_saved_results(
             "deferred": [],
         }
     )
+    if isinstance(coverage.get("openQuestions"), list):
+        coverage["openQuestions"] = [
+            {"question": item.strip()} if isinstance(item, str) else item
+            for item in coverage["openQuestions"]
+        ]
     canonical_rows = (
         {
             id(item)
@@ -1179,6 +1185,7 @@ def preserve_scan_results_locked(
 
     existing_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
     existing_scan = db.read_json_object(existing_path).get("scan", {}) if existing_path else {}
+    existing = None
     if scan["seal_manifest_digest"] is not None or (
         isinstance(existing_scan, dict)
         and (
@@ -1210,7 +1217,10 @@ def preserve_scan_results_locked(
                 return True
             if recovery_source_digests is None:
                 raise ContractError("Stopped scan sources changed after terminal publication.")
-    binding = {**db.workbench_completion_binding(scan, scan["completed_at"]), "status": outcome}
+    binding = {
+        **db.workbench_completion_binding(scan, scan["completed_at"], existing),
+        "status": outcome,
+    }
     documents = merge_saved_results(
         scan_dir,
         scan_id,
@@ -1254,7 +1264,6 @@ def preserve_scan_results_locked(
             for relative, digest in retained_sources.items()
         ):
             raise ContractError("Stopped scan source digests could not be frozen.")
-        frozen_source_digests = retained_sources
         with connection:
             connection.execute(
                 "UPDATE scans SET retained_source_digests_json = ? "
@@ -1334,6 +1343,49 @@ def preserve_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]
     return db.scan_context(connection, scan_id)
 
 
+def read_or_save_artifact(args: Any) -> dict[str, Any]:
+    """Read or publish supplemental bytes through verified filesystem handles."""
+    root = Path(args.artifact_root)
+    if args.command == "read-artifact":
+        descriptor = open_scan_local_file_descriptor(root, args.artifact_path, "Saved artifact")
+        with os.fdopen(descriptor, "rb") as source:
+            return {"content": base64.b64encode(source.read()).decode("ascii")}
+    write_scan_local_bytes(root, args.artifact_path, sys.stdin.buffer.read())
+    return {"path": str(root / args.artifact_path)}
+
+
+def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
+    """Publish supplemental bytes under the same lock as finalization and recovery."""
+    scan_id = db.require_uuid(args.scan_id, "scan-id")
+    with db.scan_completion_lock(scan_id):
+        scan = db.require_scan(connection, scan_id)
+        db.handoff.require_current_continuation(
+            scan,
+            args.claim_token,
+            error_message="Scan artifacts are owned by another continuation.",
+        )
+        if scan["status"] != "running" or scan["seal_manifest_digest"] is not None:
+            raise SystemExit("The scan stopped; its artifacts cannot be modified.")
+        scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        manifest_path = db.artifact_path(scan_dir, "scan-manifest.json", required=False)
+        if manifest_path is not None:
+            manifest = db.read_json_object(manifest_path).get("scan", {})
+            if manifest.get("sealedAt") is not None or manifest.get("artifacts") is not None:
+                raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
+        output = args.artifact_path
+        key = output.lower()
+        if not (
+            key.startswith(("artifacts/", "findings/", "hardening/"))
+            or key == "report_validation.md"
+        ) or any(
+            key == reserved or key.startswith(reserved + "/")
+            for reserved in _RESERVED_ARTIFACT_PATHS
+        ):
+            raise SystemExit("Use the typed scan tools for canonical artifacts and checkpoints.")
+        write_scan_local_bytes(scan_dir, output, sys.stdin.buffer.read())
+    return {"scanId": scan_id, "path": str(scan_dir / output)}
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
@@ -1386,15 +1438,10 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         draft = _read_scan_local_json(scan_dir, relative, "Staged scan draft")
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         binding = db.workbench_completion_binding(scan, db.now())
-        # Validate on copies: saved canonical documents remain ordinary unsealed drafts.
-        copied_manifest = copy.deepcopy(manifest)
-        copied_findings = copy.deepcopy(findings)
-        copied_coverage = copy.deepcopy(coverage)
-        _populate_unsealed_manifest_envelope(copied_manifest, copied_manifest["scan"], binding)
-        _populate_unsealed_artifact_envelope(
-            copied_manifest, copied_findings, copied_coverage, binding
-        )
-        _validate_completion_binding(copied_manifest, copied_findings, copied_coverage, binding)
+        # Save scan IDs without sealing the draft.
+        _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
+        _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
+        _validate_completion_binding(manifest, findings, coverage, binding)
         for filename, document in (
             ("findings.json", findings),
             ("coverage.json", coverage),
@@ -1405,6 +1452,29 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        # Accepted Standard drafts are evidence of review or report assembly,
+        # even when the parent omitted its explicit progress call.
+        if scan["mode"] == "standard":
+            phase = "discovery" if manifest["scan"].get("complete") is False else "reporting"
+            earlier = PHASES[: PHASES.index(phase)]
+            placeholders = ",".join("?" for _ in earlier)
+            timestamp = db.now()
+            try:
+                with connection:
+                    changed = connection.execute(
+                        "UPDATE scans SET phase = ?, updated_at = ? "
+                        f"WHERE id = ? AND status = 'running' AND phase IN ({placeholders})",
+                        (phase, timestamp, scan_id, *earlier),
+                    )
+                    if changed.rowcount:
+                        connection.execute(
+                            "UPDATE scan_progress SET phase_items_total = 0, "
+                            "phase_items_completed = 0, phase_progress_unit = NULL, updated_at = ? "
+                            "WHERE scan_id = ?",
+                            (timestamp, scan_id),
+                        )
+            except sqlite3.Error as exc:
+                print(f"Could not save scan progress: {exc}", file=sys.stderr)
     return {"scanId": scan_id, "status": "draft_written"}
 
 

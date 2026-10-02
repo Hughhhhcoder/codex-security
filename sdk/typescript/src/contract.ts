@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants, type BigIntStats, type Stats } from "node:fs";
 import {
   lstat,
   open,
@@ -136,7 +136,7 @@ export async function loadContractWithScanDirectory(
       }
       valid = result;
       if (!valid && filename === "findings.json") {
-        payload = legacySealedFindingsForValidation(payload);
+        payload = normalizePersistedFindings(payload);
         const compatibleResult = validate(payload);
         if (typeof compatibleResult !== "boolean") {
           throw new Error("asynchronous JSON Schema validation is unsupported");
@@ -217,7 +217,8 @@ export async function requireCanonicalScanDirectory(
 
 type JsonRecord = Record<string, unknown>;
 
-function legacySealedFindingsForValidation(payload: unknown): unknown {
+/** Normalize optional legacy details on a copy, without changing saved artifacts. */
+export function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
   if (!isJsonRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;
@@ -1155,8 +1156,8 @@ async function openCheckedScanFile(
 
 export async function sameCheckedFileDevice(
   file: FileHandle,
-  checked: CheckedScanFile,
-  opened: Stats,
+  checked: { path: string; metadata: Pick<Stats | BigIntStats, "dev" | "ino"> },
+  opened: Pick<Stats | BigIntStats, "dev" | "ino">,
   platform: NodeJS.Platform = process.platform,
   openReference: (path: string, flags: number) => Promise<FileHandle> = open,
 ): Promise<boolean> {

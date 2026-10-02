@@ -18,10 +18,20 @@ When changing `plugins/codex-security`, run its portable source checks before
 submitting the change:
 
 ```bash
-python -m ruff check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
-python -m ruff format --check --config plugins/codex-security/pyproject.toml .github/scripts/check_plugin_source_compatibility.py .github/scripts/test_check_plugin_source_compatibility.py plugins/codex-security
-python .github/scripts/check_plugin_source_compatibility.py
+python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
+python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
+pnpm --dir sdk/typescript run build:ci
+node .github/scripts/check_plugin_source_compatibility.mjs
+node --test .github/scripts/test_check_plugin_source_compatibility.mjs
 ```
+
+## Deep Scan worker settings
+
+When changing runtime settings, authentication, environment forwarding,
+permissions, or executable selection, trace the change through Deep Scan
+discovery and reducer workers, including resumed workers. Extend the worker
+launch tests to verify inherited values and intentional overrides at the
+child-process boundary. Keep per-scan settings isolated from concurrent scans.
 
 ## Avoid speculative defenses
 
@@ -33,6 +43,17 @@ python .github/scripts/check_plugin_source_compatibility.py
   Do not extend them to unrelated values without a demonstrated need.
 - Do not invent a restriction and then add tests whose only purpose is to
   enforce that restriction.
+
+## CLI secret and log redaction
+
+- Do not add or reintroduce CLI-layer secret or log redaction, including
+  credential-pattern filtering that masks or replaces diagnostic messages.
+  Keep CLI diagnostics intact for local troubleshooting.
+- This guidance concerns CLI implementation behavior. It does not authorize
+  removing or bypassing upstream SDK or native Codex protections, credential
+  handling safeguards, or controls on persisted or published artifacts.
+- Local output may contain sensitive information. Keep it private and review
+  it before sharing; the public disclosure requirements below still apply.
 
 ## Public CLI changes
 

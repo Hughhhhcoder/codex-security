@@ -60,6 +60,7 @@ from finalize_scan_contract import (
 )
 from finding_preview import bounded_finding_details
 from workbench import handoff
+from workbench.storage import create_private_directory, resolve_scan_root, state_dir
 from workbench_cli import parse_args
 from workbench_constants import (
     ARTIFACTS,
@@ -115,6 +116,7 @@ from workbench_target import (
     clean_worktree_content_digest,
     copy_directory_excluding,
     copy_git_worktree_files,
+    diff_snapshot_digest,
     directory_content_digest,
     directory_snapshot_regular_file_count,
     git_bytes,
@@ -138,6 +140,7 @@ from workbench_validation import (
     optional_text,
     parse_scan_cost,
     path_within_scope,
+    reject_non_finite_json,
     require_close_note,
     require_occurrence,
     require_uuid,
@@ -148,7 +151,6 @@ from workbench_validation import (
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
-SCAN_RECIPE_MAX_BYTES = 256 * 1024
 
 
 def now() -> str:
@@ -161,14 +163,6 @@ def stale_claim_before(seconds: int = CLAIM_LEASE_SECONDS) -> str:
     )
 
 
-def state_dir() -> Path:
-    state_dir = os.environ.get("CODEX_SECURITY_STATE_DIR")
-    if state_dir:
-        return Path(state_dir).expanduser().resolve()
-    codex_home = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
-    return (codex_home / "state" / "plugins" / "codex-security").resolve()
-
-
 def database_path() -> Path:
     return state_dir() / "workbench.sqlite3"
 
@@ -176,7 +170,7 @@ def database_path() -> Path:
 @contextmanager
 def scan_completion_lock(scan_id: str) -> Any:
     lock_dir = state_dir() / "completion-locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    create_private_directory(lock_dir)
     lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
     descriptor = os.open(
         lock_path,
@@ -239,7 +233,7 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 def connect() -> sqlite3.Connection:
     path = database_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    create_private_directory(path.parent)
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         connection = sqlite3.connect(path, timeout=5)
         try:
@@ -503,7 +497,9 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
-def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[str, Any]:
+def workbench_completion_binding(
+    scan: sqlite3.Row, completed_at: str, manifest: dict[str, Any] | None = None
+) -> dict[str, Any]:
     contract = scan_contract(scan)
     target_contract = contract["target"]
     plugin_manifest = read_json_object(
@@ -519,8 +515,8 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
     if scan["mode"] == "diff":
         target["baseRevision"] = scan["diff_base_revision"]
         target["headRevision"] = scan["diff_head_revision"]
-        if scan["diff_target_kind"] == "working_tree" and scan["diff_content_digest"]:
-            target["snapshotDigest"] = scan["diff_content_digest"]
+        if snapshot_digest := diff_snapshot_digest(scan, manifest):
+            target["snapshotDigest"] = snapshot_digest
     else:
         if scan["target_revision"] != "unversioned":
             target["revision"] = scan["target_revision"]
@@ -532,7 +528,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "excludePaths": contract["scope"]["requiredExcludePaths"],
     }
 
-    return {
+    binding: dict[str, Any] = {
         "scanId": scan["id"],
         "startedAt": scan["started_at"],
         "completedAt": completed_at,
@@ -542,6 +538,7 @@ def workbench_completion_binding(scan: sqlite3.Row, completed_at: str) -> dict[s
         "scope": scope,
         "coverageMode": expected_coverage_mode(scan),
     }
+    return scan_history.preserve_sealed_completion(binding, manifest)
 
 
 def verify_manifest_binding(scan: sqlite3.Row, manifest: dict[str, Any]) -> None:
@@ -805,7 +802,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
 
 
 def scan_target_root(scan_root: str | None, target: Path) -> Path:
-    root = Path(scan_root).expanduser().resolve() if scan_root else state_dir() / "scans"
+    root = resolve_scan_root(scan_root)
     target_root = (root / safe_segment(target.name)).resolve()
     if target_root == target or target in target_root.parents:
         raise SystemExit("The scan artifact directory must be outside the selected target.")
@@ -859,7 +856,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             metadata=target_metadata,
         )
         target_root = scan_target_root(args.scan_root, target)
-        target_root.mkdir(parents=True, exist_ok=True)
+        create_private_directory(target_root)
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
         workspace = require_workspace(connection, workspace_id)
@@ -1027,7 +1024,7 @@ def _start_prompt_driven_scan(
                 **scan_context(connection, existing["id"]),
                 "startDisposition": "joined",
             }
-        target_root.mkdir(parents=True, exist_ok=True)
+        create_private_directory(target_root)
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = now()
@@ -1484,8 +1481,8 @@ def complete_scan_locked(
     add_warning()
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
-    completion_binding = workbench_completion_binding(scan, completion_timestamp)
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+    current_manifest = None
     if current_manifest_path is not None:
         current_manifest = read_json_object(current_manifest_path)
         if (
@@ -1503,8 +1500,8 @@ def complete_scan_locked(
             or current_manifest["scan"].get("artifacts") is not None
         )
     )
+    completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
     if scan["recipe_json"] is not None:
-        draft_artifacts: dict[str, Path] = {}
         missing_drafts = []
         for file_name in (
             ARTIFACTS["manifest"],
@@ -1516,20 +1513,13 @@ def complete_scan_locked(
             except FileNotFoundError:
                 missing_drafts.append(file_name)
                 continue
-            draft_path = artifact_path(scan_dir, file_name, required=True)
-            if draft_path is not None:
-                draft_artifacts[file_name] = draft_path
+            artifact_path(scan_dir, file_name, required=True)
         if missing_drafts:
             raise SystemExit(
                 "Scan agent did not create required draft artifacts: "
                 f"{', '.join(missing_drafts)}. Check that the scan agent can run shell "
                 "commands and write to the scan directory before retrying."
             )
-        manifest = read_json_object(draft_artifacts[ARTIFACTS["manifest"]])
-        manifest_scan = manifest.get("scan")
-        if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
-            completion_binding["startedAt"] = manifest_scan.get("startedAt")
-            completion_binding["completedAt"] = manifest_scan.get("completedAt")
     wrote = False
     try:
         prepared = _prepare_scan_finalization(
@@ -1558,7 +1548,11 @@ def complete_scan_locked(
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(prepared)
     except ContractError as exc:
-        if wrote or (scan["mode"] == "deep" and not isinstance(exc, RecoverableContractError)):
+        if wrote or (
+            scan["mode"] == "deep"
+            and not already_sealed
+            and not isinstance(exc, RecoverableContractError)
+        ):
             args = argparse.Namespace(claim_token=claim_token, cost_json=cost_json)
             args.message, args.scan_id = str(exc), scan_id
             fail_scan_locked(connection, args)
@@ -1819,8 +1813,6 @@ def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace
 
 
 def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
-    if len(value.encode("utf-8")) > SCAN_RECIPE_MAX_BYTES:
-        raise SystemExit("Scan launch recipe must be no larger than 256 KiB.")
     try:
         recipe = json.loads(value, parse_constant=reject_non_finite_json)
     except (TypeError, UnicodeError, ValueError) as exc:
@@ -1867,17 +1859,6 @@ def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
         if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
             raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
     return recipe
-
-
-def get_scan_recipe(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
-    scan = require_scan(connection, args.scan_id)
-    if scan["recipe_json"] is None:
-        raise SystemExit("This scan does not have a saved launch recipe.")
-    return {
-        "parentScanId": scan["parent_scan_id"],
-        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
-        "scanId": scan["id"],
-    }
 
 
 _WORKBENCH_DB_CONTEXT: saved_results.WorkbenchDbContext
@@ -2506,7 +2487,7 @@ def require_reviewed_patch_applied(
             checkout = checkout_root
             copy_directory_excluding(target, checkout, excluded)
         else:
-            checkout = copy_git_worktree_files(target, checkout_root, excluded)
+            copy_git_worktree_files(target, checkout_root, excluded)
         arguments = ["apply", "--reverse", "--whitespace=nowarn"]
         if unversioned:
             arguments.append("--no-index")
@@ -2859,6 +2840,8 @@ def scan_result(
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
+        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
+        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
         "failureMessage": scan["failure_message"],
         "findings": [
             finding_result(connection, scan, row, related=relations.get(row["id"], []))
@@ -3376,10 +3359,6 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload
 
 
-def reject_non_finite_json(value: str) -> None:
-    raise ValueError(f"non-finite JSON number {value!r} is not supported")
-
-
 _WORKBENCH_PUBLICATION_CONTEXT = publication.WorkbenchPublicationContext(
     ARTIFACTS=ARTIFACTS,
     artifact_path=artifact_path,
@@ -3446,6 +3425,9 @@ def main() -> None:
             preserve_stopped_results=preserve_stopped_results_after_transition,
         )
     )
+    if args.command == "resolve-scan-root":
+        print(json.dumps({"scanRoot": str(resolve_scan_root(args.scan_root))}))
+        return
     if args.command == "inspect-target":
         result = inspect_target(args.target_path)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
@@ -3453,6 +3435,9 @@ def main() -> None:
     if args.command == "inspect-setup":
         result = inspect_setup(args)
         print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
+    if args.command in {"save-artifact", "read-artifact"}:
+        print(json.dumps(saved_results.read_or_save_artifact(args)))
         return
     if args.command == "read-severity-classification":
         result = severity.read_classification(database_path(), args.scan_id)
@@ -3518,7 +3503,25 @@ def main() -> None:
         elif args.command == "set-scan-cost-limit":
             result = set_scan_cost_limit(connection, args)
         elif args.command == "get-scan-recipe":
-            result = get_scan_recipe(connection, args)
+            result = scan_history.scan_recipe(require_scan(connection, args.scan_id))
+        elif args.command == "get-cli-scan-resume":
+            scan = require_scan(connection, args.scan_id)
+            try:
+                result = scan_history.cli_scan_resume(
+                    connection,
+                    scan,
+                    require_workspace(connection, scan["workspace_id"]),
+                    parse_scan_recipe=parse_scan_recipe,
+                    scan_contract=scan_contract,
+                    require_scan_directory=require_canonical_scan_directory,
+                    artifact_path=artifact_path,
+                    read_json_object=read_json_object,
+                    workbench_completion_binding=workbench_completion_binding,
+                )
+            except SystemExit as exc:
+                if not args.allow_unavailable:
+                    raise
+                result = {"unavailable": str(exc)}
         elif args.command == "compare-scans":
             result = scan_history.compare_scans(
                 connection,
@@ -3563,6 +3566,8 @@ def main() -> None:
             result = recover_scan_results(connection, args)
         elif args.command == "write-scan-draft":
             result = write_scan_draft(connection, args)
+        elif args.command == "save-scan-artifact":
+            result = saved_results.save_scan_artifact(_WORKBENCH_DB_CONTEXT, connection, args)
         elif args.command == "mark-handoff-delivered":
             result = handoff.mark_handoff_delivered(
                 connection,

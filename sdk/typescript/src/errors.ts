@@ -1,4 +1,4 @@
-import { formatUsd, type ScanCost } from "./cost-model.js";
+import { formatScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
 /** Returns the original error message without altering its contents. */
 export function errorMessage(error: unknown): string {
@@ -23,6 +23,16 @@ export function safeErrorMessage(error: unknown): string {
   return recognizableCredential || sensitiveField ? "[redacted]" : message;
 }
 
+/** Format CLI diagnostics; persistence continues to use safeErrorMessage. */
+export function logErrorMessage(
+  error: unknown,
+  environment: NodeJS.ProcessEnv,
+): string {
+  return environment["CODEX_SECURITY_REDACT_LOGS"] === "0"
+    ? errorMessage(error)
+    : safeErrorMessage(error);
+}
+
 /** Base error for Codex Security SDK failures. */
 export class CodexSecurityError extends Error {
   public constructor(message: string, options?: ErrorOptions) {
@@ -33,10 +43,7 @@ export class CodexSecurityError extends Error {
 
 export type DeduplicationReviewStage = "screening" | "pair-review";
 export type DeduplicationReviewFailureCategory =
-  | "validation"
-  | "no-submission"
-  | "model"
-  | "transport";
+  "validation" | "no-submission" | "model" | "transport" | "refusal";
 
 export interface DeduplicationReviewFailureMetadata {
   stage: DeduplicationReviewStage;
@@ -61,6 +68,7 @@ export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}
 export class PluginPythonUnavailableError extends PluginBootstrapError {}
+export class SandboxUnavailableError extends CodexSecurityError {}
 export class InvalidTargetError extends CodexSecurityError {}
 export class OutputDirectoryError extends CodexSecurityError {}
 export class OutputDirectoryNotEmptyError extends OutputDirectoryError {
@@ -109,7 +117,7 @@ export class ScanCostLimitExceededError extends ScanInterruptedError {
     scanDir: string,
   ) {
     super(
-      `Scan stopped: estimated cost ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; partial output remains at ${scanDir}.`,
+      `Scan stopped: short-context budget baseline ${formatUsd(cost.estimatedUsd)} exceeded the ${formatUsd(maxCostUsd)} limit; estimated cost ${formatScanCost(cost)}; partial output remains at ${scanDir}.`,
       scanDir,
     );
     this.maxCostUsd = maxCostUsd;
