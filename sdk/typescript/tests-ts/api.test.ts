@@ -59,7 +59,6 @@ import {
 } from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
-import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { INTEGRATION_TARGET, PLUGIN_ROOT } from "./plugin-root.js";
 import {
   mockScanRegistration,
@@ -72,6 +71,7 @@ import {
 import {
   completedEvents,
   createApiTestFixtures,
+  failedPostScanEvents,
   preparedRuntime,
 } from "./support/api-events.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
@@ -750,6 +750,24 @@ describe("CodexSecurity orchestration", () => {
       "forbidden",
     );
   });
+
+  test.each([
+    ["HTTP 403 ExpiredTokenException", "unauthorized"],
+    ["HTTP 403 UnrecognizedClientException", "unauthorized"],
+    ["HTTP 400 IncompleteSignature", "unauthorized"],
+    ["AccessDeniedException", "forbidden"],
+    ["NotAuthorized", "forbidden"],
+    ["HTTP 401 NotAuthorized", "forbidden"],
+    ["OptInRequired", "forbidden"],
+    ["ThrottlingException", "rate_limited"],
+  ] as const)(
+    "classifies Bedrock error %s as %s",
+    (message, classification) => {
+      expect(classifyConnectionFailure(new Error(message))).toBe(
+        classification,
+      );
+    },
+  );
 
   test.each([
     ["root configuration", { approval_policy: "never" }],
@@ -1756,6 +1774,50 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each(["standard", "deep"] as const)(
+    "identifies Bedrock account advisory applicability in the %s parent prompt",
+    async (mode) => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repository");
+      const codexHome = join(root, "codex-home");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(codexHome);
+      await mkdir(scanDir, { mode: 0o700 });
+      const client = new TestClient(
+        { codexOverrides: { model_provider: "amazon-bedrock" } },
+        {
+          environment: { AWS_PROFILE: "synthetic-bedrock" },
+          prepareRuntime: async () => preparedRuntime(codexHome),
+          resolvePluginPython: async () => "/managed/python",
+          prepareOutputDir: async () => scanDir,
+          repositoryRevision: async () => "deadbeef",
+          createCodex: () => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(prompt) {
+                expect(prompt).toContain(
+                  "Amazon Bedrock with AWS authentication",
+                );
+                expect(prompt).toContain(
+                  "Skip the ChatGPT account Daybreak access advisory",
+                );
+                expect(prompt).toContain(
+                  "Report any actual provider error unchanged",
+                );
+                throw new Error("Bedrock prompt captured");
+              },
+            }),
+          }),
+        },
+      );
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "Bedrock prompt captured",
+      );
+      await client.close();
+    },
+  );
+
   test("isolates resolved Deep settings across concurrent Bedrock scans", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -1782,10 +1844,8 @@ describe("CodexSecurity orchestration", () => {
       ],
     ];
     let started = 0;
-    let release!: () => void;
-    const allStarted = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: allStarted, resolve: release } =
+      Promise.withResolvers<void>();
     const configPaths = new Set<string>();
     const deepConfigPaths = new Set<string>();
     const manifest = JSON.parse(
@@ -4398,6 +4458,7 @@ describe("CodexSecurity orchestration", () => {
             return mockWorkbench(args, input);
           },
           async matchFindings(input, options, runtimeOptions) {
+            expect(options?.cyberAccessProgram).toBe("daybreak_blue");
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
             if (failure === "matcher") throw new Error("matcher unavailable");
@@ -4409,7 +4470,10 @@ describe("CodexSecurity orchestration", () => {
                   codex: {
                     startThread() {
                       return {
-                        async run() {
+                        async run(_input, turnOptions) {
+                          expect(turnOptions.cyberAccessProgram).toBe(
+                            "daybreak_blue",
+                          );
                           matchingTurns += 1;
                           return {
                             finalResponse: JSON.stringify({
@@ -4457,6 +4521,7 @@ describe("CodexSecurity orchestration", () => {
 
       const result = await client.run(repository, {
         ...(limited ? { maxCostUsd: 1 } : {}),
+        cyberAccessProgram: "daybreak_blue",
         onWarning: (message) => warnings.push(message),
       });
       expect(result.threadId).toBe("thread-1");
@@ -4706,13 +4771,7 @@ describe("CodexSecurity orchestration", () => {
                 if (setupFails) {
                   throw new Error("post-scan turn started after setup failed");
                 }
-                async function* failedEvents(): AsyncGenerator<ThreadEvent> {
-                  yield {
-                    type: "turn.failed",
-                    error: { message: "Could not draft fixes." },
-                  };
-                }
-                return { events: failedEvents() };
+                return { events: failedPostScanEvents() };
               },
             }),
           }),
@@ -4954,18 +5013,12 @@ describe("CodexSecurity orchestration", () => {
       const codexHome = join(root, "codex-home");
       const scanDir = join(root, "scan");
       await Promise.all([mkdir(repository), mkdir(codexHome), mkdir(scanDir)]);
-      let requested!: () => void;
-      const requestStarted = new Promise<void>((resolve) => {
-        requested = resolve;
-      });
-      let observed!: () => void;
-      const nextCost = new Promise<void>((resolve) => {
-        observed = resolve;
-      });
-      let answer!: (limit: number) => void;
-      const lateAnswer = new Promise<number>((resolve) => {
-        answer = resolve;
-      });
+      const { promise: requestStarted, resolve: requested } =
+        Promise.withResolvers<void>();
+      const { promise: nextCost, resolve: observed } =
+        Promise.withResolvers<void>();
+      const { promise: lateAnswer, resolve: answer } =
+        Promise.withResolvers<number>();
       const controller = new AbortController();
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
@@ -5701,7 +5754,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("keeps credential-bearing failures out of saved scan history", async () => {
+  test("preserves original failures in saved scan history", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
@@ -5720,8 +5773,7 @@ describe("CodexSecurity orchestration", () => {
     const quotedCredential = JSON.stringify({
       client_secret_value: "SYNTHETIC correct horse battery staple",
     });
-    const originalFailure = `${SYNTHETIC_CREDENTIALS} ${quotedCredential}`;
-    const storedFailure = "[redacted]";
+    const originalFailure = `request failed: token=SYNTHETIC_TOKEN ${quotedCredential}`;
     const client = new TestClient(
       {},
       {
@@ -5759,12 +5811,12 @@ describe("CodexSecurity orchestration", () => {
       },
     );
 
-    await expect(client.run(repository)).rejects.toThrow(SYNTHETIC_CREDENTIALS);
+    await expect(client.run(repository)).rejects.toThrow(originalFailure);
     const failure = commands.find((args) => args[0] === "fail-scan");
     const scanId = failure?.[2] ?? "";
     expect(scanId).toMatch(/^[0-9a-f-]{36}$/);
     expect(failure?.[3]).toBe("--message");
-    expect(failure?.[4]).toBe(storedFailure);
+    expect(failure?.[4]).toBe(originalFailure);
 
     // `scans show` reads the stored message back through get-scan.
     const context = await runWorkbench(
@@ -5774,11 +5826,9 @@ describe("CodexSecurity orchestration", () => {
     expect(context["scan"]).toMatchObject({
       continuationThreadId: "failed-thread",
       progress: { status: "failed" },
-      failureMessage: storedFailure,
+      failureMessage: originalFailure,
     });
 
-    const database = await readFile(join(stateDirectory, "workbench.sqlite3"));
-    expect(database.toString("latin1")).not.toContain("SYNTHETIC");
     await client.close();
   });
 
@@ -5995,10 +6045,8 @@ describe("CodexSecurity orchestration", () => {
     const codexHome = join(stateDirectory, "codex-home");
     await mkdir(repository);
     let scansStarted = 0;
-    let releaseScans!: () => void;
-    const concurrentScans = new Promise<void>((resolve) => {
-      releaseScans = resolve;
-    });
+    const { promise: concurrentScans, resolve: releaseScans } =
+      Promise.withResolvers<void>();
 
     const clients = await Promise.all(
       (
@@ -7459,16 +7507,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const codexHome = join(root, "codex-home");
     await mkdir(repository);
     await mkdir(codexHome);
-    let releaseRuntime!: (runtime: ReturnType<typeof preparedRuntime>) => void;
-    let preparationStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      preparationStarted = resolve;
-    });
-    const prepared = new Promise<ReturnType<typeof preparedRuntime>>(
-      (resolve) => {
-        releaseRuntime = resolve;
-      },
-    );
+    const { promise: started, resolve: preparationStarted } =
+      Promise.withResolvers<void>();
+    const { promise: prepared, resolve: releaseRuntime } =
+      Promise.withResolvers<ReturnType<typeof preparedRuntime>>();
     let createCodexCalled = false;
     const client = new TestClient(
       {},
@@ -7513,16 +7555,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await mkdir(repository);
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
-    let releaseRuntime!: (runtime: ReturnType<typeof preparedRuntime>) => void;
-    let preparationStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      preparationStarted = resolve;
-    });
-    const prepared = new Promise<ReturnType<typeof preparedRuntime>>(
-      (resolve) => {
-        releaseRuntime = resolve;
-      },
-    );
+    const { promise: started, resolve: preparationStarted } =
+      Promise.withResolvers<void>();
+    const { promise: prepared, resolve: releaseRuntime } =
+      Promise.withResolvers<ReturnType<typeof preparedRuntime>>();
     const client = new TestClient(
       {},
       {
@@ -7576,14 +7612,10 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     const scanDir = await copyCompletedScan(root);
     await mkdir(repository);
     await mkdir(codexHome);
-    let revisionStarted!: () => void;
-    let releaseRevision!: () => void;
-    const started = new Promise<void>((resolve) => {
-      revisionStarted = resolve;
-    });
-    const blocked = new Promise<void>((resolve) => {
-      releaseRevision = resolve;
-    });
+    const { promise: started, resolve: revisionStarted } =
+      Promise.withResolvers<void>();
+    const { promise: blocked, resolve: releaseRevision } =
+      Promise.withResolvers<void>();
     let createCodexCalled = false;
     const client = new TestClient(
       {},

@@ -74,6 +74,7 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract } from "./contract.js";
+import { isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
@@ -139,8 +140,6 @@ import {
   OutputInsideProtectedRootError,
   PluginPythonUnavailableError,
   errorMessage,
-  safeErrorMessage,
-  logErrorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
 } from "./errors.js";
@@ -347,6 +346,7 @@ const VALUE_OPTIONS = new Set([
   "--concurrency",
   "--auth",
   "--safety-identifier",
+  "--cyber-access-program",
   "--path",
   "--component",
   "--components-file",
@@ -562,8 +562,7 @@ function publicationIssueUrl(value: string | undefined): string | undefined {
     value === undefined ||
     value !== value.trim() ||
     value !== stripVTControlCharacters(value) ||
-    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u.test(value) ||
-    safeErrorMessage(value) !== value
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/u.test(value)
   ) {
     return undefined;
   }
@@ -607,7 +606,7 @@ function renderPublicationSummary(
 
   for (const issue of result.created.slice(0, 5)) {
     const identifier =
-      stripVTControlCharacters(safeErrorMessage(issue.issueIdentifier))
+      stripVTControlCharacters(issue.issueIdentifier)
         .replaceAll(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ")
         .replace(/\s+/gu, " ")
         .trim() || "Unknown Linear issue";
@@ -661,8 +660,6 @@ class PublicationProgressPresenter {
       presentation: "publication",
       clock: this.#dependencies,
       color: this.#dependencies.environment["NO_COLOR"] === undefined,
-      sanitize: (value) =>
-        logErrorMessage(value, this.#dependencies.environment),
     });
     dashboard.setStage("Connecting to Linear");
     try {
@@ -782,9 +779,7 @@ class PublicationProgressPresenter {
   }
 
   #write(message: string, compact = false): void {
-    const sanitized = diagnosticValue(
-      logErrorMessage(message, this.#dependencies.environment),
-    );
+    const sanitized = diagnosticValue(message);
     if (!compact) {
       this.#stream.write(`${sanitized}\n`);
       return;
@@ -835,8 +830,6 @@ class FindingProgressPresenter {
         presentation: "verification",
         clock: this.#dependencies,
         color: this.#dependencies.environment["NO_COLOR"] === undefined,
-        sanitize: (value) =>
-          logErrorMessage(value, this.#dependencies.environment),
       });
       dashboard.setPublicationProgress(0, this.#total);
       dashboard.setStage(`Verifying findings · 0/${this.#total}`);
@@ -859,7 +852,7 @@ class FindingProgressPresenter {
   public startPatch(finding: Finding, index: number): void {
     try {
       this.#progress.startTimer(
-        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title, this.#dependencies.environment)}`,
+        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title)}`,
       );
     } catch {
       this.stop();
@@ -966,9 +959,7 @@ class FindingProgressPresenter {
   #write(message: string): void {
     try {
       this.#progress.writeAboveTimer(() => {
-        this.#stream.write(
-          `${safePatchText(message, this.#dependencies.environment)}\n`,
-        );
+        this.#stream.write(`${safePatchText(message)}\n`);
       });
     } catch {}
   }
@@ -1820,10 +1811,7 @@ export async function main(
       return 2;
     }
     const controller = new AbortController();
-    const interrupt = () => controller.abort("SIGINT");
-    const terminate = () => controller.abort("SIGTERM");
-    dependencies.addSignalListener("SIGINT", interrupt);
-    dependencies.addSignalListener("SIGTERM", terminate);
+    const removeSignals = listenForAbort(dependencies, controller);
     let exitCode: number;
     try {
       const code = await runRecordsProtocol(
@@ -1838,8 +1826,7 @@ export async function main(
             ? 143
             : code;
     } finally {
-      dependencies.removeSignalListener("SIGINT", interrupt);
-      dependencies.removeSignalListener("SIGTERM", terminate);
+      removeSignals();
     }
     // Protocol writes have flushed or been canceled. Node's stdout ignores destroy().
     if (output === process.stdout) process.exit(exitCode);
@@ -2286,9 +2273,7 @@ export async function main(
         verbose: z
           .boolean()
           .default(false)
-          .describe(
-            "Print additional scan diagnostics to stderr without disabling redaction. Set CODEX_SECURITY_REDACT_LOGS=0 to opt out (may expose credentials).",
-          ),
+          .describe("Print additional scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, options }) {
@@ -2376,9 +2361,7 @@ export async function main(
         verbose: z
           .boolean()
           .default(false)
-          .describe(
-            "Print additional scan diagnostics to stderr without disabling redaction. Set CODEX_SECURITY_REDACT_LOGS=0 to opt out (may expose credentials).",
-          ),
+          .describe("Print additional scan diagnostics to stderr."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, error: incurError, format, options }) {
@@ -2399,7 +2382,6 @@ export async function main(
             scanId,
           ]);
           if (
-            recipe !== undefined &&
             isJsonObject(recipe) &&
             recipe["import"] !== undefined &&
             isJsonObject(recipe["import"])
@@ -2582,10 +2564,7 @@ export async function main(
         signal === "SIGINT"
           ? "Publication canceled by Ctrl-C."
           : "Publication terminated by SIGTERM.";
-      const recovery =
-        error === signal
-          ? ""
-          : ` ${diagnosticValue(logErrorMessage(error, dependencies.environment))}`;
+      const recovery = error === signal ? "" : ` ${diagnosticValue(error)}`;
       errorOutput.write(`codex-security: ${reason}${recovery}\n`);
       exitCode = signal === "SIGINT" ? 130 : 143;
     } else {
@@ -2716,7 +2695,7 @@ export async function main(
         const recovery =
           error === undefined || error === signal
             ? ""
-            : ` ${diagnosticValue(logErrorMessage(error, dependencies.environment))}`;
+            : ` ${diagnosticValue(error)}`;
         errorOutput.write(`codex-security: ${reason}${recovery}\n`);
         exitCode = signal === "SIGINT" ? 130 : 143;
         return true;
@@ -2909,7 +2888,6 @@ export async function main(
               scanId.length === 0 ||
               typeof directory !== "string" ||
               directory.length === 0 ||
-              progress === undefined ||
               !isJsonObject(progress) ||
               progress["status"] !== "complete"
             ) {
@@ -3081,10 +3059,7 @@ export async function main(
                 });
                 cloudBatch.results.push({ scanDir: directory, ...result });
               } catch (error) {
-                const message = logErrorMessage(
-                  error,
-                  dependencies.environment,
-                );
+                const message = errorMessage(error);
                 cloudBatch.failed.push({
                   scanDir: directory,
                   ...(scanId === undefined ? {} : { scanId }),
@@ -3093,7 +3068,7 @@ export async function main(
                 if (controller.signal.aborted) throw error;
                 exitCode = 2;
                 errorOutput.write(
-                  `codex-security: ${diagnosticValue(logErrorMessage(scanId ?? directory, dependencies.environment))}: ${diagnosticValue(message)}\n`,
+                  `codex-security: ${diagnosticValue(scanId ?? directory)}: ${diagnosticValue(message)}\n`,
                 );
               }
             }
@@ -3173,9 +3148,7 @@ export async function main(
         if ("warnings" in result && Array.isArray(result.warnings)) {
           for (const warning of result.warnings) {
             if (typeof warning !== "string") continue;
-            errorOutput.write(
-              `codex-security: ${diagnosticValue(logErrorMessage(warning, dependencies.environment))}\n`,
-            );
+            errorOutput.write(`codex-security: ${diagnosticValue(warning)}\n`);
           }
         }
         if (
@@ -3194,9 +3167,7 @@ export async function main(
         return { ...result };
       } catch (error) {
         if (!finishCancellation(error)) {
-          errorOutput.write(
-            `codex-security: ${options.to === "cloud" ? logErrorMessage(error, dependencies.environment) : errorMessage(error)}\n`,
-          );
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
           exitCode = 2;
         }
         return cloudBatch;
@@ -3216,10 +3187,7 @@ export async function main(
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, options }) {
       const controller = new AbortController();
-      const onInterrupt = (): void => controller.abort("SIGINT");
-      const onTerminate = (): void => controller.abort("SIGTERM");
-      dependencies.addSignalListener("SIGINT", onInterrupt);
-      dependencies.addSignalListener("SIGTERM", onTerminate);
+      const removeSignals = listenForAbort(dependencies, controller);
       try {
         const result = await (
           dependencies.checkScanPublication ?? checkScanPublication
@@ -3233,8 +3201,7 @@ export async function main(
         reportPublicationError(error, controller.signal.reason);
         return undefined;
       } finally {
-        dependencies.removeSignalListener("SIGINT", onInterrupt);
-        dependencies.removeSignalListener("SIGTERM", onTerminate);
+        removeSignals();
       }
     },
   });
@@ -3286,10 +3253,7 @@ export async function main(
       .optional(),
     async run({ args, options }) {
       const controller = new AbortController();
-      const onInterrupt = () => controller.abort("SIGINT");
-      const onTerminate = () => controller.abort("SIGTERM");
-      dependencies.addSignalListener("SIGINT", onInterrupt);
-      dependencies.addSignalListener("SIGTERM", onTerminate);
+      const removeSignals = listenForAbort(dependencies, controller);
       try {
         return await (
           dependencies.importGitHubAlerts ?? importGitHubCodeScanningAlerts
@@ -3315,18 +3279,16 @@ export async function main(
           );
         } else {
           exitCode = 2;
-          errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         }
         return undefined;
       } finally {
-        dependencies.removeSignalListener("SIGINT", onInterrupt);
-        dependencies.removeSignalListener("SIGTERM", onTerminate);
+        removeSignals();
       }
     },
   });
   const cli = Cli.create("codex-security", {
-    description:
-      "Find, review, and fix security issues in your code. Set CODEX_SECURITY_REDACT_LOGS=0 to disable CLI diagnostic redaction (may expose credentials).",
+    description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
@@ -3516,9 +3478,9 @@ export async function main(
               ? policyDisplayData(outcome.data)
               : outcome.data;
         } catch (error) {
-          const message = logErrorMessage(error, dependencies.environment);
+          const message = errorMessage(error);
           try {
-            errorOutput.write(`codex-security: ${message}\n`);
+            errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
           } catch {}
           return fail(message, 2);
         }
@@ -3554,15 +3516,14 @@ export async function main(
             .describe(
               "Reuse completed work in the named local findings workflow.",
             ),
+          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
             "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
           verbose: z
             .boolean()
             .default(false)
-            .describe(
-              "Print additional scan diagnostics to stderr without disabling redaction. Set CODEX_SECURITY_REDACT_LOGS=0 to opt out (may expose credentials).",
-            ),
+            .describe("Print additional scan diagnostics to stderr."),
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
             .describe(
@@ -3719,6 +3680,7 @@ export async function main(
             {
               auth: options.auth,
               target: scope.target,
+              cyberAccessProgram: options.cyberAccessProgram,
               knowledgeBasePaths: options.knowledgeBase,
               scanPromptFile: options.scanPromptFile,
               validationPromptFile: options.validationPromptFile,
@@ -3780,10 +3742,7 @@ export async function main(
         exitCode = outcome.exitCode;
         if (outcome.error !== undefined) {
           if (format === "json" || format === "jsonl") {
-            const message = logErrorMessage(
-              outcome.error,
-              dependencies.environment,
-            );
+            const message = errorMessage(outcome.error);
             if (!argv.includes("--full-output"))
               return { status: "failed", code: "SCAN_FAILED", message };
             // Incur would wrap returned data in an ok: true envelope.
@@ -3906,10 +3865,7 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           const directory = dependencies.currentDirectory();
           const repository = resolveCliPath(
@@ -3943,13 +3899,12 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : logErrorMessage(error, dependencies.environment)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Owner suggestions canceled." : diagnosticValue(error)}\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -3996,10 +3951,7 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ options }) {
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           if (
             (options.scan === undefined) ===
@@ -4045,13 +3997,12 @@ export async function main(
         } catch (error) {
           const signal = controller.signal.reason;
           errorOutput.write(
-            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : logErrorMessage(error, dependencies.environment)}\n`,
+            `codex-security: ${signal === "SIGINT" || signal === "SIGTERM" ? "Severity classification canceled." : diagnosticValue(error)}\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -4120,10 +4071,7 @@ export async function main(
         if (options.records)
           throw new CodexSecurityError("Use dedupe --records alone.");
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           if (options.findingsUrl === undefined)
             throw new CodexSecurityError(
@@ -4174,14 +4122,13 @@ export async function main(
             `codex-security: ${
               signal === "SIGINT" || signal === "SIGTERM"
                 ? "Deduplication canceled. Findings are unchanged."
-                : logErrorMessage(error, dependencies.environment)
+                : diagnosticValue(error)
             }\n`,
           );
           exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2;
           return undefined;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -4201,6 +4148,7 @@ export async function main(
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
+          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
           auth: ScanSettingsSchema.shape.auth.describe(
             "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
           ),
@@ -4293,12 +4241,7 @@ export async function main(
         };
         const onInterrupt = (): void => controller.abort("SIGINT");
         const onTerminate = (): void => controller.abort("SIGTERM");
-        const interruptedExitCode = (): number | undefined =>
-          controller.signal.reason === "SIGINT"
-            ? 130
-            : controller.signal.reason === "SIGTERM"
-              ? 143
-              : undefined;
+
         dependencies.addSignalListener("SIGINT", onInterrupt);
         dependencies.addSignalListener("SIGTERM", onTerminate);
         try {
@@ -4312,6 +4255,7 @@ export async function main(
             project,
             {
               auth: options.auth,
+              cyberAccessProgram: options.cyberAccessProgram,
               outputDir: options.outputDir,
               knowledgeBasePaths: options.knowledgeBase,
               scanPromptFile: options.scanPromptFile,
@@ -4364,8 +4308,6 @@ export async function main(
               showCost: options.showCost,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
-              sanitize: (value) =>
-                logErrorMessage(value, dependencies.environment),
               input: process.stdin,
               onInterrupt,
             });
@@ -4428,7 +4370,7 @@ export async function main(
               if (dashboard !== null) dashboard.updateComponent(component);
               else
                 errorOutput.write(
-                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${component.error}`}\n`,
+                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
                 );
             },
             onComplete: (result) => {
@@ -4444,7 +4386,7 @@ export async function main(
             },
           });
           exitCode =
-            interruptedExitCode() ??
+            interruptedExitCode(controller.signal) ??
             (result.failed ||
             result.incomplete ||
             result.deduplication?.status === "incomplete"
@@ -4455,7 +4397,7 @@ export async function main(
           return { ...result };
         } catch (error) {
           stopDashboard();
-          exitCode = interruptedExitCode() ?? 2;
+          exitCode = interruptedExitCode(controller.signal) ?? 2;
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         } finally {
           stopDashboard();
@@ -4562,16 +4504,8 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
-        const onInterrupt = (): void => controller.abort("SIGINT");
-        const onTerminate = (): void => controller.abort("SIGTERM");
-        const interruptedExitCode = (): number | undefined =>
-          controller.signal.reason === "SIGINT"
-            ? 130
-            : controller.signal.reason === "SIGTERM"
-              ? 143
-              : undefined;
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           const currentDirectory = dependencies.currentDirectory();
           if (options.recover && args.input === undefined) {
@@ -4771,12 +4705,12 @@ export async function main(
             onProgress: ({ repository, status, attempt, error, warning }) => {
               const detail = error ?? warning;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${errorMessage(detail)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
               );
             },
           });
           exitCode =
-            interruptedExitCode() ??
+            interruptedExitCode(controller.signal) ??
             (result.failed > 0 || result.incomplete > 0
               ? 2
               : result.policyFailed
@@ -4785,14 +4719,13 @@ export async function main(
           return { ...result };
         } catch (error) {
           exitCode =
-            interruptedExitCode() ??
+            interruptedExitCode(controller.signal) ??
             (error instanceof Error && error.name === "ExitPromptError"
               ? 130
               : 2);
           errorOutput.write(`codex-security: ${errorMessage(error)}\n`);
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -5125,15 +5058,13 @@ export async function main(
           }
           for (const result of results) {
             output.write(
-              `${result.status.toUpperCase()} ${safePatchText(result.id, dependencies.environment)}: ${safePatchText(result.evidence, dependencies.environment)}\n`,
+              `${result.status.toUpperCase()} ${safePatchText(result.id)}: ${safePatchText(result.evidence)}\n`,
             );
           }
           return undefined;
         } catch (error) {
           exitCode = 2;
-          errorOutput.write(
-            `codex-security: ${logErrorMessage(error, dependencies.environment)}\n`,
-          );
+          errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
           return undefined;
         }
       },
@@ -5502,8 +5433,8 @@ export async function main(
             };
         } catch (error) {
           if (exitCode === 0) exitCode = 2;
-          const message = logErrorMessage(error, dependencies.environment);
-          errorOutput.write(`codex-security: ${message}\n`);
+          const message = errorMessage(error);
+          errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
           if (!structuredOutput) return;
           patchStructuredError = true;
           const failure = {
@@ -5780,10 +5711,7 @@ export async function main(
                 "scan"
               ] as ScanLogSource);
         const controller = new AbortController();
-        const onInterrupt = () => controller.abort("SIGINT");
-        const onTerminate = () => controller.abort("SIGTERM");
-        dependencies.addSignalListener("SIGINT", onInterrupt);
-        dependencies.addSignalListener("SIGTERM", onTerminate);
+        const removeSignals = listenForAbort(dependencies, controller);
         try {
           return await (dependencies.sendFeedback ?? sendFeedback)({
             ...options,
@@ -5799,8 +5727,7 @@ export async function main(
           }
           throw error;
         } finally {
-          dependencies.removeSignalListener("SIGINT", onInterrupt);
-          dependencies.removeSignalListener("SIGTERM", onTerminate);
+          removeSignals();
         }
       },
     })
@@ -6026,10 +5953,7 @@ async function runScanImport(
   dependencies: CliDependencies,
 ): Promise<ScanOutcome> {
   const controller = new AbortController();
-  const onInterrupt = () => controller.abort("SIGINT");
-  const onTerminate = () => controller.abort("SIGTERM");
-  dependencies.addSignalListener("SIGINT", onInterrupt);
-  dependencies.addSignalListener("SIGTERM", onTerminate);
+  const removeSignals = listenForAbort(dependencies, controller);
   try {
     const result = await (dependencies.importScan ?? importScan)(
       { ...options, signal: controller.signal },
@@ -6048,15 +5972,14 @@ async function runScanImport(
     const message =
       signal === "SIGINT" || signal === "SIGTERM"
         ? "Scan import canceled."
-        : logErrorMessage(error, dependencies.environment);
-    errorOutput.write(`codex-security: ${message}\n`);
+        : errorMessage(error);
+    errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
     return {
       exitCode: signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 2,
       error: message,
     };
   } finally {
-    dependencies.removeSignalListener("SIGINT", onInterrupt);
-    dependencies.removeSignalListener("SIGTERM", onTerminate);
+    removeSignals();
   }
 }
 
@@ -6260,6 +6183,15 @@ async function prepareScanArgumentsFromRecipe(
     );
   }
   const auth = z.enum(SCAN_AUTH_MODES).optional().safeParse(recipe["auth"]);
+  const cyberAccessProgram =
+    ScanSettingsSchema.shape.cyberAccessProgram.safeParse(
+      recipe["cyberAccessProgram"],
+    );
+  if (!cyberAccessProgram.success) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid Cyber access program.",
+    );
+  }
   if (!auth.success)
     throw new CodexSecurityError(
       "The saved scan recipe contains an invalid authentication choice.",
@@ -6296,6 +6228,7 @@ async function prepareScanArgumentsFromRecipe(
   return {
     repository,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
+    cyberAccessProgram: cyberAccessProgram.data,
     target:
       paths.length > 0
         ? paths
@@ -6901,12 +6834,12 @@ async function publishPatchBranch(
       );
     }
     stderr.write(
-      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url, dependencies.environment)}\n`,
+      `${gitlab ? "Merge" : "Pull"} request: ${safePatchText(url)}\n`,
     );
     return { branch, url };
   } catch (error) {
     stderr.write(
-      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch, dependencies.environment)}\n`,
+      `Patch commit saved. Retry from this repository with: codex-security patch --resume-pr ${safePatchText(branch)}\n`,
     );
     throw error;
   }
@@ -7109,24 +7042,15 @@ async function snapshotPatchDirectory(
   return files;
 }
 
-function safePatchText(
-  value: string,
-  environment: NodeJS.ProcessEnv = {},
-): string {
-  return stripVTControlCharacters(
-    logErrorMessage(value, environment),
-  ).replaceAll(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu, " ");
+function safePatchText(value: string): string {
+  return stripVTControlCharacters(value).replaceAll(
+    /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/gu,
+    " ",
+  );
 }
 
-function safePatchReport(
-  value: string,
-  environment: NodeJS.ProcessEnv = {},
-): string {
-  return value
-    .split(/\r?\n/gu)
-    .map((line) => safePatchText(line, environment))
-    .join("\n")
-    .trim();
+function safePatchReport(value: string): string {
+  return value.split(/\r?\n/gu).map(safePatchText).join("\n").trim();
 }
 
 function parsePatchRiskReport(report: string): PatchRiskAssessment {
@@ -7173,7 +7097,7 @@ async function runPatchRiskAssessment(
   }
   const assessment = parsePatchRiskReport(result.report);
   stderr.write(
-    `Patch risk assessment:\n${safePatchReport(assessment.report, dependencies.environment)}\n`,
+    `Patch risk assessment:\n${safePatchReport(assessment.report)}\n`,
   );
   return assessment;
 }
@@ -7432,9 +7356,9 @@ async function runFindingPatches(
       }
     }
 
-    const title = safePatchText(finding.title, dependencies.environment);
+    const title = safePatchText(finding.title);
     stderr.write(
-      `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason, dependencies.environment)}`}\n`,
+      `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason)}`}\n`,
     );
     patches.push(patch);
   }
@@ -8285,8 +8209,6 @@ async function executeScan(
   const verbose =
     arguments_.verbose === true ||
     configuredLogLevel?.toLowerCase() === "debug";
-  const diagnosticMessage = (value: unknown): string =>
-    diagnosticValue(logErrorMessage(value, dependencies.environment));
   const writeAboveProgress = (write: () => void): void => {
     if (progress === null) {
       write();
@@ -8301,13 +8223,8 @@ async function executeScan(
     if (!verbose) return;
     const attributes = Object.entries(fields).flatMap(([name, value]) => {
       if (value === undefined) return [];
-      // Redact free-form messages, preserving structured metadata and paths.
       const displayed =
-        typeof value !== "string"
-          ? value
-          : name === "message"
-            ? diagnosticMessage(value)
-            : diagnosticValue(value);
+        typeof value === "string" ? diagnosticValue(value) : value;
       return [`${name}=${JSON.stringify(displayed)}`];
     });
     writeAboveProgress(() => {
@@ -8398,11 +8315,7 @@ async function executeScan(
       scanModelConfiguration(effectiveConfiguration));
     const provider = scanModelProvider(effectiveConfiguration);
     const analytics = effectiveConfiguration["analytics"];
-    if (
-      analytics !== undefined &&
-      isJsonObject(analytics) &&
-      analytics["enabled"] !== undefined
-    ) {
+    if (isJsonObject(analytics) && analytics["enabled"] !== undefined) {
       patchAnalyticsOverride = `analytics.enabled=${JSON.stringify(analytics["enabled"])}`;
     }
     auth =
@@ -8483,7 +8396,6 @@ async function executeScan(
           : { maxCostUsd: arguments_.maxCostUsd }),
         clock: dependencies,
         color: dependencies.environment["NO_COLOR"] === undefined,
-        sanitize: (value) => logErrorMessage(value, dependencies.environment),
         input: scanInput,
         onInterrupt,
       });
@@ -8605,6 +8517,9 @@ async function executeScan(
       },
       onAuthentication: (authentication) => {
         selectedAuthentication = authentication;
+        const bedrock =
+          providerOptions.provider === "amazon-bedrock" ||
+          authentication.method === "aws_credentials";
         diagnostic("authentication.selected", {
           requested: auth ?? DEFAULT_SCAN_AUTH,
           method: authentication.method,
@@ -8622,6 +8537,11 @@ async function executeScan(
                   ? "Using native Codex command authentication"
                   : "Using stored Codex credentials",
           );
+          if (bedrock) {
+            dashboard.note(
+              "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
+            );
+          }
           return;
         }
         progress?.stopTimer();
@@ -8640,6 +8560,11 @@ async function executeScan(
           progress?.stage("Authentication: native Codex command.");
         } else {
           progress?.stage("Authentication: stored Codex credentials.");
+        }
+        if (bedrock) {
+          progress?.stage(
+            "Amazon Bedrock uses AWS authentication; OpenAI sign-in is not required for model access or local results.",
+          );
         }
         progress?.startTimer("Preparing scan");
       },
@@ -8760,9 +8685,7 @@ async function executeScan(
         }
         writeAboveProgress(() => {
           diagnostic("scan.warning", { message });
-          errorOutput.write(
-            `codex-security: warning: ${diagnosticMessage(warning)}\n`,
-          );
+          errorOutput.write(`codex-security: warning: ${message}\n`);
         });
       },
       onObserverError: (observer, error) => {
@@ -8770,7 +8693,7 @@ async function executeScan(
           observer,
           classification: classifyConnectionFailure(error),
         });
-        const warning = `${observer} observer failed: ${diagnosticMessage(error)}`;
+        const warning = `${observer} observer failed: ${diagnosticValue(error)}`;
         if (dashboard === null) {
           writeAboveProgress(() => {
             errorOutput.write(`codex-security: warning: ${warning}\n`);
@@ -8832,7 +8755,7 @@ async function executeScan(
         : scanFailureMessage(
             failure,
             selectedAuthentication,
-            dependencies.environment,
+            providerOptions.provider,
           );
     diagnostic("scan.failed", {
       classification:
@@ -9058,9 +8981,7 @@ async function executeScan(
         }
       }
     } catch (error) {
-      errorOutput.write(
-        `codex-security: ${logErrorMessage(error, dependencies.environment)}\n`,
-      );
+      errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
       scanData = { ...scanData, patches };
       return completedScan(2);
     }
@@ -9170,19 +9091,49 @@ function authenticationFailureMessage(
 function scanFailureMessage(
   error: unknown,
   authentication: ScanAuthentication | null,
-  environment: NodeJS.ProcessEnv,
+  provider?: string,
 ): string {
-  // A local failure keeps its own diagnostic, subject to log redaction.
-  // Classification matches bare words
+  // A local failure keeps its own message. Classification matches bare words
   // such as "permission denied" anywhere in the text, so an EACCES from a
   // read-only TMPDIR would otherwise be reported as a credential problem.
-  //
-  // The advice branches below still replace the underlying text rather than
-  // appending it. That is deliberate: upstream authentication and authorization
-  // errors can name the organization or project, which must not reach stderr or
-  // the JSON error field.
-  if (isLocalScanFailure(error))
-    return diagnosticValue(logErrorMessage(error, environment));
+  if (isLocalScanFailure(error)) return diagnosticValue(error);
+  const classification = classifyConnectionFailure(error);
+  if (
+    provider === "amazon-bedrock" ||
+    authentication?.method === "aws_credentials"
+  ) {
+    const detail = diagnosticValue(error);
+    switch (classification) {
+      case "unauthorized":
+        if (authentication?.method === "command") {
+          return `${detail}\n${authenticationFailureMessage(authentication)}`;
+        }
+        if (authentication?.method === "aws_credentials") {
+          return (
+            `${detail}\n${authenticationFailureMessage(authentication)} ` +
+            (authentication.source === "AWS_BEARER_TOKEN_BEDROCK"
+              ? "Refresh AWS_BEARER_TOKEN_BEDROCK in the environment running this command."
+              : "Refresh the selected AWS credentials in the environment running this command. Temporary access-key credentials also require AWS_SESSION_TOKEN.")
+          );
+        }
+        return `${detail}\nAmazon Bedrock authentication failed. Check the credentials configured for the selected provider.`;
+      case "forbidden":
+        if (authentication?.method === "command") {
+          return (
+            `${detail}\nThe configured provider auth command's credentials cannot access the Amazon Bedrock model. ` +
+            "Check the configured provider auth command, AWS identity and Bedrock model permissions, configured AWS region, and model ID."
+          );
+        }
+        return (
+          `${detail}\nThe AWS credentials${authentication?.method === "aws_credentials" ? ` from ${authentication.source}` : ""} cannot access the configured Amazon Bedrock model. ` +
+          "Check your AWS identity and Bedrock model permissions, configured AWS region, and model ID."
+        );
+      case "rate_limited":
+        return `${detail}\nAmazon Bedrock throttled the request. Check the model quota in the configured AWS region and retry.`;
+      default:
+        return detail;
+    }
+  }
   const message = errorMessage(error);
   const nativeRefreshRecovery = message.match(
     /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
@@ -9200,18 +9151,12 @@ function scanFailureMessage(
       "Otherwise run 'npx @openai/codex-security logout', then 'npx @openai/codex-security login'."
     );
   }
-  switch (classifyConnectionFailure(error)) {
+  switch (classification) {
     case "unauthorized":
       return authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
         return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
-      }
-      if (authentication?.method === "aws_credentials") {
-        return (
-          `The AWS credentials from ${authentication.source} cannot access the configured Amazon Bedrock model. ` +
-          "Check your AWS identity and Bedrock model permissions."
-        );
       }
       return authentication?.method === "api_key"
         ? `The API key from ${authentication.source} cannot access the configured model. ` +
@@ -9223,7 +9168,7 @@ function scanFailureMessage(
     case "network_error":
     case "timeout":
     case "unknown":
-      return diagnosticValue(logErrorMessage(error, environment));
+      return diagnosticValue(error);
   }
 }
 
@@ -9853,10 +9798,6 @@ function interruptedExit(
   return ctrlC ? 130 : 143;
 }
 
-function isJsonObject(value: JsonValue): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function invokedAsMain(): boolean {
   const entrypoint = process.argv[1];
   if (entrypoint === undefined) return false;
@@ -9868,6 +9809,13 @@ function invokedAsMain(): boolean {
   }
 }
 
+const interruptedExitCode = (signal: AbortSignal): number | undefined =>
+  signal.reason === "SIGINT"
+    ? 130
+    : signal.reason === "SIGTERM"
+      ? 143
+      : undefined;
+
 if (invokedAsMain()) {
   void main().then(
     (exitCode) => {
@@ -9878,4 +9826,21 @@ if (invokedAsMain()) {
       process.exitCode = 2;
     },
   );
+}
+
+function listenForAbort(
+  dependencies: Pick<
+    CliDependencies,
+    "addSignalListener" | "removeSignalListener"
+  >,
+  controller: AbortController,
+): () => void {
+  const onInterrupt = () => controller.abort("SIGINT");
+  const onTerminate = () => controller.abort("SIGTERM");
+  dependencies.addSignalListener("SIGINT", onInterrupt);
+  dependencies.addSignalListener("SIGTERM", onTerminate);
+  return () => {
+    dependencies.removeSignalListener("SIGINT", onInterrupt);
+    dependencies.removeSignalListener("SIGTERM", onTerminate);
+  };
 }
