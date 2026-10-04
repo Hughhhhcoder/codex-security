@@ -1,6 +1,7 @@
+import { readOnlyParentSandboxState } from "./sandbox-state.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   mkdtemp,
   mkdir,
@@ -11,15 +12,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { build } from "esbuild";
 
-const applicationRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
+import { applicationRoot, buildServer } from "./build-server.mjs";
+
 const pluginRoot = path.resolve(applicationRoot, "..");
 const bundledPluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
   ? path.resolve(process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT)
@@ -30,7 +27,14 @@ const temporaryRoot = await mkdtemp(
 
 try {
   const runtimeBundle = path.join(temporaryRoot, "server.cjs");
-  await bundleEntrypoint("main.ts", runtimeBundle);
+  await buildServer(runtimeBundle, {
+    define: {
+      __dirname: JSON.stringify(path.join(bundledPluginRoot, "mcp")),
+      "import.meta.url": "__filename",
+    },
+    logOverride: { "empty-import-meta": "silent" },
+    target: "node20",
+  });
 
   await testParentToolList(runtimeBundle);
   await testClaimedParentArtifactOperations(runtimeBundle, "source");
@@ -462,24 +466,13 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     const candidateCollisionDeferred = {
       reason: "An unavailable adapter belongs to an existing candidate.",
     };
-    const deferredIdentity = ({ reason, paths, surfaceIds }) => {
-      const digest = createHash("sha256")
-        .update(JSON.stringify([reason, paths ?? [], surfaceIds ?? []]))
-        .digest("hex")
-        .slice(0, 16);
-      return `deferred-${digest}`;
-    };
-    const reasonOnlyDeferredId = deferredIdentity(reasonOnlyDeferred);
-    const explicitCollisionDeferredId = deferredIdentity(
-      explicitCollisionDeferred,
-    );
-    const candidateCollisionDeferredId = deferredIdentity(
-      candidateCollisionDeferred,
-    );
+    const explicitCollisionDeferredId = "explicit-adapter-review";
+    const candidateCollisionDeferredId = "candidate-adapter-review";
     const coverage = {
       completeness: "partial",
       surfaces: [
         {
+          id: "surface_sql-execution",
           label: "SQL execution",
           disposition: "reported",
           notes:
@@ -694,6 +687,12 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
     );
+    const checkpointDeferred = JSON.parse(
+      await readFile(path.join(scanDirectory, "coverage.json"), "utf8"),
+    ).deferred;
+    const generatedIds = checkpointDeferred.slice(5, 9).map(({ id }) => id);
+    assert.ok(generatedIds.every((id) => typeof id === "string"));
+    assert.equal(new Set(generatedIds).size, generatedIds.length);
     const discovery = await progress();
     assert.equal(discovery.status, "running");
     assert.equal(discovery.phase, "discovery");
@@ -733,10 +732,22 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       }),
       `${runtimeLabel}: correct the same scan and accept exactly one draft`,
     );
+    const {
+      documentType,
+      schemaVersion,
+      scanId: coverageScanId,
+      ...savedCoverage
+    } = JSON.parse(
+      await readFile(path.join(scanDirectory, "coverage.json"), "utf8"),
+    );
+    assert.equal(documentType, "codex-security.coverage");
+    assert.equal(schemaVersion, "1.0");
+    assert.equal(coverageScanId, scanId);
     assert.deepEqual(drafted, {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
+      coverage: savedCoverage,
       operation: "replace",
       status: "draft_written",
     });
@@ -816,19 +827,19 @@ async function testSemanticScanDraftCompletion(bundle, runtimeLabel) {
       },
       {
         ...reasonOnlyDeferred,
-        id: reasonOnlyDeferredId,
+        id: generatedIds[0],
       },
       {
         ...reasonOnlyDeferred,
-        id: `${reasonOnlyDeferredId}-2`,
+        id: generatedIds[1],
       },
       {
         ...explicitCollisionDeferred,
-        id: `${explicitCollisionDeferredId}-2`,
+        id: generatedIds[2],
       },
       {
         ...candidateCollisionDeferred,
-        id: `${candidateCollisionDeferredId}-2`,
+        id: generatedIds[3],
       },
       coverage.deferred[9],
       {
@@ -1268,22 +1279,7 @@ async function testParentToolList(bundle) {
       undefined,
     );
 
-    const sandboxState = {
-      permissionProfile: {
-        type: "managed",
-        file_system: {
-          type: "restricted",
-          entries: [
-            {
-              path: { type: "special", value: { kind: "root" } },
-              access: "read",
-            },
-          ],
-        },
-        network: "restricted",
-      },
-      sandboxCwd: pathToFileURL(pluginRoot).href,
-    };
+    const sandboxState = readOnlyParentSandboxState(pluginRoot);
     for (const userContext of ["", "   "]) {
       requireToolError(
         await client.callTool({
@@ -1341,7 +1337,7 @@ async function testDiscoveryWorkerToolList(bundle) {
     CODEX_SECURITY_REPO_ROOT: repoRoot,
     CODEX_SECURITY_ARTIFACT_LAYOUT: "worker",
     CODEX_SECURITY_SCAN_ID: scanId,
-    CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+    CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
   });
   try {
     assert.deepEqual(
@@ -1425,6 +1421,7 @@ async function testDiscoveryWorkerToolList(bundle) {
       scanId,
       findingCount: 0,
       surfaceCount: 0,
+      coverage: JSON.parse(await readFile(resultPath, "utf8")).coverage,
       operation: "replace",
       status: "draft_written",
     });
@@ -1531,7 +1528,7 @@ async function testReducerWorkerToolList(bundle) {
     CODEX_SECURITY_REPO_ROOT: repoRoot,
     CODEX_SECURITY_ARTIFACT_LAYOUT: "reducer",
     CODEX_SECURITY_SCAN_ID: scanId,
-    CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+    CODEX_SECURITY_PLUGIN_ROOT: bundledPluginRoot,
     CODEX_SECURITY_REDUCER_CONTEXT_JSON: JSON.stringify({
       scanRoot,
       claimedWorkers: [{ id: workerId, resultPath: workerResultPath }],
@@ -1716,25 +1713,6 @@ function reducerPagingFinding(id) {
     remediation: "Encode request-controlled values before emitting HTML.",
     provenance: { source: "local_plugin" },
   };
-}
-
-async function bundleEntrypoint(entrypoint, outfile) {
-  await build({
-    bundle: true,
-    define: {
-      __dirname: JSON.stringify(applicationRoot),
-      "import.meta.url": "__filename",
-    },
-    entryPoints: [path.join(applicationRoot, entrypoint)],
-    external: ["fsevents"],
-    format: "cjs",
-    loader: { ".md": "text" },
-    logLevel: "silent",
-    logOverride: { "empty-import-meta": "silent" },
-    outfile,
-    platform: "node",
-    target: "node20",
-  });
 }
 
 async function startClient(bundle, environment) {

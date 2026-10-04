@@ -415,24 +415,51 @@ describe("CLI authentication", () => {
       expect(stderr.text()).toContain(
         `method="aws_credentials" source="${source}"`,
       );
+      expect(stderr.text()).toContain(
+        "OpenAI sign-in is not required for model access or local results",
+      );
       expect(stderr.text()).not.toContain("synthetic-");
       expect(stderr.text()).not.toContain("stored Codex credentials");
       expect(stderr.text()).not.toContain("--auth chatgpt");
     }
   });
 
-  test("provides provider-aware Amazon Bedrock authentication failure guidance", async () => {
-    for (const [detail, expected] of [
-      [
-        "401 invalid credentials for org-private",
-        "Check your Amazon Bedrock bearer token",
-      ],
-      [
-        "403 model access denied for org-private",
-        "Check your AWS identity and Bedrock model permissions",
-      ],
-    ] as const) {
+  test.each([
+    [
+      "401 invalid credentials for org-private",
+      "Check your Amazon Bedrock bearer token",
+      "unauthorized",
+    ],
+    [
+      "403 model access denied for org-private",
+      "Check your AWS identity and Bedrock model permissions",
+      "forbidden",
+    ],
+    [
+      "403 ExpiredTokenException: The security token included in the request has expired.",
+      "Refresh AWS_BEARER_TOKEN_BEDROCK",
+      "unauthorized",
+    ],
+    [
+      "UnrecognizedClientException: The security token included in the request is invalid.",
+      "Refresh AWS_BEARER_TOKEN_BEDROCK",
+      "unauthorized",
+    ],
+    [
+      "AccessDeniedException: Not authorized to invoke the selected model.",
+      "configured AWS region, and model ID",
+      "forbidden",
+    ],
+    [
+      "400 ThrottlingException: Too many tokens, please wait before trying again.",
+      "Check the model quota in the configured AWS region",
+      "rate_limited",
+    ],
+  ] as const)(
+    "preserves Bedrock failure details and recovery advice: %s",
+    async (detail, expected, classification) => {
       const stderr = capture(false);
+      const stdout = capture();
       const deps = dependencies({
         environment: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer" },
       });
@@ -451,19 +478,141 @@ describe("CLI authentication", () => {
 
       expect(
         await main(
-          ["scan", "--codex", 'model_provider="amazon-bedrock"'],
-          capture().stream,
+          [
+            "scan",
+            "--codex",
+            'model_provider="amazon-bedrock"',
+            "--json",
+            "--verbose",
+            "--full-output",
+          ],
+          stdout.stream,
           stderr.stream,
           deps,
         ),
       ).toBe(2);
       expect(stderr.text()).toContain(expected);
+      expect(stderr.text()).toContain(detail);
+      expect(stderr.text()).toContain(`classification="${classification}"`);
+      expect(JSON.parse(stdout.text()).error.message).toContain(detail);
+      expect(JSON.parse(stdout.text()).error.message).toContain(expected);
       expect(stderr.text()).toContain("AWS_BEARER_TOKEN_BEDROCK");
       expect(stderr.text()).not.toContain("synthetic-");
-      expect(stderr.text()).not.toContain("org-private");
       expect(stderr.text()).not.toContain("--auth chatgpt");
-    }
+    },
+  );
+
+  test("explains refreshing temporary AWS profile credentials without a stored OpenAI login", async () => {
+    const stderr = capture(false);
+    const deps = dependencies({
+      environment: { AWS_PROFILE: "synthetic-profile" },
+    });
+    deps.createSecurity = () => ({
+      run: async (_repository, options) => {
+        options?.onAuthentication?.({
+          method: "aws_credentials",
+          source: "AWS_PROFILE",
+          verified: false,
+        });
+        throw new CodexSecurityError(
+          "403 ExpiredTokenException: security token has expired",
+        );
+      },
+      preflight: async () => fakePreflight(),
+      close: async () => {},
+    });
+    expect(
+      await main(
+        ["scan", "--codex", 'model_provider="amazon-bedrock"'],
+        capture().stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("ExpiredTokenException");
+    expect(stderr.text()).toContain("AWS_PROFILE");
+    expect(stderr.text()).toContain("AWS_SESSION_TOKEN");
+    expect(stderr.text()).not.toContain(
+      "cannot access the configured Amazon Bedrock model",
+    );
+    expect(stderr.text()).not.toContain("codex-security login");
   });
+
+  test.each([
+    [
+      "UnrecognizedClientException: The security token included in the request is invalid.",
+      "Check the configured provider auth command",
+      "unauthorized",
+    ],
+    [
+      "403 ExpiredTokenException: The security token included in the request has expired.",
+      "Check the configured provider auth command",
+      "unauthorized",
+    ],
+    [
+      "401 NotAuthorized: You do not have permission to perform this action.",
+      "AWS identity and Bedrock model permissions, configured AWS region, and model ID",
+      "forbidden",
+    ],
+    [
+      "AccessDeniedException: Not authorized to invoke the selected model.",
+      "Check the configured provider auth command",
+      "forbidden",
+    ],
+    [
+      "400 ThrottlingException: Too many tokens, please wait before trying again.",
+      "Check the model quota in the configured AWS region",
+      "rate_limited",
+    ],
+  ] as const)(
+    "preserves command-authenticated Bedrock diagnostics in stderr and JSON: %s",
+    async (detail, expected, classification) => {
+      const stderr = capture(false);
+      const stdout = capture();
+      const deps = dependencies();
+      deps.createSecurity = () => ({
+        run: async (_repository, options) => {
+          options?.onAuthentication?.({ method: "command", verified: false });
+          throw new CodexSecurityError(detail);
+        },
+        preflight: async () => fakePreflight(),
+        close: async () => {},
+      });
+      expect(
+        await main(
+          [
+            "scan",
+            "--codex",
+            'model_provider="amazon-bedrock"',
+            "--codex",
+            'model_providers.amazon-bedrock.auth={command="synthetic-auth"}',
+            "--json",
+            "--verbose",
+            "--full-output",
+          ],
+          stdout.stream,
+          stderr.stream,
+          deps,
+        ),
+      ).toBe(2);
+
+      const message = JSON.parse(stdout.text()).error.message;
+      for (const output of [stderr.text(), message]) {
+        expect(output).toContain(detail);
+        expect(output).toContain(expected);
+        expect(output).not.toContain("--auth chatgpt");
+        expect(output).not.toContain("codex-security login");
+        expect(output).not.toContain("stored ChatGPT credentials");
+        expect(output).not.toContain("AWS_BEARER_TOKEN_BEDROCK");
+        expect(output).not.toContain("AWS_SESSION_TOKEN");
+      }
+      expect(stderr.text()).toContain(`classification="${classification}"`);
+      expect(stderr.text()).toContain("Authentication: native Codex command");
+      expect(stderr.text()).toContain(
+        "OpenAI sign-in is not required for model access or local results",
+      );
+    },
+  );
 
   test("offers the existing interactive prompt when both sign-ins are available", async () => {
     for (const [argv, selection] of [
@@ -1022,7 +1171,7 @@ describe("CLI authentication", () => {
       expect(JSON.parse(stdout.text())).toMatchObject({
         status: "failed",
         code: "SCAN_FAILED",
-        message: message.includes("access token") ? "[redacted]" : message,
+        message,
       });
       expect(stderr.text()).toContain(`${message}\n`);
       expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
@@ -1219,6 +1368,671 @@ describe("CLI authentication", () => {
 });
 
 describe("skill authentication", () => {
+  async function runProviderSkill({
+    command = "patch",
+    auth = "api-key",
+    overrides,
+    environment,
+    ambientConfig,
+    storedCredentials = false,
+  }: {
+    command?: "validate" | "patch" | "verify-fix";
+    auth?: "auto" | "chatgpt" | "api-key";
+    overrides: readonly string[];
+    environment?: NodeJS.ProcessEnv;
+    ambientConfig?: string;
+    storedCredentials?: boolean;
+  }) {
+    const repository = join(stateDirectory, "repository");
+    const ambientHome = join(stateDirectory, "ambient");
+    const log = join(stateDirectory, "provider.jsonl");
+    await mkdir(repository);
+    await mkdir(ambientHome);
+    if (ambientConfig !== undefined) {
+      await writeFile(join(ambientHome, "config.toml"), ambientConfig);
+    }
+    if (storedCredentials) {
+      await writeFile(
+        join(ambientHome, "auth.json"),
+        JSON.stringify({
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
+        }),
+        { mode: 0o600 },
+      );
+    }
+    const stdout = capture();
+    const stderr = capture();
+    const status = await main(
+      [
+        command,
+        "Synthetic issue",
+        "--auth",
+        auth,
+        ...overrides.flatMap((value) => ["--codex", value]),
+      ],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        currentDirectory: repository,
+        environment: {
+          ...environment,
+          CODEX_HOME: ambientHome,
+          SYNTHETIC_PROVIDER_LOG: log,
+          SYNTHETIC_SKILL_COMMAND: command,
+        },
+        onCodex: async (args, output, environment, input) => {
+          const originalOverrides = structuredClone(output?.codexOverrides);
+          const result = await runCodexSkillCommand(
+            [
+              fileURLToPath(
+                new URL("./fixtures/skill-provider-auth.mjs", import.meta.url),
+              ),
+              ...args,
+            ],
+            output,
+            { command: process.execPath },
+            environment,
+            input,
+          );
+          expect(output?.codexOverrides).toEqual(originalOverrides);
+          return result;
+        },
+      }),
+    );
+    const records = existsSync(log)
+      ? (await readFile(log, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+      : [];
+    if (ambientConfig !== undefined) {
+      expect(await readFile(join(ambientHome, "config.toml"), "utf8")).toBe(
+        ambientConfig,
+      );
+    }
+    return {
+      status,
+      stderr: stderr.text(),
+      launch: records[0],
+      requests: records.slice(1),
+    };
+  }
+
+  test.each([
+    ["validate", "auto", "gateway"],
+    ["validate", "api-key", "gateway"],
+    ["patch", "auto", "gateway"],
+    ["patch", "api-key", "gateway"],
+    ["verify-fix", "auto", "gateway"],
+    ["verify-fix", "api-key", "gateway"],
+    ["patch", "api-key", "openrouter"],
+  ] as const)(
+    "%s uses the custom provider env_key with %s auth (%s)",
+    async (command, auth, provider) => {
+      const result = await runProviderSkill({
+        command,
+        auth,
+        overrides: [
+          `model_provider=${JSON.stringify(provider)}`,
+          `model_providers.${provider}.name="Synthetic gateway"`,
+          `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
+          `model_providers.${provider}.wire_api="responses"`,
+          `model_providers.${provider}.env_key="GATEWAY_API_KEY"`,
+        ],
+        environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+      if (command !== "validate") {
+        expect(
+          result.requests.find((request) => request.method === "thread/start")
+            .params.modelProvider,
+        ).toBe(provider);
+      }
+    },
+  );
+
+  test("rejects a missing custom provider API key before launch", async () => {
+    const result = await runProviderSkill({
+      overrides: [
+        'model_provider="gateway"',
+        'model_providers.gateway.env_key="GATEWAY_API_KEY"',
+      ],
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("GATEWAY_API_KEY");
+    expect(result.launch).toBeUndefined();
+  });
+
+  test.each(["patch", "verify-fix"] as const)(
+    "%s preserves valid names in unrelated ambient configuration",
+    async (command) => {
+      const result = await runProviderSkill({
+        command,
+        overrides: [],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="GATEWAY_API_KEY"',
+          "[mcp_servers.prototype]",
+          'command="synthetic-mcp"',
+          "enabled=false",
+        ].join("\n"),
+        environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
+      });
+    },
+  );
+
+  test.each([true, false])(
+    "patch uses a custom provider table override with ambient selection (new key present: %p)",
+    async (hasSelectedKey) => {
+      const result = await runProviderSkill({
+        overrides: ['model_providers.gateway.env_key="GATEWAY_API_KEY"'],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="OLD_GATEWAY_API_KEY"',
+        ].join("\n"),
+        environment: hasSelectedKey
+          ? { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" }
+          : { OLD_GATEWAY_API_KEY: "SYNTHETIC_OLD_KEY" },
+      });
+      if (hasSelectedKey) {
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.launch.environment).toEqual({
+          GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
+        });
+      } else {
+        expect(result.status).toBe(2);
+        expect(result.stderr).toMatch(/\bGATEWAY_API_KEY\b/u);
+        expect(result.launch).toBeUndefined();
+      }
+    },
+  );
+
+  test.each([
+    ["patch", false, false],
+    ["patch", true, false],
+    ["verify-fix", false, false],
+    ["verify-fix", true, false],
+    ["patch", true, true],
+  ] as const)(
+    "%s keeps ambient provider authentication with explicit selection (partial override: %p, profile: %p)",
+    async (command, partialOverride, profile) => {
+      const result = await runProviderSkill({
+        command,
+        overrides: [
+          'model_provider="gateway"',
+          ...(partialOverride
+            ? [
+                'model_providers.gateway.base_url="https://alternate.example.test/v1"',
+              ]
+            : []),
+        ],
+        ambientConfig: [
+          ...(profile ? ['profile="ambient"'] : []),
+          'model_provider="gateway"',
+          ...(profile ? ["[profiles.ambient]", 'model_provider="other"'] : []),
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          "requires_openai_auth=true",
+          ...(profile
+            ? [
+                "[model_providers.other]",
+                'name="Other gateway"',
+                'base_url="https://other.example.test/v1"',
+                'wire_api="responses"',
+                'env_key="OTHER_API_KEY"',
+              ]
+            : []),
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        CODEX_API_KEY: "SYNTHETIC_OPENAI_KEY",
+      });
+      expect(result.launch.args).toContain(
+        'cli_auth_credentials_store="ephemeral"',
+      );
+      expect(
+        result.requests
+          .filter((request) => request.method === "account/login/start")
+          .map((request) => request.params),
+      ).toEqual([{ type: "apiKey", apiKey: "SYNTHETIC_OPENAI_KEY" }]);
+    },
+  );
+
+  test.each([
+    ["ollama", "auto"],
+    ["ollama", "api-key"],
+    ["lmstudio", "auto"],
+    ["lmstudio", "api-key"],
+  ] as const)(
+    "patch ignores replacement authentication for native provider %s with %s auth",
+    async (provider, auth) => {
+      const result = await runProviderSkill({
+        auth,
+        overrides: [`model_provider=${JSON.stringify(provider)}`],
+        ambientConfig: [
+          `model_provider=${JSON.stringify(provider)}`,
+          `[model_providers.${provider}]`,
+          'name="Synthetic override"',
+          'base_url="https://ignored.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="IGNORED_KEY"',
+          "requires_openai_auth=true",
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test.each(["patch", "verify-fix"] as const)(
+    "%s keeps native OpenAI authentication despite a provider table override",
+    async (command) => {
+      const result = await runProviderSkill({
+        command,
+        overrides: ['model_provider="openai"'],
+        ambientConfig: [
+          'model_provider="openai"',
+          "[model_providers.openai]",
+          'name="Synthetic override"',
+          'base_url="https://ignored.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="OPENAI_API_KEY"',
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        CODEX_API_KEY: "SYNTHETIC_OPENAI_KEY",
+      });
+      expect(result.launch.args).toContain(
+        'cli_auth_credentials_store="ephemeral"',
+      );
+      expect(
+        result.requests
+          .filter((request) => request.method === "account/login/start")
+          .map((request) => request.params),
+      ).toEqual([{ type: "apiKey", apiKey: "SYNTHETIC_OPENAI_KEY" }]);
+    },
+  );
+
+  test.each([
+    ["patch", "auto"],
+    ["patch", "api-key"],
+    ["verify-fix", "auto"],
+    ["verify-fix", "api-key"],
+  ] as const)(
+    "%s uses the custom provider key before OpenAI login with %s auth",
+    async (command, auth) => {
+      const result = await runProviderSkill({
+        command,
+        auth,
+        overrides: ['model_provider="gateway"'],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="GATEWAY_API_KEY"',
+          "requires_openai_auth=true",
+        ].join("\n"),
+        environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY",
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test.each(
+    (
+      [
+        ["validate", "override"],
+        ["patch", "override"],
+        ["verify-fix", "override"],
+        ["patch", "ambient"],
+        ["verify-fix", "ambient"],
+        ["patch", "profile"],
+        ["verify-fix", "profile"],
+      ] as const
+    ).flatMap(([command, source]) =>
+      [true, false, undefined].flatMap((requiresOpenAiAuth) =>
+        ["env_key", "bearer"].map(
+          (credential) =>
+            [command, source, requiresOpenAiAuth, credential] as const,
+        ),
+      ),
+    ),
+  )(
+    "%s removes the custom provider key and %s config for explicit ChatGPT auth (requires OpenAI: %p, credential: %s)",
+    async (command, source, requiresOpenAiAuth, credential) => {
+      const configuredEnvKey =
+        process.platform === "win32" ? "gateway_api_key" : "GATEWAY_API_KEY";
+      const environment = { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" };
+      const providerConfig = {
+        name: "Synthetic gateway",
+        base_url: "https://gateway.example.test/v1",
+        wire_api: "responses",
+        ...(requiresOpenAiAuth === undefined
+          ? {}
+          : { requires_openai_auth: requiresOpenAiAuth }),
+      };
+      const providerSettings = [
+        ...Object.entries(providerConfig).map(
+          ([key, value]) => `${key}=${JSON.stringify(value)}`,
+        ),
+        ...(credential === "env_key"
+          ? [`env_key=${JSON.stringify(configuredEnvKey)}`]
+          : []),
+        ...(credential === "bearer" || requiresOpenAiAuth === false
+          ? ['experimental_bearer_token="SYNTHETIC_FALLBACK_KEY"']
+          : []),
+      ];
+      const result = await runProviderSkill({
+        command,
+        auth: "chatgpt",
+        overrides:
+          source === "override"
+            ? [
+                'model_provider="gateway"',
+                ...providerSettings.map(
+                  (setting) => `model_providers.gateway.${setting}`,
+                ),
+              ]
+            : [],
+        ...(source === "override"
+          ? {}
+          : {
+              ambientConfig: [
+                ...(source === "profile"
+                  ? ['profile="gateway-profile"', "[profiles.gateway-profile]"]
+                  : []),
+                'model_provider="gateway"',
+                "[model_providers.gateway]",
+                ...providerSettings,
+              ].join("\n"),
+            }),
+        environment,
+        storedCredentials: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual(
+        credential === "env_key" ? {} : environment,
+      );
+      expect(parseToml(result.launch.config)["model_providers"]).toEqual({
+        gateway: { ...providerConfig, requires_openai_auth: true },
+      });
+      const providerOverride = result.launch.args.findLast((arg: string) =>
+        arg.startsWith("model_providers="),
+      );
+      if (source === "override") {
+        expect(parseToml(providerOverride)["model_providers"]).toEqual({
+          gateway: { ...providerConfig, requires_openai_auth: true },
+        });
+      } else {
+        expect(providerOverride).toBeUndefined();
+      }
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+      expect(environment.GATEWAY_API_KEY).toBe("SYNTHETIC_GATEWAY_KEY");
+    },
+  );
+
+  test.each(["patch", "verify-fix"] as const)(
+    "%s keeps ambient provider credentials out of process arguments",
+    async (command) => {
+      const result = await runProviderSkill({
+        command,
+        auth: "chatgpt",
+        overrides: [
+          'model_provider="gateway"',
+          'model_providers.gateway.env_key="GATEWAY_API_KEY"',
+          "model_providers.gateway.requires_openai_auth=false",
+          'model_providers.gateway.http_headers.X-Explicit="SYNTHETIC_CLI_HEADER"',
+        ],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="GATEWAY_API_KEY"',
+          "[model_providers.gateway.http_headers]",
+          'Authorization="Bearer SYNTHETIC_SELECTED_CREDENTIAL"',
+          "[model_providers.other]",
+          'name="Other gateway"',
+          'base_url="https://other.example.test/v1"',
+          'wire_api="responses"',
+          'experimental_bearer_token="SYNTHETIC_UNSELECTED_CREDENTIAL"',
+        ].join("\n"),
+        environment: { GATEWAY_API_KEY: "SYNTHETIC_GATEWAY_KEY" },
+        storedCredentials: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const argumentsText = JSON.stringify(result.launch.args);
+      expect(argumentsText).not.toContain("SYNTHETIC_SELECTED_CREDENTIAL");
+      expect(argumentsText).not.toContain("SYNTHETIC_UNSELECTED_CREDENTIAL");
+      expect(argumentsText).toContain("SYNTHETIC_CLI_HEADER");
+      expect(parseToml(result.launch.config)["model_providers"]).toEqual({
+        gateway: {
+          name: "Synthetic gateway",
+          base_url: "https://gateway.example.test/v1",
+          wire_api: "responses",
+          requires_openai_auth: true,
+          http_headers: {
+            Authorization: "Bearer SYNTHETIC_SELECTED_CREDENTIAL",
+            "X-Explicit": "SYNTHETIC_CLI_HEADER",
+          },
+        },
+      });
+    },
+  );
+
+  test.each(["patch", "verify-fix"] as const)(
+    "%s rejects a missing custom provider key despite an available OpenAI key",
+    async (command) => {
+      const result = await runProviderSkill({
+        command,
+        overrides: ['model_provider="gateway"'],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          'env_key="GATEWAY_API_KEY"',
+          "requires_openai_auth=true",
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "SYNTHETIC_UNRELATED_OPENAI_KEY" },
+      });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toMatch(/\bGATEWAY_API_KEY\b/u);
+      expect(result.launch).toBeUndefined();
+    },
+  );
+
+  test.each([
+    ["patch", "OPENAI_API_KEY"],
+    ["patch", "CODEX_API_KEY"],
+    ["verify-fix", "OPENAI_API_KEY"],
+    ["verify-fix", "CODEX_API_KEY"],
+  ] as const)(
+    "%s preserves provider key %s without OpenAI login",
+    async (command, envKey) => {
+      const configuredEnvKey =
+        process.platform === "win32" ? envKey.toLowerCase() : envKey;
+      const result = await runProviderSkill({
+        command,
+        overrides: ['model_provider="gateway"'],
+        ambientConfig: [
+          'model_provider="gateway"',
+          "[model_providers.gateway]",
+          'name="Synthetic gateway"',
+          'base_url="https://gateway.example.test/v1"',
+          'wire_api="responses"',
+          `env_key=${JSON.stringify(configuredEnvKey)}`,
+          "requires_openai_auth=true",
+        ].join("\n"),
+        environment: {
+          OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+          CODEX_API_KEY: "SYNTHETIC_CODEX_KEY",
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+      expect(result.launch.environment[envKey]).toBe(
+        envKey === "OPENAI_API_KEY"
+          ? "SYNTHETIC_OPENAI_KEY"
+          : "SYNTHETIC_CODEX_KEY",
+      );
+    },
+  );
+
+  test("resolves custom provider key casing according to the platform", async () => {
+    const result = await runProviderSkill({
+      overrides: [
+        'model_provider="gateway"',
+        'model_providers.gateway.env_key="GATEWAY_API_KEY"',
+      ],
+      environment: { gateway_api_key: "SYNTHETIC_GATEWAY_KEY" },
+    });
+    if (process.platform === "win32") {
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment.GATEWAY_API_KEY).toBe(
+        "SYNTHETIC_GATEWAY_KEY",
+      );
+    } else {
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("GATEWAY_API_KEY");
+      expect(result.launch).toBeUndefined();
+    }
+  });
+
+  test.each([
+    ["openrouter", "api-key"],
+    ["fireworks", "api-key"],
+    ["openrouter", "chatgpt"],
+    ["fireworks", "chatgpt"],
+  ] as const)(
+    "preserves OPENAI_API_KEY when configured as the %s provider key with %s auth",
+    async (provider, auth) => {
+      const result = await runProviderSkill({
+        auth,
+        overrides: [
+          `model_provider=${JSON.stringify(provider)}`,
+          `model_providers.${provider}.name="Synthetic gateway"`,
+          `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
+          `model_providers.${provider}.wire_api="responses"`,
+          `model_providers.${provider}.env_key="OPENAI_API_KEY"`,
+          `model_providers.${provider}.requires_openai_auth=${auth === "chatgpt"}`,
+        ],
+        environment: {
+          OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+          CODEX_API_KEY: "SYNTHETIC_CODEX_KEY",
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({
+        OPENAI_API_KEY: "SYNTHETIC_OPENAI_KEY",
+      });
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
+  test.each([
+    ["validate", "override"],
+    ["patch", "override"],
+    ["verify-fix", "override"],
+    ["patch", "ambient"],
+    ["verify-fix", "ambient"],
+  ] as const)(
+    "%s uses native provider bearer authentication from %s without an OpenAI login",
+    async (command, source) => {
+      const providerConfig = {
+        name: "Synthetic gateway",
+        base_url: "https://gateway.example.test/v1",
+        wire_api: "responses",
+        experimental_bearer_token: "SYNTHETIC_BEARER_TOKEN",
+        requires_openai_auth: true,
+      };
+      const settings = Object.entries(providerConfig).map(
+        ([key, value]) => `${key}=${JSON.stringify(value)}`,
+      );
+      const result = await runProviderSkill({
+        command,
+        auth: "auto",
+        overrides: [
+          'model_provider="gateway"',
+          ...(source === "override"
+            ? settings.map((setting) => `model_providers.gateway.${setting}`)
+            : []),
+        ],
+        ...(source === "ambient"
+          ? {
+              ambientConfig: ["[model_providers.gateway]", ...settings].join(
+                "\n",
+              ),
+            }
+          : {}),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.launch.environment).toEqual({});
+      if (source === "override") {
+        const override = result.launch.args.findLast((arg: string) =>
+          arg.startsWith("model_providers="),
+        );
+        expect(parseToml(override)["model_providers"]).toEqual({
+          gateway: providerConfig,
+        });
+      } else {
+        expect(parseToml(result.launch.config)["model_providers"]).toEqual({
+          gateway: providerConfig,
+        });
+      }
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
   test.each(["validate", "patch", "verify-fix"])(
     "%s advertises scan auth modes",
     async (command) => {
@@ -1315,17 +2129,19 @@ describe("skill authentication", () => {
     },
   );
   test.each([
-    ["auto", false, undefined],
-    ["chatgpt", false, undefined],
-    ["chatgpt", true, undefined],
-    ["chatgpt", false, "synthetic"],
-    ["api-key", false, undefined],
-    ["api-key", true, undefined],
-    ["auto", false, "synthetic"],
-    ["api-key", false, "synthetic"],
+    ["auto", false, undefined, false],
+    ["chatgpt", false, undefined, false],
+    ["chatgpt", true, undefined, false],
+    ["chatgpt", false, "synthetic", false],
+    ["api-key", false, undefined, false],
+    ["api-key", true, undefined, false],
+    ["auto", false, "synthetic", false],
+    ["api-key", false, "synthetic", false],
+    ["api-key", false, "synthetic", true],
+    ["chatgpt", false, "synthetic", true],
   ] as const)(
-    "patch uses %s auth without replacing a saved login (failure: %p, provider: %s)",
-    async (auth, loginFailure, provider) => {
+    "patch uses %s auth without replacing a saved login (failure: %p, provider: %s, explicit: %p)",
+    async (auth, loginFailure, provider, explicitProvider) => {
       const repository = join(stateDirectory, "repository");
       await mkdir(repository);
       const ambientHome = join(stateDirectory, "ambient");
@@ -1360,7 +2176,14 @@ describe("skill authentication", () => {
           'forced_login_method = "api"',
         );
       }
-      if (provider !== undefined) {
+      const providerConfiguration = {
+        name: "Synthetic provider",
+        base_url: "https://example.test/v1",
+        wire_api: "responses",
+        env_key: "OPENAI_API_KEY",
+        requires_openai_auth: auth === "chatgpt",
+      };
+      if (provider !== undefined && !explicitProvider) {
         await writeFile(
           join(ambientHome, "config.toml"),
           [
@@ -1405,7 +2228,24 @@ describe("skill authentication", () => {
       };
       expect(
         await main(
-          ["patch", "Synthetic issue", "--auth", auth],
+          [
+            "patch",
+            "Synthetic issue",
+            "--auth",
+            auth,
+            ...(explicitProvider
+              ? [
+                  "--codex",
+                  `model_provider=${JSON.stringify(provider)}`,
+                  ...Object.entries(providerConfiguration).flatMap(
+                    ([key, value]) => [
+                      "--codex",
+                      `model_providers.${provider}.${key}=${JSON.stringify(value)}`,
+                    ],
+                  ),
+                ]
+              : []),
+          ],
           stdout.stream,
           stderr.stream,
           dependencies({
@@ -1446,7 +2286,7 @@ describe("skill authentication", () => {
         expect(
           requests.find((request) => request.method === "thread/start").params
             .modelProvider,
-        ).toBeUndefined();
+        ).toBe(explicitProvider ? provider : undefined);
       }
       expect(methods).toEqual([
         "initialize",

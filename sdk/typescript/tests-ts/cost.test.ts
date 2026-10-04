@@ -1,13 +1,5 @@
 import { spawnSync } from "node:child_process";
-import {
-  appendFile,
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -33,7 +25,9 @@ import {
   scanThreadId,
 } from "./support/usage-rollout.js";
 
-const temporaryDirectories: string[] = [];
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
+const temporaryDirectories = createTemporaryDirectories();
 const parentFields = ["source", "parent_thread_id", "forked_from_id"] as const;
 type SessionParentField = (typeof parentFields)[number];
 
@@ -55,19 +49,10 @@ async function waitFor(check: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for the cost tracker.");
 }
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+afterEach(temporaryDirectories.cleanup);
 
 async function codexHome(): Promise<string> {
-  const directory = await realpath(
-    await mkdtemp(join(tmpdir(), "codex-security-cost-")),
-  );
-  temporaryDirectories.push(directory);
+  const directory = await temporaryDirectories.create("codex-security-cost-");
   return directory;
 }
 
@@ -549,10 +534,8 @@ describe("live scan cost tracking", () => {
     });
     const errors: string[] = [];
     let traversals = 0;
-    let release: (() => void) | undefined;
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const { promise: blocked, resolve: release } =
+      Promise.withResolvers<void>();
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
@@ -589,10 +572,8 @@ describe("live scan cost tracking", () => {
       cached_input_tokens: 200,
       output_tokens: 30,
     });
-    let reportCost!: (cost: unknown) => void;
-    const reportedCost = new Promise<unknown>((resolve) => {
-      reportCost = resolve;
-    });
+    const { promise: reportedCost, resolve: reportCost } =
+      Promise.withResolvers<unknown>();
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",
@@ -2004,10 +1985,8 @@ describe("live scan cost tracking", () => {
     );
     await appendSessionItem(worker, progressMessage(3));
 
-    let reportProgress!: (progress: ScanProgress) => void;
-    const reportedProgress = new Promise<ScanProgress>((resolve) => {
-      reportProgress = resolve;
-    });
+    const { promise: reportedProgress, resolve: reportProgress } =
+      Promise.withResolvers<ScanProgress>();
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-sol",

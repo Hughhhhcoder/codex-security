@@ -8,7 +8,6 @@ import {
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
-  BeginDeepScanResult,
   DedupCommit,
   DeepScanCoordinatorClaim,
   DeepScanCoordinatorLeaseInput,
@@ -133,7 +132,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
     reasoningEffort?: string;
     threadId: string;
     scanRoot: string;
-  }): Promise<BeginDeepScanResult> {
+  }): Promise<DeepScanRunState> {
     const userContext = input.userContext;
     const result = await this.enqueueWrite(
       [
@@ -168,7 +167,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
       );
     }
-    return { run, shouldStart: startDisposition === "created" };
+    return run;
   }
 
   async get(scanId: string, threadId: string): Promise<DeepScanRunState> {
@@ -518,11 +517,7 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
   /** Replay only existing, same-identity workbench mutations after transient failures. */
   private async runIdempotentPersistence(args: string[]): Promise<JsonObject> {
     const startedAt = Date.now();
-    for (
-      let attempt = 1;
-      attempt <= MAX_IDEMPOTENT_PERSISTENCE_ATTEMPTS;
-      attempt += 1
-    ) {
+    for (let attempt = 1; ; attempt += 1) {
       try {
         return await this.runWorkbench(args);
       } catch (error) {
@@ -569,7 +564,6 @@ export class WorkbenchDeepScanStore implements DeepScanStore {
         await delay(delayMs);
       }
     }
-    throw new Error("Deep Scan persistence retry loop exited unexpectedly.");
   }
 }
 
