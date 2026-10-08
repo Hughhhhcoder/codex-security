@@ -62,11 +62,10 @@ const workbenchStateSelectionLock = new AsyncLock();
 const userContextSchema = z.string().trim().min(1);
 const editableUserContextSchema = z.string().trim();
 const verifiedAccessGrantSchema = z
-  .object({
+  .strictObject({
     level: z.enum(["tac1", "tac2", "tac3", "government"]),
     source: z.enum(["user", "project", "current_account"]),
   })
-  .strict()
   .refine(
     ({ level, source }) =>
       level === "tac1" ||
@@ -74,7 +73,7 @@ const verifiedAccessGrantSchema = z
     "Unsupported Daybreak grant source.",
   );
 const verifiedAccessSnapshotSchema = z
-  .object({
+  .strictObject({
     schemaVersion: z.literal(1),
     status: z.enum(["granted", "not_granted", "unknown"]),
     grants: z.array(verifiedAccessGrantSchema),
@@ -82,7 +81,6 @@ const verifiedAccessSnapshotSchema = z
     stale: z.boolean(),
     enrollmentUrl: z.url().optional(),
   })
-  .strict()
   .superRefine((snapshot, context) => {
     if (snapshot.status === "granted" && snapshot.grants.length === 0) {
       context.addIssue({
@@ -131,37 +129,29 @@ async function scanRoot(): Promise<string> {
 }
 
 const diffTargetSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("working_tree"),
-      baseRevision: z.string().trim().min(1).max(512).optional(),
-      contentDigest: z.string().trim().min(1).max(128).optional(),
-      headRevision: z.string().trim().min(1).max(512).optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("commit"),
-      baseRevision: z.string().trim().min(1).max(512).optional(),
-      headRevision: z.string().trim().min(1).max(512),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("range"),
-      baseRevision: z.string().trim().min(1).max(512),
-      headRevision: z.string().trim().min(1).max(512),
-    })
-    .strict(),
+  z.strictObject({
+    kind: z.literal("working_tree"),
+    baseRevision: z.string().trim().min(1).max(512).optional(),
+    contentDigest: z.string().trim().min(1).max(128).optional(),
+    headRevision: z.string().trim().min(1).max(512).optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("commit"),
+    baseRevision: z.string().trim().min(1).max(512).optional(),
+    headRevision: z.string().trim().min(1).max(512),
+  }),
+  z.strictObject({
+    kind: z.literal("range"),
+    baseRevision: z.string().trim().min(1).max(512),
+    headRevision: z.string().trim().min(1).max(512),
+  }),
 ]);
-const currentScanPreflightCheckSchema = z
-  .object({
-    capability: z.string().trim().min(1).max(128),
-    reason: z.string().trim().min(1).max(1200),
-    severity: z.enum(["block", "warn", "suggest"]),
-    status: z.enum(["pass", "fail", "unknown"]),
-  })
-  .strict();
+const currentScanPreflightCheckSchema = z.strictObject({
+  capability: z.string().trim().min(1).max(128),
+  reason: z.string().trim().min(1).max(1200),
+  severity: z.enum(["block", "warn", "suggest"]),
+  status: z.enum(["pass", "fail", "unknown"]),
+});
 const openSchema = {
   diffTarget: diffTargetSchema
     .optional()
@@ -283,14 +273,12 @@ type PromptOnlyScanInput = {
   targetSummary?: string;
   userContext?: string;
 };
-const userInputOptionSchema = z
-  .object({
-    description: z.string().trim().min(1).max(1200),
-    label: z.string().trim().min(1).max(200),
-  })
-  .strict();
+const userInputOptionSchema = z.strictObject({
+  description: z.string().trim().min(1).max(1200),
+  label: z.string().trim().min(1).max(200),
+});
 const userInputQuestionSchema = z
-  .object({
+  .strictObject({
     header: z.string().trim().min(1).max(64),
     id: z
       .string()
@@ -305,7 +293,6 @@ const userInputQuestionSchema = z
     options: z.array(userInputOptionSchema).min(2).max(3),
     question: z.string().trim().min(1).max(1200),
   })
-  .strict()
   .superRefine((question, context) => {
     const labels = new Set<string>();
     for (const [index, option] of question.options.entries()) {
@@ -630,7 +617,7 @@ export function createCodexSecurityServer(): McpServer {
       title: "Check Codex Security Daybreak Access",
       description:
         "Check this ChatGPT account's Daybreak access and available Daybreak programs. This check is advisory and never authorizes or blocks a scan. Skip it for Amazon Bedrock scans: it does not check AWS model access or access to local CLI results.",
-      inputSchema: z.object({}).strict(),
+      inputSchema: z.strictObject({}),
       annotations: readingAnnotations,
       _meta: {
         ...modelActionMeta,
