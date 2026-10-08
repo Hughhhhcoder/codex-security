@@ -1,3 +1,4 @@
+import { isDeepStrictEqual as sameArray } from "node:util";
 import { createHash, hash } from "node:crypto";
 import { isNonEmptyString } from "./value.js";
 import { constants, type BigIntStats, type Stats } from "node:fs";
@@ -1157,13 +1158,6 @@ function schemaError(
   const count = errors.length;
   return new ContractValidationError(
     `${filename}:${location}: schema validation failed (${keyword}${keyword === "format" && first?.params["format"] === "date-time" ? "; date-time" : ""}; ${count} ${count === 1 ? "error" : "errors"}).`,
-  );
-}
-
-function sameArray(left: readonly string[], right: readonly string[]): boolean {
-  return (
-    left.length === right.length &&
-    left.every((value, index) => value === right[index])
   );
 }
 
