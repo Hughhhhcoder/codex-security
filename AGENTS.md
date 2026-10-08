@@ -105,3 +105,5 @@ attachments, and links for sensitive information.
   pull requests before merging them.
 - Review material before publishing it. Editing or deleting it afterward does
   not guarantee removal from notifications, caches, or public history.
+- Follow the [pull request label policy](CONTRIBUTING.md#pull-request-labels).
+  Keep `area:*` labels on issues, not pull requests.
