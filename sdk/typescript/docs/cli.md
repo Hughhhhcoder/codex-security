@@ -894,7 +894,9 @@ or effort. A successful run also writes `severity-classification.json`, but
 publication reads the database. Original findings and sealed artifacts remain
 unchanged.
 
-Repeat `--finding-id ID` for a subset, such as dedupe's `uniqueFindingIds`.
+Repeat `--finding-id ID` for a subset from the selected scan. Dedupe's
+`uniqueFindingIds` can represent findings from another scan; replace an outside-scan
+representative with a member of its `duplicateGroups` entry from this scan.
 Linear publication defaults to saved classification selection, omits exclusions,
 and uses assessed severity for title and priority. Descriptions retain original
 severity and add the classification rationale. Publication rejects incomplete or
@@ -916,7 +918,10 @@ import {
   classifyScanSeverity,
   classifyScanDirectorySeverity,
   publishScan,
+  type FindingsDocument,
 } from "@openai/codex-security";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 // Assess supplied reports in memory.
 const classification = await classifySeverity(findings, {
@@ -926,9 +931,24 @@ const classification = await classifySeverity(findings, {
 
 // Save assessments for a scan ID or sealed directory.
 await classifyScanSeverity("SCAN_ID", { rubricPath: "/path/to/policy.md" });
+const scanFindings = (
+  JSON.parse(
+    await readFile(join(scanDirectory, "findings.json"), "utf8"),
+  ) as FindingsDocument
+).findings;
+const scanFindingIds = new Set(
+  scanFindings.map((finding) => finding.findingId),
+);
+// dedupeResult was produced by deduplicating this same scan.
+const selectedIds = dedupeResult.uniqueFindingIds.map((representative) => {
+  if (scanFindingIds.has(representative)) return representative;
+  return dedupeResult.duplicateGroups
+    .find((group) => group.includes(representative))!
+    .find((member) => scanFindingIds.has(member))!;
+});
 await classifyScanDirectorySeverity(scanDirectory, {
   rubricPath: "/path/to/policy.md",
-  findingIds: dedupeResult.uniqueFindingIds,
+  findingIds: selectedIds,
 });
 
 // Or supply an in-memory assessment directly to publication.
@@ -958,6 +978,12 @@ codex-security suggest-owners findings.json --source-root /path/to/repo --json >
 Input is a findings document or `{ "findings": [...] }`. The source root
 defaults to the current directory. The command reads committed `HEAD`, relevant
 source, blame, and history; it does not read uncommitted source or assign tickets.
+Finding location paths are relative to the Git worktree root, including when
+`--source-root` points to a subdirectory. A location for `src/handler.ts` keeps
+that prefix; a location of `handler.ts` refers to the root file. Rebase imported
+subdirectory-relative locations to repository-relative paths before suggesting
+owners.
+
 Linked worktrees and bound separate Git directories are supported; borrowed
 external object stores such as `git clone --shared` are rejected.
 
