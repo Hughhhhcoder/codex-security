@@ -1508,9 +1508,7 @@ def test_finding_remediation_rejects_apply_after_checkout_changes(tmp_path: Path
     ).strip()
     nested_repository = target / "untracked-repository"
     initialize_git_repository(nested_repository)
-    workspace_id = str(uuid.uuid4())
-    create_workspace(state_dir, workspace_id, "--target-path", str(target))
-    save_workspace(state_dir, workspace_id, str(target), ".", "standard")
+    workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
     started = start_delivered_scan(
         state_dir,
         "--workspace-id",
