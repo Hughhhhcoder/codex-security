@@ -91,29 +91,16 @@ export async function loadContractWithScanDirectory(
   const scanRoot = await requireScanRoot(scanDirectory, options.signal);
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
-  const payloads = {
-    "scan-manifest.json": await readScanJson(
+  const payloads: Record<string, unknown> = {};
+  for (const filename of Object.keys(DOCUMENTS)) {
+    payloads[filename] = await readScanJson(
       scanDir,
-      "scan-manifest.json",
+      filename as keyof typeof DOCUMENTS,
       documentDigests,
       options.signal,
       scanRoot,
-    ),
-    "findings.json": await readScanJson(
-      scanDir,
-      "findings.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-    "coverage.json": await readScanJson(
-      scanDir,
-      "coverage.json",
-      documentDigests,
-      options.signal,
-      scanRoot,
-    ),
-  };
+    );
+  }
   throwIfAborted(options.signal);
   let findingsPayload: unknown = payloads["findings.json"];
 
@@ -129,9 +116,7 @@ export async function loadContractWithScanDirectory(
     try {
       validate = ajv.compile(schema);
       payload =
-        filename === "findings.json"
-          ? findingsPayload
-          : payloads[filename as keyof typeof payloads];
+        filename === "findings.json" ? findingsPayload : payloads[filename];
       const validatePayload = (payload: unknown) => {
         const result = validate(payload);
         if (typeof result !== "boolean") {
