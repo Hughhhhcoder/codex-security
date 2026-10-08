@@ -1298,6 +1298,8 @@ def _recover_unsealed_coverage(
                         item["disposition"] = "needs_follow_up"
                         partial = True
 
+                if field == "deferred":
+                    _validate_deferred_paths(item, context)
                 _validate_schema_node(item, item_schema, context)
             except ContractError as exc:
                 warnings.append(f"Skipped malformed {label} {index + 1}: {exc}.")
@@ -1595,6 +1597,11 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
                 raise ContractError(f"{evidence_context}.id: duplicate code-evidence id")
             evidence_ids.add(evidence_id)
             _require_str(evidence, "code", evidence_context)
+            if evidence_key == "codeEvidence":
+                _require_safe_relative_path(
+                    _require_str(evidence, "path", evidence_context),
+                    f"{evidence_context}.path",
+                )
 
     referenced_sections = [
         (section_name, finding.get(section_name))
@@ -1655,6 +1662,15 @@ def _validate_resolved_deferred(coverage: dict[str, Any]) -> None:
         resolved.add(closure_id)
 
 
+def _validate_deferred_paths(deferred: dict[str, Any], context: str) -> None:
+    if "paths" not in deferred:
+        return
+    for index, path in enumerate(_require_list(deferred, "paths", context)):
+        if not isinstance(path, str):
+            raise ContractError(f"{context}.paths[{index}]: expected a string")
+        _require_safe_relative_path(path, f"{context}.paths[{index}]", allow_dot=True)
+
+
 def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_dir: Path) -> None:
     scan = _require_dict(manifest, "scan", "manifest")
     scan_id = _require_str(scan, "id", "manifest.scan")
@@ -1703,6 +1719,9 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
+    for index, deferred in enumerate(coverage.get("deferred", [])):
+        if isinstance(deferred, dict):
+            _validate_deferred_paths(deferred, f"coverage.deferred[{index}]")
     _validate_resolved_deferred(coverage)
     if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
         raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
