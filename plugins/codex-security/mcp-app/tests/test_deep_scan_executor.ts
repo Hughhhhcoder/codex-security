@@ -29,6 +29,7 @@ import type {
   CodexWorkerRequest,
   DeepScanWorkerKind,
 } from "../src/deep-scan/types.js";
+import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases.ts";
 
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 
@@ -96,6 +97,11 @@ try {
   await testWorkerCyberAccessSettings();
   await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
   if (process.platform !== "win32") {
+    await testDeepScanContextSnapshots({
+      CodexSdkWorkerExecutor,
+      fakeCodexFixture,
+      parentSandbox: trustedParentSandbox,
+    });
     await testMissingParentSandboxFailsBeforeWorkerLaunch();
     await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
     await testRuntimePermissionProfileFallbackStopsAndDiscards();
