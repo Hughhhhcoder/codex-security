@@ -3669,6 +3669,100 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each(["EACCES", "EPERM", "EMFILE"])(
+    "retries session logs and limits repeated %s diagnostics appropriately",
+    async (code) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const sessions = join(codexHome, "sessions");
+      await mkdir(sessions);
+      const logs = [
+        join(sessions, "a-synthetic.jsonl"),
+        join(sessions, "b-synthetic.jsonl"),
+      ];
+      await Promise.all(logs.map((path) => writeFile(path, "")));
+      const denied = new Set([logs[0]!]);
+      const attempts = new Map<string, number>();
+      let firstRepeated!: () => void;
+      let secondRepeated!: () => void;
+      const first = new Promise<void>((resolve) => {
+        firstRepeated = resolve;
+      });
+      const second = new Promise<void>((resolve) => {
+        secondRepeated = resolve;
+      });
+      const open = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation(
+        async (...args: Parameters<typeof fsPromises.open>) => {
+          const path = String(args[0]);
+          if (denied.has(path)) {
+            const count = (attempts.get(path) ?? 0) + 1;
+            attempts.set(path, count);
+            if (count === 3)
+              (path === logs[0] ? firstRepeated : secondRepeated)();
+            throw Object.assign(
+              new Error(`Synthetic ${code} for ${basename(path)}`),
+              { code, syscall: "open", path },
+            );
+          }
+          return await open(...args);
+        },
+      );
+      const warnings: string[] = [];
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              await copyCompletedScan(root);
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "thread-1" };
+                await first;
+                denied.delete(logs[0]!);
+                denied.add(logs[1]!);
+                await second;
+                denied.delete(logs[1]!);
+                for await (const event of completedEvents()) {
+                  if (event.type !== "thread.started") yield event;
+                }
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setTimeout(() => {}, 10_000);
+      const operation = client.run(repository, {
+        onActivity: () => {},
+        onWarning: (warning) => warnings.push(warning),
+      });
+      try {
+        expect(await operation).toMatchObject({
+          threadId: "thread-1",
+        });
+        await Promise.resolve();
+        for (const log of logs) {
+          expect(attempts.get(log)).toBeGreaterThanOrEqual(3);
+          const messages = warnings.filter((message) =>
+            message.includes(basename(log)),
+          );
+          if (code === "EMFILE")
+            expect(messages.length).toBeGreaterThanOrEqual(3);
+          else expect(messages).toHaveLength(1);
+        }
+      } finally {
+        clearTimeout(keepAlive);
+        denied.clear();
+        firstRepeated();
+        secondRepeated();
+        await operation.catch(() => {});
+        await client.close();
+        opening.mockRestore();
+      }
+    },
+  );
+
   test.each(["agent_message", "command_execution"] as const)(
     "uses the actual scanner inventory instead of a stale workbench estimate (%s)",
     async (itemType) => {

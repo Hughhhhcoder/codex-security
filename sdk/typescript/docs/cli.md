@@ -301,6 +301,13 @@ execution failures with `--json`, JSON, or JSONL output produce:
 ```
 
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
+A scan that returns partial or unknown coverage uses that failure envelope and
+keeps its available results under `data`. This also applies to `scans rerun` and
+`scans resume`. If the scan target also changed, the error explains that the
+results no longer represent the current checkout. For incomplete `scans rerun` and
+`scans resume` envelopes, `--filter-output` applies to `data`; selecting an
+unavailable field can return `null` or omit `data`.
+
 Saved-scan setup failures use the same output shape with
 `SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
 available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
