@@ -555,11 +555,21 @@ account authentication. Explicit `--auth chatgpt` selects stored account auth,
 omits the provider key, and clears any configured experimental bearer token for
 that command. Model, effort, and provider choices carry into patch-risk assessment.
 
+Model requests include Codex Security attribution in `responses_api_metadata`:
+`codex_security_surface` (`cli` or `sdk`), `codex_security_command`,
+`codex_security_package_version`, and `codex_security_plugin_version` when the
+selected plugin declares a version. These fields identify the workflow and
+versions producing a model request; they do not record command starts,
+completions, or failures.
+
 Disable Codex usage analytics and built-in metrics with
-`--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`
-and patch-risk assessment. It does not control configured OpenTelemetry exporters,
-integrations, authentication, or CLI update checks. Validation uses isolated
-configuration; patching and verification preserve ambient project trust.
+`--codex 'analytics.enabled=false'`. The setting carries into `scan --patch`,
+patch-risk assessment, and Deep Scan discovery and reducer workers, including
+resumed workers. Deep Scan workers also preserve the scan's request metadata.
+Model-request attribution metadata remains attached when analytics are disabled.
+The setting does not control configured OpenTelemetry exporters, integrations,
+authentication, or CLI update checks. Validation uses isolated configuration;
+patching and verification preserve ambient project trust.
 
 For filesystem and approval behavior, see the
 [local security model](../README.md#local-security-model).
