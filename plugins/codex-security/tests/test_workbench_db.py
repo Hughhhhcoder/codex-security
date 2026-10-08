@@ -45,6 +45,7 @@ from workbench_test_support import (
     update_progress,
     workspace_command,
     write_completed_contract,
+    write_remediation_patch,
 )
 
 HEAD_CHANGED_WARNING = (
@@ -1038,15 +1039,7 @@ def test_completed_finding_triage_and_remediation_persist(
     )
     assert "pending remediation operation" in str(pending_close["stderr"])
     patch_path = scan_dir / "remediation.patch"
-    patch_path.write_text(
-        "diff --git a/source.txt b/source.txt\n"
-        "--- a/source.txt\n"
-        "+++ b/source.txt\n"
-        "@@ -1 +1 @@\n"
-        "-vulnerable\n"
-        "+fixed\n",
-        newline="\n",
-    )
+    write_remediation_patch(patch_path, newline="\n")
     generated = set_remediation(
         state_dir,
         occurrence_id,
