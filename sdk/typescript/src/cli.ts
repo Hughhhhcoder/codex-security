@@ -2162,10 +2162,23 @@ export async function main(
         const result = await history(
           ["get-scan", "--scan-id", scanId],
           async (value) => {
+            const scan = value["scan"] as ScanLogSource;
             const logs = await readSavedScanLogs(
-              value["scan"] as ScanLogSource,
-              codexSecurityCredentialHome(dependencies.environment),
+              scan,
+              [
+                codexSecurityCredentialHome(dependencies.environment),
+                configuredCodexHome(dependencies.environment),
+              ],
+              {
+                allowMissingRoot: Boolean(
+                  scan.threadIds?.length || scan.executionThreadIds?.length,
+                ),
+              },
             );
+            if (logs.sessions.length === 0)
+              throw new CodexSecurityError(
+                `No saved session logs are available for scan ${scanId}.`,
+              );
             // Incur owns filtering, envelopes and token controls. Keep those
             // requests on its formatter; plain JSON needs no aggregate string.
             if (
@@ -6323,12 +6336,10 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe has an invalid Git head.",
     );
   }
-  const threshold = recipe["failOnSeverity"];
-  if (
-    threshold !== undefined &&
-    (typeof threshold !== "string" ||
-      !REPORTABLE_SEVERITIES.includes(threshold as FailureSeverity))
-  ) {
+  const threshold = ScanSettingsSchema.shape.failureSeverity.safeParse(
+    recipe["failOnSeverity"],
+  );
+  if (!threshold.success) {
     throw new CodexSecurityError(
       "The saved scan recipe contains an invalid severity policy.",
     );
@@ -6427,7 +6438,7 @@ async function prepareScanArgumentsFromRecipe(
     codexOverrides: Object.hasOwn(config, "approval_policy")
       ? config
       : { ...config, approval_policy: "never" },
-    failureSeverity: threshold as FailureSeverity | undefined,
+    failureSeverity: threshold.data,
     maxCostUsd,
     dryRun: false,
     parentScanId,

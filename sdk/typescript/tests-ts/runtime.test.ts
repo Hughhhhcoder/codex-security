@@ -5879,6 +5879,7 @@ describe("runtime directories and plugin Python boundary", () => {
         "connection.row_factory = sqlite3.Row",
         "connection.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, status TEXT NOT NULL, scan_dir TEXT NOT NULL, updated_at TEXT NOT NULL)')",
         "connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT NOT NULL, kind TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (scan_id, kind))')",
+        "connection.execute('CREATE TABLE finding_workflows (scan_id TEXT, scan_dir TEXT NOT NULL, results_json TEXT NOT NULL)')",
         "connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', ('previous-scan', 'complete', str(scan_dir), 'before'))",
         "artifacts = {'coverage': 'coverage.json', 'findings': 'findings.json', 'manifest': 'scan-manifest.json', 'markdownReport': 'report.md'}",
         "connection.executemany('INSERT INTO scan_artifacts VALUES (?, ?, ?)', [('previous-scan', kind, str(scan_dir / path)) for kind, path in artifacts.items()])",
@@ -6162,44 +6163,57 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(await planOutputArchive(output)).not.toBeNull();
   });
 
-  test("archives prior output through the exported preparation helper", async () => {
-    const root = await temporaryDirectory();
-    const output = join(root, "scan");
-    await mkdir(output, { mode: 0o700 });
-    await writeFile(join(output, "previous.txt"), "previous scan\n");
-    const archived: string[] = [];
+  test.each(["success", "sync", "async", "pending"])(
+    "archives prior output with a %s observer",
+    async (mode) => {
+      const root = await temporaryDirectory();
+      const output = join(root, "scan");
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, "previous.txt"), "previous scan\n");
+      const archived: string[] = [];
+      const outputPresentDuringNotification: boolean[] = [];
 
-    expect(
-      await prepareOutputDir(
-        output,
-        "repo",
-        undefined,
-        undefined,
-        true,
-        (path) => {
-          archived.push(path);
-        },
-      ),
-    ).toBe(output);
-    expect(archived).toHaveLength(1);
-    expect(await readFile(join(archived[0]!, "previous.txt"), "utf8")).toBe(
-      "previous scan\n",
-    );
-    expect(await readdir(output)).toEqual([]);
-    expect(
-      await prepareOutputDir(
-        output,
-        "repo",
-        undefined,
-        undefined,
-        true,
-        (path) => {
-          archived.push(path);
-        },
-      ),
-    ).toBe(output);
-    expect(archived).toHaveLength(1);
-  });
+      expect(
+        await prepareOutputDir(
+          output,
+          "repo",
+          undefined,
+          undefined,
+          true,
+          (path) => {
+            archived.push(path);
+            outputPresentDuringNotification.push(existsSync(output));
+            if (mode === "sync")
+              throw new Error("Synthetic archival observer failed");
+            if (mode === "async")
+              return Promise.reject(
+                new Error("Synthetic archival observer failed"),
+              );
+            if (mode === "pending") return new Promise<void>(() => {});
+          },
+        ),
+      ).toBe(output);
+      expect(archived).toHaveLength(1);
+      expect(outputPresentDuringNotification).toEqual([false]);
+      expect(await readFile(join(archived[0]!, "previous.txt"), "utf8")).toBe(
+        "previous scan\n",
+      );
+      expect(await readdir(output)).toEqual([]);
+      expect(
+        await prepareOutputDir(
+          output,
+          "repo",
+          undefined,
+          undefined,
+          true,
+          (path) => {
+            archived.push(path);
+          },
+        ),
+      ).toBe(output);
+      expect(archived).toHaveLength(1);
+    },
+  );
 
   test("validates explicit output directories and creates private temporary paths", async () => {
     const root = await temporaryDirectory();

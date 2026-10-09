@@ -2154,7 +2154,11 @@ async function prepareOutputDirectory(
       const archiveDir = await planOutputArchive(path);
       if (archiveDir !== null) {
         await rename(path, archiveDir);
-        onOutputArchived?.(archiveDir);
+        try {
+          void Promise.resolve(onOutputArchived?.(archiveDir)).catch(
+            () => undefined,
+          );
+        } catch {}
         existing = null;
       }
     }
