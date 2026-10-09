@@ -20,10 +20,7 @@
       "properties": {
         "scanId": { "type": "string", "pattern": "\\S" },
         "candidates": {
-          "type": "array",
-          "items": {
-            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/rawDiscoveryCandidate"
-          }
+          "$ref": "#/$defs/recordDiscoveryCandidatesInput/properties/candidates"
         }
       },
       "required": ["scanId", "candidates"],
@@ -51,32 +48,6 @@
         "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
       },
       "required": ["scanId"],
-      "additionalProperties": false
-    },
-    "recordDiscoveryCandidatesResult": {
-      "type": "object",
-      "properties": {
-        "operation": { "const": "replace" },
-        "candidatesRecorded": { "type": "integer", "minimum": 0 }
-      },
-      "required": ["operation", "candidatesRecorded"],
-      "additionalProperties": false
-    },
-    "listCandidatesResult": {
-      "type": "object",
-      "properties": {
-        "rows": {
-          "type": "array",
-          "items": {
-            "$ref": "codex-security://schemas/definitions/discovery-candidate.schema.json#/$defs/discoveryCandidate"
-          }
-        },
-        "nextCursor": {
-          "type": "string",
-          "pattern": "^(?:0|[1-9][0-9]*)$"
-        }
-      },
-      "required": ["rows"],
       "additionalProperties": false
     }
   }

@@ -1,14 +1,15 @@
+import { findingEntry } from "./value.js";
 import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isRecord } from "./record.js";
 import { CodexSecurityError } from "./errors.js";
 import type { PreparedScanPublication } from "./publication.js";
 import type { PublishedScanIssue } from "./publish.js";
 import {
-  bundledPluginRoot,
   codexSecurityStateDirectory,
   requireOutputOutsideRepository,
-  resolvePluginPython,
+  resolveWorkbenchRuntime,
   runWorkbench,
 } from "./runtime.js";
 
@@ -96,7 +97,7 @@ export async function recordPublishedIssues(
     throw invalidPublicationRecords();
   }
 
-  const expected = new Map(issues.map((issue) => [issue.findingId, issue]));
+  const expected = new Map(issues.map(findingEntry));
   const ordered = publication.issues.flatMap((issue) => {
     const record = expected.get(issue.findingId);
     return record === undefined ? [] : [record];
@@ -106,10 +107,9 @@ export async function recordPublishedIssues(
   }
 
   return created.map((value, index) => {
-    const expectedIssue = ordered[index];
+    const expectedIssue = ordered[index]!;
     const issue = readPublicationRecord(value);
     if (
-      expectedIssue === undefined ||
       issue.findingId !== expectedIssue.findingId ||
       issue.occurrenceId !== expectedIssue.occurrenceId ||
       issue.issueIdentifier !== expectedIssue.issueIdentifier ||
@@ -142,14 +142,11 @@ async function runPublicationWorkbench(
       { cause: error },
     );
   }
-  const [python, pluginRoot] = await Promise.all([
-    resolvePluginPython({
-      environment,
-      protectedRoot: publication.scanDirectory,
-      ...(signal === undefined ? {} : { signal }),
-    }),
-    bundledPluginRoot(),
-  ]);
+  const [python, pluginRoot] = await resolveWorkbenchRuntime({
+    environment,
+    protectedRoot: publication.scanDirectory,
+    ...(signal === undefined ? {} : { signal }),
+  });
   signal?.throwIfAborted();
   const findings = (publication.sourceFindings ?? publication.issues).map(
     ({ findingId, occurrenceId }) => ({
@@ -234,8 +231,4 @@ function invalidPublicationRecords(): CodexSecurityError {
   return new CodexSecurityError(
     "The workbench returned invalid persisted Linear publication records.",
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

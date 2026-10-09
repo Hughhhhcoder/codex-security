@@ -1,5 +1,8 @@
+import { parseJson } from "./value.js";
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
+import { isRecord } from "./record.js";
 import {
   estimateScanCost,
   tokenUsage,
@@ -12,15 +15,23 @@ import {
 } from "./scan-activity.js";
 import {
   isScanArtifactDirectory,
+  sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
 } from "./scan-sessions.js";
 import {
-  scanProgressUpdatesFromEvent,
+  scanProgressUpdatesFromText,
   type ScanProgress,
 } from "./worker-progress.js";
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
+
+/** A persisted worker session discovered during this run. Contains no model text. */
+export interface ScanWorkerEvent {
+  kind: "observed";
+  /** Scan-local number shared with activity and session observers. */
+  worker: number;
+}
 
 export interface ScanSessionEvent {
   threadId: string;
@@ -38,8 +49,8 @@ interface SessionReasoning {
 
 interface SessionUsage {
   offset: number;
-  pendingLine: Buffer[];
-  pendingLineBytes: number;
+  decoder: StringDecoder;
+  pendingLine: string[];
   unreadable: boolean;
   threadId: string | null;
   parentThreadId: string | null;
@@ -70,6 +81,7 @@ interface ScanCostTrackerOptions {
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
+  onWorkerEvent?: (event: ScanWorkerEvent) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -84,8 +96,8 @@ const SESSION_READ_SIZE = 64 * 1_024;
 function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
+    decoder: new StringDecoder("utf8"),
     pendingLine: [],
-    pendingLineBytes: 0,
     unreadable: false,
     threadId: null,
     parentThreadId: null,
@@ -113,10 +125,11 @@ export class ScanCostTracker {
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
   #threadId: string | null = null;
+  #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
-  #lastCost: number | null = null;
+  #lastCost: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -144,7 +157,8 @@ export class ScanCostTracker {
       this.#options.onCost === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
-      this.#options.onSessionEvent === undefined
+      this.#options.onSessionEvent === undefined &&
+      this.#options.onWorkerEvent === undefined
     ) {
       return;
     }
@@ -183,12 +197,14 @@ export class ScanCostTracker {
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
-    if (this.#timer !== null) {
-      clearInterval(this.#timer);
-      this.#timer = null;
-    }
+    clearInterval(this.#timer ?? undefined);
+    this.#timer = null;
     if (fallbackUsage !== undefined) this.recordUsage(fallbackUsage);
-    await this.refresh();
+    try {
+      await this.refresh();
+    } finally {
+      this.#observingWorkers = false;
+    }
     if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
@@ -243,21 +259,19 @@ export class ScanCostTracker {
         }
       }
     }
-    let changed = true;
-    while (changed) {
-      changed = false;
+    let previousSize: number;
+    do {
+      previousSize = included.size;
       for (const session of this.#sessions.values()) {
         if (
           session.threadId !== null &&
           session.parentThreadId !== null &&
-          included.has(session.parentThreadId) &&
-          !included.has(session.threadId)
+          included.has(session.parentThreadId)
         ) {
           included.add(session.threadId);
-          changed = true;
         }
       }
-    }
+    } while (included.size !== previousSize);
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) throw error;
     }
@@ -279,8 +293,13 @@ export class ScanCostTracker {
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
-        worker = this.#workers.get(threadId) ?? this.#workers.size + 1;
-        this.#workers.set(threadId, worker);
+        worker = this.#workers.get(threadId);
+        if (worker === undefined) {
+          worker = this.#workers.size + 1;
+          this.#workers.set(threadId, worker);
+          if (this.#observingWorkers)
+            this.#options.onWorkerEvent?.({ kind: "observed", worker });
+        }
       }
       for (const event of session.events?.splice(0) ?? []) {
         this.#options.onSessionEvent?.({
@@ -300,9 +319,13 @@ export class ScanCostTracker {
         }
         this.#reportWorkerProgress(session);
       }
+      const receipt = usages.get(threadId);
       if (
         session.usage !== null &&
-        session.usage.total_tokens > (usages.get(threadId)?.total_tokens ?? -1)
+        (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
+          // The SDK inserts zero when the final receipt omits cache writes.
+          (session.usage.total_tokens === receipt?.total_tokens &&
+            receipt.cache_write_input_tokens === 0))
       ) {
         usages.set(threadId, session.usage);
       }
@@ -341,10 +364,9 @@ export class ScanCostTracker {
       this.#workerProgress.set(session.threadId, progress.filesCompleted);
       const filesCompleted = Math.min(
         expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
-        [...this.#workerProgress.values()].reduce(
-          (total, reviewed) => total + reviewed,
-          0,
-        ),
+        this.#workerProgress
+          .values()
+          .reduce((total, reviewed) => total + reviewed, 0),
       );
       if (filesCompleted < this.#highestFilesCompleted) continue;
       const update = {
@@ -362,13 +384,18 @@ export class ScanCostTracker {
   }
 
   #reportCost(cost: ScanCost | null): void {
-    if (cost === null || cost.estimatedUsd === this.#lastCost) return;
-    this.#lastCost = cost.estimatedUsd;
+    if (cost === null) return;
+    const signature = JSON.stringify(cost);
+    if (signature === this.#lastCost) return;
+    this.#lastCost = signature;
     this.#options.onCost?.(cost);
   }
 }
 
-export async function* sessionFiles(directory: string): AsyncGenerator<string> {
+export async function* sessionFiles(
+  directory: string,
+  compressed = false,
+): AsyncGenerator<string> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -379,8 +406,12 @@ export async function* sessionFiles(directory: string): AsyncGenerator<string> {
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      yield* sessionFiles(path);
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      yield* sessionFiles(path, compressed);
+    } else if (
+      entry.isFile() &&
+      (entry.name.endsWith(".jsonl") ||
+        (compressed && entry.name.endsWith(".jsonl.zst")))
+    ) {
       yield path;
     }
   }
@@ -411,52 +442,22 @@ async function readSessionUsage(
       if (bytesRead === 0) return;
       session.offset += bytesRead;
       try {
-        readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
+        const lines = session.decoder
+          .write(buffer.subarray(0, bytesRead))
+          .split("\n");
+        session.pendingLine.push(lines[0]!);
+        for (const line of lines.slice(1)) {
+          readSessionEvent(session.pendingLine.join(""), session, repository);
+          session.pendingLine = [line];
+        }
       } catch (error) {
         session.unreadable = true;
         session.pendingLine = [];
-        session.pendingLineBytes = 0;
         throw error;
       }
     }
   } finally {
     await file.close();
-  }
-}
-
-function readSessionChunk(
-  contents: Buffer,
-  session: SessionUsage,
-  repository?: string,
-): void {
-  let lineStart = 0;
-  while (lineStart < contents.length) {
-    const newline = contents.indexOf(0x0a, lineStart);
-    const lineEnd = newline === -1 ? contents.length : newline;
-    const fragment = contents.subarray(lineStart, lineEnd);
-    const lineBytes = session.pendingLineBytes + fragment.length;
-
-    if (newline === -1) {
-      if (fragment.length > 0) {
-        session.pendingLine.push(Buffer.from(fragment));
-        session.pendingLineBytes = lineBytes;
-      }
-      return;
-    }
-
-    if (session.pendingLineBytes === 0) {
-      readSessionEvent(fragment.toString("utf8"), session, repository);
-    } else {
-      if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
-      readSessionEvent(
-        Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
-        session,
-        repository,
-      );
-      session.pendingLine = [];
-      session.pendingLineBytes = 0;
-    }
-    lineStart = newline + 1;
   }
 }
 
@@ -466,12 +467,7 @@ function readSessionEvent(
   repository?: string,
 ): void {
   if (line.length === 0) return;
-  let event: unknown;
-  try {
-    event = JSON.parse(line) as unknown;
-  } catch {
-    return;
-  }
+  const event = parseJson(() => line);
   if (!isRecord(event) || !isRecord(event["payload"])) return;
   const payload = event["payload"];
   if (event["type"] === "session_meta") {
@@ -497,20 +493,12 @@ function readSessionEvent(
       const usage = tokenUsage(payload["info"]["total_token_usage"]);
       if (usage !== null) session.inheritedUsage = usage;
     }
-    if (payload["type"] === "task_started") {
-      // Fresh Codex worker thread/turn IDs share a same-process monotonic UUIDv7 generator.
-      const threadOrder = uuid7Order(session.threadId);
-      const turnOrder = uuid7Order(payload["turn_id"]);
-      const owned =
-        threadOrder === null
-          ? typeof payload["started_at"] === "number" &&
-            session.startedAt !== null &&
-            payload["started_at"] >= Math.floor(session.startedAt / 1_000)
-          : turnOrder !== null && turnOrder >= threadOrder;
-      if (owned) {
-        session.replaying = false;
-        session.events?.push(event);
-      }
+    if (
+      payload["type"] === "task_started" &&
+      sessionOwnsTurn(session, payload)
+    ) {
+      session.replaying = false;
+      session.events?.push(event);
     }
     return;
   }
@@ -616,12 +604,7 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
-      session.progress.push(
-        ...scanProgressUpdatesFromEvent({
-          type: "item.completed",
-          item: { type: "agent_message", text: payload["message"] },
-        }),
-      );
+      session.progress.push(...scanProgressUpdatesFromText(payload["message"]));
     }
     if (repository === undefined) return;
     if (payload["type"] !== "agent_message") {
@@ -653,18 +636,6 @@ function readSessionEvent(
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
   if (ownUsage !== null) session.usage = ownUsage;
-}
-
-function uuid7Order(value: unknown): bigint | null {
-  if (
-    typeof value !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
-      value,
-    )
-  ) {
-    return null;
-  }
-  return BigInt(`0x${value.replaceAll("-", "")}`);
 }
 
 function readSessionReasoning(
@@ -741,13 +712,7 @@ function sessionProgressUpdates(
   if (payload["type"] === "message" && payload["role"] === "assistant") {
     const content = payload["content"];
     if (!Array.isArray(content)) return [];
-    return scanProgressUpdatesFromEvent({
-      type: "item.completed",
-      item: {
-        type: "agent_message",
-        text: sessionContentText(content, false),
-      },
-    });
+    return scanProgressUpdatesFromText(sessionContentText(content, false));
   }
   if (
     payload["type"] !== "function_call_output" &&
@@ -766,10 +731,7 @@ function sessionProgressUpdates(
   if (payload["status"] === "failed" || output === null) {
     return [];
   }
-  return scanProgressUpdatesFromEvent({
-    type: "item.completed",
-    item: { type: "command_execution", aggregated_output: output },
-  });
+  return scanProgressUpdatesFromText(output);
 }
 
 function sessionContentText(
@@ -799,6 +761,10 @@ function addTokenUsage(
       previous.cached_input_tokens + next.cached_input_tokens,
     cache_write_input_tokens:
       previous.cache_write_input_tokens + next.cache_write_input_tokens,
+    ...(previous.cache_write_input_tokens_reported === false ||
+    next.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
     output_tokens: previous.output_tokens + next.output_tokens,
     reasoning_output_tokens:
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
@@ -816,14 +782,14 @@ function subtractTokenUsage(
       usage.cached_input_tokens - inherited.cached_input_tokens,
     cache_write_input_tokens:
       usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
+    ...(usage.cache_write_input_tokens_reported === false ||
+    inherited.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
     output_tokens: usage.output_tokens - inherited.output_tokens,
     reasoning_output_tokens:
       usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isMissingFile(error: unknown): boolean {
