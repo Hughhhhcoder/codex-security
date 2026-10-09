@@ -29,44 +29,17 @@ export interface ReviewItem {
   path: string;
 }
 
-export interface ReviewItemsResult {
-  items: ReviewItem[];
-  nextCursor?: string;
-}
-
-export interface PreparedReviewItems {
-  reviewItemsTotal: number;
-}
-
 export const prepareReviewItemsInputSchema = loadArtifactZodSchema(
   documents,
   reviewItemsSchema.$id,
   "prepareInput",
 ) as z.ZodType<{ scanId: string; handoffClaimToken?: string }>;
 
-export const prepareReviewItemsOutputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "prepareOutput",
-) as z.ZodType<PreparedReviewItems>;
-
 export const reviewItemsReaderInputSchema = loadArtifactZodSchema(
   documents,
   reviewItemsSchema.$id,
   "reviewItemsInput",
 ) as z.ZodType<{ scanId: string; handoffClaimToken?: string } & ArtifactPage>;
-
-export const reviewItemsWorkerReaderInputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItemsWorkerInput",
-) as z.ZodType<ArtifactPage>;
-
-export const reviewItemsReaderOutputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItemsOutput",
-) as z.ZodType<ReviewItemsResult>;
 
 const reviewItemSchema = loadArtifactZodSchema(
   documents,
@@ -77,7 +50,7 @@ const reviewItemSchema = loadArtifactZodSchema(
 /** Build the selected repository or diff inventory from host-bound scan context. */
 export async function prepareCodexSecurityReviewItems(
   context: ArtifactContext,
-): Promise<PreparedReviewItems> {
+) {
   if (context.layout !== "scan") {
     throw new Error(
       `${label}: only a parent scan can prepare its shared inventory.`,
@@ -102,8 +75,7 @@ export async function prepareCodexSecurityReviewItems(
     helper,
     "--repo",
     context.repoRoot,
-    "--scope",
-    context.scope ?? ".",
+    `--scope=${context.scope ?? "."}`,
     "--out",
     destination,
   ];
@@ -163,7 +135,7 @@ export async function prepareCodexSecurityReviewItems(
 export async function listCodexSecurityReviewItems(
   context: ArtifactContext,
   page: ArtifactPage = {},
-): Promise<ReviewItemsResult> {
+) {
   const result = paginateArtifactRows(
     await readReviewItems(context),
     page,

@@ -1,14 +1,14 @@
-import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "incur";
 import { parse as parseToml } from "smol-toml";
-import { loadContract } from "./contract.js";
+import { loadContract, sha256Text as sha256 } from "./contract.js";
 import { AuthenticationRequiredError, CodexSecurityError } from "./errors.js";
 import type { Finding, ScanManifest } from "./models.js";
 import {
   CSV_TARGET_ID,
+  bindImportedFindings,
   csvRowFinding,
   parseFindingsCsv,
 } from "./findings-import.js";
@@ -90,12 +90,16 @@ export async function publishFindingsCsvToCloud(
   }
   dependencies.signal?.throwIfAborted();
   const rows = parseFindingsCsv(source);
-  const digest = hash("sha256", source);
-  const scanId = `scan_csv_${hash(
-    "sha256",
+  const digest = sha256(source);
+  const scanId = `scan_csv_${sha256(
     ["codex-security-csv-import/v1", VERSION, source].join("\0"),
   ).slice(0, 24)}`;
-  const findings = rows.map((row) => csvRowFinding(row, scanId));
+  const findings = bindImportedFindings(
+    rows.map(csvRowFinding),
+    "csv",
+    scanId,
+    CSV_TARGET_ID,
+  );
   const timestamp = "1970-01-01T00:00:00.000Z";
   const findingsDocument = JSON.stringify({
     documentType: "codex-security.findings",
@@ -144,12 +148,12 @@ export async function publishFindingsCsvToCloud(
     artifacts: [
       {
         path: "findings.json",
-        sha256: hash("sha256", findingsDocument),
+        sha256: sha256(findingsDocument),
         mediaType: "application/json",
       },
       {
         path: "coverage.json",
-        sha256: hash("sha256", coverageDocument),
+        sha256: sha256(coverageDocument),
         mediaType: "application/json",
       },
       {
@@ -167,9 +171,6 @@ async function publishCloudPayload(
   findings: Finding[],
   dependencies: CloudPublicationDependencies,
 ): Promise<CloudPublicationResult> {
-  if (findings.length === 0) {
-    throw new CodexSecurityError("There are no findings to publish.");
-  }
   dependencies.signal?.throwIfAborted();
   if (dependencies.dryRun) {
     return {
@@ -257,8 +258,9 @@ async function publishCloudPayload(
 }
 
 async function readCloudCredentials(environment: NodeJS.ProcessEnv) {
+  const configuredHome = environment["CODEX_HOME"];
   let home = expandHome(
-    environment["CODEX_HOME"]?.trim() || "~/.codex",
+    configuredHome?.trim() ? configuredHome : "~/.codex",
     environment,
   );
   let requireFileStorage = true;

@@ -186,8 +186,7 @@ function optionRow(row: Row, command: string): Row {
     if (choices.length > 1) {
       description += `${description.endsWith(".") ? "" : "."} Choices: ${choices.join(", ")}.`;
     }
-    const value = VALUE_LABELS[name] ?? (type === "number" ? "count" : name);
-    return `<${value}>`;
+    return `<${VALUE_LABELS[name] ?? (type === "number" ? "count" : name)}>`;
   });
   label = label.replace(/^--([\w-]+), (-\w)/u, "$2, --$1");
   if (command === "scan" && !/default:/iu.test(description)) {
@@ -275,8 +274,28 @@ export function formatCliHelp(text: string, columns = 80): string {
       if (command === "") {
         sections.push(
           "Get started:\n" +
-            "  codex-security login\n" +
-            "  codex-security scan .\n" +
+            "  codex-security login\n\n" +
+            wrap(
+              "In your repository, optionally draft SECURITY.md:",
+              width,
+              "  ",
+              "  ",
+            ) +
+            "\n  codex-security policy .\n" +
+            wrap(
+              "Review and edit the draft, then copy it to the displayed Policy target.",
+              width,
+              "  ",
+              "  ",
+            ) +
+            "\n" +
+            wrap(
+              "Skip this step to keep an existing policy or scan without one.",
+              width,
+              "  ",
+              "  ",
+            ) +
+            "\n\n  codex-security scan .\n" +
             "  codex-security findings",
         );
       } else if (examples) {

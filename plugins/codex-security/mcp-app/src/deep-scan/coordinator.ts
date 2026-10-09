@@ -1,6 +1,8 @@
+/// <reference lib="es2023.array" />
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
@@ -69,7 +71,10 @@ export interface CoordinatorOptions {
   handoffClaimToken?: string;
   threadId?: string;
   heartbeatIntervalMs?: number;
-  observeReplacement?: (run: DeepScanRunState) => Promise<DeepScanRunState>;
+  observeReplacement?: (
+    run: DeepScanRunState,
+    signal: AbortSignal,
+  ) => Promise<DeepScanRunState>;
   onComplete?: (draft: ScanDraftInput, signal: AbortSignal) => Promise<void>;
   onStopped?: (run: DeepScanRunState) => Promise<void>;
 }
@@ -81,26 +86,22 @@ export class DeepScanCoordinator {
   private readonly abortController = new AbortController();
   private readonly discoveryAbortController = new AbortController();
   private readonly publicationAbortController = new AbortController();
+  private readonly observationAbortController = new AbortController();
   private readonly clock: DeepScanClock;
   private readonly log: DeepScanLogger;
   private readonly artifacts: DeepScanArtifacts;
   private readonly workers: DeepScanWorkerRunner;
   private readonly discoveryWorkers: DeepScanWorkerRunner;
-  private readonly terminalPromise: Promise<DeepScanRunState>;
+  private readonly terminalResult: PromiseWithResolvers<DeepScanRunState>;
   private readonly schedulerWork = new Set<Promise<unknown>>();
   private heartbeatTimeout: ReturnType<typeof setTimeout> | undefined;
   private discoveryTimeout: ReturnType<typeof setTimeout> | undefined;
   private ownershipCheck: Promise<boolean> | undefined;
-  private resolveTerminal!: (state: DeepScanRunState) => void;
-  private rejectTerminal!: (error: unknown) => void;
-  private resolveCancellationReady!: () => void;
-  private readonly cancellationReady = new Promise<void>((resolvePromise) => {
-    this.resolveCancellationReady = resolvePromise;
-  });
+  private readonly cancellationReady = Promise.withResolvers<void>();
   private cancellationPersistence?: {
     promise: Promise<void>;
     resolve: () => void;
-    reject: (error: unknown) => void;
+    failure?: { error: unknown };
   };
   private started = false;
   private terminal = false;
@@ -144,10 +145,7 @@ export class DeepScanCoordinator {
       },
       { once: true },
     );
-    this.terminalPromise = new Promise((resolvePromise, rejectPromise) => {
-      this.resolveTerminal = resolvePromise;
-      this.rejectTerminal = rejectPromise;
-    });
+    this.terminalResult = Promise.withResolvers<DeepScanRunState>();
   }
 
   start(): void {
@@ -162,7 +160,7 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: errorKind(error),
       });
-      this.failLocally(error);
+      if (this.stopLocally()) this.terminalResult.reject(error);
     });
   }
 
@@ -171,7 +169,7 @@ export class DeepScanCoordinator {
   }
 
   settled(): Promise<DeepScanRunState> {
-    return this.terminalPromise.then(cloneState);
+    return this.terminalResult.promise.then(cloneState);
   }
 
   async wait(signal: AbortSignal | undefined): Promise<DeepScanRunState>;
@@ -203,7 +201,7 @@ export class DeepScanCoordinator {
           signal?.removeEventListener("abort", onAbort);
         };
         signal?.addEventListener("abort", onAbort, { once: true });
-        void this.terminalPromise.then(
+        void this.terminalResult.promise.then(
           (state) => {
             cleanup();
             resolvePromise(cloneState(state));
@@ -228,6 +226,7 @@ export class DeepScanCoordinator {
     });
     this.abortController.abort(reason);
     this.publicationAbortController.abort(reason);
+    this.observationAbortController.abort(reason);
     // The cancel operation returns promptly. Terminal waiters remain attached
     // until worker cleanup and stopped-result publication settle.
   }
@@ -236,24 +235,19 @@ export class DeepScanCoordinator {
     reason: string,
     persistCancellation: () => Promise<void>,
   ): Promise<DeepScanRunState> {
-    if (this.terminal) return await this.settled();
-    if (!this.cancellationPersistence) {
-      let resolve!: () => void;
-      let reject!: (error: unknown) => void;
-      const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-        resolve = resolvePromise;
-        reject = rejectPromise;
-      });
-      this.cancellationPersistence = { promise, resolve, reject };
-    }
+    if (this.terminal || this.state.status !== "running")
+      return await this.settled();
+    this.cancellationPersistence ??= Promise.withResolvers<void>();
     this.cancel(reason);
-    await this.cancellationReady;
+    await this.cancellationReady.promise;
     try {
       await persistCancellation();
-      this.cancellationPersistence.resolve();
     } catch (error) {
-      this.cancellationPersistence.reject(error);
-      throw error;
+      this.cancellationPersistence.failure = { error };
+    } finally {
+      // Cleanup still inspects durable state and preserves results when the
+      // process lost a committed response, then reports the persistence failure.
+      this.cancellationPersistence.resolve();
     }
     return await this.settled();
   }
@@ -318,14 +312,14 @@ export class DeepScanCoordinator {
         this.publicationAbortController.signal,
       );
       if (this.canceled || this.externallyFailed) return;
-      this.state = await this.finishWithReplay(schedulerResult);
+      const completed = await this.finishWithReplay(schedulerResult);
       if (this.canceled || this.externallyFailed) return;
+      this.state = completed;
       this.log({
         event: "coordinator_terminal",
         scanId: this.state.scanId,
         reason: schedulerResult.reason,
       });
-      this.finishLocally(this.state);
     } catch (error) {
       if (this.canceled || this.externallyFailed) {
         return;
@@ -349,13 +343,17 @@ export class DeepScanCoordinator {
       }
       this.abortController.abort(message);
       await this.settleSchedulerWork();
+      if (this.canceled || this.externallyFailed) return;
       try {
-        this.state = await this.options.store.fail(
+        const failed = await this.options.store.fail(
           this.state.scanId,
           persistedMessage,
           "failed",
         );
+        if (this.canceled || this.externallyFailed) return;
+        this.state = failed;
       } catch (persistError) {
+        if (this.canceled || this.externallyFailed) return;
         this.state = {
           ...this.state,
           status: "failed",
@@ -376,7 +374,8 @@ export class DeepScanCoordinator {
       // A worker can finish an atomic draft write while cancellation is being
       // persisted. Publish saved output only after every local writer settles.
       await this.settleSchedulerWork();
-      this.resolveCancellationReady();
+      await this.ownershipCheck;
+      this.cancellationReady.resolve();
       await this.cancellationPersistence?.promise;
       if (this.options.onStopped && this.options.threadId) {
         let current: DeepScanRunState | undefined;
@@ -446,30 +445,22 @@ export class DeepScanCoordinator {
           scanId: this.state.scanId,
         });
       }
+      if (this.cancellationPersistence?.failure) {
+        throw this.cancellationPersistence.failure.error;
+      }
       if (this.canceled) this.state = { ...this.state, status: "canceled" };
-      this.finishLocally(this.state);
+      if (this.stopLocally())
+        this.terminalResult.resolve(cloneState(this.state));
     }
   }
 
-  private finishLocally(state: DeepScanRunState): void {
-    if (this.markTerminal()) this.resolveTerminal(cloneState(state));
-  }
-
-  private failLocally(error: unknown): void {
-    if (this.markTerminal()) this.rejectTerminal(error);
-  }
-
-  private markTerminal(): boolean {
+  private stopLocally(): boolean {
     if (this.terminal) return false;
     this.terminal = true;
-    if (this.heartbeatTimeout !== undefined) {
-      clearTimeout(this.heartbeatTimeout);
-      this.heartbeatTimeout = undefined;
-    }
-    if (this.discoveryTimeout !== undefined) {
-      clearTimeout(this.discoveryTimeout);
-      this.discoveryTimeout = undefined;
-    }
+    clearTimeout(this.heartbeatTimeout);
+    this.heartbeatTimeout = undefined;
+    clearTimeout(this.discoveryTimeout);
+    this.discoveryTimeout = undefined;
     return true;
   }
 
@@ -511,6 +502,7 @@ export class DeepScanCoordinator {
   private scheduleHeartbeat(): void {
     if (
       this.terminal ||
+      this.externallyFailed ||
       !this.options.threadId ||
       !this.state.coordinatorGeneration
     ) {
@@ -569,9 +561,10 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: errorKind(readError),
       });
-      if (!leaseLossConfirmed) return false;
+      if (!leaseLossConfirmed) return this.externallyFailed;
       current = this.state;
     }
+    if (this.externallyFailed || this.terminal) return this.externallyFailed;
     const replacementConfirmed =
       leaseLossConfirmed ||
       (current.status === "running" &&
@@ -581,11 +574,17 @@ export class DeepScanCoordinator {
     if (current.status === "running" && !replacementConfirmed) return false;
 
     this.externallyFailed = true;
+    this.state = current;
+    clearTimeout(this.heartbeatTimeout);
+    this.heartbeatTimeout = undefined;
     this.abortController.abort("deep_scan_coordinator_lease_lost");
     this.publicationAbortController.abort("deep_scan_coordinator_lease_lost");
     if (replacementConfirmed && this.options.observeReplacement) {
       try {
-        this.state = await this.options.observeReplacement(current);
+        this.state = await this.options.observeReplacement(
+          current,
+          this.observationAbortController.signal,
+        );
       } catch (observeError) {
         this.log({
           event: "coordinator_replacement_observation_failed",
@@ -601,7 +600,6 @@ export class DeepScanCoordinator {
     } else {
       this.state = current;
     }
-    this.finishLocally(this.state);
     return true;
   }
 
@@ -625,7 +623,6 @@ export class DeepScanCoordinator {
         .map((worker) => worker.id),
     );
     const omittedWorkerIds: string[] = [];
-    await this.readPersistedExecutionPrompts();
     const recoveredReducers = await this.recoverCompletedReducers(recovered);
     let latestResult = recoveredReducers.result;
     let buffer: AcceptedDiscovery[] = recovered.filter(
@@ -634,24 +631,38 @@ export class DeepScanCoordinator {
     let reducer: Promise<DedupOutcome> | undefined;
     let previousReducerResultPath = recoveredReducers.resultPath;
     let dispatched = this.state.dispatchedCount;
-    let workerSequence = Math.max(
-      dispatched,
+    const [discoveryLabels, reducerLabels] = await Promise.all([
+      fs.readdir(this.artifacts.workersRoot),
+      fs.readdir(this.artifacts.dedupRoot),
+    ]);
+    let workerSequence = [
+      BigInt(dispatched),
+      ...discoveryLabels.map((label) =>
+        workerLabelSequence(label, "discovery"),
+      ),
       ...(this.state.persistedWorkers ?? [])
         .filter((worker) => worker.kind === "discovery")
-        .map((worker) => workerLabelSequence(worker, "discovery")),
-    );
-    let reducerSequence = Math.max(
-      0,
+        .map((worker) =>
+          workerLabelSequence(
+            basename(dirname(worker.promptPath)),
+            "discovery",
+          ),
+        ),
+    ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
+    let reducerSequence = [
+      0n,
+      ...reducerLabels.map((label) => workerLabelSequence(label, "dedup")),
       ...(this.state.persistedWorkers ?? [])
         .filter((worker) => worker.kind === "dedup")
-        .map((worker) => workerLabelSequence(worker, "dedup")),
-    );
+        .map((worker) =>
+          workerLabelSequence(basename(dirname(worker.promptPath)), "dedup"),
+        ),
+    ].reduce((maximum, value) => (value > maximum ? value : maximum), 0n);
     let stopReason: DeepScanTerminalReason | undefined;
     let lastReplaceableFailure:
       Extract<DiscoveryOutcome, { status: "failed" }> | undefined;
 
-    const errorLimit =
-      config.stopAfterConsecutiveErrors ?? config.stopAfterNoNew;
+    const errorLimit = config.stopAfterConsecutiveErrors;
     let reducerFailures = persistedReducerFailureStreak(
       this.state.persistedWorkers ?? [],
     );
@@ -667,11 +678,9 @@ export class DeepScanCoordinator {
       );
     }
     if (reducerFailures >= errorLimit) {
-      const failure = [...(this.state.persistedWorkers ?? [])]
-        .reverse()
-        .find(
-          (worker) => worker.kind === "dedup" && worker.status === "failed",
-        );
+      const failure = (this.state.persistedWorkers ?? []).findLast(
+        (worker) => worker.kind === "dedup" && worker.status === "failed",
+      );
       throw reducerErrorLimitError(
         reducerFailures,
         errorLimit,
@@ -741,7 +750,7 @@ export class DeepScanCoordinator {
       if (result.status === "rejected") return result.reason;
       const outcome = result.value;
       if ("status" in outcome) return outcome.error;
-      this.state = outcome.run;
+      if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       return undefined;
     };
 
@@ -769,7 +778,7 @@ export class DeepScanCoordinator {
           dispatched < config.maxDiscoveryRuns
         ) {
           dispatched += 1;
-          workerSequence += 1;
+          workerSequence += 1n;
           const workerLabel = `discovery-${String(workerSequence).padStart(4, "0")}`;
           const workerId = randomUUID();
           const workerPromise = this.trackSchedulerWork(
@@ -791,7 +800,7 @@ export class DeepScanCoordinator {
         ) {
           const consumed = [...buffer].sort(compareCompletionSequence);
           buffer = [];
-          reducerSequence += 1;
+          reducerSequence += 1n;
           reducer = this.trackSchedulerWork(
             this.workers.runReducer({
               id: randomUUID(),
@@ -904,7 +913,7 @@ export class DeepScanCoordinator {
         throw thresholdError;
       }
       reducerFailures = 0;
-      this.state = outcome.run;
+      if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       latestResult = outcome.result;
       if (
@@ -954,7 +963,6 @@ export class DeepScanCoordinator {
         worker.resultManifestPath,
         this.state.scanId,
       );
-      await fs.readFile(worker.promptPath, "utf8");
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
@@ -975,12 +983,21 @@ export class DeepScanCoordinator {
       .filter(
         (worker) => worker.kind === "dedup" && worker.status === "succeeded",
       )
-      .sort(
-        (left, right) =>
-          workerLabelSequence(left, "dedup") -
-            workerLabelSequence(right, "dedup") ||
-          left.id.localeCompare(right.id),
-      );
+      .sort((left, right) => {
+        const leftSequence = workerLabelSequence(
+          basename(dirname(left.promptPath)),
+          "dedup",
+        );
+        const rightSequence = workerLabelSequence(
+          basename(dirname(right.promptPath)),
+          "dedup",
+        );
+        return leftSequence < rightSequence
+          ? -1
+          : leftSequence > rightSequence
+            ? 1
+            : left.id.localeCompare(right.id);
+      });
     for (const worker of completedReducers) {
       if (!worker.resultManifestPath) {
         throw new Error(
@@ -1006,24 +1023,9 @@ export class DeepScanCoordinator {
         this.state.scanId,
       );
       latestResult = result;
-      await fs.readFile(worker.promptPath, "utf8");
       resultPath = worker.resultManifestPath;
     }
     return { resultPath, result: latestResult };
-  }
-
-  private async readPersistedExecutionPrompts(): Promise<void> {
-    for (const worker of this.state.persistedWorkers ?? []) {
-      if (
-        worker.kind === "setup" ||
-        worker.status === "queued" ||
-        worker.status === "running" ||
-        (worker.status === "canceled" && worker.attempt === 0)
-      ) {
-        continue;
-      }
-      await fs.readFile(worker.promptPath, "utf8");
-    }
   }
 
   private reducerReady(
@@ -1046,10 +1048,8 @@ export class DeepScanCoordinator {
 
   private trackSchedulerWork<T>(promise: Promise<T>): Promise<T> {
     this.schedulerWork.add(promise);
-    void promise.then(
-      () => this.schedulerWork.delete(promise),
-      () => this.schedulerWork.delete(promise),
-    );
+    const cleanup = () => this.schedulerWork.delete(promise);
+    void promise.then(cleanup, cleanup);
     return promise;
   }
 
@@ -1103,22 +1103,11 @@ export class DeepScanCoordinator {
 const systemClock: DeepScanClock = {
   now: () => Date.now(),
   sleep: async (delayMs, signal) => {
-    if (signal.aborted) throw abortError(signal.reason);
-    await new Promise<void>((resolvePromise, rejectPromise) => {
-      const timeout = setTimeout(() => {
-        cleanup();
-        resolvePromise();
-      }, delayMs);
-      const onAbort = (): void => {
-        cleanup();
-        rejectPromise(abortError(signal.reason));
-      };
-      const cleanup = (): void => {
-        clearTimeout(timeout);
-        signal.removeEventListener("abort", onAbort);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
+    try {
+      await delay(delayMs, undefined, { signal });
+    } catch (error) {
+      throw signal.aborted ? abortError(signal.reason) : error;
+    }
   },
 };
 
@@ -1133,11 +1122,11 @@ function compareCompletionSequence(
 }
 
 function workerLabelSequence(
-  worker: PersistedDeepScanWorker,
+  label: string,
   kind: "discovery" | "dedup",
-): number {
-  const match = worker.promptPath.match(new RegExp(`${kind}-(\\d+)`));
-  return match ? Number(match[1]) : 0;
+): bigint {
+  const match = label.match(new RegExp(`^${kind}-(\\d+)$`));
+  return match ? BigInt(match[1]!) : 0n;
 }
 
 function cloneState(state: DeepScanRunState): DeepScanRunState {

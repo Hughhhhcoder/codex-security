@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
 import {
   validateDiscoveryArtifacts,
@@ -158,16 +158,6 @@ export class DeepScanWorkerRunner {
         await validateDiscoveryArtifacts(artifacts, resultPath, run.scanId);
         discoveryValidated = true;
       },
-      beforeRetry: async (attempt) => {
-        await archiveDirectory(
-          artifactDir,
-          join(
-            workerRoot,
-            "attempts",
-            `attempt-${String(attempt).padStart(2, "0")}`,
-          ),
-        );
-      },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
       await this.persistWorkerCancellation(
@@ -263,15 +253,13 @@ export class DeepScanWorkerRunner {
     const promptRoot = join(reducerRoot, "prompts");
     const resultPath = join(artifactDir, "result.json");
     await fs.mkdir(artifactDir, { recursive: true });
-    const basePrompt = renderDedupPrompt({
-      reducerLabel,
-      claimedWorkerIds: consumed.map((worker) => worker.id),
-    });
+    const workerIds = consumed.map((worker) => worker.id);
+    const basePrompt = renderDedupPrompt(reducerLabel, workerIds);
     await writePrivateFile(promptPath, basePrompt);
     await this.options.store.claimDedup({
       id: reducerId,
       scanId: run.scanId,
-      workerIds: consumed.map((worker) => worker.id),
+      workerIds,
       promptPath,
       artifactDir,
     });
@@ -320,14 +308,6 @@ export class DeepScanWorkerRunner {
           },
           run.scanId,
         );
-      },
-      beforeRetry: async (attempt) => {
-        const attemptRoot = join(
-          reducerRoot,
-          "attempts",
-          `attempt-${String(attempt).padStart(2, "0")}`,
-        );
-        await archiveDirectory(artifactDir, attemptRoot);
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
@@ -391,7 +371,6 @@ export class DeepScanWorkerRunner {
     artifactContext?: CodexWorkerArtifactContext;
     subagents: number;
     validate: () => Promise<void>;
-    beforeRetry: (attempt: number) => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -428,8 +407,8 @@ export class DeepScanWorkerRunner {
         const result = await this.options.executor.run({
           kind: input.kind,
           promptPath: executionPromptPath,
-          // Discovery workers write only to their isolated directory. Setup and
-          // dedup workers own shared scan artifacts; the target remains read-only.
+          // Discovery workers write only to their isolated directory. Reducers
+          // own shared scan artifacts; the target remains read-only.
           workingDirectory:
             input.kind === "discovery"
               ? input.artifactDir
@@ -548,7 +527,7 @@ export class DeepScanWorkerRunner {
         } else {
           resumableThreadId = undefined;
           continuationPrompt = undefined;
-          await input.beforeRetry(attempt);
+          await this.archiveWorkerAttempt(input.artifactDir, attempt);
           if (validationStarted && !validationCompleted) {
             executionPromptPath = await writeValidationRetryPrompt({
               kind: input.kind,
@@ -584,6 +563,17 @@ export class DeepScanWorkerRunner {
         }
       }
     }
+  }
+
+  private async archiveWorkerAttempt(artifactDir: string, attempt: number) {
+    await archiveDirectory(
+      artifactDir,
+      join(
+        dirname(artifactDir),
+        "attempts",
+        `attempt-${String(attempt).padStart(2, "0")}`,
+      ),
+    );
   }
 
   private async persistWorkerCancellation(

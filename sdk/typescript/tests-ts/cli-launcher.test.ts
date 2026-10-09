@@ -1,46 +1,43 @@
-import {
-  copyFile,
-  mkdir,
-  mkdtemp,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { copyFile, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { VERSION } from "../src/index.js";
 import { SYNTHETIC_CREDENTIALS } from "./cli-fixtures.js";
 import { runCommand } from "./support/shell.js";
+import { temporaryDirectory } from "./support/temporary-directories.js";
 
 const packageRoot = join(import.meta.dir, "..");
 
 describe("CLI launcher", () => {
   test("runs through an installed npm-style bin symlink", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-bin-"));
+    const root = await temporaryDirectory("codex-security-cli-bin-");
     try {
       const launcher = join(packageRoot, "src", "cli.ts");
-      const bin =
-        process.platform === "win32" ? launcher : join(root, "codex-security");
-      if (process.platform !== "win32") {
-        await symlink(launcher, bin);
-      }
-      const { status, stdout, stderr } = await runCommand(
-        process.execPath,
-        [bin, "--version"],
-        { timeout: 30_000 },
-      );
+      const bins =
+        process.platform === "win32"
+          ? [launcher]
+          : ["codex-security", "cs"].map((name) => join(root, name));
+      for (const bin of bins) {
+        if (process.platform !== "win32") {
+          await symlink(launcher, bin);
+        }
+        const { status, stdout, stderr } = await runCommand(
+          process.execPath,
+          [bin, "--version"],
+          { timeout: 30_000 },
+        );
 
-      expect(status, stderr).toBe(0);
-      expect(stderr).toBe("");
-      expect(stdout).toBe(`${VERSION}\n`);
+        expect(status, stderr).toBe(0);
+        expect(stderr).toBe("");
+        expect(stdout).toBe(`${VERSION}\n`);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
   test("maps unexpected source-entrypoint failures to exit 2", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-security-cli-failure-"));
+    const root = await temporaryDirectory("codex-security-cli-failure-");
     try {
       const preload = join(root, "unavailable-cwd.mjs");
       await writeFile(
@@ -64,9 +61,7 @@ describe("CLI launcher", () => {
   });
 
   test("maps installed-launcher failures to a fixed startup error", async () => {
-    const root = await mkdtemp(
-      join(tmpdir(), "codex-security-cli-bin-failure-"),
-    );
+    const root = await temporaryDirectory("codex-security-cli-bin-failure-");
     try {
       const launcher = join(root, "bin", "codex-security.mjs");
       await mkdir(join(root, "bin"), { recursive: true });
