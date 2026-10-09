@@ -449,6 +449,13 @@ describe("TypeScript package skeleton", () => {
         args,
       });
     }
+    for (let shard = 1; shard <= 7; shard += 1) {
+      expect(runner.strategy?.matrix["include"]).toContainEqual({
+        os: "windows-latest",
+        mode: `isolated-${shard}`,
+        args: `--isolate --shard=${shard}/7`,
+      });
+    }
     const command = runner.steps!.find(
       (step) => step.name === "Test runner mode",
     )?.run;

@@ -278,6 +278,10 @@ jobs:
         working-directory: sdk/typescript
         run: node scripts/check-package.mjs ../../dist/*.tgz
 
+      - name: Check Action against the release candidate
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        uses: ./.github/actions/check-action-candidate
+
   mcp:
     name: MCP app tests
     needs: [validate-title, package]
