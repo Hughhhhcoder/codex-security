@@ -2687,6 +2687,7 @@ describe("CLI", () => {
 
   test.each(
     [
+      ["info", "--workers"],
       ["classify-severity", "--scan", "--rubric", "policy.md"],
       ["classify-severity", "--scan-dir", "--rubric", "policy.md"],
       ["classify-severity", "--scan", "latest", "--rubric", "--reprocess"],
