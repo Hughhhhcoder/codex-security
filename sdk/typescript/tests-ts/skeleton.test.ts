@@ -263,7 +263,8 @@ describe("TypeScript package skeleton", () => {
     expect(nativeCoverageStep).not.toHaveProperty("continue-on-error");
     for (const name of [
       "Install plugin dependencies",
-      "Build SDK and type-check eval tooling",
+      "Set up Node.js for triage evals",
+      "Set up triage eval dependencies and host runtime",
     ]) {
       expect(job.steps!.find((step) => step.name === name)?.if).toBe(
         "matrix.os == 'ubuntu-latest' && matrix.python == '3.12'",
