@@ -20,7 +20,7 @@ from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
-from workbench_validation import reject_non_finite_json
+from workbench_validation import reject_non_finite_json, timestamp_key
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -297,8 +297,8 @@ def list_scans(
         {where}
         ORDER BY
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
-            MAX(scans.updated_at, progress.updated_at) DESC,
-            scans.started_at DESC,
+            MAX(julianday(upper(scans.updated_at)), julianday(upper(progress.updated_at))) DESC,
+            julianday(upper(scans.started_at)) DESC,
             scans.id
         {pagination}
         """,
@@ -337,7 +337,11 @@ def list_scans(
                 "targetPath": row["target_path"],
                 "targetRevision": row["target_revision"],
                 "targetSummary": row["target_summary"],
-                "updatedAt": max(row["updated_at"], row["progress_updated_at"]),
+                "updatedAt": max(
+                    row["updated_at"],
+                    row["progress_updated_at"],
+                    key=lambda value: (timestamp_key(value), value),
+                ),
                 **(
                     {"warnings": json.loads(row["completion_warnings_json"])}
                     if row["completion_warnings_json"] != "[]"
