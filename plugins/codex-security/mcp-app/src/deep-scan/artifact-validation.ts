@@ -69,7 +69,7 @@ export async function validateDiscoveryArtifacts(
   return result;
 }
 
-/** Validate the complete aggregate and derive convergence from stable finding identities. */
+/** Validate the complete aggregate and derive convergence from retained source ancestry. */
 export async function validateReducerArtifacts(
   input: {
     artifacts: DeepScanArtifacts;
@@ -126,11 +126,19 @@ export async function validateReducerArtifacts(
   } else {
     validateRetainedFindings(result, [], previous);
   }
-  const retainedFindings = previousFindingAssignments(result, previous);
+  const previousFindingIds = new Set(
+    input.sources
+      ? (previous?.findings ?? [])
+          .flatMap(retainedFindingSources)
+          .map((source) => source.id)
+      : (previous?.findings ?? []).map(scanFindingIdentity),
+  );
   return {
     result,
-    newFindings: result.findings.filter(
-      (finding) => !retainedFindings.has(finding),
+    newFindings: result.findings.filter((finding) =>
+      input.sources
+        ? !findingSourceIds(finding).some((id) => previousFindingIds.has(id))
+        : !previousFindingIds.has(scanFindingIdentity(finding)),
     ).length,
   };
 }
@@ -158,14 +166,17 @@ export function reconcileDeepReduction(
     discoveries.map((discovery) => discovery.result),
     previous ?? undefined,
   );
-  retainSourceFindings(result, { discoveries, previous }, false);
+  retainSourceFindings(result, { discoveries, previous });
   for (const [retained, previousFindings] of previousFindingAssignments(
     result,
     previous,
   )) {
+    const sourceIds = findingSourceIds(retained);
     for (const finding of previousFindings) {
       preserveFindingDetails(retained, finding);
     }
+    (retained.provenance as Record<string, unknown>).sourceFindingIds =
+      sourceIds;
   }
   retainSourceFindings(result, { discoveries, previous });
   for (const [field, label] of [
@@ -199,6 +210,16 @@ function findingSourceIds(finding: Record<string, unknown>): string[] {
   return sourceFindingIds ?? sourceFindings?.map((source) => source.id) ?? [];
 }
 
+function retainedFindingSources(
+  finding: Record<string, unknown>,
+  index: number,
+) {
+  const originals = (finding.provenance as Record<string, unknown>)
+    .sourceFindings as
+    Array<{ id: string; finding: Record<string, unknown> }> | undefined;
+  return originals?.length ? originals : [{ id: `previous:${index}`, finding }];
+}
+
 function retainSourceFindings(
   result: DeepReductionInput,
   inputs: DeepReductionSources,
@@ -213,17 +234,10 @@ function retainSourceFindings(
       sources.set(`${discovery.workerId}:${index}`, original);
     }
   }
-  for (const [index, finding] of (inputs.previous?.findings ?? []).entries()) {
-    const provenance = finding.provenance as Finding;
-    const originals = provenance.sourceFindings as
-      Array<{ id: string; finding: Finding }> | undefined;
-    if (originals?.length) {
-      for (const original of originals)
-        sources.set(original.id, original.finding);
-    } else {
-      sources.set(`previous:${index}`, finding);
-    }
-  }
+  for (const original of (inputs.previous?.findings ?? []).flatMap(
+    retainedFindingSources,
+  ))
+    sources.set(original.id, original.finding);
   const claimed = new Set<string>();
   for (const finding of result.findings) {
     const provenance = finding.provenance as Finding;
@@ -295,14 +309,20 @@ function previousFindingAssignments(
     DeepReductionInput["findings"][number],
     DeepReductionInput["findings"]
   >();
-  for (const finding of previous?.findings ?? []) {
-    const previousRefs = findingSourceIds(finding);
+  for (const [index, finding] of (previous?.findings ?? []).entries()) {
+    const previousRefs = retainedFindingSources(finding, index).map(
+      (source) => source.id,
+    );
+    const lineageMatches = result.findings.filter((current) => {
+      const currentRefs = new Set(findingSourceIds(current));
+      return previousRefs.every((ref) => currentRefs.has(ref));
+    });
+    const hasExplicitLineage = result.findings.some(
+      (current) => findingSourceIds(current).length > 0,
+    );
     const matches =
-      previousRefs.length > 0
-        ? result.findings.filter((current) => {
-            const currentRefs = new Set(findingSourceIds(current));
-            return previousRefs.every((ref) => currentRefs.has(ref));
-          })
+      lineageMatches.length > 0 || hasExplicitLineage
+        ? lineageMatches
         : result.findings.filter(
             (current) =>
               scanFindingIdentity(current) === scanFindingIdentity(finding),
@@ -318,6 +338,17 @@ function previousFindingAssignments(
       );
     }
     const retained = matches[0]!;
+    if (
+      previousRefs.some((ref) => ref.startsWith("previous:")) &&
+      scanFindingIdentity(retained) !== scanFindingIdentity(finding)
+    ) {
+      throw Object.assign(
+        new Error(
+          "Deep reduction changed a previously accepted finding identity.",
+        ),
+        { code: "merge_traceability_unstable_candidate_id" },
+      );
+    }
     const assigned = assignments.get(retained) ?? [];
     assigned.push(finding);
     assignments.set(retained, assigned);
@@ -325,7 +356,7 @@ function previousFindingAssignments(
   return assignments;
 }
 
-/** Preserve previous source lineage (or legacy identity) and never discard every finding. */
+/** Preserve previously accepted identities and never discard every finding. */
 export function validateRetainedFindings(
   result: DeepReductionInput,
   sources: DeepReductionInput[],

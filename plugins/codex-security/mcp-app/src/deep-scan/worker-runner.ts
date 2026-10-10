@@ -17,6 +17,7 @@ import {
   boundedDeepScanErrorMessage,
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
+  confirmedOwnershipChange,
   isCodexCybersecurityPolicyRefusal,
 } from "./errors.js";
 import { renderDedupPrompt, renderDiscoveryPrompt } from "./templates.js";
@@ -206,12 +207,9 @@ export class DeepScanWorkerRunner {
     };
     let persisted: PersistedDeepScanWorker;
     try {
-      persisted = await this.replayStoreMutation(
-        "discovery_acceptance_replay",
-        workerId,
-        async () => await this.options.store.updateWorker(acceptance),
-      );
+      persisted = await this.options.store.updateWorker(acceptance);
     } catch (error) {
+      if (confirmedOwnershipChange(error, run.scanId)) throw error;
       if (!this.options.signal.aborted) throw error;
       return { type: "discovery", status: "canceled", workerId };
     }
@@ -342,11 +340,7 @@ export class DeepScanWorkerRunner {
       newFindings: reducerValidation.newFindings,
       resultManifestPath: resultPath,
     };
-    const committed = await this.replayStoreMutation(
-      "dedup_commit_replay",
-      reducerId,
-      async () => await this.options.store.commitDedup(commit),
-    );
+    const committed = await this.options.store.commitDedup(commit);
     this.options.log({
       event: "dedup_committed",
       scanId: run.scanId,
@@ -464,6 +458,7 @@ export class DeepScanWorkerRunner {
           threadId: result.threadId ?? activeThreadId,
         };
       } catch (error) {
+        if (confirmedOwnershipChange(error, run.scanId)) throw error;
         if (signal.aborted) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
@@ -603,32 +598,6 @@ export class DeepScanWorkerRunner {
     });
   }
 
-  /** Replay idempotent SQLite commits when their process response is ambiguous. */
-  private async replayStoreMutation<T>(
-    event: string,
-    workerId: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    try {
-      return await operation();
-    } catch (firstError) {
-      this.options.log({
-        event,
-        scanId: this.options.run.scanId,
-        workerId,
-        reason: errorNameWithCode(asError(firstError)),
-      });
-      try {
-        return await operation();
-      } catch (replayError) {
-        throw new Error(
-          `Deep Scan persistence replay failed: ${asError(replayError).message}`,
-          { cause: firstError },
-        );
-      }
-    }
-  }
-
   private async cancelAttempt(
     input: {
       workerId: string;
@@ -660,7 +629,10 @@ function withWorkerDiagnostics(
   const namespaceFailure = diagnostics.find(
     (diagnostic) => diagnostic.code === "sandbox_namespace_exhausted",
   );
-  const diagnostic = namespaceFailure ?? diagnostics[0];
+  const diagnostic =
+    namespaceFailure ??
+    diagnostics.find((item) => item.code !== "worker_error") ??
+    diagnostics[0];
   const combined = new Error(
     `${diagnostics.map((item) => item.message).join(" ")} Deterministic artifact validation also reported: ${normalized.message}`,
     { cause: normalized },
@@ -677,7 +649,9 @@ function withWorkerDiagnostics(
 function isMissingWorkerResult(error: Error, artifactDir: string): boolean {
   const diagnosed = error as NodeJS.ErrnoException;
   const original =
-    diagnosed.code === "artifact_tool_failed" && error.cause instanceof Error
+    (diagnosed.code === "artifact_tool_failed" ||
+      diagnosed.code === "worker_error") &&
+    error.cause instanceof Error
       ? (error.cause as NodeJS.ErrnoException)
       : diagnosed;
   return (
