@@ -316,6 +316,12 @@ export interface ScanOptions extends ScanSettings {
   ) => number | undefined | Promise<number | undefined>;
   onOutputArchived?: (archiveDir: string) => void;
   onOutputDirReady?: (scanDir: string) => void;
+  /** @internal Authoritative registration receipt for CLI scan navigation. */
+  onScanRegistered?: (scan: {
+    scanId: string;
+    scanDir: string;
+    startedAt?: string;
+  }) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onScanStarted?: () => void;
@@ -418,6 +424,7 @@ type ScanObserverName =
   | "onCost"
   | "onOutputArchived"
   | "onOutputDirReady"
+  | "onScanRegistered"
   | "onScanStarted"
   | "onTrustedAccessStatus"
   | "onReconnect"
@@ -1785,6 +1792,16 @@ export class CodexSecurity {
         });
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      notifyObserver(
+        options,
+        "onScanRegistered",
+      )({
+        scanId,
+        scanDir,
+        ...(typeof registration["startedAt"] === "string"
+          ? { startedAt: registration["startedAt"] }
+          : {}),
+      });
       if (typeof registration["archivedScanDir"] === "string") {
         notifyObserver(
           options,
@@ -3312,6 +3329,16 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      notifyObserver(
+        options,
+        "onScanRegistered",
+      )({
+        scanId,
+        scanDir,
+        ...(typeof registration["startedAt"] === "string"
+          ? { startedAt: registration["startedAt"] }
+          : {}),
+      });
       if (typeof registration["archivedScanDir"] === "string") {
         notifyObserver(
           options,
