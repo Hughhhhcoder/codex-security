@@ -3911,6 +3911,7 @@ describe("CodexSecurity orchestration", () => {
       "register-cli-scan",
       "get-scan-feedback",
       "set-scan-thread",
+      "get-scan",
       "cancel-scan",
     ]);
     expect(commands.at(-1)).toEqual([
