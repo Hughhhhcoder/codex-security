@@ -323,6 +323,22 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
 
 
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Win32 extended-length paths")
+def test_sqlite_snapshot_reads_windows_extended_length_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('sealed')")
+    subprocess.run(
+        [sys.executable, str(SNAPSHOT_SCRIPT), "\\\\?\\" + str(source), str(snapshot)],
+        check=True,
+    )
+    with sqlite3.connect(snapshot) as connection:
+        assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
 @pytest.mark.parametrize("alias_kind", ["same", "symlink", "hardlink"])
 def test_sqlite_snapshot_rejects_destination_aliasing_source(
     tmp_path: Path, alias_kind: str
@@ -849,9 +865,7 @@ def test_severity_migration_only_copies_assessments_with_matching_scan_occurrenc
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-@pytest.mark.parametrize("operation", ["migration", "read"])
-def test_severity_work_scales_with_selected_findings(operation: str) -> None:
-    severity = load_script("workbench_severity")
+def test_severity_migration_scales_with_classified_scans() -> None:
     timestamp = "2026-09-01T00:00:00Z"
 
     def instruction_count(scale: int) -> int:
@@ -862,9 +876,7 @@ def test_severity_work_scales_with_selected_findings(operation: str) -> None:
                 "INSERT INTO workspaces (id, created_at, updated_at) VALUES ('workspace', ?, ?)",
                 (timestamp, timestamp),
             )
-            scan_count, findings_per_scan = (
-                (scale, 10) if operation == "migration" else (1, scale * 10)
-            )
+            scan_count, findings_per_scan = scale, 10
             for scan in range(scan_count):
                 scan_id = f"scan-{scan}"
                 finding_ids = [f"finding-{scan}-{item}" for item in range(findings_per_scan)]
@@ -905,9 +917,6 @@ def test_severity_work_scales_with_selected_findings(operation: str) -> None:
                         (finding_id, occurrence_id, timestamp),
                     )
             connection.commit()
-            if operation == "read":
-                apply_migrations(connection)
-
             instructions = 0
 
             def progress() -> int:
@@ -917,12 +926,7 @@ def test_severity_work_scales_with_selected_findings(operation: str) -> None:
 
             connection.set_progress_handler(progress, 100)
             try:
-                if operation == "migration":
-                    apply_migrations(connection)
-                else:
-                    selected = list(reversed(finding_ids))
-                    result = severity.assessments(connection, selected, scan_id)
-                    assert [assessment["findingId"] for assessment in result] == selected
+                apply_migrations(connection)
             finally:
                 connection.set_progress_handler(None, 0)
             assert (

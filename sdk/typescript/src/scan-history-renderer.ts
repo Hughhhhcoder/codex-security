@@ -23,6 +23,7 @@ const STATUS_STYLES: Record<string, { color: number; icon: string }> = {
   reopened: { color: 31, icon: "↻" },
   new: { color: 31, icon: "+" },
   persisting: { color: 33, icon: "●" },
+  not_observed: { color: 36, icon: "○" },
   not_rescanned: { color: 36, icon: "○" },
   unknown: { color: 35, icon: "?" },
 };
@@ -121,7 +122,7 @@ export function renderScanHistory(
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
     const grouped =
       before?.length || after?.length
-        ? `  ${accent("·")}  ${before?.length ?? 1} → ${after?.length ?? 1}`
+        ? `  ${accent("·")}  ${before?.length ?? (entry["beforeOccurrenceId"] ? 1 : 0)} → ${after?.length ?? (entry["afterOccurrenceId"] ? 1 : 0)}`
         : "";
     const matches = entry["matches"] as JsonObject[] | undefined;
     const related = entry["related"] as JsonObject[] | undefined;
@@ -260,6 +261,11 @@ export function renderScanHistory(
       `  ${strong(clean(basename(result["targetPath"] as string)))}  ${accent("·")}  ${clean(result["scanId"])}`,
       `  ${paint(`${status === "complete" ? "✓" : "●"} ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
     );
+    if (typeof result["startedAt"] === "string") {
+      lines.push(`  ${strong("STARTED")}  ${clean(result["startedAt"])}`);
+    } else if (typeof result["updatedAt"] === "string") {
+      lines.push(`  ${strong("UPDATED")}  ${clean(result["updatedAt"])}`);
+    }
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);
     }
@@ -281,6 +287,11 @@ export function renderScanHistory(
       lines.push(
         `  ${Object.entries(summary)
           .filter(([, count]) => count)
+          .sort(
+            ([left], [right]) =>
+              Object.keys(SEVERITY_COLORS).indexOf(left.toUpperCase()) -
+              Object.keys(SEVERITY_COLORS).indexOf(right.toUpperCase()),
+          )
           .map(([severity, count]) => {
             const label = severity.toUpperCase();
             return paint(
@@ -292,6 +303,16 @@ export function renderScanHistory(
       );
     }
     const recipe = result["recipe"] as JsonObject | undefined;
+    const target = recipe?.["target"] as JsonObject | undefined;
+    if (target) {
+      lines.push(`  ${strong("SCOPE")}  ${clean(JSON.stringify(target))}`);
+    }
+    const deepScan = recipe?.["deepScan"] as JsonObject | undefined;
+    if (deepScan) {
+      lines.push(
+        `  ${strong("DEEP SCAN")}  ${clean(JSON.stringify(deepScan))}`,
+      );
+    }
     const config = recipe?.["config"] as JsonObject | undefined;
     if (config && Object.keys(config).length > 0) {
       lines.push(
@@ -327,6 +348,23 @@ export function renderScanHistory(
       lines.push(
         `  ${strong("KNOWLEDGE BASE")}  ${knowledgeBase.map((path) => dim(clean(path))).join(", ")}`,
       );
+    }
+    const inputs = recipe?.["scanInputs"] as JsonObject | undefined;
+    if (inputs) {
+      lines.push(
+        `  ${strong("SCAN INSTRUCTIONS")}  ${inputs["scanPromptSha256"] ? `sha256:${clean(inputs["scanPromptSha256"])}` : "none"}`,
+      );
+      const knowledge = inputs["knowledgeBase"] as JsonObject | null;
+      if (knowledge) {
+        lines.push(
+          `  ${strong("KNOWLEDGE SNAPSHOT")}  sha256:${clean(knowledge["sha256"])}`,
+        );
+        for (const document of knowledge["documents"] as JsonObject[]) {
+          lines.push(
+            `    ${clean(document["name"])}  sha256:${clean(document["sha256"])}`,
+          );
+        }
+      }
     }
     const artifacts = result["artifacts"] as JsonObject | undefined;
     if (artifacts && Object.keys(artifacts).length > 0) {
@@ -371,12 +409,6 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
-    const coverage = (result["coverage"] as JsonObject)["afterCompleteness"];
-    if (coverage !== "complete") {
-      lines.push(
-        `  ${paint(`⚠ Follow-up coverage is ${clean(coverage)}; resolved findings cannot be confirmed.`, 33)}`,
-      );
-    }
     const findings = (result["findings"] as JsonObject[]).map((entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===

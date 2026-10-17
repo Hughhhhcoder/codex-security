@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote
 
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
@@ -256,7 +257,7 @@ def _discover_rollout_sessions(
     warnings: set[str],
 ) -> tuple[list[RolloutSession], set[str]]:
     database = sqlite3.connect(
-        state_database.as_uri() + "?mode=ro",
+        f"file:{quote(str(state_database), safe='')}?mode=ro",
         uri=True,
         timeout=STATE_DATABASE_TIMEOUT_SECONDS,
     )
@@ -441,6 +442,8 @@ def _read_rollout_usage(
                         previous = inherited_usage
                 continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
+                continue
+            if "info" in payload and payload["info"] is None:
                 continue
             timestamp = _timestamp(event.get("timestamp"))
             snapshot = _token_snapshot(payload)

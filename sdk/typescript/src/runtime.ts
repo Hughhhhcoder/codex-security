@@ -1631,6 +1631,8 @@ export async function runWorkbench(
       "store-dedupe-groups",
       "list-dedupe-groups",
       "dashboard",
+      "severity-classification",
+      "read-severity-classification",
     ].includes(arguments_[0] ?? "");
     const node =
       native && process.versions["bun"]
@@ -2520,7 +2522,7 @@ export async function createMarketplace(
     const marketplace = join(codexHome, "sdk-marketplace");
     const pluginDestination = join(marketplace, "plugins", PLUGIN_NAME);
     await copyPluginTree(root, pluginDestination, signal);
-    const projection = await legacyPluginProjection(pluginDestination, signal);
+    const projection = await pluginRuntimeProjection(pluginDestination, signal);
     for (const [path, file] of projection?.files ?? []) {
       const destination = join(pluginDestination, path);
       await mkdir(dirname(destination), { recursive: true });
@@ -2570,15 +2572,15 @@ async function writeMarketplaceManifest(
   }
 }
 
-type LegacyPluginProjection = {
+type PluginRuntimeProjection = {
   root: string;
   files: Map<string, { contents: Buffer; mode?: number }>;
 };
 
-async function legacyPluginProjection(
+async function pluginRuntimeProjection(
   root: string,
   signal?: AbortSignal,
-): Promise<LegacyPluginProjection | undefined> {
+): Promise<PluginRuntimeProjection | undefined> {
   const path = join(root, ".mcp.json");
   // Keep the source link checks ahead of any configuration read.
   if (!(await lstat(path).catch(nullIfMissingFileError))?.isFile()) return;
@@ -2592,14 +2594,12 @@ async function legacyPluginProjection(
   if (
     !isRecord(server) ||
     (server["command"] !== "./scripts/launch_codex_security_mcp" &&
-      server["command"] !== "./scripts/launch_codex_security_mcp.cmd" &&
-      !isLegacyNodeMcpServer(server))
+      server["command"] !== "./scripts/launch_codex_security_mcp.cmd")
   ) {
     return;
   }
   const environment = server["env_vars"];
   if (environment !== undefined && !Array.isArray(environment)) return;
-  const directNode = isLegacyNodeMcpServer(server);
   if (
     !Array.isArray(environment) ||
     !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
@@ -2609,67 +2609,35 @@ async function legacyPluginProjection(
       "CODEX_SECURITY_PLUGIN_ROOT",
     ];
   }
-  const files: LegacyPluginProjection["files"] = new Map();
-  if (directNode) {
-    const args = [...(server["args"] as string[])];
-    args[args.findIndex(isLegacyNodeMcpEntry)] =
-      "./mcp/codex_security_sdk_bridge.mjs";
-    server["args"] = args;
-    files.set("mcp/codex_security_sdk_bridge.mjs", {
-      contents: Buffer.from(
-        'import { runMain } from "node:module";\n' +
-          'import { dirname, join } from "node:path";\n' +
-          'import { fileURLToPath } from "node:url";\n' +
-          "const root = process.env.CODEX_SECURITY_PLUGIN_ROOT;\n" +
-          'process.argv[1] = root ? join(root, "mcp", "server.mjs") : join(dirname(fileURLToPath(import.meta.url)), "server.mjs");\n' +
-          "runMain(process.argv[1]);\n",
-      ),
-      mode: 0o644,
-    });
-  } else {
-    server["command"] =
-      server["command"] === "./scripts/launch_codex_security_mcp.cmd"
-        ? "./scripts/launch_codex_security_mcp_sdk.cmd"
-        : "./scripts/launch_codex_security_mcp_sdk";
-    files.set("scripts/launch_codex_security_mcp_sdk", {
-      contents: Buffer.from(
-        "#!/bin/sh\n" +
-          'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
-          '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
-          "fi\n" +
-          'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
-      ),
-      mode: 0o755,
-    });
-    files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
-      contents: Buffer.from(
-        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
-          "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
-          '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
-          "exit /b\r\n:codex_security_sdk_original\r\n" +
-          '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
-      ),
-      mode: 0o755,
-    });
-  }
+  const files: PluginRuntimeProjection["files"] = new Map();
+  server["command"] =
+    server["command"] === "./scripts/launch_codex_security_mcp.cmd"
+      ? "./scripts/launch_codex_security_mcp_sdk.cmd"
+      : "./scripts/launch_codex_security_mcp_sdk";
+  files.set("scripts/launch_codex_security_mcp_sdk", {
+    contents: Buffer.from(
+      "#!/bin/sh\n" +
+        'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
+        '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
+        "fi\n" +
+        'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+    ),
+    mode: 0o755,
+  });
+  files.set("scripts/launch_codex_security_mcp_sdk.cmd", {
+    contents: Buffer.from(
+      "@echo off\r\nsetlocal DisableDelayedExpansion\r\n" +
+        "if not defined CODEX_SECURITY_PLUGIN_ROOT goto codex_security_sdk_original\r\n" +
+        '"%CODEX_SECURITY_PLUGIN_ROOT%\\scripts\\launch_codex_security_mcp.cmd" %*\r\n' +
+        "exit /b\r\n:codex_security_sdk_original\r\n" +
+        '"%~dp0launch_codex_security_mcp.cmd" %*\r\n',
+    ),
+    mode: 0o755,
+  });
   files.set(".mcp.json", {
     contents: Buffer.from(`${JSON.stringify(configuration, null, 2)}\n`),
   });
   return { root, files };
-}
-
-function isLegacyNodeMcpEntry(argument: unknown): boolean {
-  return argument === "./mcp/server.mjs" || argument === "mcp/server.mjs";
-}
-
-function isLegacyNodeMcpServer(server: Record<string, unknown>): boolean {
-  const command = server["command"];
-  return (
-    typeof command === "string" &&
-    ["node", "node.exe"].includes(basename(command).toLowerCase()) &&
-    Array.isArray(server["args"]) &&
-    server["args"].some(isLegacyNodeMcpEntry)
-  );
 }
 
 export function resolveCodexCommand(
@@ -2695,6 +2663,34 @@ export function resolveCodexCommand(
   }
 
   return { command: resolveBundledCodexExecutable() };
+}
+
+export async function codexExecutableReadPaths(
+  command: string,
+): Promise<string[]> {
+  const executable = await realpath(command);
+  const packageJson = resolve(dirname(executable), "..", "package.json");
+  try {
+    const metadata = JSON.parse(await readFile(packageJson, "utf8"));
+    if (
+      metadata?.name !== "@openai/codex" ||
+      typeof metadata.bin?.codex !== "string"
+    )
+      return [executable];
+    const launcher = await realpath(
+      resolve(dirname(packageJson), metadata.bin.codex),
+    );
+    if (launcher !== executable) return [executable];
+  } catch {
+    // A custom executable need not belong to a readable, valid npm package.
+    return [executable];
+  }
+
+  // npm's entrypoint launches a native binary, which Linux re-executes in the sandbox.
+  return [
+    executable,
+    await realpath(resolveBundledCodexExecutable(packageJson)),
+  ];
 }
 
 export function executablePathForSpawn(command: string): string {
@@ -2724,7 +2720,7 @@ export async function bootstrapPlugin(
 ): Promise<PluginInstall> {
   const root = await realpath(pluginRoot);
   const { name, version } = await pluginMetadata(root);
-  const projection = await legacyPluginProjection(root, options.signal).catch(
+  const projection = await pluginRuntimeProjection(root, options.signal).catch(
     (error: unknown) => {
       if (options.signal?.aborted) throw error;
       throw new LocalPluginBootstrapError(errorMessage(error), {
@@ -2900,7 +2896,7 @@ async function pluginContentsMatch(
   destination: string,
   signal?: AbortSignal,
   allowExtraFiles = false,
-  projection?: LegacyPluginProjection,
+  projection?: PluginRuntimeProjection,
 ): Promise<boolean> {
   throwIfSignalAborted(signal);
 
