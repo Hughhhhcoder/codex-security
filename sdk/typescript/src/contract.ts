@@ -24,7 +24,6 @@ import {
   requirePrivateOutputDirectory,
   requireSecureOutputAncestry,
 } from "./runtime.js";
-import { MODEL_UNSAFE_STRING } from "./string-safety.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
 import { isWithin as isContained } from "./trusted-executable.js";
 import { isWindowsUnsafePathComponent } from "./windows-path.js";
@@ -213,7 +212,7 @@ function validateCanonicalContract(
       remote,
     )?.[1];
     if (
-      MODEL_UNSAFE_STRING.test(remote) ||
+      /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(remote) ||
       remote.includes("\\") ||
       authority === undefined
     ) {
