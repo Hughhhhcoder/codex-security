@@ -1,3 +1,4 @@
+import { findingEntry } from "./value.js";
 import {
   loadContractWithScanDirectory,
   type LoadedContract,
@@ -10,6 +11,18 @@ import type {
   SeverityLevel,
 } from "./models.js";
 import { bundledPluginRoot } from "./runtime.js";
+import { CodexSecurityError } from "./errors.js";
+import {
+  severityClassificationSchema,
+  validateSeverityClassification,
+  type SeverityClassification,
+  type SeverityAssessment,
+} from "./classify-severity.js";
+import {
+  readScanSeverityClassification,
+  selectClassificationFindings,
+  type ScanSeverityClassification,
+} from "./classify-scan-severity.js";
 
 export interface LinearPublicationDestination {
   type: "linear";
@@ -22,8 +35,13 @@ export interface PrepareScanPublicationOptions {
   teamId: string;
   projectId?: string;
   uploadedAt?: string;
+  environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   expectedScanId?: string;
+  /** Publish only these finding IDs from the supplied scan; dedupe representatives may belong to other scans. */
+  findingIds?: readonly string[];
+  /** Use this assessment; otherwise use the scan's saved classification when present. */
+  classification?: SeverityClassification | ScanSeverityClassification;
 }
 
 export interface PreparedPublicationIssue {
@@ -36,7 +54,6 @@ export interface PreparedPublicationIssue {
 
 export interface PreparedScanPublication {
   scanId: string;
-  uploadId: string;
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
@@ -80,10 +97,45 @@ export async function prepareScanPublication(
     });
   const uploadedAt = options.uploadedAt ?? new Date().toISOString();
   const scanId = contract.manifest.scan.id;
+  let classification: SeverityClassification | undefined;
+  if (options.classification !== undefined) {
+    const { scanId: assessedScanId, ...assessment } =
+      options.classification as ScanSeverityClassification;
+    if (assessedScanId !== undefined && assessedScanId !== scanId) {
+      throw new CodexSecurityError(
+        "Severity classification belongs to a different scan.",
+      );
+    }
+    classification = validateSeverityClassification(
+      severityClassificationSchema.parse(assessment),
+      contract.findings.findings,
+    );
+  } else {
+    classification = await readScanSeverityClassification(
+      canonicalScanDirectory,
+      scanId,
+      contract.findings.findings,
+      options.signal,
+      options.environment,
+    );
+  }
+  const assessments = new Map(classification?.assessments.map(findingEntry));
+  const selected = selectClassificationFindings(
+    contract.findings.findings,
+    options.findingIds ??
+      classification?.assessments.map(({ findingId }) => findingId),
+  );
+  if (
+    classification &&
+    selected.some(({ findingId }) => !assessments.has(findingId))
+  ) {
+    throw new CodexSecurityError(
+      "Selected findings are missing from the severity classification. Classify the selection before publishing.",
+    );
+  }
 
   return {
     scanId,
-    uploadId: scanId,
     scanDirectory: canonicalScanDirectory,
     destination: {
       type: options.destination,
@@ -92,13 +144,21 @@ export async function prepareScanPublication(
         ? {}
         : { projectId: options.projectId }),
     },
-    issues: contract.findings.findings.map((finding) => {
-      const priority = LINEAR_PRIORITIES[finding.severity.level];
+    issues: selected.flatMap((finding) => {
+      const assessment = assessments.get(finding.findingId);
+      if (assessment?.decision === "excluded") return [];
+      const level = assessment?.level ?? finding.severity.level;
+      const priority = LINEAR_PRIORITIES[level];
       return {
         findingId: finding.findingId,
         occurrenceId: finding.occurrenceId,
-        title: `[Codex Security][${finding.severity.level.toUpperCase()}] ${finding.title}`,
-        description: renderFindingDescription(contract, finding, uploadedAt),
+        title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
+        description: renderFindingDescription(
+          contract,
+          finding,
+          uploadedAt,
+          assessment,
+        ),
         ...(priority === undefined ? {} : { priority }),
       };
     }),
@@ -109,10 +169,27 @@ function renderFindingDescription(
   contract: LoadedContract,
   finding: Finding,
   uploadedAt: string,
+  assessment?: SeverityAssessment,
 ): string {
   const { coverage } = contract;
   const { scan } = contract.manifest;
   const lines = ["## Summary", "", finding.summary];
+  if (assessment?.source === "rubric") {
+    lines.push(
+      "",
+      "",
+      "## Severity classification",
+      "",
+      `**Assessed severity:** ${assessment.level}`,
+      `**Rubric label:** ${assessment.rubricLabel}`,
+      "",
+      assessment.rationale,
+    );
+    if (assessment.confidence !== null)
+      lines.push("", `**Classification confidence:** ${assessment.confidence}`);
+    if (assessment.reviewTrigger !== null)
+      lines.push("", `**Review trigger:** ${assessment.reviewTrigger}`);
+  }
 
   if (finding.attackPath?.summary !== undefined) {
     lines.push("", "## Reproduction summary", "", finding.attackPath.summary);
@@ -179,7 +256,6 @@ function renderFindingDescription(
     ...(scan.scope.excludePaths.length === 0
       ? []
       : [`**Excluded scope:** ${scan.scope.excludePaths.join(", ")}`]),
-    `**Coverage:** ${coverage.completeness}`,
     `**Coverage mode:** ${coverage.mode}`,
     `**Scan mode:** ${scanMode(coverage.mode)}`,
     `**Started:** ${scan.startedAt}`,
@@ -238,16 +314,10 @@ function renderCodeEvidence(
   target: ScanTargetRecord,
   evidence: FindingCodeEvidence,
 ): string[] {
-  const location: FindingLocation = {
-    path: evidence.path,
-    startLine: evidence.startLine,
-    ...(evidence.endLine === undefined ? {} : { endLine: evidence.endLine }),
-    ...(evidence.role === undefined ? {} : { role: evidence.role }),
-  };
   return [
     `### ${evidence.label}`,
     "",
-    renderLocation(target, location),
+    renderLocation(target, evidence),
     "",
     fencedCode(evidence.code, evidence.language),
     "",

@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { readSubprocess } from "./support/shell.js";
+import { parseJsonLines } from "./support/json.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,11 +15,12 @@ function bundledFunction(runtime: string, name: string): string {
   return source;
 }
 
-test("keeps every advertised Deep worker tool within Codex's name limit", async () => {
+test("advertises distinct Standard worker and Deep reducer contracts", async () => {
   const runtime = await loadBundledRuntime();
-  const method = /  compactArtifactServer\(request\) \{[\s\S]*?\n  \}/u.exec(
-    runtime,
-  )?.[0];
+  const method =
+    /  compactArtifactServer\(request, includePathsFile\) \{[\s\S]*?\n  \}/u.exec(
+      runtime,
+    )?.[0];
   expect(method).toBeDefined();
   const pathImport = /\(0, (import_node_path\d+)\.join\)/u.exec(method!)?.[1];
   expect(pathImport).toBeDefined();
@@ -47,7 +49,6 @@ test("keeps every advertised Deep worker tool within Codex's name limit", async 
           modelSettings: {
             artifactContext: {
               pluginRoot: PLUGIN_ROOT,
-              scanRoot,
               repoRoot,
               scanId: "test-scan",
             },
@@ -66,24 +67,32 @@ test("keeps every advertised Deep worker tool within Codex's name limit", async 
       );
       expect(Object.keys(servers)).toEqual(["cs_artifacts"]);
       const server = servers["cs_artifacts"]!;
-      const result = spawnSync(node!, server.args, {
-        encoding: "utf8",
+      const child = Bun.spawn({
+        cmd: [node!, ...server.args],
         env: { ...process.env, ...server.env },
-        input: [
-          '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
-          '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
-          '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
-          "",
-        ].join("\n"),
+        stdin: Buffer.from(
+          [
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-security-test","version":"1.0.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
+            "",
+          ].join("\n"),
+        ),
+        stdout: "pipe",
+        stderr: "pipe",
         timeout: 30_000,
       });
-      expect(result.status, result.stderr).toBe(0);
-      const response = result.stdout
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as { id?: number; result?: unknown })
-        .find((message) => message.id === 2)?.result as
-        | { tools: Array<{ name: string }> }
+      const { status, stdout, stderr } = await readSubprocess(child);
+      expect(status, stderr).toBe(0);
+      const response = parseJsonLines<{ id?: number; result?: unknown }>(
+        stdout,
+      ).find((message) => message.id === 2)?.result as
+        | {
+            tools: Array<{
+              name: string;
+              inputSchema: { properties: Record<string, unknown> };
+            }>;
+          }
         | undefined;
       expect(response).toBeDefined();
       expect(response!.tools.length).toBeGreaterThan(0);
@@ -92,73 +101,87 @@ test("keeps every advertised Deep worker tool within Codex's name limit", async 
           64,
         );
       }
-      if (layout === "reducer") {
-        expect(response!.tools.map((tool) => tool.name)).toContain(
-          "record_codex_security_deep_reduction",
+      const recordTool = response!.tools.find(
+        (tool) =>
+          tool.name ===
+          (layout === "reducer"
+            ? "record_codex_security_deep_reduction"
+            : "record_codex_security_scan_draft"),
+      );
+      expect(recordTool).toBeDefined();
+      expect(recordTool!.inputSchema.properties).toHaveProperty("findings");
+      expect(recordTool!.inputSchema.properties).toHaveProperty("scope");
+      if (layout === "reducer")
+        expect(recordTool!.inputSchema.properties).not.toHaveProperty(
+          "coverage",
         );
-      }
+      else
+        expect(recordTool!.inputSchema.properties).toHaveProperty("coverage");
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("classifies owned worker tool failures without exposing their contents", async () => {
+test("preserves owned worker tool failure diagnostics", async () => {
   const runtime = await loadBundledRuntime();
-  const diagnosticSource = bundledFunction(runtime, "appendSafeItemDiagnostic");
+  const diagnosticSource = bundledFunction(runtime, "appendItemDiagnostic");
   const recordHelper = /\b(isRecord\d*)\(item\)/u.exec(diagnosticSource)?.[1];
   expect(recordHelper).toBeDefined();
   const appendDiagnostic = new Function(
     [
       bundledFunction(runtime, recordHelper!),
       bundledFunction(runtime, "isSandboxNamespaceExhaustion"),
+      bundledFunction(runtime, "isCodeModeFrameError"),
+      bundledFunction(runtime, "appendStreamDiagnostic"),
       bundledFunction(runtime, "appendUniqueDiagnostic"),
       diagnosticSource,
-      "return appendSafeItemDiagnostic;",
+      "return appendItemDiagnostic;",
     ].join("\n"),
   )() as (
     diagnostics: Array<{ code: string; message: string }>,
     event: Record<string, unknown>,
   ) => void;
 
-  const secret = "synthetic-secret-never-log";
+  const detail = "synthetic-provider-detail";
   for (const fixture of [
     {
       server: "cs_artifacts",
       tool: "record_codex_security_deep_reduction",
-      result: { isError: true, content: [{ text: secret }] },
+      result: { isError: true, content: [{ type: "text", text: detail }] },
       error: null,
-      reason: "returned an error",
+      message: detail,
     },
     {
       server: "cs_artifacts",
       tool: "additional_codex_security_worker_tool",
       result: null,
-      error: { message: secret },
-      reason: "transport failed",
+      error: { message: detail },
+      message: detail,
     },
     {
       server: "codex_security_artifacts",
       tool: "record_codex_security_discovery_candidates",
       result: null,
       error: null,
-      reason: "failed",
+      message:
+        "Codex worker artifact tool record_codex_security_discovery_candidates failed.",
     },
   ]) {
     const diagnostics: Array<{ code: string; message: string }> = [];
     appendDiagnostic(diagnostics, {
       type: "mcp_tool_call",
       status: "failed",
-      arguments: { token: secret },
+      arguments: { token: "synthetic-input-only" },
       ...fixture,
     });
     expect(diagnostics).toEqual([
       {
         code: "artifact_tool_failed",
-        message: `Codex worker artifact tool ${fixture.tool} ${fixture.reason}.`,
+        message: fixture.message,
       },
     ]);
-    expect(JSON.stringify(diagnostics)).not.toContain(secret);
+    expect(JSON.stringify(diagnostics)).not.toContain("synthetic-input-only");
   }
 
   const unrelatedDiagnostics: Array<{ code: string; message: string }> = [];
@@ -168,41 +191,16 @@ test("classifies owned worker tool failures without exposing their contents", as
     server: "unrelated_server",
     tool: "record_codex_security_deep_reduction",
     result: { isError: true },
-    error: null,
+    error: { message: "Synthetic unrelated transport failure" },
   });
   expect(unrelatedDiagnostics).toEqual([]);
-});
-
-test("does not retry textual missing-path worker failures", async () => {
-  const runtime = await loadBundledRuntime();
-  const errorClass =
-    /var DeepScanNonRetryableError = class extends Error \{[\s\S]*?\n\};/u.exec(
-      runtime,
-    )?.[0];
-  expect(errorClass).toBeDefined();
-  const classify = new Function(
-    "ARTIFACT_MCP_STARTUP_TIMEOUT_PATTERN",
-    "REMOTE_PLUGIN_AUTH_WARNING_PATTERN",
-    "isCodexCybersecurityPolicyRefusal",
-    [
-      errorClass!,
-      bundledFunction(runtime, "classifyCodexWorkerError"),
-      bundledFunction(runtime, "isCodexConfigurationFailure"),
-      "return classifyCodexWorkerError;",
-    ].join("\n"),
-  )(/$^/u, /$^/u, () => false) as (error: Error) => Error;
-
-  for (const diagnostic of [
-    "Error: No such file or directory (os error 2)",
-    "Error: The system cannot find the file specified. (os error 2)",
-  ]) {
-    const original = new Error(
-      ["Codex Exec exited with code 1:", diagnostic].join("\n"),
-    );
-    const classified = classify(original);
-    expect(classified.name).toBe("DeepScanNonRetryableError");
-    expect(classified.cause).toBe(original);
-  }
+  appendDiagnostic(unrelatedDiagnostics, {
+    type: "file_change",
+    status: "failed",
+  });
+  expect(unrelatedDiagnostics).toEqual([
+    { code: "file_change_failed", message: "Codex worker file change failed." },
+  ]);
 });
 
 test("resumes only when the exact Standard worker or reducer result is missing", async () => {
@@ -254,7 +252,11 @@ test("resumes only when the exact Standard worker or reducer result is missing",
   expect(standardContinuation(1)).toMatch(/retry.*until it succeeds/iu);
 
   const continuation = new Function(
-    `${bundledFunction(runtime, "reducerCompletionContinuation")}\nreturn reducerCompletionContinuation;`,
+    [
+      bundledFunction(runtime, "reducerInputRecoveryInstructions"),
+      bundledFunction(runtime, "reducerCompletionContinuation"),
+      "return reducerCompletionContinuation;",
+    ].join("\n"),
   )() as (attempt: number) => string;
   expect(continuation(1)).toContain("record_codex_security_deep_reduction");
   expect(continuation(1)).toMatch(/retry.*until it succeeds/iu);

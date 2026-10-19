@@ -1,39 +1,98 @@
 import {
   CodexSecurity,
   DiffTarget,
+  classifySeverity,
+  classifyScanSeverity,
+  classifyScanDirectorySeverity,
   deduplicateScan,
+  deduplicateRecords,
+  runHostedScan,
+  type HostedScanInput,
+  type HostedScanOptions,
+  type HostedScanResult,
+  type ScanExecutor,
+  type DeduplicateRecordsInput,
+  type DeduplicateRecordsResult,
+  type DeduplicationReviewRequest,
+  type DeduplicationReviewRunner,
   estimateScanCost,
+  loadProjectConfig,
+  matchScanFindings,
   planComponents,
   publishScanToCustom,
+  publishScan,
   runComponentScans,
+  resolveProjectConfig,
+  suggestOwners,
+  type OwnerFinding,
+  type OwnerSuggestion,
   type ComponentScanOptions,
   type DeduplicateScanResult,
   type CustomPublicationResult,
   type Finding,
+  type PatchOptions,
+  type PatchResult,
+  type ProjectConfigInput,
+  type SeverityClassification,
+  type ScanSeverityClassification,
   type ScanCost,
+  type ScanComparisonInput,
+  type ScanComparisonOptions,
+  type ScanComparisonResult,
   type ScanOptions,
   type ScanProgress,
+  type ScanWorkerEvent,
   type ScanResult,
+  type ScanSettings,
   type ValidationOptions,
   type ValidationResult,
 } from "@openai/codex-security";
 import {
   OpenAiFindingEmbedder,
   SqliteFindingsStore,
-  startFindingsServer,
 } from "@openai/codex-security/server";
 
-export async function findingsServer(getApiKey: () => Promise<string>) {
-  return await startFindingsServer({
+export async function classify(
+  findings: Finding[],
+  scanId: string,
+  scanDirectory: string,
+  signal: AbortSignal,
+): Promise<SeverityClassification> {
+  const classification = await classifySeverity(findings, {
+    rubricPath: "policy.md",
+    knowledgeBasePaths: ["context.md"],
+    reasoningEffort: "high",
+    signal,
+  });
+  const saved: ScanSeverityClassification = await classifyScanSeverity(scanId, {
+    signal,
+  });
+  await classifyScanDirectorySeverity(scanDirectory, {
+    expectedScanId: saved.scanId,
+    reprocess: true,
+    findingIds: findings.map(({ findingId }) => findingId),
+    signal,
+  });
+  await publishScan(scanDirectory, {
+    destination: "linear",
+    teamId: "example-team",
+    classification,
+    findingIds: classification.assessments.map(({ findingId }) => findingId),
+    dryRun: true,
+    signal,
+  });
+  return classification;
+}
+
+export function findingsStorage(getApiKey: () => Promise<string>) {
+  return {
     store: new SqliteFindingsStore(),
     embeddings: new OpenAiFindingEmbedder(
       getApiKey,
       fetch,
       process.env["CODEX_SECURITY_EMBEDDINGS_URL"] || undefined,
     ),
-    host: "127.0.0.1",
-    port: 0,
-  });
+  };
 }
 
 export async function publishCustom(
@@ -65,6 +124,10 @@ const options: ScanOptions = {
   onProgress(progress: ScanProgress) {
     progress.filesCompleted satisfies number;
   },
+  onWorkerEvent(event: ScanWorkerEvent) {
+    event.kind satisfies "observed";
+    event.worker satisfies number;
+  },
 };
 
 export async function scan(repository: string): Promise<ScanResult> {
@@ -74,6 +137,35 @@ export async function scan(repository: string): Promise<ScanResult> {
   } finally {
     await client.close();
   }
+}
+
+export function configuredScanOptions(
+  input: ProjectConfigInput = {
+    scan: {
+      mode: "deep",
+      scope: { paths: ["src"] },
+      deep: { subagents_per_worker: 0, stop_after_consecutive_errors: 2 },
+    },
+    limits: { max_cost_usd_per_scan: 5 },
+    policy: { fail_on_severity: "high" },
+  },
+): ScanSettings {
+  return resolveProjectConfig(input).options;
+}
+
+export async function scanFromFile(repository: string, file: string) {
+  const { config, options } = await loadProjectConfig(file);
+  await using client = new CodexSecurity(config);
+  const result = await client.run(repository, {
+    ...options,
+    postScanPromptFile: "follow-up.md",
+  });
+  return {
+    result,
+    failed:
+      options.failureSeverity !== undefined &&
+      result.hasFindingsAtOrAbove(options.failureSeverity),
+  };
 }
 
 export const cost: ScanCost | null = estimateScanCost("gpt-5.6-sol", {
@@ -99,8 +191,67 @@ export async function validate(
   return await client.validate(options);
 }
 
+export async function patch(
+  repositoryPath: string,
+  finding: Finding | ImportedFinding,
+): Promise<PatchResult> {
+  await using client = new CodexSecurity();
+  const options: PatchOptions = {
+    repositoryPath,
+    finding,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "high",
+  };
+  const result = await client.patch(options);
+  result.changedFiles satisfies readonly string[];
+  // @ts-expect-error Patch results expose changed files as immutable metadata.
+  result.changedFiles.push("unexpected.ts");
+  switch (result.status) {
+    case "verified":
+    case "no_change":
+      result.verificationReport satisfies string;
+      break;
+    case "blocked":
+    case "failed":
+      result.reason satisfies string;
+      break;
+    default:
+      result satisfies never;
+  }
+  return result;
+}
+
 // @ts-expect-error The dependency-injection constructor is internal.
 new CodexSecurity({}, undefined as never, undefined as never);
+
+const comparisonInput: ScanComparisonInput = {
+  before: [],
+  after: [],
+  knownFindingGroups: [["finding-a", "finding-b"]],
+};
+const comparisonOptions: ScanComparisonOptions = {
+  environment: { CODEX_SECURITY_STATE_DIR: "." },
+  model: "synthetic-model",
+  reasoningEffort: "max",
+  signal: new AbortController().signal,
+  workingDirectory: ".",
+  onProgress: ({ phase }) => {
+    void phase;
+  },
+};
+const comparisonResult: Promise<ScanComparisonResult> = matchScanFindings(
+  comparisonInput,
+  comparisonOptions,
+);
+void comparisonResult;
+
+// @ts-expect-error Historical matching policy is internal.
+matchScanFindings(comparisonInput, { allowHistoricalUncertainty: true });
+const codex = {
+  startThread: () => ({ run: async () => ({ finalResponse: "{}" }) }),
+};
+// @ts-expect-error Codex injection is internal.
+matchScanFindings(comparisonInput, { codex });
 
 export async function scanComponents(repository: string, outputDir: string) {
   const plan = await planComponents(repository);
@@ -114,3 +265,65 @@ export async function scanComponents(repository: string, outputDir: string) {
 
 // @ts-expect-error The model client is an internal test dependency.
 planComponents("synthetic-repository", { codex: {} });
+
+export async function dedupeRecords(
+  input: DeduplicateRecordsInput,
+  execute: (
+    request: DeduplicationReviewRequest,
+    signal?: AbortSignal,
+  ) => Promise<unknown>,
+  signal: AbortSignal,
+): Promise<DeduplicateRecordsResult> {
+  const reviewRunner: DeduplicationReviewRunner = {
+    run(request, options) {
+      return execute(request, options?.signal);
+    },
+  };
+  return await deduplicateRecords(input, { reviewRunner, signal });
+}
+
+export const ownerVariants: OwnerSuggestion["owner"][] = [
+  { name: "Alex Example", email: "alex@example.test" },
+  { kind: "person", provider: "github", handle: "example-user" },
+  { kind: "group", provider: "github", handle: "example/maintainers" },
+  { kind: "person", email: "alex@example.test" },
+  null,
+];
+
+export function ownerIdentifier(owner: OwnerSuggestion["owner"]) {
+  if (owner === null) return null;
+  return "handle" in owner ? owner.handle : owner.email;
+}
+
+export async function suggestFindingOwners(
+  repository: string,
+  findings: OwnerFinding[],
+) {
+  const report = await suggestOwners(repository, findings);
+  const schemaVersion: 2 = report.schemaVersion;
+  return {
+    schemaVersion,
+    identifiers: report.results.map(({ owner }) => ownerIdentifier(owner)),
+  };
+}
+
+export async function hostedScan(
+  input: HostedScanInput,
+  executor: ScanExecutor,
+  signal: AbortSignal,
+): Promise<HostedScanResult> {
+  const options: HostedScanOptions = {
+    executor,
+    signal,
+    onEvent(event) {
+      event.type satisfies "progress" | "activity";
+    },
+  };
+  return await runHostedScan(input, options);
+}
+
+const localOptions: ScanOptions = {
+  // @ts-expect-error Hosted execution uses the standalone runHostedScan API.
+  hosted: {},
+};
+void localOptions;

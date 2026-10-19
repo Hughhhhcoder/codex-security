@@ -1,3 +1,4 @@
+import { isNonEmptyString } from "./value.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import semverGt from "semver/functions/gt.js";
@@ -9,7 +10,7 @@ const PACKAGE_VERSIONS = packageVersions(
 export const VERSION = PACKAGE_VERSIONS.package;
 export const CODEX_SDK_VERSION = PACKAGE_VERSIONS.sdk;
 export const CODEX_EXECUTABLE_VERSION = PACKAGE_VERSIONS.executable;
-export const BUNDLED_PLUGIN_VERSION = "0.1.94" as const;
+export const BUNDLED_PLUGIN_VERSION = "0.1.95" as const;
 
 const PACKAGE_NAME = "@openai/codex-security";
 
@@ -52,7 +53,8 @@ export function updateCommand(
     path.includes("/pnpm/global/") ||
     path.includes("/.bun/install/global/") ||
     path.includes("/.yarn/global/") ||
-    path.includes("/yarn/global/");
+    path.includes("/yarn/global/") ||
+    path.includes("/yarn/data/global/");
 
   if (agent.startsWith("pnpm/") || path.includes("/.pnpm/")) {
     return `pnpm add${global ? " -g" : ""} ${PACKAGE_NAME}@latest`;
@@ -60,7 +62,8 @@ export function updateCommand(
   if (
     agent.startsWith("yarn/") ||
     path.includes("/.yarn/") ||
-    path.includes("/yarn/global/")
+    path.includes("/yarn/global/") ||
+    path.includes("/yarn/data/global/")
   ) {
     return `yarn${global ? " global" : ""} add ${PACKAGE_NAME}@latest`;
   }
@@ -145,19 +148,14 @@ export function formatUpdateNotice(notice: UpdateNotice): string {
   ].join("\n");
 }
 
-function packageVersions(url: URL): {
-  package: string;
-  sdk: string;
-  executable: string;
-} {
+function packageVersions(url: URL) {
   try {
     const manifest: unknown = JSON.parse(readFileSync(url, "utf8"));
     if (
       typeof manifest !== "object" ||
       manifest === null ||
       !("version" in manifest) ||
-      typeof manifest.version !== "string" ||
-      manifest.version.length === 0
+      !isNonEmptyString(manifest.version)
     ) {
       throw new Error("version must be a non-empty string");
     }
@@ -174,12 +172,7 @@ function packageVersions(url: URL): {
       "@openai/codex" in dependencies
         ? dependencies["@openai/codex"]
         : undefined;
-    if (
-      typeof sdk !== "string" ||
-      sdk.length === 0 ||
-      typeof executable !== "string" ||
-      executable.length === 0
-    ) {
+    if (!isNonEmptyString(sdk) || !isNonEmptyString(executable)) {
       throw new Error("Codex dependencies must have non-empty versions");
     }
     return { package: manifest.version, sdk, executable };

@@ -9,6 +9,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
+from workbench_test_support import saved_coverage
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 EXAMPLE_DIR = PLUGIN_DIR / "examples" / "completed-scan"
@@ -54,10 +55,14 @@ class ScanContractExamplesTest(unittest.TestCase):
             with self.subTest(schema=schema_path.name):
                 Draft202012Validator.check_schema(read_json(schema_path))
 
-    def test_deep_reducer_schema_preserves_complete_standard_results(self) -> None:
+    def test_deep_reducer_schema_accepts_standard_findings_without_coverage(self) -> None:
         common_schema = read_json(SCHEMA_DIR / "definitions" / "artifact-common.schema.json")
         scan_draft_schema = read_json(SCHEMA_DIR / "tools" / "scan-draft.schema.json")
         reducer_schema = read_json(SCHEMA_DIR / "tools" / "deep-reducer.schema.json")
+        reduction_input = reducer_schema["$defs"]["reductionInput"]
+        self.assertNotIn("coverage", reduction_input["properties"])
+        self.assertEqual(set(reduction_input["required"]), {"scanId", "findings"})
+        self.assertFalse(reduction_input["additionalProperties"])
         registry = Registry().with_resources(
             (schema["$id"], Resource.from_contents(schema))
             for schema in (common_schema, scan_draft_schema)
@@ -78,10 +83,8 @@ class ScanContractExamplesTest(unittest.TestCase):
             "provenance": {"source": "local_plugin"},
         }
         coverage = {
-            "completeness": "complete",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [],
+            "surfaces": [{"label": "HTTP responses", "disposition": "reported"}],
+            "explicitExclusions": [{"pattern": "docs/", "reason": "Documentation only."}],
         }
 
         Draft202012Validator.check_schema(reducer_schema)
@@ -93,19 +96,45 @@ class ScanContractExamplesTest(unittest.TestCase):
         request = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [finding],
-            "coverage": coverage,
         }
 
         validator.validate(request)
         validator.validate(
             {
                 **request,
+                "complete": True,
+                "handoffClaimToken": "2ea75b4f-f9b2-49b4-a5a9-2a8de8ca9047",
                 "scope": {"summary": "HTTP responses"},
                 "threatModel": {"summary": "Untrusted requests reach responses."},
             }
         )
         validator.validate({**request, "findings": []})
+        self.assertFalse(validator.is_valid({**request, "coverage": coverage}))
 
+        standard_validator = Draft202012Validator(
+            scan_draft_schema, registry=registry, format_checker=FormatChecker()
+        )
+        standard_request = {
+            **request,
+            "coverage": {**coverage, "deferred": []},
+        }
+        standard_validator.validate(standard_request)
+        self.assertFalse(standard_validator.is_valid(request))
+        self.assertFalse(standard_validator.is_valid({**request, "coverage": coverage}))
+        for missing_field in ("surfaces", "explicitExclusions", "deferred"):
+            with self.subTest(standard_missing_coverage_field=missing_field):
+                self.assertFalse(
+                    standard_validator.is_valid(
+                        {
+                            **standard_request,
+                            "coverage": {
+                                field: value
+                                for field, value in standard_request["coverage"].items()
+                                if field != missing_field
+                            },
+                        }
+                    )
+                )
         for extra_field in (
             "source_worker_id",
             "unknown_field",
@@ -128,22 +157,17 @@ class ScanContractExamplesTest(unittest.TestCase):
             "provenance",
         ):
             with self.subTest(missing_field=missing_field):
+                incomplete_finding = {
+                    field: value for field, value in finding.items() if field != missing_field
+                }
+                self.assertFalse(validator.is_valid({**request, "findings": [incomplete_finding]}))
                 self.assertFalse(
-                    validator.is_valid(
-                        {
-                            **request,
-                            "findings": [
-                                {
-                                    field: value
-                                    for field, value in finding.items()
-                                    if field != missing_field
-                                }
-                            ],
-                        }
+                    standard_validator.is_valid(
+                        {**standard_request, "findings": [incomplete_finding]}
                     )
                 )
 
-        for missing_field in ("scanId", "findings", "coverage"):
+        for missing_field in ("scanId", "findings"):
             with self.subTest(missing_field=missing_field):
                 self.assertFalse(
                     validator.is_valid(
@@ -260,13 +284,6 @@ class ScanContractExamplesTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "was expected"):
             validate_schema_node(manifest, schema, "scan-manifest")
 
-    def test_coverage_rejects_unknown_completeness(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["completeness"] = "probably-complete"
-        with self.assertRaisesRegex(AssertionError, "is not one of"):
-            validate_schema_node(coverage, schema, "coverage")
-
     def test_findings_accept_safe_writeup_and_reject_unsafe_path(self) -> None:
         schema = read_json(SCHEMA_DIR / "findings.schema.json")
         findings = copy.deepcopy(self.findings)
@@ -310,12 +327,7 @@ class ScanContractExamplesTest(unittest.TestCase):
         draft = {
             "scanId": "7fc17317-9594-49e0-b06a-d72fd7e14bba",
             "findings": [draft_finding],
-            "coverage": {
-                "completeness": "complete",
-                "surfaces": [],
-                "explicitExclusions": [],
-                "deferred": [],
-            },
+            "coverage": saved_coverage(),
         }
         draft_validator.validate(draft)
 
@@ -346,34 +358,14 @@ class ScanContractExamplesTest(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "does not match"):
                     validate_schema_node(coverage, schema, "coverage")
 
-    def test_coverage_rejects_complete_with_needs_follow_up_surface(self) -> None:
+    def test_coverage_accepts_unresolved_work(self) -> None:
         schema = read_json(SCHEMA_DIR / "coverage.schema.json")
         coverage = copy.deepcopy(self.coverage)
-        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
-
-    def test_coverage_rejects_complete_with_deferred_work(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["deferred"] = [
-            {
-                "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
-            }
-        ]
-        with self.assertRaisesRegex(AssertionError, "Too many items match"):
-            validate_schema_node(coverage, schema, "coverage")
-
-    def test_coverage_allows_partial_with_deferred_work(self) -> None:
-        schema = read_json(SCHEMA_DIR / "coverage.schema.json")
-        coverage = copy.deepcopy(self.coverage)
-        coverage["completeness"] = "partial"
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         coverage["deferred"] = [
             {
                 "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
+                "reason": "Runtime verification remains unavailable.",
             }
         ]
         validate_schema_node(coverage, schema, "coverage")
