@@ -400,10 +400,10 @@ jobs:
         run: |
           python -m ruff check --config plugins/codex-security/pyproject.toml plugins/codex-security
           python -m ruff format --check --config plugins/codex-security/pyproject.toml plugins/codex-security
-          node --experimental-strip-types .github/scripts/check_plugin_source_compatibility.mts
+          node .github/scripts/check_plugin_source_compatibility.mjs
       - name: Test source compatibility checker
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: node --experimental-strip-types --test .github/scripts/test_check_plugin_source_compatibility.mts
+        run: node --test .github/scripts/test_check_plugin_source_compatibility.mjs
       - name: Prepare private Windows test root
         if: runner.os == 'Windows'
         id: windows-temp
