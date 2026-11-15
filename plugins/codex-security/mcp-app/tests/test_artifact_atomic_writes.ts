@@ -38,6 +38,9 @@ const io = await importSource(source, {
     },
   ],
 });
+const deepScanArtifacts = await importSource(
+  path.join(import.meta.dirname, "../src/deep-scan/artifacts.ts"),
+);
 
 async function fixture(t: TestContext) {
   const root = await fs.realpath(
@@ -75,6 +78,84 @@ test("failed exclusive creation preserves the unowned staging file", async (t) =
   assert.equal(await readFile(f.destination, "utf8"), "original\n");
   assert.equal(await readFile(f.temporary, "utf8"), "another writer\n");
 });
+
+test("Deep Scan JSON writes create parent directories and preserve JSON bytes", async (t) => {
+  const root = await fs.realpath(
+    await mkdtemp(path.join(tmpdir(), "deep-scan-json-write-")),
+  );
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const destination = path.join(root, "nested", "heartbeat.json");
+
+  await deepScanArtifacts.writeJsonAtomic(destination, { beat: 2 });
+
+  assert.equal(await readFile(destination, "utf8"), '{\n  "beat": 2\n}\n');
+  assert.deepEqual(await readdir(path.dirname(destination)), [
+    "heartbeat.json",
+  ]);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(destination)).mode & 0o777, 0o600);
+  }
+});
+
+test("Deep Scan JSON writes clean up their staging file when rename fails", async (t) => {
+  const root = await fs.realpath(
+    await mkdtemp(path.join(tmpdir(), "deep-scan-json-write-")),
+  );
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const destination = path.join(root, "heartbeat.json");
+  const original = '{"beat":1}\n';
+  await writeFile(destination, original);
+  const failure = Object.assign(new Error("synthetic rename failure"), {
+    code: "EIO",
+  });
+  let attempts = 0;
+  t.mock.method(fs, "rename", async () => {
+    attempts++;
+    throw failure;
+  });
+
+  await assert.rejects(
+    deepScanArtifacts.writeJsonAtomic(destination, { beat: 2 }),
+    (error: unknown) => error === failure,
+  );
+  assert.equal(attempts, 1);
+  assert.equal(await readFile(destination, "utf8"), original);
+  assert.deepEqual(await readdir(root), ["heartbeat.json"]);
+});
+
+test(
+  "Deep Scan JSON writes retry transient Windows rename conflicts",
+  { skip: process.platform !== "win32" },
+  async (t) => {
+    const root = await fs.realpath(
+      await mkdtemp(path.join(tmpdir(), "deep-scan-json-retry-")),
+    );
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const destination = path.join(root, "heartbeat.json");
+    const original = '{"beat":1}\n';
+    await writeFile(destination, original);
+    const rename = fs.rename;
+    const failure = Object.assign(new Error("synthetic reader conflict"), {
+      code: "EBUSY",
+    });
+    const stagingPaths: string[] = [];
+    t.mock.method(fs, "rename", async (source: string, target: string) => {
+      assert.equal(target, destination);
+      stagingPaths.push(source);
+      if (stagingPaths.length === 1) {
+        assert.equal(await readFile(destination, "utf8"), original);
+        throw failure;
+      }
+      await rename(source, target);
+    });
+
+    await deepScanArtifacts.writeJsonAtomic(destination, { beat: 2 });
+    assert.equal(stagingPaths.length, 2);
+    assert.equal(stagingPaths[0], stagingPaths[1]);
+    assert.equal(await readFile(destination, "utf8"), '{\n  "beat": 2\n}\n');
+    assert.deepEqual(await readdir(root), ["heartbeat.json"]);
+  },
+);
 
 test("successful rename leaves a subsequent writer's staging file intact", async (t) => {
   const f = await fixture(t);
